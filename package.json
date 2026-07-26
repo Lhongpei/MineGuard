@@ -2,14 +2,24 @@
   "name": "mineguard-leader-demo",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
   "scripts": {
-    "dev": "next dev",
-    "build": "next build && node scripts/finalize-export.mjs",
-    "start": "next start"
+    "dev": "vinext dev",
+    "build": "vinext build && node scripts/finalize-vinext.mjs",
+    "start": "vinext start"
   },
   "dependencies": {
-    "next": "16.2.12",
     "react": "19.2.8",
     "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.0.4",
+    "@vitejs/plugin-rsc": "0.5.30",
+    "react-server-dom-webpack": "19.2.8",
+    "vinext": "1.0.0-beta.4",
+    "vite": "8.1.5"
   }
 }

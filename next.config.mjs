@@ -1,6 +1,5 @@
-/** @type {import('next').NextConfig} */
+/** @type {import('vinext').NextConfig} */
 const nextConfig = {
-  output: "export",
   trailingSlash: true,
   poweredByHeader: false,
 };
