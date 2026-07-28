@@ -1,0 +1,13 @@
+# MineGuard 0.4.0 verified runtime constraints.
+#
+# Captured from the release verification environment on 2026-07-26
+# (Python 3.12.0).  Change these pins only together with a full algorithm,
+# migration, API, CLI and backup/restore regression run.
+numpy==2.4.6
+scipy==1.17.1
+pydantic==2.11.9
+pydantic-core==2.33.2
+annotated-types==0.7.0
+typing-extensions==4.12.2
+typing-inspection==0.4.1
+PyYAML==6.0.3

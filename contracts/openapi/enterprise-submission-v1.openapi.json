@@ -1,0 +1,402 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Enterprise Submission Contract API",
+    "version": "1.0.0",
+    "description": "Neutral HTTP/JSON boundary between an enterprise reporting agent and a regulatory platform. The two implementations share this specification only and must not import each other's code. Intake acceptance is not a regulatory finding."
+  },
+  "servers": [
+    {
+      "url": "https://regulator.example.invalid",
+      "description": "Placeholder; discover the deployed URL out of band."
+    }
+  ],
+  "tags": [
+    {
+      "name": "contract-discovery"
+    },
+    {
+      "name": "enterprise-submissions"
+    }
+  ],
+  "paths": {
+    "/v1/enterprise-submission-capabilities": {
+      "get": {
+        "operationId": "getEnterpriseSubmissionCapabilities",
+        "tags": [
+          "contract-discovery"
+        ],
+        "summary": "Negotiate supported contract and authentication versions",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Current capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/capabilities-v1.schema.json"
+                },
+                "examples": {
+                  "current": {
+                    "externalValue": "../examples/capabilities-v1.json"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/enterprise-submissions": {
+      "post": {
+        "operationId": "submitEnterpriseReport",
+        "tags": [
+          "enterprise-submissions"
+        ],
+        "summary": "Submit one human-confirmed enterprise report",
+        "description": "The request is validated, authenticated, replay-checked and accepted into regulatory intake. It does not let the enterprise or its LLM declare the report normal, legal, compliant, or an approved exception.",
+        "security": [
+          {
+            "EnterpriseHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ClientId"
+          },
+          {
+            "$ref": "#/components/parameters/Timestamp"
+          },
+          {
+            "$ref": "#/components/parameters/Nonce"
+          },
+          {
+            "$ref": "#/components/parameters/ContentSha256"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureVersion"
+          },
+          {
+            "$ref": "#/components/parameters/ContractVersion"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/enterprise-submission-v1.schema.json"
+              },
+              "examples": {
+                "governedSubmission": {
+                  "externalValue": "../examples/enterprise-submission-v1.json"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted into the intake workflow",
+            "headers": {
+              "Location": {
+                "description": "Receipt resource",
+                "schema": {
+                  "type": "string",
+                  "format": "uri-reference"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/submission-receipt-v1.schema.json"
+                },
+                "examples": {
+                  "accepted": {
+                    "externalValue": "../examples/submission-receipt-v1.json"
+                  }
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Byte-identical idempotent retry; receipt status is duplicate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/submission-receipt-v1.schema.json"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-signing-spec": "../specs/hmac-transport-auth-v1.md"
+      }
+    },
+    "/v1/enterprise-submissions/{submission_id}/receipt": {
+      "get": {
+        "operationId": "getEnterpriseSubmissionReceipt",
+        "tags": [
+          "enterprise-submissions"
+        ],
+        "summary": "Read the immutable intake receipt",
+        "security": [
+          {
+            "EnterpriseHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "submission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/ClientId"
+          },
+          {
+            "$ref": "#/components/parameters/Timestamp"
+          },
+          {
+            "$ref": "#/components/parameters/Nonce"
+          },
+          {
+            "$ref": "#/components/parameters/ContentSha256"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureVersion"
+          },
+          {
+            "$ref": "#/components/parameters/ContractVersion"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Immutable receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/submission-receipt-v1.schema.json"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-signing-spec": "../specs/hmac-transport-auth-v1.md"
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "EnterpriseHmac": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Enterprise-Signature",
+        "description": "Composite HMAC-SHA256 authentication. All X-Enterprise-* signing headers are mandatory; see specs/hmac-transport-auth-v1.md."
+      }
+    },
+    "parameters": {
+      "ClientId": {
+        "name": "X-Enterprise-Client-Id",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        }
+      },
+      "Timestamp": {
+        "name": "X-Enterprise-Timestamp",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "description": "UTC RFC 3339 timestamp, normally within plus or minus 300 seconds of server time."
+      },
+      "Nonce": {
+        "name": "X-Enterprise-Nonce",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{22,86}$"
+        },
+        "description": "Fresh base64url value containing at least 128 random bits; no padding."
+      },
+      "ContentSha256": {
+        "name": "X-Enterprise-Content-SHA256",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "description": "SHA-256 over exact transmitted HTTP body bytes. For GET, hash the empty byte string."
+      },
+      "SignatureVersion": {
+        "name": "X-Enterprise-Signature-Version",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "const": "hmac-sha256-v1"
+        }
+      },
+      "ContractVersion": {
+        "name": "X-Enterprise-Contract-Version",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "const": "enterprise-submission-v1"
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Malformed JSON, headers, or body digest",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/error-v1.schema.json"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Unknown client, invalid signature, expired timestamp, or replayed nonce",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/error-v1.schema.json"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Receipt does not exist or is outside this client's scope",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/error-v1.schema.json"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Idempotency key or submission_id was reused with different content",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/error-v1.schema.json"
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "Published body or observation count limit exceeded",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/error-v1.schema.json"
+            }
+          }
+        }
+      },
+      "UnprocessableEntity": {
+        "description": "Schema-valid JSON failed contract or governance validation",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/error-v1.schema.json"
+            },
+            "examples": {
+              "provenanceRequired": {
+                "externalValue": "../examples/error-v1.json"
+              }
+            }
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "Client rate limit exceeded",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/error-v1.schema.json"
+            }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "Intake is temporarily unavailable; preserve the idempotency key when retrying",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/error-v1.schema.json"
+            }
+          }
+        }
+      }
+    }
+  }
+}

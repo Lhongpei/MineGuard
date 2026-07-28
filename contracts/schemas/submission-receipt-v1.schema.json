@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:enterprise-submission-receipt:v1",
+  "title": "Enterprise Submission Receipt V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "submission_contract_version",
+    "receipt_id",
+    "submission_id",
+    "idempotency_key",
+    "received_at",
+    "status",
+    "payload_sha256",
+    "regulatory_outcome",
+    "warnings",
+    "links"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "enterprise-submission-receipt-v1"
+    },
+    "submission_contract_version": {
+      "const": "enterprise-submission-v1"
+    },
+    "receipt_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "submission_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128
+    },
+    "received_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "duplicate"
+      ],
+      "description": "Accepted into the intake workflow or a byte-identical idempotent retry."
+    },
+    "payload_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "intake_batch_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "analysis_job_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "regulatory_outcome": {
+      "const": "not_determined_at_intake",
+      "description": "A receipt never means normal, legal, compliant, or approved."
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "json_pointer": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        }
+      }
+    },
+    "links": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "self"
+      ],
+      "properties": {
+        "self": {
+          "type": "string",
+          "format": "uri-reference"
+        },
+        "analysis_job": {
+          "type": "string",
+          "format": "uri-reference"
+        }
+      }
+    }
+  }
+}

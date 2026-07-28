@@ -1,0 +1,27 @@
+{
+  "profile": {
+    "profile_id": "trusted-five-flow",
+    "version": "2026.1",
+    "effective_from": "2026-01-01T00:00:00Z",
+    "effective_to": "2027-01-01T00:00:00Z",
+    "parameters": {
+      "transport_balance_tolerance": 25.0,
+      "stock_balance_tolerance": 30.0,
+      "transport_slack_penalty": 80.0,
+      "stock_slack_penalty": 90.0,
+      "max_mcs": 4,
+      "max_relaxed_groups": 2,
+      "max_mcs_search_combinations": 20000,
+      "quality_gate": 60.0,
+      "minimum_observation_quality": 50.0
+    },
+    "required_metrics": [
+      "coal.reported_output_t",
+      "coal.main_transport_t",
+      "wash.feed_t",
+      "sales.raw_shipped_t",
+      "inventory.raw_change_t"
+    ],
+    "approved": true
+  }
+}

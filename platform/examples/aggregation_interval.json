@@ -1,0 +1,25 @@
+{
+  "measurement_type": "interval_delta",
+  "window_start": "2026-07-20T00:00:00+08:00",
+  "window_end": "2026-07-21T00:00:00+08:00",
+  "observations": [
+    {
+      "observation_id": "belt-20260720-am",
+      "value": 410.0,
+      "observed_at": "2026-07-20T12:00:00+08:00",
+      "interval_start": "2026-07-20T00:00:00+08:00",
+      "interval_end": "2026-07-20T12:00:00+08:00",
+      "sequence_no": 1
+    },
+    {
+      "observation_id": "belt-20260720-pm",
+      "value": 590.0,
+      "observed_at": "2026-07-21T00:00:00+08:00",
+      "interval_start": "2026-07-20T12:00:00+08:00",
+      "interval_end": "2026-07-21T00:00:00+08:00",
+      "sequence_no": 2
+    }
+  ],
+  "min_coverage": 0.9,
+  "expected_interval_seconds": 43200.0
+}

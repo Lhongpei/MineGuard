@@ -1,0 +1,4 @@
+interface:
+  display_name: "煤炭新闻搜索"
+  short_description: "百度检索近期煤炭新闻，由AI归纳并保留可追溯来源"
+  default_prompt: "使用 $coal-news-search 检索最近一周的煤炭行业新闻，生成带来源编号的AI摘要。"

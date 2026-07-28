@@ -1,0 +1,61 @@
+{
+  "mine_id": "M001",
+  "window_start": "2026-07-20T00:00:00+08:00",
+  "window_end": "2026-07-21T00:00:00+08:00",
+  "observations": [
+    {
+      "observation_id": "production-report-20260720",
+      "metric_code": "coal.reported_output_t",
+      "value": 5000,
+      "tolerance_abs": 100,
+      "source_group": "production_report",
+      "dependency_domains": ["production-reporting-system"],
+      "source_reliability": 0.6
+    },
+    {
+      "observation_id": "main-belt-20260720",
+      "metric_code": "coal.main_transport_t",
+      "value": 7100,
+      "tolerance_abs": 106.5,
+      "source_group": "main_belt",
+      "dependency_domains": ["main-belt-plc"],
+      "source_reliability": 1.0
+    },
+    {
+      "observation_id": "wash-feed-20260720",
+      "metric_code": "wash.feed_t",
+      "value": 6800,
+      "tolerance_abs": 136,
+      "source_group": "wash_meter",
+      "dependency_domains": ["wash-meter-plc"],
+      "source_reliability": 1.0
+    },
+    {
+      "observation_id": "raw-sales-20260720",
+      "metric_code": "sales.raw_shipped_t",
+      "value": 0,
+      "tolerance_abs": 1,
+      "source_group": "sales_ledger",
+      "dependency_domains": ["sales-ledger"],
+      "source_reliability": 1.0
+    },
+    {
+      "observation_id": "raw-stock-change-20260720",
+      "metric_code": "inventory.raw_change_t",
+      "value": 250,
+      "tolerance_abs": 100,
+      "source_group": "stock_survey",
+      "dependency_domains": ["inventory-survey"],
+      "source_reliability": 1.0
+    }
+  ],
+  "parameters": {
+    "transport_balance_tolerance": 0,
+    "stock_balance_tolerance": 0,
+    "transport_slack_penalty": 100,
+    "stock_slack_penalty": 100,
+    "max_mcs": 5,
+    "max_relaxed_groups": 3,
+    "quality_gate": 60
+  }
+}

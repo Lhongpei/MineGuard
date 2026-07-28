@@ -1,0 +1,22 @@
+{
+  "definition": {
+    "source_id": "m001-wash-feed",
+    "mine_id": "M001",
+    "metric_code": "wash.feed_t",
+    "root_source_group": "m001-wash-meter-system",
+    "unit": "t",
+    "tolerance_abs": 13.0,
+    "tolerance_rel": 0.002,
+    "resolution": 0.1,
+    "reliability": 0.95,
+    "dependency_domains": ["operations-historian"],
+    "measurement_type": "window_total",
+    "max_delay_seconds": 60.0,
+    "calibration_valid_until": "2026-12-31T23:59:59Z",
+    "active": true
+  },
+  "version": 1,
+  "effective_from": "2026-01-01T00:00:00Z",
+  "effective_to": "2027-01-01T00:00:00Z",
+  "hmac_secret": "DEMO_ONLY_m001_wash_0123456789"
+}

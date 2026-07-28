@@ -1,0 +1,47 @@
+{
+  "mine_id": "M002",
+  "window_start": "2026-07-20T00:00:00+08:00",
+  "window_end": "2026-07-21T00:00:00+08:00",
+  "observations": [
+    {
+      "observation_id": "production-report",
+      "metric_code": "coal.reported_output_t",
+      "value": 7050,
+      "tolerance_abs": 100,
+      "source_group": "production_report",
+      "dependency_domains": ["production-reporting-system"]
+    },
+    {
+      "observation_id": "main-belt",
+      "metric_code": "coal.main_transport_t",
+      "value": 7100,
+      "tolerance_abs": 106.5,
+      "source_group": "main_belt",
+      "dependency_domains": ["main-belt-plc"]
+    },
+    {
+      "observation_id": "wash-feed",
+      "metric_code": "wash.feed_t",
+      "value": 6800,
+      "tolerance_abs": 136,
+      "source_group": "wash_meter",
+      "dependency_domains": ["wash-meter-plc"]
+    },
+    {
+      "observation_id": "raw-sales",
+      "metric_code": "sales.raw_shipped_t",
+      "value": 0,
+      "tolerance_abs": 1,
+      "source_group": "sales_ledger",
+      "dependency_domains": ["sales-ledger"]
+    },
+    {
+      "observation_id": "raw-stock-change",
+      "metric_code": "inventory.raw_change_t",
+      "value": 250,
+      "tolerance_abs": 100,
+      "source_group": "stock_survey",
+      "dependency_domains": ["inventory-survey"]
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+[Unit]
+Description=Enterprise trusted reporting agent
+Documentation=file:///opt/enterprise-agent/agent/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=enterprise-agent
+Group=enterprise-agent
+WorkingDirectory=/opt/enterprise-agent/agent
+EnvironmentFile=/etc/enterprise-agent/enterprise-agent.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/enterprise-agent/agent/.venv/bin/enterprise-agent serve --host 127.0.0.1 --port 8090
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
+
+# systemd creates /var/lib/enterprise-agent as the only writable state path.
+StateDirectory=enterprise-agent
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/enterprise-agent
+ReadOnlyPaths=/etc/enterprise-agent
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

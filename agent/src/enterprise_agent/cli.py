@@ -1,0 +1,444 @@
+"""Command-line entry point for local operation and automation."""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import sqlite3
+import sys
+import sysconfig
+from pathlib import Path
+from typing import Any
+
+from .auth import build_auth_manager, hash_password, is_loopback
+from .client import PlatformClient
+from .errors import AgentError
+from .http_api import serve
+from .llm import OpenAICompatibleProvider
+from .service import EnterpriseAgentService
+from .settings import Settings
+from .skills import build_skill_registry
+from .storage import Repository
+
+
+def _json_object(text: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise argparse.ArgumentTypeError("必须是有效 JSON") from error
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("JSON 顶层必须是对象")
+    return parsed
+
+
+def _service(settings: Settings) -> EnterpriseAgentService:
+    return EnterpriseAgentService(
+        Repository(settings.database_path),
+        platform_client=(
+            PlatformClient(settings.platform) if settings.platform is not None else None
+        ),
+        llm_provider=(
+            OpenAICompatibleProvider(settings.llm) if settings.llm is not None else None
+        ),
+        skill_registry=build_skill_registry(
+            settings.coal_news,
+            llm_config=settings.llm,
+        ),
+    )
+
+
+def _default_web_root() -> Path:
+    candidates = (
+        # Editable/source checkout.
+        Path(__file__).resolve().parents[2] / "web",
+        # Wheel installation via setuptools data-files.
+        Path(sysconfig.get_path("data"))
+        / "share"
+        / "enterprise-reporting-agent"
+        / "web",
+    )
+    for candidate in candidates:
+        if (candidate / "index.html").is_file():
+            return candidate
+    return candidates[-1]
+
+
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("端口必须是整数") from error
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("端口必须在 1-65535 之间")
+    return port
+
+
+def _startup_banner(
+    *,
+    server: Any,
+    service: EnterpriseAgentService,
+    settings: Settings,
+    requested_host: str,
+    web_root: Path,
+) -> None:
+    bound_port = int(server.server_address[1])
+    if settings.public_origin is not None:
+        access = (
+            f"浏览器地址：{settings.public_origin}/\n"
+            f"监听地址：{requested_host}:{bound_port}（由 HTTPS 反向代理转发）"
+        )
+    elif is_loopback(requested_host):
+        display_host = (
+            f"[{requested_host.strip('[]')}]"
+            if ":" in requested_host
+            else requested_host
+        )
+        url = f"http://{display_host}:{bound_port}/"
+        access = (
+            f"浏览器地址：{url}\n"
+            f"健康检查：{url}api/v1/health\n"
+            "远程 SSH 使用：在自己的电脑另开终端执行\n"
+            f"  ssh -N -L {bound_port}:127.0.0.1:{bound_port} "
+            "<用户名>@<服务器地址>\n"
+            f"然后在自己电脑打开 http://127.0.0.1:{bound_port}/"
+        )
+    else:
+        access = (
+            f"监听地址：{requested_host}:{bound_port}\n"
+            "浏览器必须通过配置好的 HTTPS 反向代理访问；"
+            "不要直接使用明文 HTTP。"
+        )
+    if settings.users:
+        account_status = f"已配置 {len(settings.users)} 个企业账号"
+    elif settings.allow_anonymous_local:
+        account_status = "匿名本机开发身份（仅限调试）"
+    else:
+        account_status = "演示账号 demo / 123123123（只能查看和编辑）"
+    print(
+        "\n企业可信数据填报智能体已启动（前台运行）\n"
+        f"{access}\n"
+        f"账号状态：{account_status}\n"
+        f"数据库：{service.repository.path}\n"
+        f"前端资源：{web_root.resolve()}\n"
+        "监管平台："
+        + (
+            "已配置；登录后可在页面检查在线及合同兼容状态"
+            if service.platform_client is not None
+            else "未配置；当前可保存、导入和预检，不能提交"
+        )
+        + "\n模型辅助："
+        + (
+            "已配置（启动时未探测接口连通性）"
+            if service.llm_provider is not None
+            else "未配置；使用确定性规则模式"
+        )
+        + "\n煤炭新闻搜索："
+        + (
+            "已启用百度优先、多源后备检索（启动时未探测网络连通性）"
+            if service.skills.available("coal-news-search")
+            else "已关闭（可设置 COAL_NEWS_SEARCH_ENABLED=true 启用）"
+        )
+        + "\n新闻 AI 总结："
+        + (
+            "已启用；仅总结公开搜索标题与片段并保留来源编号"
+            if service.llm_provider is not None
+            else "未配置模型；检索成功时仍展示确定性来源列表"
+        )
+        + "\n保持此终端运行；按 Ctrl+C 可安全停止。\n",
+        flush=True,
+    )
+
+
+def _print(value: Any) -> None:
+    print(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="enterprise-agent",
+        description="独立企业可信数据填报智能体",
+    )
+    parser.add_argument(
+        "--db",
+        help="覆盖 ENTERPRISE_AGENT_DB",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    serve_parser = sub.add_parser("serve", help="启动 HTTP API 和前端")
+    serve_parser.add_argument("--host")
+    serve_parser.add_argument("--port", type=_port)
+    serve_parser.add_argument("--web-root")
+
+    password = sub.add_parser(
+        "hash-password",
+        help="安全生成 ENTERPRISE_AGENT_USERS_JSON 使用的密码摘要",
+    )
+    password.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="从标准输入读取一行密码（自动化场景）",
+    )
+
+    create = sub.add_parser("create", help="新建草稿")
+    create.add_argument("--actor", required=True)
+    create.add_argument("--values", type=_json_object, default={})
+
+    sub.add_parser("list", help="列出草稿")
+    show = sub.add_parser("show", help="查看草稿")
+    show.add_argument("draft_id")
+
+    patch = sub.add_parser("patch", help="修改草稿")
+    patch.add_argument("draft_id")
+    patch.add_argument("--actor", required=True)
+    patch.add_argument("--revision", type=int)
+    patch.add_argument("--values", type=_json_object, required=True)
+
+    importer = sub.add_parser("import", help="导入 JSON 或 CSV")
+    importer.add_argument("draft_id")
+    importer.add_argument("file", type=Path)
+    importer.add_argument("--format", choices=("json", "csv"), required=True)
+    importer.add_argument("--actor", required=True)
+    importer.add_argument("--revision", type=int)
+
+    questions = sub.add_parser("questions", help="列出缺项问题")
+    questions.add_argument("draft_id")
+    validate = sub.add_parser("validate", help="执行确定性预检")
+    validate.add_argument("draft_id")
+
+    review = sub.add_parser("review", help="逐条记录当前人员已核对来源观测")
+    review.add_argument("draft_id")
+    review.add_argument("--actor", required=True)
+    review.add_argument("--revision", type=int, required=True)
+    review_selection = review.add_mutually_exclusive_group(required=True)
+    review_selection.add_argument(
+        "--observation-id",
+        action="append",
+        dest="observation_ids",
+        help="要核对的观测编号；可重复使用",
+    )
+    review_selection.add_argument(
+        "--all",
+        action="store_true",
+        help="明确选择当前草稿中的全部观测",
+    )
+    review.add_argument(
+        "--unreview",
+        action="store_true",
+        help="撤销当前人员对所选观测的核对记录",
+    )
+
+    confirm = sub.add_parser("confirm", help="人工确认完整有效草稿")
+    confirm.add_argument("draft_id")
+    confirm.add_argument("--actor", required=True)
+    confirm.add_argument("--name", required=True)
+    confirm.add_argument("--role", required=True)
+    confirm.add_argument("--attestation", required=True)
+    confirm.add_argument(
+        "--yes-i-confirm",
+        action="store_true",
+        help="明确确认所填数据来自原始记录且已核对",
+    )
+    confirm.add_argument("--revision", type=int)
+
+    submit = sub.add_parser("submit", help="提交已确认草稿")
+    submit.add_argument("draft_id")
+    submit.add_argument("--idempotency-key")
+    submit.add_argument("--actor", default="local-cli")
+
+    audit = sub.add_parser("audit", help="验证并显示追加审计链")
+    audit.add_argument("draft_id")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "hash-password":
+            if args.password_stdin:
+                password = sys.stdin.readline().rstrip("\r\n")
+            else:
+                password = getpass.getpass("密码：")
+                confirmation = getpass.getpass("再次输入：")
+                if password != confirmation:
+                    parser.error("两次输入的密码不一致")
+            print(hash_password(password))
+            return 0
+        settings = Settings.from_environment()
+        if args.db:
+            settings = Settings(
+                **{
+                    **settings.__dict__,
+                    "database_path": args.db,
+                }
+            )
+        service = _service(settings)
+        if args.command == "serve":
+            host = args.host or settings.host
+            port = args.port or settings.port
+            if not is_loopback(host) and not settings.secure_cookie:
+                parser.error(
+                    "监听非本机地址时必须设置 ENTERPRISE_AGENT_SECURE_COOKIE=true，"
+                    "并在 HTTPS 反向代理后提供服务"
+                )
+            if not is_loopback(host) and settings.public_origin is None:
+                parser.error(
+                    "监听非本机地址时必须设置唯一的 ENTERPRISE_AGENT_PUBLIC_ORIGIN"
+                )
+            if (
+                settings.public_origin is not None
+                and settings.public_origin.startswith("https://")
+                and not settings.secure_cookie
+            ):
+                parser.error(
+                    "配置 HTTPS ENTERPRISE_AGENT_PUBLIC_ORIGIN 时必须设置 "
+                    "ENTERPRISE_AGENT_SECURE_COOKIE=true"
+                )
+            if (
+                settings.public_origin is not None
+                and settings.public_origin.startswith("http://")
+                and settings.secure_cookie
+            ):
+                parser.error(
+                    "HTTP ENTERPRISE_AGENT_PUBLIC_ORIGIN 不能设置 "
+                    "ENTERPRISE_AGENT_SECURE_COOKIE=true"
+                )
+            auth_manager = build_auth_manager(
+                accounts=settings.users,
+                bind_host=host,
+                allow_anonymous_local=settings.allow_anonymous_local,
+                session_ttl_seconds=settings.session_ttl_seconds,
+                public_origin_exposed=settings.public_origin is not None,
+            )
+            if not settings.users and is_loopback(host):
+                print(
+                    "警告：启用仅限本机的演示账号 demo，默认密码为 "
+                    "123123123；该账号标记为必须修改，正式使用前请配置逐用户账号。",
+                    file=sys.stderr,
+                )
+            if settings.allow_anonymous_local:
+                print(
+                    "警告：已启用仅限回环地址的匿名开发身份，不得用于正式环境。",
+                    file=sys.stderr,
+                )
+            selected_web = (
+                Path(args.web_root).expanduser().resolve()
+                if args.web_root
+                else _default_web_root()
+            )
+            if not selected_web.is_dir() or not (selected_web / "index.html").is_file():
+                parser.error(
+                    f"前端资源目录无效：{selected_web}；"
+                    "请重新安装软件包或通过 --web-root 指定目录"
+                )
+            serve(
+                service,
+                host=host,
+                port=port,
+                auth_manager=auth_manager,
+                secure_cookie=settings.secure_cookie,
+                public_origin=settings.public_origin,
+                web_root=selected_web,
+                on_started=lambda server: _startup_banner(
+                    server=server,
+                    service=service,
+                    settings=settings,
+                    requested_host=host,
+                    web_root=selected_web,
+                ),
+            )
+            return 0
+        if args.command == "create":
+            _print(service.create_draft(args.values, actor=args.actor))
+        elif args.command == "list":
+            items, total = service.list_drafts(limit=200)
+            _print({"drafts": items, "count": len(items), "total": total})
+        elif args.command == "show":
+            _print(service.get_draft(args.draft_id))
+        elif args.command == "patch":
+            _print(
+                service.patch_draft(
+                    args.draft_id,
+                    args.values,
+                    actor=args.actor,
+                    expected_revision=args.revision,
+                )
+            )
+        elif args.command == "import":
+            _print(
+                service.import_into_draft(
+                    args.draft_id,
+                    format_name=args.format,
+                    content=args.file.read_text(encoding="utf-8"),
+                    source_name=args.file.name,
+                    actor=args.actor,
+                    expected_revision=args.revision,
+                )
+            )
+        elif args.command == "questions":
+            _print(service.questions(args.draft_id))
+        elif args.command == "validate":
+            result = service.validate(args.draft_id)
+            _print(result)
+            return 0 if result["valid"] else 2
+        elif args.command == "review":
+            observation_ids = args.observation_ids
+            if args.all:
+                draft = service.get_draft(args.draft_id)
+                observation_ids = [
+                    observation["observation_id"]
+                    for observation in draft.get("observations", [])
+                    if isinstance(observation, dict)
+                    and isinstance(observation.get("observation_id"), str)
+                    and observation["observation_id"]
+                ]
+                if not observation_ids:
+                    raise ValueError("当前草稿没有可核对的有效观测编号")
+            _print(
+                service.review_observations(
+                    args.draft_id,
+                    observation_ids=observation_ids,
+                    reviewed=not args.unreview,
+                    actor=args.actor,
+                    expected_revision=args.revision,
+                )
+            )
+        elif args.command == "confirm":
+            revision = args.revision
+            if revision is None:
+                revision = service.get_draft(args.draft_id)["_meta"]["revision"]
+            _print(
+                service.confirm(
+                    args.draft_id,
+                    actor=args.actor,
+                    confirmer_name=args.name,
+                    confirmer_role=args.role,
+                    accepted=args.yes_i_confirm,
+                    attestation=args.attestation,
+                    expected_revision=revision,
+                )
+            )
+        elif args.command == "submit":
+            _print(
+                service.submit(
+                    args.draft_id,
+                    idempotency_key=args.idempotency_key,
+                    actor=args.actor,
+                )
+            )
+        elif args.command == "audit":
+            _print(
+                {
+                    "events": service.repository.audit_events(args.draft_id),
+                    "integrity": service.repository.verify_audit(args.draft_id),
+                }
+            )
+        return 0
+    except (AgentError, OSError, sqlite3.Error, ValueError) as error:
+        print(f"错误：{error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

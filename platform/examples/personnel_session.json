@@ -1,0 +1,47 @@
+{
+  "session_id": "GATE-A-entry-20260720T080000",
+  "faces": [
+    {
+      "face_track_id": "face-001",
+      "event_time": "2026-07-20T08:00:01+08:00",
+      "candidate_person_id": "P001",
+      "match_probability": 0.97,
+      "direction": "entry"
+    },
+    {
+      "face_track_id": "face-002",
+      "event_time": "2026-07-20T08:00:06+08:00",
+      "candidate_person_id": "P009",
+      "match_probability": 0.94,
+      "direction": "entry"
+    },
+    {
+      "face_track_id": "face-003",
+      "event_time": "2026-07-20T08:00:12+08:00",
+      "candidate_person_id": "P003",
+      "match_probability": 0.91,
+      "direction": "entry"
+    }
+  ],
+  "cards": [
+    {
+      "card_event_id": "card-event-001",
+      "card_id": "CARD-001",
+      "bound_person_id": "P001",
+      "event_time": "2026-07-20T08:00:02+08:00",
+      "direction": "entry"
+    },
+    {
+      "card_event_id": "card-event-002",
+      "card_id": "CARD-002",
+      "bound_person_id": "P002",
+      "event_time": "2026-07-20T08:00:07+08:00",
+      "direction": "entry"
+    }
+  ],
+  "max_time_delta_seconds": 30,
+  "unmatched_face_cost": 1.1,
+  "unmatched_card_cost": 1.1,
+  "mismatch_penalty": 1.0
+}
+

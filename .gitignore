@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+pytest-of-*/
 build/
 dist/
 *.egg-info/
@@ -9,3 +10,14 @@ node_modules/
 out/
 next-env.d.ts
 .wrangler/
+.mineguard/
+.enterprise-agent/
+agent/data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example

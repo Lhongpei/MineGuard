@@ -1,0 +1,22 @@
+{
+  "definition": {
+    "source_id": "m001-raw-stock-change",
+    "mine_id": "M001",
+    "metric_code": "inventory.raw_change_t",
+    "root_source_group": "m001-stock-survey-system",
+    "unit": "t",
+    "tolerance_abs": 15.0,
+    "tolerance_rel": 0.002,
+    "resolution": 1.0,
+    "reliability": 0.95,
+    "dependency_domains": ["inventory-survey"],
+    "measurement_type": "window_total",
+    "max_delay_seconds": 60.0,
+    "calibration_valid_until": "2026-12-31T23:59:59Z",
+    "active": true
+  },
+  "version": 1,
+  "effective_from": "2026-01-01T00:00:00Z",
+  "effective_to": "2027-01-01T00:00:00Z",
+  "hmac_secret": "DEMO_ONLY_m001_stock_0123456789"
+}

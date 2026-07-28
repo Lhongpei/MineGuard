@@ -1,0 +1,339 @@
+{
+  "request_id": "flow-anomalous-20260720-23",
+  "mine_id": "M001",
+  "unit": "t",
+  "windows": [
+    {
+      "window_id": "2026-07-20",
+      "start": "2026-07-20T00:00:00+08:00",
+      "end": "2026-07-21T00:00:00+08:00"
+    },
+    {
+      "window_id": "2026-07-21",
+      "start": "2026-07-21T00:00:00+08:00",
+      "end": "2026-07-22T00:00:00+08:00"
+    },
+    {
+      "window_id": "2026-07-22",
+      "start": "2026-07-22T00:00:00+08:00",
+      "end": "2026-07-23T00:00:00+08:00"
+    },
+    {
+      "window_id": "2026-07-23",
+      "start": "2026-07-23T00:00:00+08:00",
+      "end": "2026-07-24T00:00:00+08:00"
+    }
+  ],
+  "nodes": [
+    {
+      "node_id": "mine-face",
+      "name": "采煤工作面",
+      "kind": "source"
+    },
+    {
+      "node_id": "raw-stock",
+      "name": "原煤库存",
+      "kind": "storage"
+    },
+    {
+      "node_id": "buyer",
+      "name": "销售接收端",
+      "kind": "sink"
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "production-to-stock",
+      "name": "主运输入仓",
+      "from_node_id": "mine-face",
+      "to_node_id": "raw-stock",
+      "loss_rate_min": 0.0,
+      "loss_rate_max": 0.0,
+      "delay_windows_min": 0,
+      "delay_windows_max": 0,
+      "maximum_dispatch": 500.0
+    },
+    {
+      "edge_id": "stock-to-buyer",
+      "name": "装车发运",
+      "from_node_id": "raw-stock",
+      "to_node_id": "buyer",
+      "loss_rate_min": 0.005,
+      "loss_rate_max": 0.015,
+      "delay_windows_min": 1,
+      "delay_windows_max": 1,
+      "maximum_dispatch": 500.0
+    }
+  ],
+  "inventory_states": [
+    {
+      "node_id": "raw-stock",
+      "minimum": 0.0,
+      "maximum": 500.0,
+      "initial_lower": 0.0,
+      "initial_upper": 0.0,
+      "terminal_lower": 0.0,
+      "terminal_upper": 0.0
+    }
+  ],
+  "initial_in_transit": [
+    {
+      "edge_id": "stock-to-buyer",
+      "arrival_window_id": "2026-07-20",
+      "received_lower": 0.0,
+      "received_upper": 0.0
+    }
+  ],
+  "flow_observations": [
+    {
+      "observation_id": "belt-production-20",
+      "source_id": "main-belt-scale",
+      "value": 100.0,
+      "error": {
+        "absolute": 2.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.98,
+      "quality": 0.99,
+      "trusted": true,
+      "edge_id": "production-to-stock",
+      "window_id": "2026-07-20",
+      "point": "dispatch"
+    },
+    {
+      "observation_id": "belt-production-21",
+      "source_id": "main-belt-scale",
+      "value": 80.0,
+      "error": {
+        "absolute": 2.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.98,
+      "quality": 0.99,
+      "trusted": true,
+      "edge_id": "production-to-stock",
+      "window_id": "2026-07-21",
+      "point": "dispatch"
+    },
+    {
+      "observation_id": "belt-production-22",
+      "source_id": "main-belt-scale",
+      "value": 20.0,
+      "error": {
+        "absolute": 2.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.98,
+      "quality": 0.99,
+      "trusted": true,
+      "edge_id": "production-to-stock",
+      "window_id": "2026-07-22",
+      "point": "dispatch"
+    },
+    {
+      "observation_id": "belt-production-23",
+      "source_id": "main-belt-scale",
+      "value": 0.0,
+      "error": {
+        "absolute": 2.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.98,
+      "quality": 0.99,
+      "trusted": true,
+      "edge_id": "production-to-stock",
+      "window_id": "2026-07-23",
+      "point": "dispatch"
+    },
+    {
+      "observation_id": "dispatch-sales-20",
+      "source_id": "dispatch-ledger",
+      "value": 40.0,
+      "error": {
+        "absolute": 3.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.95,
+      "quality": 0.98,
+      "trusted": true,
+      "edge_id": "stock-to-buyer",
+      "window_id": "2026-07-20",
+      "point": "dispatch"
+    },
+    {
+      "observation_id": "dispatch-sales-21",
+      "source_id": "dispatch-ledger",
+      "value": 170.0,
+      "error": {
+        "absolute": 10.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.35,
+      "quality": 0.95,
+      "trusted": true,
+      "edge_id": "stock-to-buyer",
+      "window_id": "2026-07-21",
+      "point": "dispatch"
+    },
+    {
+      "observation_id": "dispatch-sales-22",
+      "source_id": "dispatch-ledger",
+      "value": 60.0,
+      "error": {
+        "absolute": 3.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.95,
+      "quality": 0.98,
+      "trusted": true,
+      "edge_id": "stock-to-buyer",
+      "window_id": "2026-07-22",
+      "point": "dispatch"
+    },
+    {
+      "observation_id": "dispatch-sales-23",
+      "source_id": "dispatch-ledger",
+      "value": 0.0,
+      "error": {
+        "absolute": 3.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.95,
+      "quality": 0.98,
+      "trusted": true,
+      "edge_id": "stock-to-buyer",
+      "window_id": "2026-07-23",
+      "point": "dispatch"
+    },
+    {
+      "observation_id": "gate-arrival-21",
+      "source_id": "buyer-gate-scale",
+      "value": 39.6,
+      "error": {
+        "absolute": 2.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.98,
+      "quality": 0.99,
+      "trusted": true,
+      "edge_id": "stock-to-buyer",
+      "window_id": "2026-07-21",
+      "point": "arrival"
+    },
+    {
+      "observation_id": "gate-arrival-22",
+      "source_id": "buyer-gate-scale",
+      "value": 99.0,
+      "error": {
+        "absolute": 2.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.98,
+      "quality": 0.99,
+      "trusted": true,
+      "edge_id": "stock-to-buyer",
+      "window_id": "2026-07-22",
+      "point": "arrival"
+    },
+    {
+      "observation_id": "gate-arrival-23",
+      "source_id": "buyer-gate-scale",
+      "value": 59.4,
+      "error": {
+        "absolute": 2.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.98,
+      "quality": 0.99,
+      "trusted": true,
+      "edge_id": "stock-to-buyer",
+      "window_id": "2026-07-23",
+      "point": "arrival"
+    }
+  ],
+  "inventory_observations": [
+    {
+      "observation_id": "stock-end-20",
+      "source_id": "inventory-survey",
+      "value": 60.0,
+      "error": {
+        "absolute": 2.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.96,
+      "quality": 0.98,
+      "trusted": true,
+      "node_id": "raw-stock",
+      "window_id": "2026-07-20",
+      "boundary": "end"
+    },
+    {
+      "observation_id": "stock-end-21",
+      "source_id": "inventory-survey",
+      "value": 40.0,
+      "error": {
+        "absolute": 2.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.96,
+      "quality": 0.98,
+      "trusted": true,
+      "node_id": "raw-stock",
+      "window_id": "2026-07-21",
+      "boundary": "end"
+    },
+    {
+      "observation_id": "stock-end-22",
+      "source_id": "inventory-survey",
+      "value": 0.0,
+      "error": {
+        "absolute": 2.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.96,
+      "quality": 0.98,
+      "trusted": true,
+      "node_id": "raw-stock",
+      "window_id": "2026-07-22",
+      "boundary": "end"
+    },
+    {
+      "observation_id": "stock-end-23",
+      "source_id": "inventory-survey",
+      "value": 0.0,
+      "error": {
+        "absolute": 2.0,
+        "relative": 0.0,
+        "resolution": 0.1
+      },
+      "reliability": 0.96,
+      "quality": 0.98,
+      "trusted": true,
+      "node_id": "raw-stock",
+      "window_id": "2026-07-23",
+      "boundary": "end"
+    }
+  ],
+  "parameters": {
+    "business_slack_penalty": 100.0,
+    "allow_business_slack": false,
+    "minimum_observation_quality": 0.7,
+    "minimum_usable_observations": 12,
+    "require_observation_each_window": true,
+    "numerical_tolerance": 1e-08
+  }
+}

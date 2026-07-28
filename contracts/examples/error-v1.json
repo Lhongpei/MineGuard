@@ -1,0 +1,18 @@
+{
+  "contract_version": "enterprise-submission-error-v1",
+  "error_id": "018f7b4d-7012-74a0-b7b8-2f9a83518014",
+  "occurred_at": "2026-07-27T08:05:01Z",
+  "http_status": 422,
+  "code": "FIELD_PROVENANCE_REQUIRED",
+  "message": "A reported field is missing its evidence provenance.",
+  "retryable": false,
+  "submission_id": "018f7b4c-91d2-7a50-9bf6-3e589f13c201",
+  "idempotency_key": "enterprise-001-20260727-shift-a-01",
+  "violations": [
+    {
+      "json_pointer": "/payload/observations/0/field_provenance/value",
+      "rule": "minItems",
+      "message": "At least one immutable source record is required."
+    }
+  ]
+}

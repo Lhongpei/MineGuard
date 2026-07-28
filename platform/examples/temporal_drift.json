@@ -1,0 +1,67 @@
+{
+  "observations": [
+    {
+      "mine_id": "M001",
+      "source_id": "main-belt",
+      "metric_code": "source.signed_normalized_residual",
+      "timestamp": "2026-07-12T00:00:00+08:00",
+      "signed_residual": 0.1
+    },
+    {
+      "mine_id": "M001",
+      "source_id": "main-belt",
+      "metric_code": "source.signed_normalized_residual",
+      "timestamp": "2026-07-13T00:00:00+08:00",
+      "signed_residual": -0.1
+    },
+    {
+      "mine_id": "M001",
+      "source_id": "main-belt",
+      "metric_code": "source.signed_normalized_residual",
+      "timestamp": "2026-07-14T00:00:00+08:00",
+      "signed_residual": 0.0
+    },
+    {
+      "mine_id": "M001",
+      "source_id": "main-belt",
+      "metric_code": "source.signed_normalized_residual",
+      "timestamp": "2026-07-15T00:00:00+08:00",
+      "signed_residual": 0.2
+    },
+    {
+      "mine_id": "M001",
+      "source_id": "main-belt",
+      "metric_code": "source.signed_normalized_residual",
+      "timestamp": "2026-07-16T00:00:00+08:00",
+      "signed_residual": -0.2
+    },
+    {
+      "mine_id": "M001",
+      "source_id": "main-belt",
+      "metric_code": "source.signed_normalized_residual",
+      "timestamp": "2026-07-17T00:00:00+08:00",
+      "signed_residual": 0.1
+    },
+    {
+      "mine_id": "M001",
+      "source_id": "main-belt",
+      "metric_code": "source.signed_normalized_residual",
+      "timestamp": "2026-07-18T00:00:00+08:00",
+      "signed_residual": 0.0
+    },
+    {
+      "mine_id": "M001",
+      "source_id": "main-belt",
+      "metric_code": "source.signed_normalized_residual",
+      "timestamp": "2026-07-19T00:00:00+08:00",
+      "signed_residual": -0.1
+    },
+    {
+      "mine_id": "M001",
+      "source_id": "main-belt",
+      "metric_code": "source.signed_normalized_residual",
+      "timestamp": "2026-07-20T00:00:00+08:00",
+      "signed_residual": 5.0
+    }
+  ]
+}

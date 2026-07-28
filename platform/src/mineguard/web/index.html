@@ -1,0 +1,1509 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#123d32">
+    <title>矿安智察 · 煤矿数据监管辅助研判</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body class="is-auth-pending">
+    <section id="auth-gate" class="auth-gate" aria-live="polite">
+      <div id="auth-checking" class="auth-card auth-checking">
+        <span class="auth-mark" aria-hidden="true">监</span>
+        <h1>正在确认内网访问身份</h1>
+        <p>请稍候，系统正在检查当前会话和可监管矿山范围。</p>
+      </div>
+      <div
+        id="login-panel"
+        class="auth-card login-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="login-title"
+        hidden
+      >
+        <span class="auth-mark" aria-hidden="true">监</span>
+        <p class="section-kicker">矿安智察 · 内网访问</p>
+        <h1 id="login-title">登录监管工作台</h1>
+        <p>使用本单位分配的内网账号。登录后仅显示您有权查看的矿山和事项。</p>
+        <form id="login-form">
+          <label>
+            <span>用户名</span>
+            <input id="login-username" name="username" type="text" maxlength="100" autocomplete="username" required autofocus>
+          </label>
+          <label>
+            <span>密码</span>
+            <input id="login-password" name="password" type="password" maxlength="500" autocomplete="current-password" required>
+          </label>
+          <div id="login-status" class="form-status" role="status" aria-live="polite"></div>
+          <button id="login-submit" class="button primary" type="submit">登录并进入工作台</button>
+        </form>
+        <small>会话凭证仅由浏览器安全 Cookie 管理，页面不会保存或展示会话令牌。</small>
+      </div>
+    </section>
+
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+    <header class="site-header">
+      <div class="header-inner">
+        <div class="brand" aria-label="矿安智察">
+          <span class="brand-mark" aria-hidden="true">监</span>
+          <span>
+            <strong>矿安智察</strong>
+            <small>煤矿多源数据辅助监管</small>
+          </span>
+        </div>
+        <div class="header-status">
+          <span id="scope-summary" class="scope-summary">工作范围 · 待载入</span>
+          <div id="principal-summary" class="principal-summary" hidden>
+            <div>
+              <strong id="principal-name">—</strong>
+              <span id="principal-role">—</span>
+              <small id="principal-scopes">—</small>
+            </div>
+            <button id="logout-button" class="header-button" type="button">退出</button>
+          </div>
+          <div class="service-state" role="status" aria-live="polite">
+            <span class="state-dot" id="service-dot" aria-hidden="true"></span>
+            <span id="service-text">正在连接分析服务</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main id="main-content" class="page-shell">
+      <section class="intro" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">领导监管工作台</p>
+          <h1 id="page-title">先看辖区态势，再跟进重点线索</h1>
+          <p class="intro-copy">
+            汇总各矿数据报送与交叉核验情况，把需要补数和复核的事项排在前面，
+            并保留每一步办理记录。
+          </p>
+        </div>
+        <div class="scope-note">
+          <span class="scope-icon" aria-hidden="true">i</span>
+          <p><strong>辅助研判</strong>　所有结果均为技术线索或待复核事项，不替代人工复核和执法认定。</p>
+        </div>
+      </section>
+
+      <nav class="workspace-nav" aria-label="监管工作区">
+        <div class="workspace-tabs" role="tablist" aria-label="监管工作区">
+          <button
+            id="overview-workspace-tab"
+            class="workspace-tab is-active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="overview-workspace"
+            data-workspace="overview"
+          >
+            <span aria-hidden="true">①</span>
+            辖区总览
+          </button>
+          <button
+            id="cases-workspace-tab"
+            class="workspace-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="cases-workspace"
+            data-workspace="cases"
+            tabindex="-1"
+          >
+            <span aria-hidden="true">②</span>
+            核查台账
+            <span id="nav-open-case-count" class="nav-count" hidden></span>
+          </button>
+          <button
+            id="jobs-workspace-tab"
+            class="workspace-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="jobs-workspace"
+            data-workspace="jobs"
+            tabindex="-1"
+          >
+            <span aria-hidden="true">③</span>
+            分析任务
+            <span id="nav-running-job-count" class="nav-count" hidden></span>
+          </button>
+          <button
+            id="tools-workspace-tab"
+            class="workspace-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="tools-workspace"
+            data-workspace="tools"
+            tabindex="-1"
+          >
+            <span aria-hidden="true">④</span>
+            临时分析
+          </button>
+          <button
+            id="admin-workspace-tab"
+            class="workspace-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="admin-workspace"
+            data-workspace="admin"
+            tabindex="-1"
+            hidden
+          >
+            <span aria-hidden="true">⑤</span>
+            系统管理
+          </button>
+        </div>
+      </nav>
+
+      <section
+        id="overview-workspace"
+        class="workspace-panel"
+        role="tabpanel"
+        aria-labelledby="overview-workspace-tab"
+        tabindex="0"
+      >
+        <div class="workspace-heading">
+          <div>
+            <p class="section-kicker">辖区数据接收与技术研判</p>
+            <h2>今天先关注什么</h2>
+            <p>先确认数据是否收齐，再查看技术不一致和待办理事项。</p>
+          </div>
+          <button id="refresh-overview" class="button quiet compact" type="button">
+            刷新总览
+          </button>
+        </div>
+
+        <div id="overview-status" class="data-load-status" role="status" aria-live="polite">
+          正在读取辖区汇总…
+        </div>
+
+        <section id="overview-empty" class="workspace-empty" aria-labelledby="overview-empty-title" hidden>
+          <span class="empty-mark" aria-hidden="true">览</span>
+          <h3 id="overview-empty-title">尚未收到可展示的辖区汇总</h3>
+          <p id="overview-empty-message">
+            可以刷新重试，也可以载入脱敏试点数据，先体验从总览到核查台账的完整流程。
+          </p>
+          <div class="empty-actions">
+            <button id="load-pilot-overview" class="button primary" type="button">
+              载入脱敏试点数据
+            </button>
+            <button id="retry-overview" class="button quiet" type="button">重新读取</button>
+          </div>
+          <small>试点数据不含真实矿山、人员或生产信息，并会明确标注为本地试点。</small>
+        </section>
+
+        <div id="overview-content" hidden>
+          <div class="context-strip">
+            <div>
+              <span>当前范围</span>
+              <strong id="overview-portfolio-name">—</strong>
+            </div>
+            <div>
+              <span>数据批次</span>
+              <strong id="overview-batch-id">—</strong>
+            </div>
+            <div>
+              <span>最近更新</span>
+              <strong id="overview-generated-at">—</strong>
+            </div>
+            <span id="overview-trial-badge" class="trial-badge" hidden>脱敏试点数据</span>
+          </div>
+
+          <div id="overview-kpi-grid" class="overview-kpi-grid" aria-label="辖区关键情况"></div>
+
+          <div id="coverage-callout" class="coverage-callout">
+            <div>
+              <strong id="coverage-title">数据接收情况待确认</strong>
+              <p id="coverage-explanation">缺报不按零值处理，也不进入“正常”统计。</p>
+            </div>
+            <div class="coverage-meter" aria-hidden="true">
+              <span id="coverage-meter-fill"></span>
+            </div>
+          </div>
+
+          <section class="trend-section" aria-labelledby="leadership-trend-title">
+            <div class="section-toolbar">
+              <div>
+                <p class="section-kicker">近 30 日变化</p>
+                <h3 id="leadership-trend-title">趋势与积压</h3>
+                <p>帮助判断问题是在改善、持平还是需要加快办理；统计分数只用于排序。</p>
+              </div>
+              <button id="refresh-trends" class="button quiet compact" type="button">
+                刷新趋势
+              </button>
+            </div>
+            <div id="trends-status" class="data-load-status" role="status" aria-live="polite">
+              正在读取近 30 日趋势…
+            </div>
+            <div id="trends-content" hidden>
+              <p id="trend-executive-summary" class="executive-summary"></p>
+              <div id="trend-kpi-grid" class="trend-kpi-grid" aria-label="近30日关键指标"></div>
+              <div class="trend-layout">
+                <article class="trend-card" aria-labelledby="daily-trend-title">
+                  <div class="detail-section-heading">
+                    <p class="section-kicker">每日变化</p>
+                    <h4 id="daily-trend-title">报送覆盖与待办积压</h4>
+                  </div>
+                  <div
+                    id="daily-trend-chart"
+                    class="daily-trend-chart"
+                    role="img"
+                    aria-label="近30日报送覆盖率与每日结束时待办积压"
+                  ></div>
+                  <p class="chart-note">柱高表示每日结束时开放事项数量；圆点文字表示当日报送覆盖率。“—”表示当天无应报数据，不按 0% 处理。</p>
+                </article>
+                <article class="trend-card" aria-labelledby="mine-ranking-title">
+                  <div class="detail-section-heading">
+                    <p class="section-kicker">优先关注</p>
+                    <h4 id="mine-ranking-title">矿山关注排序</h4>
+                  </div>
+                  <ol id="mine-risk-ranking" class="mine-risk-ranking"></ol>
+                  <p id="mine-ranking-empty" class="muted-note" hidden>当前范围内暂无可排序矿山。</p>
+                  <p class="chart-note">关注分由技术线索、未闭环事项等透明规则计算，仅用于安排核查顺序，不是风险、处罚或责任认定。</p>
+                </article>
+              </div>
+              <details class="trend-details">
+                <summary>查看重复异常、数据质量与统计口径</summary>
+                <div class="trend-detail-grid">
+                  <section aria-labelledby="repeated-anomaly-title">
+                    <h4 id="repeated-anomaly-title">重复出现的技术线索</h4>
+                    <ul id="repeated-anomaly-list" class="plain-list"></ul>
+                  </section>
+                  <section aria-labelledby="analytics-quality-title">
+                    <h4 id="analytics-quality-title">统计数据质量</h4>
+                    <dl id="analytics-quality-list" class="trace-fields"></dl>
+                  </section>
+                </div>
+              </details>
+            </div>
+            <section
+              id="temporal-health-card"
+              class="temporal-health-card"
+              aria-labelledby="temporal-health-title"
+            >
+              <div class="temporal-health-heading">
+                <div>
+                  <p class="section-kicker">近 90 日连续观察</p>
+                  <h4 id="temporal-health-title">时序异常与数据质量</h4>
+                  <p>观察已入库分析特征中的持续偏移、突变、修订和低质量记录；未出现提示不能证明原始数据源完整或及时。算法预警只是核查线索，不是定案。</p>
+                </div>
+                <span id="temporal-status-badge" class="temporal-status-badge is-loading">
+                  正在读取
+                </span>
+              </div>
+              <div
+                id="temporal-status"
+                class="data-load-status"
+                role="status"
+                aria-live="polite"
+              >
+                正在读取近 90 日时序异常与数据质量…
+              </div>
+              <div id="temporal-content" hidden>
+                <p id="temporal-summary" class="temporal-summary"></p>
+                <div
+                  id="temporal-kpi-grid"
+                  class="temporal-kpi-grid"
+                  aria-label="时序异常与数据质量关键指标"
+                ></div>
+                <div class="temporal-episode-heading">
+                  <h5>需要人工复核的预警事件</h5>
+                  <span>按事件起止时间展示，不把单点波动直接写成结论</span>
+                </div>
+                <ol id="temporal-episode-list" class="temporal-episode-list"></ol>
+                <p id="temporal-episode-empty" class="muted-note" hidden></p>
+              </div>
+            </section>
+            <p id="trends-empty" class="muted-note" hidden>
+              当前 30 日范围内暂无可计算趋势；这不代表没有事项，请同时查看本批次总览。
+            </p>
+          </section>
+
+          <section class="queue-section" aria-labelledby="priority-queue-title">
+            <div class="section-toolbar">
+              <div>
+                <p class="section-kicker">按优先级排列</p>
+                <h3 id="priority-queue-title">优先关注队列</h3>
+              </div>
+              <button id="view-all-cases" class="button quiet compact" type="button">
+                查看全部核查台账
+              </button>
+            </div>
+
+            <div class="status-legend" aria-label="标签说明">
+              <span><i class="legend-dot priority" aria-hidden="true"></i>优先级：先看谁</span>
+              <span><i class="legend-dot technical" aria-hidden="true"></i>技术状态：数据说明什么</span>
+              <span><i class="legend-dot workflow" aria-hidden="true"></i>办理状态：事情办到哪一步</span>
+            </div>
+
+            <div class="compact-filters">
+              <label>
+                <span>快速查找</span>
+                <input id="overview-search" type="search" placeholder="矿名、编号或线索">
+              </label>
+              <label>
+                <span>只看</span>
+                <select id="overview-focus-filter">
+                  <option value="all">全部重点</option>
+                  <option value="missing">缺报或数据不足</option>
+                  <option value="inconsistent">技术不一致</option>
+                  <option value="open">待办理事项</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="table-scroll priority-table-wrap" tabindex="0" aria-label="优先关注队列，可横向滚动">
+              <table class="priority-table">
+                <thead>
+                  <tr>
+                    <th scope="col">优先级</th>
+                    <th scope="col">矿山与期间</th>
+                    <th scope="col">技术线索</th>
+                    <th scope="col">数据接收</th>
+                    <th scope="col">技术状态</th>
+                    <th scope="col">办理状态</th>
+                    <th scope="col">责任与期限</th>
+                    <th scope="col"><span class="visually-hidden">操作</span></th>
+                  </tr>
+                </thead>
+                <tbody id="overview-priority-body"></tbody>
+              </table>
+            </div>
+            <p id="overview-queue-empty" class="table-empty-note" hidden>
+              当前筛选条件下没有待展示事项。
+            </p>
+          </section>
+        </div>
+      </section>
+
+      <section
+        id="cases-workspace"
+        class="workspace-panel"
+        role="tabpanel"
+        aria-labelledby="cases-workspace-tab"
+        tabindex="0"
+        hidden
+      >
+        <div id="case-list-view">
+          <div class="workspace-heading">
+            <div>
+              <p class="section-kicker">全过程留痕</p>
+              <h2>核查台账</h2>
+              <p>按办理状态跟进技术线索、补数要求、责任人和复核结论。</p>
+            </div>
+            <button id="refresh-cases" class="button quiet compact" type="button">刷新台账</button>
+          </div>
+
+          <div class="ledger-filters" aria-label="台账筛选">
+            <label class="search-field">
+              <span>查找事项</span>
+              <input id="case-search" type="search" placeholder="矿名、事项编号或线索">
+            </label>
+            <label>
+              <span>优先级</span>
+              <select id="case-priority-filter">
+                <option value="all">全部</option>
+                <option value="urgent">优先复核（P1）</option>
+                <option value="high">一般复核（P2）</option>
+                <option value="supplement">先补数据（DATA）</option>
+                <option value="normal">常规 / 无需优先</option>
+              </select>
+            </label>
+            <label>
+              <span>技术状态</span>
+              <select id="case-technical-filter">
+                <option value="all">全部</option>
+                <option value="inconsistent">技术不一致</option>
+                <option value="inconclusive">数据不足</option>
+                <option value="consistent">当前可协调</option>
+                <option value="missing">缺报</option>
+              </select>
+            </label>
+            <label>
+              <span>办理状态</span>
+              <select id="case-workflow-filter">
+                <option value="all">全部</option>
+                <option value="new">待办理</option>
+                <option value="assigned">已交办</option>
+                <option value="supplement_requested">待补数</option>
+                <option value="reviewing">核查中</option>
+                <option value="pending_approval">待另一人审批</option>
+                <option value="resolved">已复核</option>
+                <option value="closed">已关闭</option>
+              </select>
+            </label>
+            <label class="archive-toggle">
+              <input id="show-archived-cases" type="checkbox">
+              <span>查看已归档</span>
+            </label>
+          </div>
+
+          <div id="cases-status" class="data-load-status" role="status" aria-live="polite">
+            进入台账后将自动读取事项。
+          </div>
+
+          <section id="cases-empty" class="workspace-empty compact-empty" aria-labelledby="cases-empty-title" hidden>
+            <span class="empty-mark" aria-hidden="true">账</span>
+            <h3 id="cases-empty-title">暂时没有可展示的核查事项</h3>
+            <p id="cases-empty-message">这可能是尚未形成事项，也可能是服务暂时未连接。</p>
+            <button id="retry-cases" class="button quiet" type="button">重新读取台账</button>
+          </section>
+
+          <div id="cases-table-content" class="table-scroll ledger-table-wrap" tabindex="0" aria-label="核查台账，可横向滚动" hidden>
+            <table class="ledger-table">
+              <thead>
+                <tr>
+                  <th scope="col">事项</th>
+                  <th scope="col">优先级</th>
+                  <th scope="col">技术状态</th>
+                  <th scope="col">办理状态</th>
+                  <th scope="col">责任人</th>
+                  <th scope="col">期限</th>
+                  <th scope="col">最近更新</th>
+                  <th scope="col"><span class="visually-hidden">操作</span></th>
+                </tr>
+              </thead>
+              <tbody id="case-table-body"></tbody>
+            </table>
+          </div>
+          <p id="cases-filter-empty" class="table-empty-note" hidden>
+            当前筛选条件下没有事项，请调整筛选条件。
+          </p>
+        </div>
+
+        <article id="case-detail-view" class="case-detail" aria-labelledby="case-detail-title" hidden>
+          <div class="detail-toolbar">
+            <button id="back-to-cases" class="text-button" type="button">← 返回核查台账</button>
+            <div>
+              <button id="download-case" class="button quiet compact" type="button">下载事项</button>
+              <button id="print-case" class="button quiet compact" type="button">打印事项简报</button>
+            </div>
+          </div>
+
+          <div id="case-detail-loading" class="data-load-status" role="status" aria-live="polite"></div>
+
+          <div id="case-detail-content" hidden>
+            <header class="case-header">
+              <div>
+                <p id="case-detail-id" class="section-kicker">事项 —</p>
+                <h2 id="case-detail-title">待复核事项</h2>
+                <p id="case-detail-period" class="case-subtitle"></p>
+              </div>
+              <div class="case-status-stack" aria-label="事项状态">
+                <span id="case-priority-badge" class="status-badge"></span>
+                <span id="case-technical-badge" class="status-badge"></span>
+                <span id="case-workflow-badge" class="status-badge"></span>
+              </div>
+            </header>
+
+            <div class="case-warning">
+              <strong>当前为技术线索，待人工复核</strong>
+              <p id="case-plain-summary">系统结果用于确定核查顺序和范围，不构成违法事实或责任认定。</p>
+            </div>
+
+            <div class="case-layout">
+              <div class="case-main">
+                <section class="detail-section" aria-labelledby="case-facts-title">
+                  <div class="detail-section-heading">
+                    <p class="section-kicker">一眼看懂</p>
+                    <h3 id="case-facts-title">关键情况</h3>
+                  </div>
+                  <dl id="case-facts" class="fact-grid"></dl>
+                </section>
+
+                <section class="detail-section" aria-labelledby="case-history-title">
+                  <div class="detail-section-heading">
+                    <p class="section-kicker">第二视角 · 只作辅助</p>
+                    <h3 id="case-history-title">历史证据与综合研判</h3>
+                    <p class="muted-note">
+                      只与同矿、同工况、同算法口径且经人工核实的历史窗口比较；历史不足不算正常，合法情景也不能覆盖物理冲突。
+                    </p>
+                  </div>
+                  <div class="historical-evidence-grid">
+                    <article id="case-historical-panel" class="historical-evidence-card">
+                      <div class="historical-card-heading">
+                        <strong>条件历史基线</strong>
+                        <span id="case-historical-status" class="status-badge">尚未评估</span>
+                      </div>
+                      <p id="case-historical-summary">
+                        尚未返回历史证据，不能据此判断当前数据符合历史规律。
+                      </p>
+                      <dl id="case-historical-facts" class="compact-facts"></dl>
+                      <div id="case-historical-scenarios" class="historical-scenarios" hidden></div>
+                    </article>
+                    <article id="case-fusion-panel" class="historical-evidence-card fusion-card">
+                      <div class="historical-card-heading">
+                        <strong>多路证据关系</strong>
+                        <span id="case-fusion-agreement" class="status-badge">尚未融合</span>
+                      </div>
+                      <p id="case-fusion-summary">
+                        物理交叉核验仍是正式技术结论；辅助证据只用于解释和安排复核顺序。
+                      </p>
+                      <dl id="case-fusion-facts" class="compact-facts"></dl>
+                      <ul id="case-fusion-reasons" class="plain-reason-list"></ul>
+                    </article>
+                  </div>
+                </section>
+
+                <section class="detail-section" aria-labelledby="case-checks-title">
+                  <div class="detail-section-heading">
+                    <p class="section-kicker">建议下一步</p>
+                    <h3 id="case-checks-title">建议核查</h3>
+                  </div>
+                  <ol id="case-recommended-checks" class="action-list"></ol>
+                </section>
+
+                <section class="detail-section" aria-labelledby="case-evidence-title">
+                  <div class="detail-section-heading">
+                    <p class="section-kicker">依据与可追溯性</p>
+                    <h3 id="case-evidence-title">证据来源</h3>
+                  </div>
+                  <ul id="case-evidence-list" class="evidence-list"></ul>
+                  <p id="case-evidence-empty" class="muted-note" hidden>
+                    暂未返回可打开的原始证据，请按建议向数据责任单位调取。
+                  </p>
+                </section>
+
+                <section class="detail-section" aria-labelledby="case-timeline-title">
+                  <div class="detail-section-heading timeline-heading">
+                    <div>
+                      <p class="section-kicker">全过程留痕</p>
+                      <h3 id="case-timeline-title">办理时间线</h3>
+                    </div>
+                    <span id="case-event-count" class="subtle-count"></span>
+                  </div>
+                  <ol id="case-timeline" class="timeline"></ol>
+                </section>
+              </div>
+
+              <aside class="case-side">
+                <section class="side-card evidence-grade-card" aria-labelledby="evidence-grade-title">
+                  <p class="section-kicker">多源支撑</p>
+                  <h3 id="evidence-grade-title">证据等级</h3>
+                  <strong id="case-evidence-grade" class="grade-value">—</strong>
+                  <p id="case-evidence-grade-note">
+                    表示现有数据对技术判断的支撑强度，不是风险、处罚或责任等级。
+                  </p>
+                </section>
+
+                <section class="side-card" aria-labelledby="hash-title">
+                  <p class="section-kicker">审计链</p>
+                  <h3 id="hash-title">哈希校验状态</h3>
+                  <div id="case-hash-status" class="hash-status"></div>
+                  <dl id="case-trace-fields" class="trace-fields"></dl>
+                </section>
+
+                <section id="evidence-bundle-card" class="side-card evidence-bundle-card" aria-labelledby="evidence-bundle-title">
+                  <p class="section-kicker">可移交、可复验</p>
+                  <h3 id="evidence-bundle-title">事项证据包</h3>
+                  <p>按当前事项版本固化分析快照、结果和办理记录，并校验清单哈希。</p>
+                  <button id="generate-evidence" class="button secondary" type="button">生成当前版本证据包</button>
+                  <div id="evidence-bundle-status" class="form-status" role="status" aria-live="polite"></div>
+                  <div id="evidence-bundle-result" class="evidence-bundle-result" hidden>
+                    <div id="evidence-verification" class="hash-status"></div>
+                    <dl id="evidence-bundle-fields" class="trace-fields"></dl>
+                    <div id="evidence-bundle-actions" class="bundle-actions"></div>
+                  </div>
+                </section>
+
+                <section id="reference-label-card" class="side-card reference-label-card" aria-labelledby="reference-label-title">
+                  <p class="section-kicker">人工核实后入库</p>
+                  <h3 id="reference-label-title">历史参考标签</h3>
+                  <p class="reference-label-warning">
+                    只有明确标注为“核实正常”的记录，才可能进入以后同条件正常历史基线；“合法例外”只关联已批准场景作解释，不会放宽正常基线。
+                  </p>
+                  <div id="reference-label-status" class="form-status" role="status" aria-live="polite"></div>
+                  <div id="reference-label-current" class="reference-label-current"></div>
+                  <details id="reference-label-history-details" class="reference-label-history-details">
+                    <summary>查看标签变更记录</summary>
+                    <ol id="reference-label-history" class="reference-label-history"></ol>
+                  </details>
+                  <form id="reference-label-form">
+                    <input id="reference-label-expected-sequence" type="hidden" value="0">
+                    <label>
+                      <span>本次人工核实标签</span>
+                      <select id="reference-label-value" required>
+                        <option value="unresolved">尚未解决 / 继续核查</option>
+                        <option value="verified_normal">已核实为正常</option>
+                        <option value="legitimate_exception">已核实为合法例外</option>
+                        <option value="confirmed_data_error">确认存在数据错误</option>
+                        <option value="confirmed_technical_anomaly">确认存在技术异常</option>
+                        <option value="adjudicated_violation">已依法认定违规</option>
+                      </select>
+                    </label>
+                    <label id="reference-label-scenario-wrap" hidden>
+                      <span>合法情景编号 <small>合法例外时必填</small></span>
+                      <input id="reference-label-scenario" type="text" maxlength="128" autocomplete="off" placeholder="例如：planned-maintenance">
+                    </label>
+                    <label>
+                      <span>核实依据与说明</span>
+                      <textarea id="reference-label-note" rows="4" maxlength="4000" required placeholder="说明核对了哪些原始材料、业务口径和审批依据"></textarea>
+                    </label>
+                    <p class="form-help">
+                      每次提交都会追加留痕，不覆盖旧标签；请勿仅凭算法结果反向标注。
+                    </p>
+                    <button id="submit-reference-label" class="button secondary" type="submit">提交标签并留痕</button>
+                  </form>
+                  <p id="reference-label-readonly-note" class="muted-note" hidden>
+                    当前账号可查看标签记录，但只有监管负责人或系统管理员可以提交新标签。
+                  </p>
+                </section>
+
+                <section id="case-action-card" class="side-card action-form-card" aria-labelledby="case-action-title">
+                  <p class="section-kicker">更新办理进度</p>
+                  <h3 id="case-action-title">记录一次办理动作</h3>
+                  <form id="case-action-form">
+                    <label>
+                      <span>办理动作</span>
+                      <select id="case-action" required>
+                        <option value="assign">交办核查</option>
+                        <option value="add_note">补充办理说明</option>
+                        <option value="start_review">开始复核</option>
+                        <option value="request_data">要求补充数据</option>
+                        <option value="submit_conclusion">提交人工复核结论</option>
+                        <option value="withdraw_conclusion">撤回本人待审批结论</option>
+                        <option value="approve">批准他人提交的结论</option>
+                        <option value="reject">退回他人提交的结论</option>
+                        <option value="close">兼容模式直接关闭</option>
+                        <option value="reopen">重新打开</option>
+                        <option value="archive_case">移出常用台账（归档）</option>
+                        <option value="restore_case">恢复到常用台账</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>责任人或承办单位 <small>选填</small></span>
+                      <input id="case-assignee" type="text" maxlength="100" autocomplete="off" placeholder="例如：张某 / 监管一科">
+                    </label>
+                    <label>
+                      <span>复核结论 <small>形成结论时填写</small></span>
+                      <select id="case-disposition">
+                        <option value="">暂不填写</option>
+                        <option value="confirmed_technical_issue">技术线索经复核得到支持</option>
+                        <option value="partially_supported">技术线索部分得到支持</option>
+                        <option value="excluded">经复核排除</option>
+                        <option value="data_insufficient">资料仍不足，暂不能判断</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>办理说明</span>
+                      <textarea id="case-action-note" rows="4" maxlength="1000" placeholder="说明已核对内容、补数要求或下一步安排"></textarea>
+                    </label>
+                    <p class="form-help">
+                      结论提交后须由另一名监管负责人批准或退回；系统同时校验事项版本，避免多人互相覆盖。
+                    </p>
+                    <div id="case-action-status" class="form-status" role="status" aria-live="polite"></div>
+                    <button id="submit-case-action" class="button primary" type="submit">提交并留痕</button>
+                  </form>
+                </section>
+
+                <div class="legal-note side-legal-note">
+                  <strong>技术线索不构成违法认定。</strong>
+                  办理结论须结合原始证据、业务口径和法定程序，由有权限人员作出。
+                </div>
+              </aside>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section
+        id="jobs-workspace"
+        class="workspace-panel"
+        role="tabpanel"
+        aria-labelledby="jobs-workspace-tab"
+        tabindex="0"
+        hidden
+      >
+        <div class="workspace-heading">
+          <div>
+            <p class="section-kicker">批量计算与失败隔离</p>
+            <h2>分析任务</h2>
+            <p>按矿山和时间窗口跟踪排队、运行与完成情况；单个窗口失败不会掩盖其他窗口结果。</p>
+          </div>
+          <div class="heading-actions">
+            <button id="submit-pilot-job" class="button secondary compact" type="button">
+              提交脱敏分析任务
+            </button>
+            <label class="archive-toggle compact-toggle">
+              <input id="show-archived-jobs" type="checkbox">
+              <span>查看已归档</span>
+            </label>
+            <button id="refresh-jobs" class="button quiet compact" type="button">刷新任务</button>
+          </div>
+        </div>
+
+        <div id="jobs-status" class="data-load-status" role="status" aria-live="polite">
+          进入工作区后将自动读取分析任务。
+        </div>
+
+        <section id="jobs-empty" class="workspace-empty compact-empty" aria-labelledby="jobs-empty-title" hidden>
+          <span class="empty-mark" aria-hidden="true">任</span>
+          <h3 id="jobs-empty-title">暂时没有分析任务</h3>
+          <p id="jobs-empty-message">可提交内置脱敏窗口体验任务排队、运行和结果汇总。</p>
+          <div class="empty-actions">
+            <button id="submit-pilot-job-empty" class="button primary" type="button">提交脱敏分析任务</button>
+            <button id="retry-jobs" class="button quiet" type="button">重新读取</button>
+          </div>
+        </section>
+
+        <div id="jobs-content" hidden>
+          <div id="jobs-summary-grid" class="job-summary-grid" aria-label="分析任务状态汇总"></div>
+          <div class="status-legend job-legend" aria-label="任务状态说明">
+            <span><i class="legend-dot workflow" aria-hidden="true"></i>排队 / 运行：任务尚未完成</span>
+            <span><i class="legend-dot priority" aria-hidden="true"></i>部分失败：可查看具体失败窗口</span>
+            <span><i class="legend-dot technical" aria-hidden="true"></i>取消：未运行窗口不产生分析结论</span>
+          </div>
+          <div class="table-scroll job-table-wrap" tabindex="0" aria-label="分析任务列表，可横向滚动">
+            <table class="job-table">
+              <thead>
+                <tr>
+                  <th scope="col">任务状态</th>
+                  <th scope="col">任务与提交人</th>
+                  <th scope="col">窗口进度</th>
+                  <th scope="col">失败摘要</th>
+                  <th scope="col">最近更新</th>
+                  <th scope="col"><span class="visually-hidden">操作</span></th>
+                </tr>
+              </thead>
+              <tbody id="jobs-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <article id="job-detail" class="job-detail" aria-labelledby="job-detail-title" hidden>
+          <div class="detail-toolbar">
+            <button id="back-to-jobs" class="text-button" type="button">← 返回任务列表</button>
+            <button id="refresh-job-detail" class="button quiet compact" type="button">刷新本任务</button>
+          </div>
+          <header class="case-header job-detail-header">
+            <div>
+              <p id="job-detail-id" class="section-kicker">任务 —</p>
+              <h2 id="job-detail-title">分析任务</h2>
+              <p id="job-detail-meta" class="case-subtitle"></p>
+            </div>
+            <span id="job-detail-status" class="status-badge"></span>
+          </header>
+          <div class="job-progress-card">
+            <div>
+              <strong id="job-progress-title">等待进度</strong>
+              <span id="job-progress-counts">—</span>
+            </div>
+            <div
+              id="job-progress-bar"
+              class="job-progress"
+              role="progressbar"
+              aria-label="分析任务窗口进度"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <span id="job-progress-fill"></span>
+            </div>
+          </div>
+          <div id="job-detail-actions" class="job-detail-actions"></div>
+          <div class="table-scroll" tabindex="0" aria-label="任务窗口执行明细，可横向滚动">
+            <table class="job-window-table">
+              <thead>
+                <tr>
+                  <th scope="col">窗口</th>
+                  <th scope="col">矿山</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">尝试次数</th>
+                  <th scope="col">结果或失败摘要</th>
+                  <th scope="col">完成时间</th>
+                </tr>
+              </thead>
+              <tbody id="job-window-body"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section
+        id="admin-workspace"
+        class="workspace-panel"
+        role="tabpanel"
+        aria-labelledby="admin-workspace-tab"
+        tabindex="0"
+        hidden
+      >
+        <div class="workspace-heading">
+          <div>
+            <p class="section-kicker">仅系统管理员可见</p>
+            <h2>系统管理</h2>
+            <p>查看服务是否可用、核验备份并维护最小权限账号；页面不展示敏感路径和会话凭证。</p>
+          </div>
+          <button id="refresh-admin" class="button quiet compact" type="button">刷新本页</button>
+        </div>
+
+        <section class="operations-section" aria-labelledby="operations-title">
+          <div class="detail-section-heading operations-heading">
+            <div>
+              <p class="section-kicker">运行保障</p>
+              <h3 id="operations-title">系统就绪与备份</h3>
+            </div>
+            <span id="readiness-overall" class="status-badge">正在检查</span>
+          </div>
+          <div id="operations-status" class="data-load-status" role="status" aria-live="polite">
+            正在检查系统依赖和备份…
+          </div>
+          <div class="operations-layout">
+            <article class="operations-card" aria-labelledby="readiness-title">
+              <div class="card-inline-heading">
+                <div>
+                  <h4 id="readiness-title">当前可用性</h4>
+                  <p id="readiness-summary">正在检查数据库和关键服务。</p>
+                </div>
+                <button id="refresh-operations" class="button quiet compact" type="button">重新检查</button>
+              </div>
+              <ul id="readiness-checks" class="readiness-checks"></ul>
+            </article>
+            <article class="operations-card" aria-labelledby="backup-title">
+              <div class="card-inline-heading">
+                <div>
+                  <h4 id="backup-title">不可变备份</h4>
+                  <p>创建后立即做完整性校验；“有效”表示清单签名、文件哈希和大小均一致。备份按留存制度由运维处置，不在业务页面删除。</p>
+                </div>
+              </div>
+              <form id="backup-create-form" class="backup-create-form">
+                <label>
+                  <span>备份编号</span>
+                  <input id="backup-id" type="text" maxlength="128" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" autocomplete="off" required>
+                </label>
+                <button id="create-backup-submit" class="button secondary compact" type="submit">立即备份并校验</button>
+              </form>
+              <div id="backup-action-status" class="form-status" role="status" aria-live="polite"></div>
+              <div class="table-scroll" tabindex="0" aria-label="备份记录，可横向滚动">
+                <table class="backup-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">备份编号</th>
+                      <th scope="col">校验</th>
+                      <th scope="col">创建时间</th>
+                      <th scope="col">文件</th>
+                      <th scope="col"><span class="visually-hidden">操作</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="backups-table-body"></tbody>
+                </table>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="operations-section batch-lifecycle-section" aria-labelledby="batch-lifecycle-title">
+          <div class="detail-section-heading operations-heading">
+            <div>
+              <p class="section-kicker">数据生命周期</p>
+              <h3 id="batch-lifecycle-title">分析批次管理</h3>
+              <p class="muted-note">作废会让批次退出领导总览、趋势和事项生成，但原始结果与审计记录仍可追溯；需要时可恢复。</p>
+            </div>
+            <div class="heading-actions">
+              <label class="archive-toggle compact-toggle">
+                <input id="show-invalidated-batches" type="checkbox">
+                <span>查看已作废</span>
+              </label>
+              <button id="isolate-pilot-batches" class="button quiet compact" type="button">隔离历史演示数据</button>
+              <button id="refresh-batches" class="button quiet compact" type="button">刷新批次</button>
+            </div>
+          </div>
+          <div id="batches-status" class="data-load-status" role="status" aria-live="polite">
+            进入系统管理后将读取分析批次。
+          </div>
+          <div id="batches-table-wrap" class="table-scroll" tabindex="0" aria-label="分析批次列表，可横向滚动" hidden>
+            <table class="batch-table">
+              <thead>
+                <tr>
+                  <th scope="col">批次</th>
+                  <th scope="col">数据类型</th>
+                  <th scope="col">矿山数</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">形成时间</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="batches-table-body"></tbody>
+            </table>
+          </div>
+          <p id="batches-empty" class="muted-note" hidden>当前没有可展示的分析批次。</p>
+        </section>
+
+        <section class="operations-section legitimate-scenario-section" aria-labelledby="legitimate-scenario-title">
+          <div class="detail-section-heading operations-heading">
+            <div>
+              <p class="section-kicker">版本化业务知识</p>
+              <h3 id="legitimate-scenario-title">合法情景库</h3>
+              <p class="muted-note">
+                记录已审批的检修、工况等合法例外。情景只能解释历史罕见性，不能把物理冲突改成正常；版本从 1 开始连续递增，修改时请新建版本，不覆盖旧版本。
+              </p>
+            </div>
+            <button id="refresh-legitimate-scenarios" class="button quiet compact" type="button">刷新情景</button>
+          </div>
+          <div id="legitimate-scenarios-status" class="data-load-status" role="status" aria-live="polite">
+            进入系统管理后将读取合法情景。
+          </div>
+          <div class="legitimate-scenario-layout">
+            <div>
+              <div id="legitimate-scenarios-table-wrap" class="table-scroll" tabindex="0" aria-label="合法情景版本列表，可横向滚动" hidden>
+                <table class="legitimate-scenario-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">情景与版本</th>
+                      <th scope="col">适用范围</th>
+                      <th scope="col">工况条件</th>
+                      <th scope="col">启用状态</th>
+                      <th scope="col">完整性</th>
+                    </tr>
+                  </thead>
+                  <tbody id="legitimate-scenarios-table-body"></tbody>
+                </table>
+              </div>
+              <p id="legitimate-scenarios-empty" class="muted-note" hidden>
+                尚未建立合法情景。没有匹配情景时，系统不会自行推断为合法例外。
+              </p>
+            </div>
+            <section class="side-card legitimate-scenario-form-card" aria-labelledby="legitimate-scenario-form-title">
+              <p class="section-kicker">新增不可变版本</p>
+              <h4 id="legitimate-scenario-form-title">登记合法情景</h4>
+              <form id="legitimate-scenario-form">
+                <div class="scenario-form-pair">
+                  <label>
+                    <span>情景编号</span>
+                    <input id="scenario-id" type="text" maxlength="128" autocomplete="off" required placeholder="例如：planned-maintenance">
+                  </label>
+                  <label>
+                    <span>版本</span>
+                    <input id="scenario-version" type="number" min="1" step="1" value="1" required>
+                  </label>
+                </div>
+                <label>
+                  <span>情景名称</span>
+                  <input id="scenario-name" type="text" maxlength="160" autocomplete="off" required placeholder="例如：经批准的计划检修">
+                </label>
+                <label>
+                  <span>说明与审批依据</span>
+                  <textarea id="scenario-description" rows="3" maxlength="8000" required placeholder="说明合法依据、适用边界和核验材料"></textarea>
+                </label>
+                <label>
+                  <span>适用矿山 <small>逗号分隔；留空表示不限矿山</small></span>
+                  <input id="scenario-mine-ids" type="text" maxlength="4000" autocomplete="off" placeholder="M001, M002">
+                </label>
+                <div class="scenario-form-triple">
+                  <label>
+                    <span>生产制度</span>
+                    <input id="scenario-regime" type="text" maxlength="128" autocomplete="off" placeholder="留空不限">
+                  </label>
+                  <label>
+                    <span>班次</span>
+                    <input id="scenario-shift" type="text" maxlength="128" autocomplete="off" placeholder="留空不限">
+                  </label>
+                  <label>
+                    <span>季节</span>
+                    <input id="scenario-season" type="text" maxlength="128" autocomplete="off" placeholder="留空不限">
+                  </label>
+                </div>
+                <label>
+                  <span>检修状态</span>
+                  <select id="scenario-maintenance">
+                    <option value="">不限</option>
+                    <option value="true">仅检修窗口</option>
+                    <option value="false">仅非检修窗口</option>
+                  </select>
+                </label>
+                <label>
+                  <span>必须具备的审批事件编号 <small>逗号分隔</small></span>
+                  <input id="scenario-event-codes" type="text" maxlength="4000" autocomplete="off" placeholder="MAINTENANCE_APPROVED">
+                </label>
+                <label>
+                  <span>必须具备的工况标签 <small>逗号分隔</small></span>
+                  <input id="scenario-required-tags" type="text" maxlength="4000" autocomplete="off" placeholder="planned, audited">
+                </label>
+                <label>
+                  <span>特征适用范围 <small>JSON；至少一项，同时还需填写至少一个适用范围或事件条件</small></span>
+                  <textarea id="scenario-feature-bounds" rows="4" spellcheck="false" required>{}</textarea>
+                </label>
+                <label class="archive-toggle">
+                  <input id="scenario-active" type="checkbox" checked>
+                  <span>此版本启用</span>
+                </label>
+                <div id="legitimate-scenario-form-status" class="form-status" role="status" aria-live="polite"></div>
+                <button id="submit-legitimate-scenario" class="button primary" type="submit">保存新版本</button>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <div class="section-toolbar admin-user-heading">
+          <div>
+            <p class="section-kicker">访问控制</p>
+            <h3>用户管理</h3>
+            <p>为内网试点创建最小权限账号；密码仅在创建时提交，不在列表和浏览器中保存。</p>
+          </div>
+          <button id="refresh-users" class="button quiet compact" type="button">刷新用户</button>
+        </div>
+
+        <div class="role-explainer" aria-label="角色权限说明">
+          <article>
+            <strong>系统管理员</strong>
+            <p>维护账号、查看全部矿山，并可执行复核审批。</p>
+          </article>
+          <article>
+            <strong>监管负责人</strong>
+            <p>可交办、运行分析、复核并审批他人提交的结论。</p>
+          </article>
+          <article>
+            <strong>复核人员</strong>
+            <p>可查看授权矿山、核查线索并提交结论，不能审批自己的结论。</p>
+          </article>
+          <article>
+            <strong>查阅人员</strong>
+            <p>只能查看授权矿山的态势、任务和事项，不能修改。</p>
+          </article>
+        </div>
+
+        <div id="users-status" class="data-load-status" role="status" aria-live="polite"></div>
+
+        <div class="admin-layout">
+          <section class="detail-section" aria-labelledby="user-list-title">
+            <div class="detail-section-heading">
+              <p class="section-kicker">账号生命周期</p>
+              <h3 id="user-list-title">当前用户</h3>
+              <p class="muted-note">账号不做物理删除；停用会立即终止登录，但历史办理记录仍完整保留。</p>
+            </div>
+            <div id="users-table-wrap" class="table-scroll" tabindex="0" aria-label="用户列表，可横向滚动" hidden>
+              <table class="user-table">
+                <thead>
+                  <tr>
+                    <th scope="col">用户名</th>
+                    <th scope="col">角色</th>
+                    <th scope="col">矿山范围</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">更新时间</th>
+                    <th scope="col">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="users-table-body"></tbody>
+              </table>
+            </div>
+            <p id="users-empty" class="muted-note" hidden>暂未返回用户信息。</p>
+          </section>
+
+          <section class="side-card user-create-card" aria-labelledby="user-create-title">
+            <p class="section-kicker">创建最小权限账号</p>
+            <h3 id="user-create-title">新增用户</h3>
+            <form id="user-create-form">
+              <label id="user-username-wrap">
+                <span>用户名</span>
+                <input id="new-user-username" type="text" maxlength="100" autocomplete="off" required>
+              </label>
+              <label id="user-password-wrap">
+                <span>初始密码 <small>至少 8 位</small></span>
+                <input id="new-user-password" type="password" minlength="8" maxlength="500" autocomplete="new-password" required>
+              </label>
+              <label>
+                <span>角色</span>
+                <select id="new-user-role">
+                  <option value="viewer">查阅人员</option>
+                  <option value="reviewer">复核人员</option>
+                  <option value="supervisor">监管负责人</option>
+                  <option value="admin">系统管理员</option>
+                </select>
+              </label>
+              <label>
+                <span>授权矿山 <small>多个编号用逗号分隔；管理员可留空</small></span>
+                <input id="new-user-scopes" type="text" maxlength="1000" autocomplete="off" placeholder="例如：M001, M002">
+              </label>
+              <div id="user-create-status" class="form-status" role="status" aria-live="polite"></div>
+              <div class="user-form-actions">
+                <button id="cancel-user-edit" class="button quiet" type="button" hidden>取消修改</button>
+                <button id="create-user-submit" class="button primary" type="submit">创建用户</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      </section>
+
+      <section
+        id="tools-workspace"
+        class="workspace-panel tools-workspace"
+        role="tabpanel"
+        aria-labelledby="tools-workspace-tab"
+        tabindex="0"
+        hidden
+      >
+        <div class="workspace-heading tools-heading">
+          <div>
+            <p class="section-kicker">专业工具 / 临时分析</p>
+            <h2>单次数据交叉核验</h2>
+            <p>供业务或技术人员临时上传数据分析；正式监管办理请回到核查台账留痕。</p>
+          </div>
+        </div>
+
+        <section class="work-panel" aria-labelledby="input-title">
+          <div class="panel-heading">
+            <div>
+              <span class="step-number" aria-hidden="true">1</span>
+              <div>
+                <p class="section-kicker">选择监管事项</p>
+                <h2 id="input-title">导入待分析数据</h2>
+              </div>
+            </div>
+            <div class="mode-tabs" role="tablist" aria-label="监管事项类型">
+              <button
+                id="production-tab"
+                class="mode-tab is-active"
+                type="button"
+                role="tab"
+                aria-selected="true"
+                aria-controls="input-panel"
+                data-mode="production"
+              >
+                产量数据核验
+              </button>
+              <button
+                id="personnel-tab"
+                class="mode-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="input-panel"
+                data-mode="personnel"
+              >
+                人员通行核验
+              </button>
+            </div>
+          </div>
+
+          <div id="input-panel" role="tabpanel" aria-labelledby="production-tab">
+            <p id="mode-description" class="mode-description">
+              比对上报产量与皮带、入洗、销售、库存数据，定位相互矛盾的数据来源。
+            </p>
+
+            <div class="input-grid">
+              <div class="data-source-card">
+                <h3>选择数据</h3>
+                <p>可先用示例体验，也可上传业务系统导出的 JSON 文件。</p>
+                <div class="source-actions">
+                  <button id="load-risk-sample" class="button secondary" type="button">
+                    载入异常示例
+                  </button>
+                  <button id="load-normal-sample" class="button quiet" type="button">
+                    载入正常示例
+                  </button>
+                  <button id="upload-button" class="button quiet file-button" type="button">
+                    上传 JSON 文件
+                  </button>
+                  <button id="clear-analysis" class="button quiet" type="button" disabled>
+                    清空本次数据
+                  </button>
+                  <input id="file-input" class="visually-hidden" type="file" accept=".json,application/json">
+                </div>
+
+                <div id="dataset-card" class="dataset-card is-empty">
+                  <span class="dataset-icon" aria-hidden="true">数</span>
+                  <div>
+                    <strong id="dataset-name">尚未载入数据</strong>
+                    <p id="dataset-summary">请选择示例或上传文件</p>
+                  </div>
+                  <span id="dataset-state" class="dataset-state">待导入</span>
+                </div>
+
+                <details class="editor-details">
+                  <summary>查看或修改原始数据（专业人员）</summary>
+                  <div class="editor-wrap">
+                    <label for="json-editor">JSON 原始数据</label>
+                    <textarea
+                      id="json-editor"
+                      rows="14"
+                      spellcheck="false"
+                      placeholder="载入示例、上传文件，或在此粘贴 JSON 数据"
+                    ></textarea>
+                    <p class="field-help">修改后系统会在分析前重新校验格式。</p>
+                  </div>
+                </details>
+              </div>
+
+              <aside class="reading-guide" aria-labelledby="guide-title">
+                <h3 id="guide-title">领导看结果只需三步</h3>
+                <ol>
+                  <li>
+                    <span>1</span>
+                    <p><strong>先看结论颜色</strong><small>橙色建议核查，灰色表示尚不能判断，绿色表示当前数据可协调。</small></p>
+                  </li>
+                  <li>
+                    <span>2</span>
+                    <p><strong>再看关键线索</strong><small>系统说明哪些数据互相矛盾，以及可能涉及的范围。</small></p>
+                  </li>
+                  <li>
+                    <span>3</span>
+                    <p><strong>按建议安排复核</strong><small>调取原始记录、设备日志、视频和凭证，由业务人员确认。</small></p>
+                  </li>
+                </ol>
+              </aside>
+            </div>
+
+            <div class="run-bar">
+              <div id="request-status" class="request-status" role="status" aria-live="polite">
+                数据载入后即可开始分析
+              </div>
+              <button id="analyze-button" class="button primary" type="button" disabled>
+                <span id="analyze-button-text">开始交叉核验</span>
+                <span class="button-arrow" aria-hidden="true">→</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section id="empty-state" class="empty-state" aria-labelledby="empty-title">
+          <span class="empty-mark" aria-hidden="true">析</span>
+          <h2 id="empty-title">研判结果将在这里呈现</h2>
+          <p>不会只给算法分数，而是说明“是否异常、异常在哪里、下一步做什么”。</p>
+        </section>
+
+        <section id="result-section" class="result-section" aria-labelledby="result-title" hidden>
+          <div class="result-heading">
+            <div>
+              <span class="step-number" aria-hidden="true">2</span>
+              <div>
+                <p class="section-kicker">辅助研判结果</p>
+                <h2 id="result-title">本次数据核验</h2>
+                <p id="result-time" class="result-time"></p>
+              </div>
+            </div>
+            <div class="result-actions">
+              <button id="download-button" class="button quiet compact" type="button">下载结果</button>
+              <button id="print-button" class="button quiet compact" type="button">打印简报</button>
+            </div>
+          </div>
+
+          <div id="decision-banner" class="decision-banner" tabindex="-1">
+            <span id="decision-symbol" class="decision-symbol" aria-hidden="true">!</span>
+            <div>
+              <p id="decision-level" class="decision-level"></p>
+              <h3 id="decision-title"></h3>
+              <p id="decision-summary"></p>
+            </div>
+            <div class="decision-priority">
+              <span>建议优先级</span>
+              <strong id="priority-text"></strong>
+            </div>
+          </div>
+
+          <div id="kpi-grid" class="kpi-grid" aria-label="关键指标"></div>
+
+          <div class="result-grid">
+            <article class="result-card" aria-labelledby="finding-title">
+              <div class="card-heading">
+                <span class="card-number" aria-hidden="true">1</span>
+                <div>
+                  <p>核心判断</p>
+                  <h3 id="finding-title">发现了什么</h3>
+                </div>
+              </div>
+              <ul id="finding-list" class="finding-list"></ul>
+            </article>
+
+            <article class="result-card action-card" aria-labelledby="action-title">
+              <div class="card-heading">
+                <span class="card-number" aria-hidden="true">2</span>
+                <div>
+                  <p>处置建议</p>
+                  <h3 id="action-title">下一步怎么做</h3>
+                </div>
+              </div>
+              <ol id="action-list" class="action-list"></ol>
+            </article>
+          </div>
+
+          <article id="evidence-card" class="evidence-card" aria-labelledby="evidence-title">
+            <div>
+              <p class="section-kicker">支撑本次判断的数据来源</p>
+              <h3 id="evidence-title">证据链概览</h3>
+            </div>
+            <div id="source-list" class="source-list"></div>
+            <p id="evidence-explanation" class="evidence-explanation"></p>
+          </article>
+
+          <details class="technical-details">
+            <summary>
+              <span>
+                <strong>查看专业分析依据</strong>
+                <small>指标协调值、冲突组合和原始返回结果</small>
+              </span>
+            </summary>
+
+            <div class="technical-content">
+              <section id="metric-section" aria-labelledby="metric-title">
+                <h3 id="metric-title">指标比对明细</h3>
+                <div class="table-scroll" tabindex="0" aria-label="指标比对明细，可横向滚动">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">指标</th>
+                        <th scope="col">接收值</th>
+                        <th scope="col">协调参考值</th>
+                        <th scope="col">偏离程度</th>
+                      </tr>
+                    </thead>
+                    <tbody id="metric-table-body"></tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section id="conflict-section" aria-labelledby="conflict-title">
+                <h3 id="conflict-title">所有可恢复一致性的最小待核查情景</h3>
+                <div class="table-scroll" tabindex="0" aria-label="冲突组合，可横向滚动">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">情景</th>
+                        <th scope="col">该情景先复核的来源</th>
+                        <th scope="col">涉及来源数</th>
+                        <th scope="col">可靠性代价</th>
+                        <th scope="col">该情景合理区间</th>
+                        <th scope="col">该情景最小差额</th>
+                        <th scope="col">独立证据簇</th>
+                      </tr>
+                    </thead>
+                    <tbody id="conflict-table-body"></tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section id="personnel-detail-section" aria-labelledby="personnel-detail-title" hidden>
+                <h3 id="personnel-detail-title">人脸与定位卡匹配明细</h3>
+                <div class="table-scroll" tabindex="0" aria-label="人员匹配明细，可横向滚动">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">人脸轨迹</th>
+                        <th scope="col">人脸身份</th>
+                        <th scope="col">定位卡</th>
+                        <th scope="col">卡绑定身份</th>
+                        <th scope="col">判断</th>
+                      </tr>
+                    </thead>
+                    <tbody id="personnel-table-body"></tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section id="assumption-section" aria-labelledby="assumption-title">
+                <h3 id="assumption-title">口径与使用边界</h3>
+                <ul id="assumption-list" class="plain-list"></ul>
+              </section>
+
+              <details class="raw-result">
+                <summary>查看系统原始返回结果</summary>
+                <pre id="raw-output" tabindex="0"></pre>
+              </details>
+            </div>
+          </details>
+
+          <div class="legal-note">
+            <strong>技术线索不构成违法认定。</strong>
+            本结果是基于当前数据、容差和模型假设生成的辅助核查线索。
+            任何责任认定均须结合原始证据、业务口径和法定程序，由有权限人员作出。
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <dialog
+      id="overview-reference-label-dialog"
+      class="action-confirm-dialog overview-reference-label-dialog"
+      aria-labelledby="overview-reference-label-title"
+    >
+      <div class="overview-reference-label-content">
+        <div class="dialog-heading">
+          <div>
+            <p class="section-kicker">人工核实历史样本</p>
+            <h2 id="overview-reference-label-title">查看历史参考标签</h2>
+            <p id="overview-reference-label-context" class="muted-note"></p>
+          </div>
+          <button id="close-overview-reference-label" class="text-button" type="button">关闭</button>
+        </div>
+        <p class="reference-label-warning">
+          系统不会把“当前可协调”自动标成正常。只有人工核实后明确标注的记录，才可能进入以后同条件历史基线。
+        </p>
+        <div id="overview-reference-label-status" class="form-status" role="status" aria-live="polite"></div>
+        <div id="overview-reference-label-current" class="reference-label-current"></div>
+        <details id="overview-reference-label-history-details" class="reference-label-history-details">
+          <summary>查看标签变更记录</summary>
+          <ol id="overview-reference-label-history" class="reference-label-history"></ol>
+        </details>
+        <form id="overview-reference-label-form">
+          <input id="overview-reference-label-expected-sequence" type="hidden" value="0">
+          <label>
+            <span>本次人工核实标签</span>
+            <select id="overview-reference-label-value" required>
+              <option value="unresolved">尚未解决 / 继续核查</option>
+              <option value="verified_normal">已核实为正常</option>
+              <option value="legitimate_exception">已核实为合法例外</option>
+              <option value="confirmed_data_error">确认存在数据错误</option>
+              <option value="confirmed_technical_anomaly">确认存在技术异常</option>
+              <option value="adjudicated_violation">已依法认定违规</option>
+            </select>
+          </label>
+          <label id="overview-reference-label-scenario-wrap" hidden>
+            <span>合法情景编号 <small>合法例外时必填</small></span>
+            <input id="overview-reference-label-scenario" type="text" maxlength="128" autocomplete="off">
+          </label>
+          <label>
+            <span>核实依据与说明</span>
+            <textarea id="overview-reference-label-note" rows="4" maxlength="4000" required placeholder="说明核对了哪些原始材料、业务口径和审批依据"></textarea>
+          </label>
+          <p class="form-help">每次提交都会追加留痕，不覆盖旧标签；请勿仅凭算法结果反向标注。</p>
+          <button id="submit-overview-reference-label" class="button primary" type="submit">提交标签并留痕</button>
+        </form>
+        <p id="overview-reference-label-readonly-note" class="muted-note" hidden>
+          当前账号可查看标签记录，但只有监管负责人或系统管理员可以提交新标签。
+        </p>
+      </div>
+    </dialog>
+
+    <dialog
+      id="action-confirm-dialog"
+      class="action-confirm-dialog"
+      aria-labelledby="action-confirm-title"
+      aria-describedby="action-confirm-message"
+    >
+      <form id="action-confirm-form" class="action-confirm-form">
+        <p class="section-kicker">操作确认</p>
+        <h2 id="action-confirm-title">确认操作</h2>
+        <p id="action-confirm-message"></p>
+        <label id="action-confirm-input-wrap" hidden>
+          <span id="action-confirm-input-label">补充信息</span>
+          <input
+            id="action-confirm-input"
+            type="text"
+            maxlength="500"
+            autocomplete="off"
+          >
+          <small id="action-confirm-input-help"></small>
+        </label>
+        <p id="action-confirm-error" class="form-status is-error" role="alert" hidden></p>
+        <div class="action-confirm-buttons">
+          <button id="action-confirm-cancel" class="button quiet compact" type="button">
+            取消
+          </button>
+          <button id="action-confirm-submit" class="button primary compact" type="submit">
+            确认
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <footer class="site-footer">
+      <p>矿安智察 · 多源交叉验证监管工作台</p>
+      <p>数据在本系统内分析，请按本单位数据安全制度使用。</p>
+    </footer>
+
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

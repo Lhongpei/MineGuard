@@ -1,0 +1,386 @@
+{
+  "contract_version": "enterprise-submission-v1",
+  "submission_id": "018f7b4c-91d2-7a50-9bf6-3e589f13c201",
+  "idempotency_key": "enterprise-001-20260727-shift-a-01",
+  "submitted_at": "2026-07-27T08:05:00Z",
+  "payload": {
+    "enterprise": {
+      "enterprise_id": "enterprise-001",
+      "enterprise_name": "示例能源有限公司",
+      "unified_social_credit_code": "91110000ABCDEFGH1X",
+      "field_provenance": {
+        "enterprise_id": [
+          {
+            "origin_type": "erp",
+            "source_system": "enterprise-master-data",
+            "source_record_id": "enterprise-001",
+            "captured_at": "2026-07-27T07:55:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "enterprise_name": [
+          {
+            "origin_type": "erp",
+            "source_system": "enterprise-master-data",
+            "source_record_id": "enterprise-001",
+            "captured_at": "2026-07-27T07:55:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "unified_social_credit_code": [
+          {
+            "origin_type": "erp",
+            "source_system": "enterprise-master-data",
+            "source_record_id": "enterprise-001",
+            "captured_at": "2026-07-27T07:55:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      }
+    },
+    "mine": {
+      "mine_id": "mine-001",
+      "mine_name": "示例一号矿",
+      "field_provenance": {
+        "mine_id": [
+          {
+            "origin_type": "erp",
+            "source_system": "mine-master-data",
+            "source_record_id": "mine-001",
+            "captured_at": "2026-07-27T07:55:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ],
+        "mine_name": [
+          {
+            "origin_type": "erp",
+            "source_system": "mine-master-data",
+            "source_record_id": "mine-001",
+            "captured_at": "2026-07-27T07:55:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ]
+      }
+    },
+    "window": {
+      "window_start": "2026-07-27T00:00:00Z",
+      "window_end": "2026-07-27T08:00:00Z",
+      "field_provenance": {
+        "window_start": [
+          {
+            "origin_type": "erp",
+            "source_system": "production-calendar",
+            "source_record_id": "shift-a-20260727",
+            "captured_at": "2026-07-27T07:55:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          }
+        ],
+        "window_end": [
+          {
+            "origin_type": "erp",
+            "source_system": "production-calendar",
+            "source_record_id": "shift-a-20260727",
+            "captured_at": "2026-07-27T07:55:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          }
+        ]
+      }
+    },
+    "profile": {
+      "profile_id": "coal-balance-default",
+      "profile_version": "2026.07",
+      "field_provenance": {
+        "profile_id": [
+          {
+            "origin_type": "approved_document",
+            "source_system": "regulatory-profile-registry",
+            "source_record_id": "coal-balance-default@2026.07",
+            "captured_at": "2026-07-27T07:55:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+        ],
+        "profile_version": [
+          {
+            "origin_type": "approved_document",
+            "source_system": "regulatory-profile-registry",
+            "source_record_id": "coal-balance-default@2026.07",
+            "captured_at": "2026-07-27T07:55:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+        ]
+      }
+    },
+    "operational_context": {
+      "regime_code": "NORMAL_PRODUCTION",
+      "shift_code": "A",
+      "season_code": "SUMMER",
+      "maintenance": false,
+      "approved_event_codes": [],
+      "tags": [
+        "longwall-101"
+      ],
+      "field_provenance": {
+        "regime_code": [
+          {
+            "origin_type": "erp",
+            "source_system": "production-execution-system",
+            "source_record_id": "shift-a-20260727",
+            "captured_at": "2026-07-27T07:58:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        ],
+        "shift_code": [
+          {
+            "origin_type": "erp",
+            "source_system": "production-execution-system",
+            "source_record_id": "shift-a-20260727",
+            "captured_at": "2026-07-27T07:58:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        ],
+        "season_code": [
+          {
+            "origin_type": "deterministic_calculation",
+            "source_system": "enterprise-submission-agent",
+            "source_record_id": "calendar-rule-cn-2026",
+            "captured_at": "2026-07-27T07:58:00Z",
+            "acquisition_method": "deterministic_formula",
+            "evidence_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "transformation": "Map window_start calendar date to the enterprise-approved season table."
+          }
+        ],
+        "maintenance": [
+          {
+            "origin_type": "work_order_system",
+            "source_system": "maintenance-work-orders",
+            "source_record_id": "mine-001-20260727-active-query",
+            "captured_at": "2026-07-27T07:58:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        ],
+        "approved_event_codes": [
+          {
+            "origin_type": "work_order_system",
+            "source_system": "approved-event-registry",
+            "source_record_id": "mine-001-20260727-active-query",
+            "captured_at": "2026-07-27T07:58:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        ],
+        "tags": [
+          {
+            "origin_type": "erp",
+            "source_system": "production-execution-system",
+            "source_record_id": "shift-a-20260727",
+            "captured_at": "2026-07-27T07:58:00Z",
+            "acquisition_method": "direct_api",
+            "evidence_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        ]
+      }
+    },
+    "observations": [
+      {
+        "source_id": "mine-001-main-transport",
+        "observation_id": "obs-20260727-0001",
+        "value": 1000.25,
+        "unit": "t",
+        "observed_at": "2026-07-27T08:00:00Z",
+        "received_at": "2026-07-27T08:00:05Z",
+        "interval_start": null,
+        "interval_end": null,
+        "reset_before": false,
+        "sequence_no": 202607270001,
+        "revision": 0,
+        "payload_sha256": "78a5d9cf36c2b566511bee3364ae714a02479da6ff8b02f2b996de5574c197a9",
+        "signature": "59dc38c6346e0f955976c541a093644276c9f36830de8d4c38aee79b56e82477",
+        "field_provenance": {
+          "source_id": [
+            {
+              "origin_type": "sensor",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "mine-001-main-transport",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "device_gateway",
+              "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          ],
+          "observation_id": [
+            {
+              "origin_type": "sensor",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "device_gateway",
+              "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          ],
+          "value": [
+            {
+              "origin_type": "sensor",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "source_location": "channel/main_transport/window_total",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "device_gateway",
+              "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          ],
+          "unit": [
+            {
+              "origin_type": "sensor",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "device_gateway",
+              "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          ],
+          "observed_at": [
+            {
+              "origin_type": "sensor",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "device_gateway",
+              "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          ],
+          "received_at": [
+            {
+              "origin_type": "sensor",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "device_gateway",
+              "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          ],
+          "interval_start": [
+            {
+              "origin_type": "sensor",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "device_gateway",
+              "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          ],
+          "interval_end": [
+            {
+              "origin_type": "sensor",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "device_gateway",
+              "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          ],
+          "reset_before": [
+            {
+              "origin_type": "sensor",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "device_gateway",
+              "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          ],
+          "sequence_no": [
+            {
+              "origin_type": "sensor",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "device_gateway",
+              "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          ],
+          "revision": [
+            {
+              "origin_type": "sensor",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "device_gateway",
+              "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          ],
+          "payload_sha256": [
+            {
+              "origin_type": "cryptographic_derivation",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "signature_process",
+              "evidence_sha256": "78a5d9cf36c2b566511bee3364ae714a02479da6ff8b02f2b996de5574c197a9"
+            }
+          ],
+          "signature": [
+            {
+              "origin_type": "cryptographic_derivation",
+              "source_system": "trusted-meter-gateway",
+              "source_record_id": "obs-20260727-0001",
+              "captured_at": "2026-07-27T08:00:05Z",
+              "acquisition_method": "signature_process",
+              "evidence_sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+            }
+          ]
+        }
+      }
+    ],
+    "llm_assistance": {
+      "used": false,
+      "affected_field_paths": [],
+      "numeric_values_copied_or_deterministically_calculated": true,
+      "approved_events_copied_from_authoritative_source": true,
+      "human_reviewed_affected_fields": true,
+      "declaration_provenance": [
+        {
+          "origin_type": "manual_record",
+          "source_system": "enterprise-submission-agent-audit",
+          "source_record_id": "submission-018f7b4c-llm-audit",
+          "captured_at": "2026-07-27T08:04:00Z",
+          "acquisition_method": "direct_api",
+          "evidence_sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      ]
+    },
+    "human_confirmation": {
+      "confirmed": true,
+      "confirmer_id": "employee-0088",
+      "confirmer_name": "示例确认人",
+      "confirmer_role": "企业报送负责人",
+      "confirmed_at": "2026-07-27T08:04:30Z",
+      "confirmation_method": "authenticated_click",
+      "confirmation_evidence_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "evidence_reviewed": true,
+      "authorized_to_submit": true,
+      "understands_regulator_decides_normality_and_legality": true,
+      "declaration_provenance": [
+        {
+          "origin_type": "manual_record",
+          "source_system": "enterprise-submission-agent-audit",
+          "source_record_id": "confirmation-018f7b4c",
+          "captured_at": "2026-07-27T08:04:30Z",
+          "acquisition_method": "manual_entry",
+          "evidence_sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+        }
+      ]
+    }
+  },
+  "payload_sha256": "f730ae0a8c047c6d094f81eac048f94e46f287bf9cabe7c5b5732f84230b7ac1"
+}

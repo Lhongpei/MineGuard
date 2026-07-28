@@ -1,0 +1,761 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:enterprise-submission:v1",
+  "title": "Enterprise Submission V1",
+  "description": "Independent enterprise-agent to regulatory-platform submission contract. Acceptance is not a finding that data is normal, legal, or compliant.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "submission_id",
+    "idempotency_key",
+    "submitted_at",
+    "payload",
+    "payload_sha256"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "enterprise-submission-v1"
+    },
+    "submission_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Globally unique immutable submission identifier."
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$",
+      "description": "Stable across retries. Its scope is the authenticated client_id."
+    },
+    "submitted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "$ref": "#/$defs/submissionPayload"
+    },
+    "payload_sha256": {
+      "$ref": "#/$defs/sha256",
+      "description": "Lowercase SHA-256 of RFC 8785 JCS canonical bytes of the payload object only."
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "utcDateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "provenanceRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin_type",
+        "source_system",
+        "source_record_id",
+        "captured_at",
+        "acquisition_method",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "origin_type": {
+          "type": "string",
+          "enum": [
+            "sensor",
+            "erp",
+            "weighbridge",
+            "inventory_system",
+            "transport_system",
+            "work_order_system",
+            "approved_document",
+            "manual_record",
+            "deterministic_calculation",
+            "cryptographic_derivation"
+          ]
+        },
+        "source_system": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "source_record_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "source_location": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Stable field, cell, page, JSON Pointer, or device channel location."
+        },
+        "captured_at": {
+          "$ref": "#/$defs/utcDateTime"
+        },
+        "acquisition_method": {
+          "type": "string",
+          "enum": [
+            "direct_api",
+            "device_gateway",
+            "file_import",
+            "ocr_extraction",
+            "llm_extraction",
+            "manual_entry",
+            "deterministic_formula",
+            "signature_process"
+          ]
+        },
+        "evidence_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Digest of the immutable source evidence or canonical source record."
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Required by policy for OCR/LLM extraction; not a substitute for evidence."
+        },
+        "transformation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "description": "Exact deterministic conversion or extraction description."
+        }
+      }
+    },
+    "provenanceSet": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "$ref": "#/$defs/provenanceRecord"
+      }
+    },
+    "enterprise": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enterprise_id",
+        "enterprise_name",
+        "unified_social_credit_code",
+        "field_provenance"
+      ],
+      "properties": {
+        "enterprise_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "enterprise_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "unified_social_credit_code": {
+          "type": "string",
+          "pattern": "^[0-9A-HJ-NPQRTUWXY]{18}$"
+        },
+        "field_provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enterprise_id",
+            "enterprise_name",
+            "unified_social_credit_code"
+          ],
+          "properties": {
+            "enterprise_id": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "enterprise_name": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "unified_social_credit_code": {
+              "$ref": "#/$defs/provenanceSet"
+            }
+          }
+        }
+      }
+    },
+    "mine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mine_id",
+        "mine_name",
+        "field_provenance"
+      ],
+      "properties": {
+        "mine_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "mine_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "field_provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mine_id",
+            "mine_name"
+          ],
+          "properties": {
+            "mine_id": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "mine_name": {
+              "$ref": "#/$defs/provenanceSet"
+            }
+          }
+        }
+      }
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "window_start",
+        "window_end",
+        "field_provenance"
+      ],
+      "properties": {
+        "window_start": {
+          "$ref": "#/$defs/utcDateTime"
+        },
+        "window_end": {
+          "$ref": "#/$defs/utcDateTime"
+        },
+        "field_provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "window_start",
+            "window_end"
+          ],
+          "properties": {
+            "window_start": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "window_end": {
+              "$ref": "#/$defs/provenanceSet"
+            }
+          }
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_id",
+        "profile_version",
+        "field_provenance"
+      ],
+      "properties": {
+        "profile_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "profile_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "field_provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profile_id",
+            "profile_version"
+          ],
+          "properties": {
+            "profile_id": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "profile_version": {
+              "$ref": "#/$defs/provenanceSet"
+            }
+          }
+        }
+      }
+    },
+    "operationalContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "regime_code",
+        "shift_code",
+        "season_code",
+        "maintenance",
+        "approved_event_codes",
+        "tags",
+        "field_provenance"
+      ],
+      "properties": {
+        "regime_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "shift_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "season_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "maintenance": {
+          "type": "boolean"
+        },
+        "approved_event_codes": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "tags": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "field_provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "regime_code",
+            "shift_code",
+            "season_code",
+            "maintenance",
+            "approved_event_codes",
+            "tags"
+          ],
+          "properties": {
+            "regime_code": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "shift_code": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "season_code": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "maintenance": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "approved_event_codes": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "tags": {
+              "$ref": "#/$defs/provenanceSet"
+            }
+          }
+        }
+      }
+    },
+    "governedObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "observation_id",
+        "value",
+        "unit",
+        "observed_at",
+        "received_at",
+        "interval_start",
+        "interval_end",
+        "reset_before",
+        "sequence_no",
+        "revision",
+        "payload_sha256",
+        "signature",
+        "field_provenance"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "observation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "value": {
+          "type": "number",
+          "minimum": -1000000000000000,
+          "maximum": 1000000000000000
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "observed_at": {
+          "$ref": "#/$defs/utcDateTime"
+        },
+        "received_at": {
+          "$ref": "#/$defs/utcDateTime"
+        },
+        "interval_start": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/utcDateTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "interval_end": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/utcDateTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reset_before": {
+          "type": "boolean"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "field_provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "observation_id",
+            "value",
+            "unit",
+            "observed_at",
+            "received_at",
+            "interval_start",
+            "interval_end",
+            "reset_before",
+            "sequence_no",
+            "revision",
+            "payload_sha256",
+            "signature"
+          ],
+          "properties": {
+            "source_id": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "observation_id": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "value": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "unit": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "observed_at": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "received_at": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "interval_start": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "interval_end": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "reset_before": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "sequence_no": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "revision": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "payload_sha256": {
+              "$ref": "#/$defs/provenanceSet"
+            },
+            "signature": {
+              "$ref": "#/$defs/provenanceSet"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "interval_start": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "interval_end": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "interval_end": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "llmAssistance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "used",
+        "affected_field_paths",
+        "numeric_values_copied_or_deterministically_calculated",
+        "approved_events_copied_from_authoritative_source",
+        "human_reviewed_affected_fields",
+        "declaration_provenance"
+      ],
+      "properties": {
+        "used": {
+          "type": "boolean"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "tasks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "document_classification",
+              "field_extraction",
+              "unit_normalization_suggestion",
+              "missing_field_question_generation",
+              "consistency_explanation",
+              "draft_assistance"
+            ]
+          }
+        },
+        "affected_field_paths": {
+          "type": "array",
+          "maxItems": 512,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "numeric_values_copied_or_deterministically_calculated": {
+          "const": true,
+          "description": "LLMs must never invent, estimate, interpolate, or silently repair a reported number."
+        },
+        "approved_events_copied_from_authoritative_source": {
+          "const": true,
+          "description": "LLMs must never invent an approval, work order, maintenance event, or exception."
+        },
+        "human_reviewed_affected_fields": {
+          "const": true
+        },
+        "declaration_provenance": {
+          "$ref": "#/$defs/provenanceSet"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "used": {
+                "const": true
+              }
+            },
+            "required": [
+              "used"
+            ]
+          },
+          "then": {
+            "required": [
+              "provider",
+              "model",
+              "tasks"
+            ],
+            "properties": {
+              "provider": {},
+              "model": {},
+              "tasks": {},
+              "affected_field_paths": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "affected_field_paths": {
+                "type": "array",
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "humanConfirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "confirmed",
+        "confirmer_id",
+        "confirmer_name",
+        "confirmer_role",
+        "confirmed_at",
+        "confirmation_method",
+        "confirmation_evidence_sha256",
+        "evidence_reviewed",
+        "authorized_to_submit",
+        "understands_regulator_decides_normality_and_legality",
+        "declaration_provenance"
+      ],
+      "properties": {
+        "confirmed": {
+          "const": true
+        },
+        "confirmer_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "confirmer_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "confirmer_role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "confirmed_at": {
+          "$ref": "#/$defs/utcDateTime"
+        },
+        "confirmation_method": {
+          "type": "string",
+          "enum": [
+            "authenticated_click",
+            "qualified_electronic_signature",
+            "enterprise_seal"
+          ]
+        },
+        "confirmation_evidence_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "evidence_reviewed": {
+          "const": true
+        },
+        "authorized_to_submit": {
+          "const": true
+        },
+        "understands_regulator_decides_normality_and_legality": {
+          "const": true
+        },
+        "declaration_provenance": {
+          "$ref": "#/$defs/provenanceSet"
+        }
+      }
+    },
+    "submissionPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enterprise",
+        "mine",
+        "window",
+        "profile",
+        "operational_context",
+        "observations",
+        "llm_assistance",
+        "human_confirmation"
+      ],
+      "properties": {
+        "enterprise": {
+          "$ref": "#/$defs/enterprise"
+        },
+        "mine": {
+          "$ref": "#/$defs/mine"
+        },
+        "window": {
+          "$ref": "#/$defs/window"
+        },
+        "profile": {
+          "$ref": "#/$defs/profile"
+        },
+        "operational_context": {
+          "$ref": "#/$defs/operationalContext"
+        },
+        "observations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "items": {
+            "$ref": "#/$defs/governedObservation"
+          }
+        },
+        "llm_assistance": {
+          "$ref": "#/$defs/llmAssistance"
+        },
+        "human_confirmation": {
+          "$ref": "#/$defs/humanConfirmation"
+        }
+      }
+    }
+  }
+}

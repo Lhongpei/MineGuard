@@ -1,0 +1,18 @@
+{
+  "contract_version": "enterprise-submission-receipt-v1",
+  "submission_contract_version": "enterprise-submission-v1",
+  "receipt_id": "018f7b4d-3367-71b0-98d8-84ac388c2e20",
+  "submission_id": "018f7b4c-91d2-7a50-9bf6-3e589f13c201",
+  "idempotency_key": "enterprise-001-20260727-shift-a-01",
+  "received_at": "2026-07-27T08:05:01Z",
+  "status": "accepted",
+  "payload_sha256": "f730ae0a8c047c6d094f81eac048f94e46f287bf9cabe7c5b5732f84230b7ac1",
+  "intake_batch_id": "batch-20260727-000042",
+  "analysis_job_id": "job-20260727-000042",
+  "regulatory_outcome": "not_determined_at_intake",
+  "warnings": [],
+  "links": {
+    "self": "/v1/enterprise-submissions/018f7b4c-91d2-7a50-9bf6-3e589f13c201/receipt",
+    "analysis_job": "/v1/jobs/job-20260727-000042"
+  }
+}

@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:enterprise-submission-capabilities:v1",
+  "title": "Enterprise Submission Capabilities V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "service_id",
+    "server_time",
+    "supported_submission_contracts",
+    "authentication",
+    "limits",
+    "integrity_algorithms",
+    "features"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "enterprise-submission-capabilities-v1"
+    },
+    "service_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "server_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "supported_submission_contracts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "status",
+          "schema_uri",
+          "submission_path"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "pattern": "^enterprise-submission-v[1-9][0-9]*$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "current",
+              "supported",
+              "deprecated"
+            ]
+          },
+          "schema_uri": {
+            "type": "string",
+            "format": "uri-reference"
+          },
+          "submission_path": {
+            "type": "string",
+            "pattern": "^/"
+          },
+          "sunset_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scheme",
+        "signature_version",
+        "timestamp_tolerance_seconds",
+        "nonce_retention_seconds"
+      ],
+      "properties": {
+        "scheme": {
+          "const": "hmac-sha256"
+        },
+        "signature_version": {
+          "const": "hmac-sha256-v1"
+        },
+        "timestamp_tolerance_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "nonce_retention_seconds": {
+          "type": "integer",
+          "minimum": 600,
+          "maximum": 86400
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_body_bytes",
+        "max_observations"
+      ],
+      "properties": {
+        "max_body_bytes": {
+          "type": "integer",
+          "minimum": 1024
+        },
+        "max_observations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        }
+      }
+    },
+    "integrity_algorithms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "submission_payload",
+        "transport_body",
+        "observation_signature"
+      ],
+      "properties": {
+        "submission_payload": {
+          "const": "sha-256+rfc8785-jcs"
+        },
+        "transport_body": {
+          "const": "sha-256+raw-http-body"
+        },
+        "observation_signature": {
+          "const": "mineguard-governed-observation-hmac-sha256-v1"
+        }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field_provenance_required",
+        "human_confirmation_required",
+        "llm_disclosure_required",
+        "regulatory_classification_at_intake"
+      ],
+      "properties": {
+        "field_provenance_required": {
+          "const": true
+        },
+        "human_confirmation_required": {
+          "const": true
+        },
+        "llm_disclosure_required": {
+          "const": true
+        },
+        "regulatory_classification_at_intake": {
+          "const": false
+        }
+      }
+    }
+  }
+}
