@@ -1,0 +1,28 @@
+{
+  "schema_version": "edge-telemetry-capabilities-v1",
+  "service_id": "mineguard-regulatory-platform",
+  "server_time": "2026-07-28T10:15:00Z",
+  "batch_contract": "edge-telemetry-batch-v1",
+  "submission_path": "/v1/edge-telemetry-batches",
+  "authentication": {
+    "scheme": "hmac-sha256",
+    "signature_version": "hmac-sha256-v1",
+    "timestamp_tolerance_seconds": 300,
+    "nonce_retention_seconds": 3600
+  },
+  "limits": {
+    "max_body_bytes": 2097152,
+    "max_observations": 10000,
+    "max_local_alerts": 1000
+  },
+  "features": {
+    "read_only_collection": true,
+    "store_and_forward": true,
+    "manual_attestation": true,
+    "local_alerts_advisory_only": true,
+    "regulatory_recalculation": true,
+    "optional_interval_window": true,
+    "detailed_non_pii_metrics": true,
+    "source_health_metrics": true
+  }
+}

@@ -1,11 +1,11 @@
 # 煤矿数据监管平台与企业填报智能体
 
-本仓库包含两套职责相对对立、可分别部署的系统，以及一套中立接口规范：
+本仓库包含三套职责分离、可分别部署的系统，以及一套中立接口规范：
 
 ```text
-企业侧 agent/  ── HTTPS + JSON + HMAC ──>  监管侧 platform/
-       │                                      │
-       └──── 各自实现 contracts/ 的规范 ──────┘
+企业填报 agent/ ── 企业确认报送 ─────────────┐
+矿端采集 edge-agent/ ── 只读遥测/断网续传 ──┼─> 监管 platform/
+          三方均只实现 contracts/，不互相 import ┘
 ```
 
 - `platform/`：监管平台，独立登记矿井、分析配置和可信来源，执行物理交叉验证、
@@ -13,12 +13,15 @@
 - `agent/`：企业填报智能体，独立完成材料导入、缺项追问、来源追溯、煤炭确定性
   体检、受控工具规划、只读煤炭业务对话、企业人工确认和报送；不作“正常”、
   “合法”或“合规”认定。
+- `edge-agent/`：矿端独立边缘服务，以只读方式采集出煤、用电、人员、甲烷、
+  火工品和通风，完成单位/时间归一、本地留存、预警提示和断网续传；没有设备
+  写入或生产控制能力。
 - `contracts/`：版本化 HTTP/JSON Schema、OpenAPI、签名规范和互操作样例。它是
-  双方唯一共享的边界规范，不是运行时依赖包。
+  三方唯一共享的边界规范，不是运行时依赖包。
 
-`platform` 与 `agent` 不互相 import 源码，不共享 Python 模型、数据库、文件目录
-或内部密钥。双方只通过契约规定的网络接口交互；任一方都可在保持契约兼容的前提下
-独立升级、替换或停机。
+三套进程不互相 import 源码，不共享 Python 模型、数据库、文件目录或内部密钥。
+它们只通过契约规定的网络接口交互；任一方都可在保持契约兼容的前提下独立升级、
+替换或停机。
 
 ## 本地快速启动
 
@@ -31,8 +34,12 @@ python3 -m venv .venv
 python3 -m pip install -c constraints.txt -e .
 export MINEGUARD_ADMIN_PASSWORD='123123123'
 export MINEGUARD_EXTERNAL_CLIENTS_JSON='[{"client_id":"enterprise-client-001","enterprise_id":"ENT-001","mine_ids":["M001"],"secrets":["DEMO_ONLY_change_transport_secret_32_chars"]}]'
+export MINEGUARD_EDGE_CLIENTS_JSON='[{"client_id":"mine-edge-M001","mine_ids":["M001"],"secrets":["REVNT19PTkxZX2NoYW5nZV9lZGdlX3RyYW5zcG9ydF9zZWNyZXRfMzJfYnl0ZXM="]}]'
 mineguard serve --host 127.0.0.1 --port 8080 --state-directory .mineguard
 ```
+
+上述边缘密钥只是本机演示固定值；实际部署必须替换为 `openssl rand -base64 32`
+生成并由密钥系统保管的随机值。
 
 在另一个终端启动企业智能体：
 
@@ -67,6 +74,10 @@ enterprise-agent serve --host 127.0.0.1 --port 8090
 [本地双系统运行](docs/本地双系统运行.md)；企业端长期常驻、systemd、安全环境
 文件及备份恢复见[企业端部署与运维](agent/docs/部署与运维.md)。
 
+矿端服务单独启动，详细字段和 systemd 配置见
+[矿端边缘服务说明](edge-agent/README.md)。监管端与矿端必须配置同一随机密钥
+字节的 Base64；监管端仍按自己的规则独立复算，矿端本地预警不直接成为监管结论。
+
 企业端还必须单独导入与草稿矿井/窗口精确一致的监管事件查询快照；“查询结果为空”
 也需要权威空集及证据摘要。普通生产报告里的 `approved_event_codes: []` 不能替代
 监管快照，平台最终仍用自己登记的不可变快照独立比对。
@@ -89,6 +100,7 @@ DeepSeek 是可选的候选字段提取和煤炭任务规划能力。未设置 `
 python3 contracts/scripts/validate_contracts.py
 (cd platform && python3 -m pytest)
 (cd agent && python3 -m pytest)
+(cd edge-agent && python3 -m pytest)
 ```
 
 再运行一次完全黑盒的双进程与运维故障验收。它使用临时数据库、随机本机端口和
@@ -103,6 +115,7 @@ Python 包；同时会通过企业 HTTP API 验收煤炭工具目录、运行轨
 
 ```bash
 python3 scripts/verify_two_process.py
+python3 scripts/verify_edge_pipeline.py --verbose --timeout 45
 ```
 
 监管端返回接收回执，只说明契约、签名和接入检查已通过并进入监管处理流程，不代表

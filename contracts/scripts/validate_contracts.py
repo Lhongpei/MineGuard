@@ -13,10 +13,12 @@ import hashlib
 import hmac
 import json
 import math
+from datetime import datetime
 from pathlib import Path
 import re
 import sys
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 CONTRACT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +27,11 @@ EXAMPLES = {
     "submission-receipt-v1.json": "submission-receipt-v1.schema.json",
     "error-v1.json": "error-v1.schema.json",
     "capabilities-v1.json": "capabilities-v1.schema.json",
+    "edge-telemetry-batch-v1.json": "edge-telemetry-batch-v1.schema.json",
+    "edge-telemetry-receipt-v1.json": "edge-telemetry-receipt-v1.schema.json",
+    "edge-telemetry-capabilities-v1.json": (
+        "edge-telemetry-capabilities-v1.schema.json"
+    ),
 }
 EXPECTED_PAYLOAD_SHA256 = (
     "f730ae0a8c047c6d094f81eac048f94e46f287bf9cabe7c5b5732f84230b7ac1"
@@ -40,6 +47,12 @@ EXPECTED_BODY_SHA256 = (
 )
 EXPECTED_TRANSPORT_SIGNATURE = (
     "1f26b2f2541ddefd388dba69fb9d601fb25a7d2448c2f0b021c198edba97795e"
+)
+EXPECTED_EDGE_BODY_SHA256 = (
+    "f289284d73836288cae3191eeac928b62d78c8988418e1016e4f956c08af2aab"
+)
+EXPECTED_EDGE_TRANSPORT_SIGNATURE = (
+    "8d56b417514d8f78c9d0e5c431880aa5eb5df49b15cbaea1ec59efe1ac0b6001"
 )
 
 
@@ -216,6 +229,157 @@ def _check_fixed_vectors(submission_path: Path, submission: dict[str, Any]) -> N
         raise ContractValidationError("transport signature vector changed")
 
 
+def _check_edge_fixed_vectors(
+    edge_batch_path: Path,
+    edge_batch: dict[str, Any],
+    edge_receipt: dict[str, Any],
+) -> None:
+    body_hash = hashlib.sha256(edge_batch_path.read_bytes()).hexdigest()
+    if body_hash != EXPECTED_EDGE_BODY_SHA256:
+        raise ContractValidationError(
+            "raw edge example body changed; update the edge transport vector"
+        )
+    signing_lines = [
+        "MINE-EDGE-TELEMETRY-HTTP-HMAC-SHA256-V1",
+        "POST",
+        "/v1/edge-telemetry-batches",
+        "mine-edge-M001",
+        "2026-07-28T10:15:03Z",
+        "AAECAwQFBgcICQoLDA0ODw",
+        "edge-telemetry-batch-v1",
+        body_hash,
+    ]
+    transport_signature = hmac.new(
+        b"example-edge-transport-secret-not-for-production",
+        "\n".join(signing_lines).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if transport_signature != EXPECTED_EDGE_TRANSPORT_SIGNATURE:
+        raise ContractValidationError(
+            "edge transport signature vector changed"
+        )
+    client_id = edge_batch.get("client_id")
+    batch_id = edge_batch.get("batch_id")
+    if (
+        not isinstance(client_id, str)
+        or not isinstance(batch_id, str)
+        or len(client_id) > 88
+        or re.fullmatch(
+            re.escape(client_id) + r"--batch_[0-9a-f]{32}",
+            batch_id,
+        )
+        is None
+    ):
+        raise ContractValidationError(
+            "edge example batch_id is not scoped to its exact client_id"
+        )
+    if (
+        edge_receipt.get("batch_id") != batch_id
+        or edge_receipt.get("client_id") != client_id
+        or edge_receipt.get("mine_id") != edge_batch.get("mine_id")
+        or edge_receipt.get("body_sha256") != body_hash
+    ):
+        raise ContractValidationError(
+            "edge receipt example is not bound to the batch example"
+        )
+    observations = edge_batch.get("observations")
+    if not isinstance(observations, list):
+        raise ContractValidationError("edge example observations must be a list")
+    if (
+        edge_receipt.get("accepted_observations") != len(observations)
+        or edge_receipt.get("rejected_observations") != 0
+    ):
+        raise ContractValidationError(
+            "edge receipt counts do not match the accepted example batch"
+        )
+    required_extension_metrics = {
+        "production.belt_instantaneous_t_h",
+        "personnel.area_count",
+        "detonator.used_count",
+        "source.heartbeat_age_seconds",
+        "source.consecutive_failures",
+        "source.missing_state",
+    }
+    example_metrics = {
+        item.get("metric_code")
+        for item in observations
+        if isinstance(item, dict)
+    }
+    if not required_extension_metrics.issubset(example_metrics):
+        raise ContractValidationError(
+            "edge example no longer exercises all V1 telemetry extensions"
+        )
+    for index, observation in enumerate(observations):
+        if not isinstance(observation, dict):
+            raise ContractValidationError(
+                f"edge observation {index} must be an object"
+            )
+        observed_at = _aware_datetime(
+            observation.get("observed_at"),
+            f"observations[{index}].observed_at",
+        )
+        received_at = _aware_datetime(
+            observation.get("received_at"),
+            f"observations[{index}].received_at",
+        )
+        if received_at < observed_at:
+            raise ContractValidationError(
+                f"observations[{index}].received_at predates observed_at"
+            )
+        interval = observation.get("interval")
+        if interval is not None:
+            if not isinstance(interval, dict):
+                raise ContractValidationError(
+                    f"observations[{index}].interval must be an object"
+                )
+            start = _aware_datetime(
+                interval.get("start"),
+                f"observations[{index}].interval.start",
+            )
+            end = _aware_datetime(
+                interval.get("end"),
+                f"observations[{index}].interval.end",
+            )
+            if end <= start or end > received_at:
+                raise ContractValidationError(
+                    f"observations[{index}] has an invalid interval window"
+                )
+            timezone_name = interval.get("timezone")
+            if (
+                isinstance(timezone_name, str)
+                and not re.fullmatch(
+                    r"[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]",
+                    timezone_name,
+                )
+            ):
+                try:
+                    ZoneInfo(timezone_name)
+                except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
+                    raise ContractValidationError(
+                        f"observations[{index}] has an unknown timezone"
+                    ) from exc
+        if (
+            str(observation.get("metric_code", "")).startswith("source.")
+            and observation.get("location_code") != observation.get("source_id")
+        ):
+            raise ContractValidationError(
+                f"observations[{index}] source health location is ambiguous"
+            )
+
+
+def _aware_datetime(value: Any, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise ContractValidationError(f"{field} must be a date-time string")
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ContractValidationError(f"{field} is not ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ContractValidationError(f"{field} must include a UTC offset")
+    return parsed
+
+
 def _optional_jsonschema_validation(documents: dict[Path, Any]) -> str:
     try:
         from jsonschema import Draft202012Validator, FormatChecker
@@ -243,7 +407,7 @@ def _optional_jsonschema_validation(documents: dict[Path, Any]) -> str:
             raise ContractValidationError(
                 f"{example_path}: schema validation failed: {details}"
             )
-    return "4 个示例均通过 Draft 2020-12 schema 校验"
+    return f"{len(EXAMPLES)} 个示例均通过 Draft 2020-12 schema 校验"
 
 
 def main() -> int:
@@ -292,6 +456,16 @@ def main() -> int:
         CONTRACT_ROOT / "examples" / "enterprise-submission-v1.json"
     )
     _check_fixed_vectors(submission_path, documents[submission_path])
+    edge_batch_path = (
+        CONTRACT_ROOT / "examples" / "edge-telemetry-batch-v1.json"
+    )
+    _check_edge_fixed_vectors(
+        edge_batch_path,
+        documents[edge_batch_path],
+        documents[
+            CONTRACT_ROOT / "examples" / "edge-telemetry-receipt-v1.json"
+        ],
+    )
 
     text_suffixes = {".json", ".md", ".py", ".txt", ".yaml", ".yml"}
     all_text = "\n".join(

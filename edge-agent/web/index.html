@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>矿端边缘智能体</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">矿端 · 只读采集节点</p>
+        <h1>数据接入与安全预警</h1>
+      </div>
+      <div id="connectionBadge" class="badge neutral">正在检查</div>
+    </header>
+
+    <main>
+      <section id="calibrationWarning" class="notice warning" hidden>
+        <strong>当前使用示例阈值</strong>
+        <span>尚未按本矿和适用规程确认，预警只能用于联调，不能直接作为停产或处罚依据。</span>
+      </section>
+
+      <section class="summary-grid" aria-label="运行概况">
+        <article class="summary-card">
+          <span>本地已收数据</span>
+          <strong id="observationCount">—</strong>
+          <small>六类观测累计</small>
+        </article>
+        <article class="summary-card">
+          <span>本地预警</span>
+          <strong id="alertCount">—</strong>
+          <small>规则自动生成</small>
+        </article>
+        <article class="summary-card">
+          <span>待上报</span>
+          <strong id="pendingCount">—</strong>
+          <small>断网时安全保存在本机</small>
+        </article>
+        <article class="summary-card">
+          <span>已上报</span>
+          <strong id="deliveredCount">—</strong>
+          <small>监管接收端已确认</small>
+        </article>
+        <article class="summary-card">
+          <span>采集来源</span>
+          <strong id="sourceHealthCount">—</strong>
+          <small id="sourceHealthHint">正在读取健康状态</small>
+        </article>
+      </section>
+
+      <section class="panel identity-panel">
+        <div>
+          <p class="eyebrow">节点身份</p>
+          <h2 id="mineName">—</h2>
+          <p id="clientName" class="muted">—</p>
+        </div>
+        <div class="identity-actions">
+          <label>
+            本机 API 令牌
+            <input id="apiToken" type="password" autocomplete="off"
+                   placeholder="仅在管理员配置后填写">
+          </label>
+          <button id="saveTokenButton" class="secondary">保存到本浏览器</button>
+          <button id="flushButton">立即尝试上报</button>
+        </div>
+      </section>
+
+      <nav class="tabs" aria-label="查看内容">
+        <button class="tab active" data-target="sourcesView">采集来源</button>
+        <button class="tab" data-target="alertsView">当前预警</button>
+        <button class="tab" data-target="observationsView">最近数据</button>
+        <button class="tab" data-target="manualView">人工补录</button>
+        <button class="tab" data-target="helpView">使用说明</button>
+      </nav>
+
+      <section id="sourcesView" class="panel tab-view">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">连接器相互隔离 · 不控制生产设备</p>
+            <h2>连续采集健康</h2>
+          </div>
+          <button class="secondary refresh-button">刷新</button>
+        </div>
+        <div id="sourcesList" class="source-grid empty-state">
+          尚未配置连续采集来源
+        </div>
+      </section>
+
+      <section id="alertsView" class="panel tab-view" hidden>
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">按严重程度优先</p>
+            <h2>最近预警</h2>
+          </div>
+          <button class="secondary refresh-button">刷新</button>
+        </div>
+        <div id="alertsList" class="list empty-state">暂无预警</div>
+      </section>
+
+      <section id="observationsView" class="panel tab-view" hidden>
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">来源和人工数据严格区分</p>
+            <h2>最近观测</h2>
+          </div>
+          <button class="secondary refresh-button">刷新</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th><th>类别</th><th>位置</th><th>指标</th>
+                <th>数值</th><th>来源</th>
+              </tr>
+            </thead>
+            <tbody id="observationsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="manualView" class="panel tab-view" hidden>
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">有痕补录 · 不伪装成传感器数据</p>
+            <h2>人工补录一条观测</h2>
+          </div>
+        </div>
+        <form id="manualForm" class="form-grid">
+          <label>类别
+            <select name="kind" required>
+              <option value="coal_output">出煤</option>
+              <option value="electricity">用电</option>
+              <option value="personnel">人员</option>
+              <option value="methane">瓦斯</option>
+              <option value="explosives">火工品</option>
+              <option value="ventilation">通风</option>
+            </select>
+          </label>
+          <label>指标代码<input name="metric" required placeholder="例如 methane_concentration"></label>
+          <label>数值<input name="value" required placeholder="例如 0.82"></label>
+          <label>单位<input name="unit" required placeholder="例如 %、人、kWh、m3/s"></label>
+          <label>位置代码<input name="location_code" required placeholder="例如 face-101"></label>
+          <label>观测时间<input name="observed_at" type="datetime-local" required></label>
+          <label>补录人账号<input name="operator_id" required></label>
+          <label>来源系统<input name="source_id" value="manual-entry" required></label>
+          <label class="wide">补录原因<input name="reason" required placeholder="说明自动采集缺失原因"></label>
+          <label class="wide">凭证编号/路径<input name="evidence_ref" required placeholder="班报编号、纸质单据编号或只读归档路径"></label>
+          <div class="wide form-actions">
+            <p>提交后写入审计来源并进入上报队列；系统不会修改任何生产设备。</p>
+            <button type="submit">确认补录</button>
+          </div>
+        </form>
+        <p id="manualResult" class="form-result" role="status"></p>
+      </section>
+
+      <section id="helpView" class="panel tab-view prose" hidden>
+        <h2>怎么判断系统是否正常？</h2>
+        <ol>
+          <li>顶部显示“运行正常”，说明本地服务和数据库可用。</li>
+          <li>“待上报”短时增加是正常现象；网络恢复后会自动重试。</li>
+          <li>待上报长期不下降时，联系运维检查监管接收地址、网络和 HMAC 密钥。</li>
+          <li>采集来源显示“缺数”或“失败”时，只影响该来源；其他来源和上报仍会继续。</li>
+          <li>红色安全预警必须立即按矿井既有制度人工核实；本系统不自动控制设备。</li>
+        </ol>
+        <h2>数据从哪里来？</h2>
+        <p>支持 JSONL 文件、投递目录、HTTP 只读轮询和受控 HTTP 推送。人工补录必须填写人员、原因和凭证，页面会明确标记“人工”。</p>
+        <h2>安全边界</h2>
+        <p>来源页的“启用/暂停”只控制本节点是否读取该连接器，不会启停风机、传感器或任何生产设备。本节点没有修改传感器、下发生产参数、删除源数据等接口。</p>
+      </section>
+    </main>
+
+    <footer>矿端边缘智能体 · 只读采集模式 · 安全处置以现场制度和人工复核为准</footer>
+    <script src="/app.js"></script>
+  </body>
+</html>

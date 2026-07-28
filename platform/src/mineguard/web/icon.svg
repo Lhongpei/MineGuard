@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="沁源监测">
+  <rect width="512" height="512" rx="96" fill="#124f42"/>
+  <path d="M95 322h322v58H95zM128 289l56-151h144l56 151h-58l-15-42H201l-15 42zm92-95-12 34h96l-12-34z" fill="#f4c95d"/>
+  <circle cx="256" cy="176" r="28" fill="#f3f6f4"/>
+</svg>

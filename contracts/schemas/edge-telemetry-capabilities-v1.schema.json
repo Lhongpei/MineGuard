@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:edge-telemetry-capabilities:v1",
+  "title": "Mine Edge Telemetry Capabilities V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "service_id",
+    "server_time",
+    "batch_contract",
+    "submission_path",
+    "authentication",
+    "limits",
+    "features"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "edge-telemetry-capabilities-v1"
+    },
+    "service_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "server_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "batch_contract": {
+      "const": "edge-telemetry-batch-v1"
+    },
+    "submission_path": {
+      "const": "/v1/edge-telemetry-batches"
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scheme",
+        "signature_version",
+        "timestamp_tolerance_seconds",
+        "nonce_retention_seconds"
+      ],
+      "properties": {
+        "scheme": {
+          "const": "hmac-sha256"
+        },
+        "signature_version": {
+          "const": "hmac-sha256-v1"
+        },
+        "timestamp_tolerance_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "nonce_retention_seconds": {
+          "type": "integer",
+          "minimum": 600,
+          "maximum": 86400
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_body_bytes",
+        "max_observations",
+        "max_local_alerts"
+      ],
+      "properties": {
+        "max_body_bytes": {
+          "type": "integer",
+          "minimum": 1024
+        },
+        "max_observations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "max_local_alerts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "read_only_collection",
+        "store_and_forward",
+        "manual_attestation",
+        "local_alerts_advisory_only",
+        "regulatory_recalculation"
+      ],
+      "properties": {
+        "read_only_collection": {
+          "const": true
+        },
+        "store_and_forward": {
+          "const": true
+        },
+        "manual_attestation": {
+          "const": true
+        },
+        "local_alerts_advisory_only": {
+          "const": true
+        },
+        "regulatory_recalculation": {
+          "const": true
+        },
+        "optional_interval_window": {
+          "const": true
+        },
+        "detailed_non_pii_metrics": {
+          "const": true
+        },
+        "source_health_metrics": {
+          "const": true
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:edge-telemetry-receipt:v1",
+  "title": "Mine Edge Telemetry Receipt V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "batch_id",
+    "client_id",
+    "mine_id",
+    "status",
+    "received_at",
+    "body_sha256",
+    "accepted_observations",
+    "rejected_observations",
+    "regulatory_outcome",
+    "links"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "edge-telemetry-receipt-v1"
+    },
+    "receipt_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "batch_id": {
+      "type": "string",
+      "minLength": 41,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,87}--batch_[0-9a-f]{32}$",
+      "description": "Must repeat the request batch_id and therefore begin with the exact client_id followed by --batch_."
+    },
+    "client_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 88,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "mine_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "duplicate",
+        "partially_accepted"
+      ]
+    },
+    "received_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "body_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "accepted_observations": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "rejected_observations": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "regulatory_outcome": {
+      "const": "not_determined_at_intake"
+    },
+    "links": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt",
+        "alerts"
+      ],
+      "properties": {
+        "receipt": {
+          "type": "string",
+          "format": "uri-reference"
+        },
+        "alerts": {
+          "type": "string",
+          "format": "uri-reference"
+        }
+      }
+    }
+  }
+}

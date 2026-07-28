@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
+import json
 from pathlib import Path
 
 
@@ -82,6 +83,18 @@ def test_frontend_uses_safe_text_rendering_and_all_statuses() -> None:
     assert "不是处罚等级" in script
 
 
+def test_safety_map_uses_optional_validated_boundary_without_overclaiming() -> None:
+    html, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "/v1/map/boundary" in script
+    assert "createElementNS" in script
+    assert "边界来源、坐标系和点位精度仍须现场验收" in script
+    assert "不是测绘底图或导航依据" in html
+    assert "历史尾概率" in script
+    assert "directional_tail_probability" in script
+
+
 def test_personnel_identity_statuses_are_rendered_explicitly() -> None:
     script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
 
@@ -117,6 +130,28 @@ def test_leader_workspaces_use_workflow_apis_and_keep_statuses_separate() -> Non
         assert endpoint in script
     assert "expected_version" in script
     assert "audit_chain_valid" in script
+
+
+def test_admin_can_govern_historical_verification_references() -> None:
+    html, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "历史参考样本治理" in html
+    assert "登记人与审批人必须不同" in script
+    assert "/v1/admin/verification-references" in script
+    for value in (
+        "verification-reference-production-digest",
+        "verification-reference-electricity-digest",
+        "verification-reference-explosives-digest",
+        "expected_sample_sha256",
+        "registry_integrity_valid",
+        "audit_chain_valid",
+        "approve",
+        "reject",
+    ):
+        assert value in html or value in script
+    assert "生产核验只使用正文完全匹配" in html
+    assert "当前登记账号不能自批" in script
 
 
 def test_pilot_overview_is_an_explicit_non_persistent_preview() -> None:
@@ -276,6 +311,272 @@ def test_temporal_dashboard_is_plain_language_and_never_overstates() -> None:
     )
     for status in ("anomalous", "normal", "insufficient_history"):
         assert status in script
+
+
+def test_safety_workspace_has_leader_summary_mine_files_and_alert_ledger() -> None:
+    html, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    for label in (
+        "安全态势",
+        "四色总览",
+        "一矿一档",
+        "矿井最新关键指标",
+        "安全预警列表",
+        "井下人数",
+        "甲烷最高点",
+        "最新风量",
+    ):
+        assert label in html or label in script
+    assert "暂无开放预警”不等于现场安全" in html
+    assert "不是事故、处罚或责任等级" in html
+    assert "不会直接控制停产、断电、复电或撤人" in html
+    assert "/v1/dashboard/safety" in script
+    assert "/v1/safety/alerts" in script
+    assert "/v1/reports/safety-alerts.csv" in html
+    for field in (
+        "approved_underground_personnel",
+        "latest_metrics",
+        "open_alerts",
+        "shadow_alerts",
+        "shadow_summary",
+        "operational",
+        "risk_level",
+        "occurrence_count",
+        "overdue",
+    ):
+        assert field in script
+
+
+def test_safety_alert_actions_are_permissioned_versioned_and_csrf_protected() -> None:
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'safetyAssign: ["admin", "supervisor"]' in script
+    assert 'safetyReview: ["admin", "supervisor", "reviewer"]' in script
+    assert 'safetyApprove: ["admin", "supervisor"]' in script
+    assert 'safetyProfile: ["admin"]' in script
+    assert "function userCanSafetyAction(action)" in script
+    assert "const allowedActions = availableSafetyActions(alert);" in script
+
+
+def test_safety_attachments_are_hashed_uploaded_and_download_only() -> None:
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "createSafetyAttachmentPanel(alert)" in script
+    assert "SAFETY_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024" in script
+    assert 'window.crypto.subtle.digest("SHA-256", bytes)' in script
+    assert "/attachments" in script
+    assert "/download" in script
+    assert "download.download = attachment.filename" in script
+    assert 'userCan("safetyReview")' in script
+    attachment_code = script[
+        script.index("const SAFETY_ATTACHMENT_MAX_BYTES") :
+        script.index("function renderSafetyAlerts()")
+    ]
+    assert "URL.createObjectURL" not in attachment_code
+    assert "FileReader" not in attachment_code
+    assert "if (allowedActions.length > 0)" in script
+    assert "expected_version: alert.version" in script
+    assert 'method: "POST"' in script
+    assert "/actions`" in script
+    for action in (
+        "assign",
+        "acknowledge",
+        "start",
+        "resolve",
+        "close",
+        "reopen",
+        "add_note",
+    ):
+        assert action in script
+
+
+def test_frontend_is_installable_without_caching_authenticated_api_data() -> None:
+    html = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    worker = (WEB_ROOT / "service-worker.js").read_text(encoding="utf-8")
+    manifest = json.loads(
+        (WEB_ROOT / "manifest.webmanifest").read_text(encoding="utf-8")
+    )
+
+    assert 'rel="manifest"' in html
+    assert 'navigator.serviceWorker.register("/service-worker.js")' in script
+    assert manifest["display"] == "standalone"
+    assert manifest["start_url"] == "/"
+    assert {
+        (item["src"], item["sizes"], item["type"])
+        for item in manifest["icons"]
+    } >= {
+        ("/assets/icon-192.png", "192x192", "image/png"),
+        ("/assets/icon-512.png", "512x512", "image/png"),
+    }
+    assert (WEB_ROOT / "icon-192.png").stat().st_size > 0
+    assert (WEB_ROOT / "icon-512.png").stat().st_size > 0
+    assert 'url.pathname.startsWith("/v1/")' in worker
+    assert "/assets/app.js" in worker
+    assert "/assets/icon-192.png" in worker
+    assert "/assets/icon-512.png" in worker
+    # requestJson adds the in-memory CSRF token for every mutating request.
+    assert '"X-CSRF-Token"' in script
+    assert 'credentials: "same-origin"' in script
+
+
+def test_periodic_regulatory_report_is_plain_language_scoped_and_printable() -> None:
+    html, parser = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    assert parser.inline_handlers == []
+    for text in (
+        "生成领导监管报告",
+        "月度报告",
+        "季度报告",
+        "固定自然周期",
+        "缺报、历史不足与核验阻断",
+        "不会自动外发、签批、立案或改变台账状态",
+        "打印 / 另存为 PDF",
+    ):
+        assert text in html
+    for identifier in (
+        'id="regulatory-report-form"',
+        'id="regulatory-report-kind"',
+        'id="regulatory-report-year"',
+        'id="regulatory-report-month"',
+        'id="regulatory-report-quarter"',
+        'id="regulatory-report-timezone"',
+        'id="regulatory-report-quality-issues"',
+        'id="regulatory-report-mine-body"',
+        'id="print-regulatory-report"',
+    ):
+        assert identifier in html
+    assert "/v1/reports/regulatory" in script
+    assert "new URLSearchParams(selection)" in script
+    assert "Asia/Shanghai" in script
+    assert "regulatoryReportingLabel" in script
+    assert "无可统计应报记录" in script
+    assert "历史样本不足" in script
+    assert "核验被阻断" in script
+    assert "不等于安全认定" in script
+    assert "window.print()" in script
+    assert "print-regulatory-report" in styles
+    assert "@media print" in styles
+    report_renderer = script.split(
+        "function renderRegulatoryReport", maxsplit=1
+    )[1].split("function printRegulatoryReport", maxsplit=1)[0]
+    assert ".innerHTML" not in report_renderer
+    assert ".textContent" in report_renderer
+
+
+def test_missing_safety_profile_is_explicit_and_admin_can_complete_it() -> None:
+    html, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "管理员需补齐矿井档案" in script
+    assert "缺项期间不能形成完整阈值判断" in script
+    assert "管理员 · 新增或补齐矿井档案" in html
+    assert "/v1/admin/mines" in script
+    for field in (
+        "mine_id",
+        "mine_name",
+        "gas_category",
+        "approved_underground_personnel",
+        "approved_capacity_tpy",
+        "longitude",
+        "latitude",
+        "enabled",
+    ):
+        assert field in script
+
+
+def test_mine_file_shows_production_verification_without_overstating() -> None:
+    html, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "生产核验需关注" in html
+    for field in (
+        "verification_summary",
+        "production_verification",
+        "overall_clue_level",
+        "jointly_upgraded",
+        "verification_ratio",
+        "robust_z",
+    ):
+        assert field in script
+    for label in (
+        "尚未运行吨煤耗电与吨煤火工品核验",
+        "历史不足",
+        "数据阻断",
+        "本次无关注",
+        "两路同向印证",
+    ):
+        assert label in script
+    assert "本窗口未形成需要关注的历史偏离线索" in script
+    assert "本窗口生产数据正常" not in script
+
+
+def test_safety_mine_map_is_offline_relative_and_links_to_filter() -> None:
+    html, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
+    renderer = script.split(
+        "function renderSafetyMap()", maxsplit=1
+    )[1].split("function handleSafetyMineSelection", maxsplit=1)[0]
+
+    assert "矿井分布示意" in html
+    assert "不是测绘底图或导航依据" in html
+    assert "档案经纬度不足，暂以一矿一档为准" in html
+    assert "minimumLongitude" in renderer
+    assert "maximumLongitude" in renderer
+    assert "minimumLatitude" in renderer
+    assert "maximumLatitude" in renderer
+    assert "dataset.safetyMine" in renderer
+    assert "map-x-" in renderer
+    assert "map-y-" in renderer
+    assert ".style" not in renderer
+    assert ".safety-map-point.map-x-10" in styles
+    assert ".safety-map-point.map-y-10" in styles
+
+
+def test_admin_safety_rule_approval_is_explicit_versioned_and_hidden_by_role() -> None:
+    html, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "管理员 · 安全规则审批" in html
+    assert "登记的方案版本不等于已审批" in html
+    assert "本页不编辑阈值内容" in html
+    assert 'safetyRules: ["admin"]' in script
+    assert "/v1/admin/safety-rules" in script
+    assert "expected_fingerprint: rule.fingerprint" in script
+    assert "inputMinLength: 10" in script
+    assert 'action === "approve"' in script
+    assert 'action === "retire"' in script
+    for field in (
+        "rule_version",
+        "fingerprint",
+        "effective_from",
+        "effective_to",
+        "authority_reference",
+        "decision_note",
+    ):
+        assert field in script
+    for status in ("proposal", "draft", "approved", "retired"):
+        assert status in script
+
+
+def test_safety_workspace_is_responsive_and_has_no_inline_event_handlers() -> None:
+    _, parser = parse_frontend()
+    styles = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    assert parser.inline_handlers == []
+    for selector in (
+        ".safety-level-grid",
+        ".safety-mine-grid",
+        ".safety-metric-grid",
+        ".safety-alert-actions",
+    ):
+        assert selector in styles
+    assert "@media (max-width: 900px)" in styles
+    assert "@media (max-width: 680px)" in styles
 
 
 def test_admin_operations_explain_readiness_and_verify_backups() -> None:

@@ -1,0 +1,34 @@
+{
+  "profile": {
+    "mine_id": "M001",
+    "gas_category": "high_gas",
+    "approved_personnel_capacity": 200
+  },
+  "decision_time": "2026-07-28T08:00:05Z",
+  "observations": [
+    {
+      "observation_id": "personnel-20260728-0800",
+      "mine_id": "M001",
+      "observed_at": "2026-07-28T08:00:00Z",
+      "received_at": "2026-07-28T08:00:01Z",
+      "source": {
+        "source_id": "personnel-positioning",
+        "system_name": "人员定位系统",
+        "channel": "automatic",
+        "lineage_ref": "personnel-positioning:202607280800",
+        "signature_valid": true
+      },
+      "quality": {
+        "score": 0.99,
+        "complete": true,
+        "device_healthy": true,
+        "clock_synchronised": true,
+        "blocking_flags": []
+      },
+      "metric": "personnel.count",
+      "value": 186,
+      "unit": "person"
+    }
+  ],
+  "previous_states": []
+}

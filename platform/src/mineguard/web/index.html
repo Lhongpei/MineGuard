@@ -3,6 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/assets/icon-192.png">
     <meta name="color-scheme" content="light">
     <meta name="theme-color" content="#123d32">
     <title>矿安智察 · 煤矿数据监管辅助研判</title>
@@ -103,6 +106,19 @@
             辖区总览
           </button>
           <button
+            id="safety-workspace-tab"
+            class="workspace-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="safety-workspace"
+            data-workspace="safety"
+            tabindex="-1"
+          >
+            <span aria-hidden="true">②</span>
+            安全态势
+          </button>
+          <button
             id="cases-workspace-tab"
             class="workspace-tab"
             type="button"
@@ -112,7 +128,7 @@
             data-workspace="cases"
             tabindex="-1"
           >
-            <span aria-hidden="true">②</span>
+            <span aria-hidden="true">③</span>
             核查台账
             <span id="nav-open-case-count" class="nav-count" hidden></span>
           </button>
@@ -126,7 +142,7 @@
             data-workspace="jobs"
             tabindex="-1"
           >
-            <span aria-hidden="true">③</span>
+            <span aria-hidden="true">④</span>
             分析任务
             <span id="nav-running-job-count" class="nav-count" hidden></span>
           </button>
@@ -140,7 +156,7 @@
             data-workspace="tools"
             tabindex="-1"
           >
-            <span aria-hidden="true">④</span>
+            <span aria-hidden="true">⑤</span>
             临时分析
           </button>
           <button
@@ -154,7 +170,7 @@
             tabindex="-1"
             hidden
           >
-            <span aria-hidden="true">⑤</span>
+            <span aria-hidden="true">⑥</span>
             系统管理
           </button>
         </div>
@@ -379,6 +395,488 @@
             </p>
           </section>
         </div>
+
+        <section
+          id="regulatory-report-panel"
+          class="regulatory-report-panel"
+          aria-labelledby="regulatory-report-builder-title"
+        >
+          <div class="section-toolbar">
+            <div>
+              <p class="section-kicker">月度 / 季度监管分析</p>
+              <h3 id="regulatory-report-builder-title">生成领导监管报告</h3>
+              <p>按当前账号授权矿井和固定自然周期汇总，缺报、历史不足与核验阻断都会单独列出。</p>
+            </div>
+          </div>
+          <form id="regulatory-report-form" class="report-period-form">
+            <label>
+              <span>报告类型</span>
+              <select id="regulatory-report-kind">
+                <option value="monthly">月度报告</option>
+                <option value="quarterly">季度报告</option>
+              </select>
+            </label>
+            <label>
+              <span>年份</span>
+              <input id="regulatory-report-year" type="number" min="2020" max="2100" step="1" required>
+            </label>
+            <label id="regulatory-report-month-wrap">
+              <span>月份</span>
+              <select id="regulatory-report-month">
+                <option value="01">1月</option>
+                <option value="02">2月</option>
+                <option value="03">3月</option>
+                <option value="04">4月</option>
+                <option value="05">5月</option>
+                <option value="06">6月</option>
+                <option value="07">7月</option>
+                <option value="08">8月</option>
+                <option value="09">9月</option>
+                <option value="10">10月</option>
+                <option value="11">11月</option>
+                <option value="12">12月</option>
+              </select>
+            </label>
+            <label id="regulatory-report-quarter-wrap" hidden>
+              <span>季度</span>
+              <select id="regulatory-report-quarter">
+                <option value="Q1">第一季度</option>
+                <option value="Q2">第二季度</option>
+                <option value="Q3">第三季度</option>
+                <option value="Q4">第四季度</option>
+              </select>
+            </label>
+            <label>
+              <span>统计时区</span>
+              <select id="regulatory-report-timezone">
+                <option value="Asia/Shanghai">北京时间（Asia/Shanghai）</option>
+              </select>
+            </label>
+            <button id="generate-regulatory-report" class="button primary compact" type="submit">
+              生成只读报告
+            </button>
+          </form>
+          <p class="report-form-note">
+            仅支持自然月或自然季度，不允许任意日期拼接；报告不会自动外发、签批、立案或改变台账状态。
+          </p>
+          <div
+            id="regulatory-report-status"
+            class="data-load-status"
+            role="status"
+            aria-live="polite"
+          >
+            请选择报告期并生成。
+          </div>
+          <article id="regulatory-report-content" class="regulatory-report" hidden>
+            <header class="regulatory-report-header">
+              <div>
+                <p class="section-kicker">沁源县煤矿辅助监管</p>
+                <h3 id="regulatory-report-title">监管分析报告</h3>
+                <p id="regulatory-report-reference" class="report-reference"></p>
+              </div>
+              <button id="print-regulatory-report" class="button quiet compact" type="button" disabled>
+                打印 / 另存为 PDF
+              </button>
+            </header>
+            <dl id="regulatory-report-meta" class="report-meta"></dl>
+            <div id="regulatory-report-quality" class="report-quality-callout">
+              <strong id="regulatory-report-quality-title">数据完整性待确认</strong>
+              <ul id="regulatory-report-quality-issues" class="plain-list"></ul>
+            </div>
+            <p id="regulatory-report-summary" class="executive-summary"></p>
+            <div id="regulatory-report-kpis" class="report-kpi-grid"></div>
+            <section aria-labelledby="regulatory-report-mine-title">
+              <div class="detail-section-heading">
+                <p class="section-kicker">逐矿情况</p>
+                <h4 id="regulatory-report-mine-title">授权范围内矿井覆盖与线索</h4>
+              </div>
+              <div class="table-scroll" tabindex="0" aria-label="逐矿监管报告明细，可横向滚动">
+                <table class="report-mine-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">矿井</th>
+                      <th scope="col">本期状态</th>
+                      <th scope="col">报送覆盖</th>
+                      <th scope="col">生产交叉核验</th>
+                      <th scope="col">安全预警</th>
+                      <th scope="col">未闭环事项</th>
+                    </tr>
+                  </thead>
+                  <tbody id="regulatory-report-mine-body"></tbody>
+                </table>
+              </div>
+              <p id="regulatory-report-mine-empty" class="muted-note" hidden>
+                当前账号没有可用矿井范围，报告不包含监管对象。
+              </p>
+            </section>
+            <details class="report-methodology">
+              <summary>查看统计口径与局限</summary>
+              <ul id="regulatory-report-limitations" class="plain-list"></ul>
+            </details>
+            <p id="regulatory-report-disclaimer" class="legal-note"></p>
+          </article>
+        </section>
+      </section>
+
+      <section
+        id="safety-workspace"
+        class="workspace-panel safety-workspace"
+        role="tabpanel"
+        aria-labelledby="safety-workspace-tab"
+        tabindex="0"
+        hidden
+      >
+        <div class="workspace-heading">
+          <div>
+            <p class="section-kicker">人员 · 瓦斯 · 通风</p>
+            <h2>全县煤矿安全态势</h2>
+            <p>先看四色预警，再按一矿一档查看最新指标和处置进度。颜色表示技术线索紧迫程度，不是事故、处罚或责任等级。</p>
+          </div>
+          <div class="heading-actions">
+            <a
+              id="export-safety-alerts"
+              class="button quiet compact"
+              href="/v1/reports/safety-alerts.csv"
+              download
+            >
+              导出预警 CSV
+            </a>
+            <button id="refresh-safety" class="button quiet compact" type="button">
+              刷新安全态势
+            </button>
+          </div>
+        </div>
+
+        <div id="safety-status" class="data-load-status" role="status" aria-live="polite">
+          进入安全态势后将自动读取最新监测线索。
+        </div>
+
+        <section id="safety-empty" class="workspace-empty compact-empty" aria-labelledby="safety-empty-title" hidden>
+          <span class="empty-mark" aria-hidden="true">安</span>
+          <h3 id="safety-empty-title">尚无可展示的矿井安全数据</h3>
+          <p id="safety-empty-message">这可能是矿井尚未接入，也可能是服务暂时未连接；不能据此判断当前没有风险。</p>
+          <button id="retry-safety" class="button quiet" type="button">重新读取</button>
+        </section>
+
+        <div id="safety-content" hidden>
+          <div class="context-strip safety-context-strip">
+            <div>
+              <span>数据更新时间</span>
+              <strong id="safety-generated-at">—</strong>
+            </div>
+            <div>
+              <span>纳入矿井</span>
+              <strong id="safety-mine-count">—</strong>
+            </div>
+            <div>
+              <span>开放预警</span>
+              <strong id="safety-open-count">—</strong>
+            </div>
+            <div>
+              <span>影子试运行</span>
+              <strong id="safety-shadow-count">—</strong>
+            </div>
+            <div>
+              <span>已逾期</span>
+              <strong id="safety-overdue-count">—</strong>
+            </div>
+            <div>
+              <span>生产核验需关注</span>
+              <strong id="safety-verification-attention-count">—</strong>
+            </div>
+          </div>
+
+          <div
+            id="safety-evaluation-health"
+            class="form-status safety-evaluation-health"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+          <div
+            id="safety-responsibility-health"
+            class="form-status safety-evaluation-health"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+
+          <details
+            id="edge-evaluation-admin"
+            class="safety-rules-admin"
+            hidden
+          >
+            <summary>运维 · 平台安全复算队列</summary>
+            <p class="form-help">
+              查看边缘批次在监管端的独立复算状态。失败会自动退避重试；只有进入失败或死信的批次才提供人工“受控重算”，操作会写入审计。
+            </p>
+            <div class="safety-rules-toolbar">
+              <label>
+                <span>复算状态</span>
+                <select id="edge-evaluation-filter">
+                  <option value="">全部状态</option>
+                  <option value="dead">死信</option>
+                  <option value="failed">等待重试</option>
+                  <option value="pending">排队中</option>
+                  <option value="running">复算中</option>
+                  <option value="completed">已完成</option>
+                </select>
+              </label>
+              <button
+                id="refresh-edge-evaluations"
+                class="button quiet compact"
+                type="button"
+              >刷新队列</button>
+            </div>
+            <div
+              id="edge-evaluation-status"
+              class="form-status"
+              role="status"
+              aria-live="polite"
+            ></div>
+            <div
+              class="table-scroll"
+              tabindex="0"
+              aria-label="平台安全复算批次，可横向滚动"
+            >
+              <table class="job-table">
+                <thead>
+                  <tr>
+                    <th scope="col">批次 / 矿井</th>
+                    <th scope="col">接收时间</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">尝试</th>
+                    <th scope="col">最近结果 / 错误</th>
+                    <th scope="col">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="edge-evaluation-body"></tbody>
+              </table>
+            </div>
+            <p
+              id="edge-evaluation-empty"
+              class="table-empty-note"
+              hidden
+            >当前筛选范围内没有复算批次。</p>
+          </details>
+
+          <section class="safety-level-section" aria-labelledby="safety-level-title">
+            <div class="detail-section-heading">
+              <p class="section-kicker">四色总览</p>
+              <h3 id="safety-level-title">当前开放预警</h3>
+              <p>点击颜色可筛选预警；红色和橙色线索优先安排人工核查。</p>
+            </div>
+            <div id="safety-level-grid" class="safety-level-grid" aria-label="蓝黄橙红四色预警数量"></div>
+          </section>
+
+          <section class="safety-level-section" aria-labelledby="verification-heatmap-title">
+            <div class="detail-section-heading">
+              <p class="section-kicker">跨矿对比</p>
+              <h3 id="verification-heatmap-title">产量交叉核验偏差热力图</h3>
+              <p>综合吨煤电耗、火工品强度及历史合法样本；颜色仅表示优先核查顺序，不是违法认定。</p>
+            </div>
+            <div id="verification-heatmap" class="verification-heatmap" role="list"></div>
+            <p id="verification-heatmap-empty" class="table-empty-note" hidden>尚无可比较的生产核验结果；历史不足时不会强行着色。</p>
+          </section>
+
+          <div class="safety-filter-bar" aria-label="安全预警筛选">
+            <label>
+              <span>矿井</span>
+              <select id="safety-mine-filter">
+                <option value="all">全部矿井</option>
+              </select>
+            </label>
+            <label>
+              <span>预警级别</span>
+              <select id="safety-level-filter">
+                <option value="all">全部级别</option>
+                <option value="red">红色 · 立即核查</option>
+                <option value="orange">橙色 · 优先处置</option>
+                <option value="yellow">黄色 · 尽快核查</option>
+                <option value="blue">蓝色 · 持续关注</option>
+              </select>
+            </label>
+            <label>
+              <span>处置状态</span>
+              <select id="safety-status-filter">
+                <option value="all">全部状态</option>
+                <option value="open">待查阅</option>
+                <option value="acknowledged">已阅</option>
+                <option value="in_progress">核查中</option>
+                <option value="resolved">已处理</option>
+                <option value="closed">已关闭</option>
+              </select>
+            </label>
+          </div>
+
+          <section class="safety-map-section" aria-labelledby="safety-map-title">
+            <div class="section-toolbar">
+              <div>
+                <p id="safety-map-kicker" class="section-kicker">辖区相对位置</p>
+                <h3 id="safety-map-title">矿井分布示意</h3>
+                <p id="safety-map-source">按已登记经纬度在辖区最小、最大范围内归一展示，仅用于快速定位，不是测绘底图或导航依据。</p>
+              </div>
+            </div>
+            <div
+              id="safety-map-canvas"
+              class="safety-map-canvas"
+              role="group"
+              aria-label="矿井相对位置示意，可点击矿井联动筛选"
+              hidden
+            ></div>
+            <p id="safety-map-empty" class="safety-map-empty">
+              档案经纬度不足，暂以一矿一档为准。
+            </p>
+            <div class="safety-map-legend" aria-label="示意图颜色说明">
+              <span><i class="is-red" aria-hidden="true"></i>红色</span>
+              <span><i class="is-orange" aria-hidden="true"></i>橙色</span>
+              <span><i class="is-yellow" aria-hidden="true"></i>黄色</span>
+              <span><i class="is-blue" aria-hidden="true"></i>蓝色</span>
+              <span><i class="is-normal" aria-hidden="true"></i>暂无开放预警</span>
+            </div>
+          </section>
+
+          <section class="safety-mine-section" aria-labelledby="safety-mine-title">
+            <div class="section-toolbar">
+              <div>
+                <p class="section-kicker">一矿一档</p>
+                <h3 id="safety-mine-title">矿井最新关键指标</h3>
+                <p>展示最近收到的人员、甲烷和通风数据；“暂无开放预警”不等于现场安全。</p>
+              </div>
+            </div>
+            <div id="safety-mine-grid" class="safety-mine-grid"></div>
+            <p id="safety-mine-empty" class="table-empty-note" hidden>当前筛选条件下没有矿井档案。</p>
+          </section>
+
+          <section class="safety-alert-section" aria-labelledby="safety-alert-title">
+            <div class="section-toolbar">
+              <div>
+                <p class="section-kicker">处置台账</p>
+                <h3 id="safety-alert-title">安全预警列表</h3>
+                <p>每次查阅、交办、核查和关闭均由服务端留痕；页面不会直接控制停产、断电、复电或撤人。</p>
+              </div>
+            </div>
+            <div id="safety-action-status" class="form-status" role="status" aria-live="polite"></div>
+            <div id="safety-alert-list" class="safety-alert-list"></div>
+            <p id="safety-alert-empty" class="table-empty-note" hidden>当前筛选条件下没有预警记录。</p>
+          </section>
+
+          <p id="safety-disclaimer" class="safety-disclaimer">
+            安全预警只是辅助监管技术线索，须结合原始监测、适用规程和现场情况人工核查。
+          </p>
+        </div>
+
+        <details id="safety-profile-admin" class="safety-profile-admin" hidden>
+          <summary>管理员 · 新增或补齐矿井档案</summary>
+          <form id="safety-profile-form">
+            <div class="safety-profile-form-grid">
+              <label>
+                <span>矿井编号 <small>必填，保存后不可随意变更</small></span>
+                <input id="safety-profile-mine-id" type="text" maxlength="128" autocomplete="off" required>
+              </label>
+              <label>
+                <span>矿井名称 <small>必填</small></span>
+                <input id="safety-profile-mine-name" type="text" maxlength="256" autocomplete="off" required>
+              </label>
+              <label>
+                <span>瓦斯等级 <small>必填</small></span>
+                <select id="safety-profile-gas-category" required>
+                  <option value="low_gas">低瓦斯矿井</option>
+                  <option value="high_gas">高瓦斯矿井</option>
+                </select>
+              </label>
+              <label>
+                <span>核定井下人数 <small>必填，大于 0</small></span>
+                <input id="safety-profile-personnel" type="number" min="1" step="1" required>
+              </label>
+              <label>
+                <span>核定产能（吨/年） <small>可选</small></span>
+                <input id="safety-profile-capacity" type="number" min="0.01" step="0.01">
+              </label>
+              <label>
+                <span>经度 <small>可选，-180 至 180</small></span>
+                <input id="safety-profile-longitude" type="number" min="-180" max="180" step="any">
+              </label>
+              <label>
+                <span>纬度 <small>可选，-90 至 90</small></span>
+                <input id="safety-profile-latitude" type="number" min="-90" max="90" step="any">
+              </label>
+              <label class="safety-profile-enabled">
+                <input id="safety-profile-enabled" type="checkbox" checked>
+                <span>纳入安全态势监测</span>
+              </label>
+            </div>
+            <p class="form-help">瓦斯等级和核定井下人数直接影响阈值判断；保存前请核对正式批复资料。</p>
+            <div id="safety-profile-status" class="form-status" role="status" aria-live="polite"></div>
+            <button id="save-safety-profile" class="button primary compact" type="submit">保存矿井档案</button>
+          </form>
+        </details>
+
+        <details id="safety-rules-admin" class="safety-rules-admin" hidden>
+          <summary>管理员 · 安全规则审批</summary>
+          <div class="safety-rules-toolbar">
+            <p>规则只有经管理员明确审批且处于有效期内，才可用于平台安全重算；登记的方案版本不等于已审批。</p>
+            <button id="refresh-safety-rules" class="button quiet compact" type="button">刷新规则</button>
+          </div>
+          <div id="safety-rules-status" class="form-status" role="status" aria-live="polite"></div>
+          <div id="safety-rules-list" class="safety-rules-list"></div>
+          <p id="safety-rules-empty" class="table-empty-note" hidden>尚未登记安全规则版本；新规则可通过受控管理 API 登记。</p>
+          <p class="form-help">本页不编辑阈值内容。审批前须核对依据、适用范围、有效期和完整指纹；所有动作均保留审计记录。</p>
+        </details>
+
+        <details id="safety-responsibility-admin" class="safety-rules-admin" hidden>
+          <summary>管理员 · 预警责任路由</summary>
+          <p class="form-help">按矿井、类别和最低级别指定接收与备岗账号。所有匹配路由并行知会，其中最具体的一条成为唯一主责；每条路由分别记录已读，并在超时后独立升级备岗。账号必须具备对应矿井的复核权限。</p>
+          <form id="safety-responsibility-form">
+            <div class="safety-profile-form-grid">
+              <label>
+                <span>路由编号</span>
+                <input id="safety-route-id" type="text" maxlength="128" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" required>
+              </label>
+              <label>
+                <span>矿井编号 <small>留空表示全部</small></span>
+                <input id="safety-route-mine" type="text" maxlength="128">
+              </label>
+              <label>
+                <span>预警类别 <small>留空表示全部</small></span>
+                <input id="safety-route-category" type="text" maxlength="128" placeholder="methane / personnel">
+              </label>
+              <label>
+                <span>最低级别</span>
+                <select id="safety-route-level">
+                  <option value="blue">蓝色及以上</option>
+                  <option value="yellow">黄色及以上</option>
+                  <option value="orange">橙色及以上</option>
+                  <option value="red">仅红色</option>
+                </select>
+              </label>
+              <label>
+                <span>接收账号</span>
+                <input id="safety-route-primary" type="text" maxlength="128" required>
+              </label>
+              <label>
+                <span>备岗账号 <small>可选</small></span>
+                <input id="safety-route-backup" type="text" maxlength="128">
+              </label>
+              <label>
+                <span>未读升级分钟数</span>
+                <input id="safety-route-escalation" type="number" min="1" max="10080" value="30" required>
+              </label>
+              <label class="safety-profile-enabled">
+                <input id="safety-route-enabled" type="checkbox" checked>
+                <span>启用此路由</span>
+              </label>
+            </div>
+            <div id="safety-responsibility-status" class="form-status" role="status" aria-live="polite"></div>
+            <button id="save-safety-responsibility" class="button primary compact" type="submit">保存责任路由</button>
+          </form>
+          <div class="safety-rules-toolbar">
+            <strong>已配置路由</strong>
+            <button id="refresh-safety-responsibility" class="button quiet compact" type="button">刷新</button>
+          </div>
+          <div id="safety-responsibility-list" class="safety-rules-list"></div>
+          <p id="safety-responsibility-empty" class="table-empty-note" hidden>尚未配置责任路由，正式预警可能处于未交办状态。</p>
+        </details>
       </section>
 
       <section
@@ -896,6 +1394,36 @@
           </div>
         </section>
 
+        <section class="operations-section notification-delivery-section" aria-labelledby="notification-delivery-title">
+          <div class="detail-section-heading operations-heading">
+            <div>
+              <p class="section-kicker">外部预警通道</p>
+              <h3 id="notification-delivery-title">通知逐目标投递</h3>
+              <p class="muted-note">每个 webhook 独立留存成功、重试和死信状态；一个目标故障不会阻塞其他目标，也不会重发已经成功的目标。人工重试只对死信目标生效并写入审计。</p>
+            </div>
+            <button id="refresh-notification-deliveries" class="button quiet compact" type="button">刷新投递</button>
+          </div>
+          <div id="notification-deliveries-status" class="data-load-status" role="status" aria-live="polite">
+            进入系统管理后将读取最近通知投递状态。
+          </div>
+          <div id="notification-deliveries-table-wrap" class="table-scroll" tabindex="0" aria-label="通知逐目标投递记录，可横向滚动" hidden>
+            <table class="notification-delivery-table">
+              <thead>
+                <tr>
+                  <th scope="col">预警与矿井</th>
+                  <th scope="col">目标</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">尝试</th>
+                  <th scope="col">最近投递</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="notification-deliveries-table-body"></tbody>
+            </table>
+          </div>
+          <p id="notification-deliveries-empty" class="muted-note" hidden>当前没有通知投递记录。未配置外部通道时，站内预警仍会正常留痕。</p>
+        </section>
+
         <section class="operations-section batch-lifecycle-section" aria-labelledby="batch-lifecycle-title">
           <div class="detail-section-heading operations-heading">
             <div>
@@ -1033,6 +1561,82 @@
                 </label>
                 <div id="legitimate-scenario-form-status" class="form-status" role="status" aria-live="polite"></div>
                 <button id="submit-legitimate-scenario" class="button primary" type="submit">保存新版本</button>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section class="operations-section verification-reference-section" aria-labelledby="verification-reference-title">
+          <div class="detail-section-heading operations-heading">
+            <div>
+              <p class="section-kicker">生产核验可信历史</p>
+              <h3 id="verification-reference-title">历史参考样本治理</h3>
+              <p class="muted-note">
+                先把同矿同工况的历史样本与产量、用电、火工品原始材料摘要登记为不可变草案，再由另一名管理员批准。调用方填写“已复核”不会自动获得信任；生产核验只使用正文完全匹配、证据绑定完整且审计链有效的批准样本。
+              </p>
+            </div>
+            <div class="heading-actions">
+              <label class="archive-toggle compact-toggle">
+                <span>状态</span>
+                <select id="verification-reference-filter">
+                  <option value="">全部</option>
+                  <option value="draft">待另一人审批</option>
+                  <option value="approved">已批准</option>
+                  <option value="rejected">已驳回</option>
+                </select>
+              </label>
+              <button id="refresh-verification-references" class="button quiet compact" type="button">刷新样本</button>
+            </div>
+          </div>
+          <div id="verification-references-status" class="data-load-status" role="status" aria-live="polite">
+            进入系统管理后将读取历史参考样本及审计完整性。
+          </div>
+          <div class="legitimate-scenario-layout">
+            <div>
+              <div id="verification-references-table-wrap" class="table-scroll" tabindex="0" aria-label="历史参考样本列表，可横向滚动" hidden>
+                <table class="legitimate-scenario-table verification-reference-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">样本与窗口</th>
+                      <th scope="col">证据绑定</th>
+                      <th scope="col">状态与人员</th>
+                      <th scope="col">完整性</th>
+                      <th scope="col">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="verification-references-table-body"></tbody>
+                </table>
+              </div>
+              <p id="verification-references-empty" class="muted-note" hidden>
+                当前筛选条件下没有历史参考样本。没有批准样本时，生产核验会明确返回历史不足，不会借用其他矿井或工况。
+              </p>
+            </div>
+            <section class="side-card legitimate-scenario-form-card" aria-labelledby="verification-reference-form-title">
+              <p class="section-kicker">登记不可变草案</p>
+              <h4 id="verification-reference-form-title">绑定样本与原始证据</h4>
+              <form id="verification-reference-form">
+                <label>
+                  <span>历史样本 JSON <small>须为完整 HistoricalVerificationSample</small></span>
+                  <textarea id="verification-reference-sample" rows="12" spellcheck="false" required placeholder='{"sample_id":"history-M001-20260701","mine_id":"M001",...}'></textarea>
+                </label>
+                <label>
+                  <span>产量原始材料 SHA-256</span>
+                  <input id="verification-reference-production-digest" type="text" minlength="64" maxlength="64" pattern="[0-9a-f]{64}" spellcheck="false" autocomplete="off" required>
+                </label>
+                <label>
+                  <span>用电原始材料 SHA-256</span>
+                  <input id="verification-reference-electricity-digest" type="text" minlength="64" maxlength="64" pattern="[0-9a-f]{64}" spellcheck="false" autocomplete="off" required>
+                </label>
+                <label>
+                  <span>火工品原始材料 SHA-256</span>
+                  <input id="verification-reference-explosives-digest" type="text" minlength="64" maxlength="64" pattern="[0-9a-f]{64}" spellcheck="false" autocomplete="off" required>
+                </label>
+                <label>
+                  <span>证据引用 <small>每行一项，可填受控档案号或证据 URI</small></span>
+                  <textarea id="verification-reference-evidence-refs" rows="4" maxlength="12000" required placeholder="archive://production/M001/20260701&#10;archive://electricity/M001/20260701&#10;archive://explosives/M001/20260701"></textarea>
+                </label>
+                <div id="verification-reference-form-status" class="form-status" role="status" aria-live="polite"></div>
+                <button id="submit-verification-reference" class="button primary" type="submit">登记为待审批草案</button>
               </form>
             </section>
           </div>

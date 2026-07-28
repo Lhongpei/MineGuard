@@ -1,0 +1,258 @@
+{
+  "schema_version": "edge-telemetry-batch-v1",
+  "batch_id": "mine-edge-M001--batch_ed6efc44d56d2342b7e012d3216b951a",
+  "client_id": "mine-edge-M001",
+  "mine_id": "M001",
+  "sent_at": "2026-07-28T10:15:02Z",
+  "sequence_start": 12001,
+  "sequence_end": 12008,
+  "rule_profile": {
+    "profile_id": "qinyuan-safety-default",
+    "version": 1,
+    "sha256": "9a7aaf041e0a9beea32ad783954634611c6373c53fd44434ad58c11aa40e0c91"
+  },
+  "observations": [
+    {
+      "source_id": "M001-methane-T2",
+      "observation_id": "M001-methane-T2-12001-r0",
+      "metric_code": "methane.concentration_percent",
+      "value": 1.02,
+      "unit": "%",
+      "location_code": "working-face-return-T2",
+      "observed_at": "2026-07-28T10:15:00Z",
+      "received_at": "2026-07-28T10:15:01Z",
+      "sequence_no": 12001,
+      "revision": 0,
+      "acquisition_mode": "automatic_adapter",
+      "source_record_id": "safety-monitor:12001",
+      "source_record_sha256": "e34255df2ec61df0d928a40c65e4882de730a1d72a50f897300285d37665b0f7",
+      "source_signature": null,
+      "status_code": "online",
+      "quality": {
+        "valid": true,
+        "completeness": 1.0,
+        "timeliness": 1.0,
+        "device_health": "healthy",
+        "clock_synchronized": true,
+        "flags": []
+      },
+      "manual_attestation": null
+    },
+    {
+      "source_id": "M001-personnel-positioning",
+      "observation_id": "M001-personnel-face101-12002-r0",
+      "metric_code": "personnel.area_count",
+      "value": 36,
+      "unit": "person",
+      "location_code": "working-face-101",
+      "observed_at": "2026-07-28T10:15:00Z",
+      "received_at": "2026-07-28T10:15:01Z",
+      "sequence_no": 12002,
+      "revision": 0,
+      "acquisition_mode": "api_poll",
+      "source_record_id": "personnel-positioning:202607281015",
+      "source_record_sha256": "3e5fbcfc1b88a27e414fb71903a54ef4ed35a16cab61b2332bc3d29b032268a8",
+      "source_signature": null,
+      "status_code": "online",
+      "interval": {
+        "start": "2026-07-28T18:10:00+08:00",
+        "end": "2026-07-28T18:15:00+08:00",
+        "timezone": "Asia/Shanghai",
+        "aggregation": "snapshot",
+        "shift_code": "day-A"
+      },
+      "quality": {
+        "valid": true,
+        "completeness": 0.99,
+        "timeliness": 1.0,
+        "device_health": "healthy",
+        "clock_synchronized": true,
+        "flags": []
+      },
+      "manual_attestation": null
+    },
+    {
+      "source_id": "M001-main-fan-airflow",
+      "observation_id": "M001-main-fan-airflow-12003-r0",
+      "metric_code": "ventilation.airflow_m3_min",
+      "value": 8900,
+      "unit": "m3/min",
+      "location_code": "main-return",
+      "observed_at": "2026-07-28T10:15:00Z",
+      "received_at": "2026-07-28T10:15:01Z",
+      "sequence_no": 12003,
+      "revision": 0,
+      "acquisition_mode": "automatic_adapter",
+      "source_record_id": "main-fan-plc:12003",
+      "source_record_sha256": "eab0b55e4c5402cf2edb309fcd7f96f49fb5081f1830580688d80f8388a4431e",
+      "source_signature": null,
+      "status_code": "online",
+      "quality": {
+        "valid": true,
+        "completeness": 1.0,
+        "timeliness": 1.0,
+        "device_health": "healthy",
+        "clock_synchronized": true,
+        "flags": []
+      },
+      "manual_attestation": null
+    },
+    {
+      "source_id": "M001-main-belt-scale",
+      "observation_id": "M001-main-belt-scale-12004-r0",
+      "metric_code": "production.belt_instantaneous_t_h",
+      "value": 126.5,
+      "unit": "t/h",
+      "location_code": "main-belt-01",
+      "observed_at": "2026-07-28T10:15:00Z",
+      "received_at": "2026-07-28T10:15:01Z",
+      "sequence_no": 12004,
+      "revision": 0,
+      "acquisition_mode": "automatic_adapter",
+      "source_record_id": "belt-scale:12004",
+      "source_record_sha256": "c3f7d0cdfbbfb5b3030127130823fc93fdba7ad3eaf15d41fe47b7af4f255d1f",
+      "source_signature": null,
+      "status_code": "online",
+      "interval": {
+        "start": "2026-07-28T10:14:55Z",
+        "end": "2026-07-28T10:15:00Z",
+        "timezone": "UTC",
+        "aggregation": "instantaneous_rate"
+      },
+      "quality": {
+        "valid": true,
+        "completeness": 1.0,
+        "timeliness": 1.0,
+        "device_health": "healthy",
+        "clock_synchronized": true,
+        "flags": []
+      },
+      "manual_attestation": null
+    },
+    {
+      "source_id": "M001-explosives-ledger",
+      "observation_id": "M001-detonator-used-12005-r0",
+      "metric_code": "detonator.used_count",
+      "value": 18,
+      "unit": "count",
+      "location_code": "explosives-store-01",
+      "observed_at": "2026-07-28T10:15:00Z",
+      "received_at": "2026-07-28T10:15:01Z",
+      "sequence_no": 12005,
+      "revision": 0,
+      "acquisition_mode": "api_poll",
+      "source_record_id": "explosives-ledger:12005",
+      "source_record_sha256": "9f4a0bb92defbfe8f11518415a20adc5bf79be2b427a6ec63c7dd46fbc8de2dc",
+      "source_signature": null,
+      "status_code": "online",
+      "interval": {
+        "start": "2026-07-28T02:00:00Z",
+        "end": "2026-07-28T10:15:00Z",
+        "timezone": "Asia/Shanghai",
+        "aggregation": "window_total",
+        "shift_code": "day-A"
+      },
+      "quality": {
+        "valid": true,
+        "completeness": 1.0,
+        "timeliness": 1.0,
+        "device_health": "healthy",
+        "clock_synchronized": true,
+        "flags": []
+      },
+      "manual_attestation": null
+    },
+    {
+      "source_id": "M001-personnel-positioning",
+      "observation_id": "M001-personnel-source-heartbeat-12006-r0",
+      "metric_code": "source.heartbeat_age_seconds",
+      "value": 2,
+      "unit": "s",
+      "location_code": "M001-personnel-positioning",
+      "observed_at": "2026-07-28T10:15:00Z",
+      "received_at": "2026-07-28T10:15:01Z",
+      "sequence_no": 12006,
+      "revision": 0,
+      "acquisition_mode": "automatic_adapter",
+      "source_record_id": "source-health:personnel:12006",
+      "source_record_sha256": "78a46a5d800d9028bed4d6b7b96be3b11264efc66ea56c6ac12f18781fa14401",
+      "source_signature": null,
+      "status_code": "online",
+      "quality": {
+        "valid": true,
+        "completeness": 1.0,
+        "timeliness": 1.0,
+        "device_health": "healthy",
+        "clock_synchronized": true,
+        "flags": []
+      },
+      "manual_attestation": null
+    },
+    {
+      "source_id": "M001-personnel-positioning",
+      "observation_id": "M001-personnel-source-failures-12007-r0",
+      "metric_code": "source.consecutive_failures",
+      "value": 0,
+      "unit": "count",
+      "location_code": "M001-personnel-positioning",
+      "observed_at": "2026-07-28T10:15:00Z",
+      "received_at": "2026-07-28T10:15:01Z",
+      "sequence_no": 12007,
+      "revision": 0,
+      "acquisition_mode": "automatic_adapter",
+      "source_record_id": "source-health:personnel:12007",
+      "source_record_sha256": "1911c3ad31ee35a0202e6d4e75baab6b2a21361bfe90093eb2d6a442a296af1e",
+      "source_signature": null,
+      "status_code": "online",
+      "quality": {
+        "valid": true,
+        "completeness": 1.0,
+        "timeliness": 1.0,
+        "device_health": "healthy",
+        "clock_synchronized": true,
+        "flags": []
+      },
+      "manual_attestation": null
+    },
+    {
+      "source_id": "M001-personnel-positioning",
+      "observation_id": "M001-personnel-source-missing-12008-r0",
+      "metric_code": "source.missing_state",
+      "value": 0,
+      "unit": "count",
+      "location_code": "M001-personnel-positioning",
+      "observed_at": "2026-07-28T10:15:00Z",
+      "received_at": "2026-07-28T10:15:01Z",
+      "sequence_no": 12008,
+      "revision": 0,
+      "acquisition_mode": "automatic_adapter",
+      "source_record_id": "source-health:personnel:12008",
+      "source_record_sha256": "206681374208d070ec05e4f2cacdcafc3042799874dc640beafedb1129d2b6a8",
+      "source_signature": null,
+      "status_code": "online",
+      "quality": {
+        "valid": true,
+        "completeness": 1.0,
+        "timeliness": 1.0,
+        "device_health": "healthy",
+        "clock_synchronized": true,
+        "flags": []
+      },
+      "manual_attestation": null
+    }
+  ],
+  "local_alerts": [
+    {
+      "local_alert_id": "M001-local-methane-12001",
+      "rule_code": "methane-alarm",
+      "level": "yellow",
+      "detected_at": "2026-07-28T10:15:01Z",
+      "location_code": "working-face-return-T2",
+      "observation_ids": [
+        "M001-methane-T2-12001-r0"
+      ],
+      "summary": "回风巷 T2 甲烷浓度达到本地报警阈值，等待监管端独立复算。",
+      "advisory_only": true
+    }
+  ]
+}

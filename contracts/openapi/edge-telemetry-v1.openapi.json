@@ -1,0 +1,253 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MineGuard Mine Edge Telemetry API",
+    "version": "1.0.0",
+    "description": "Neutral HTTP boundary between an independently deployed mine edge collector and the regulatory platform. Local alerts are advisory only."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "paths": {
+    "/v1/edge-telemetry-capabilities": {
+      "get": {
+        "operationId": "getEdgeTelemetryCapabilities",
+        "responses": {
+          "200": {
+            "description": "Current intake capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/edge-telemetry-capabilities-v1.schema.json"
+                },
+                "examples": {
+                  "current": {
+                    "externalValue": "../examples/edge-telemetry-capabilities-v1.json"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/edge-telemetry-batches": {
+      "post": {
+        "operationId": "submitEdgeTelemetryBatch",
+        "description": "Submit an immutable raw telemetry batch. Observations may include a strict interval window and may carry aggregate, non-PII belt/personnel metrics or source-health metrics; source-health location_code must equal source_id. The exact request body bytes are covered by the seven X-Edge-* authentication headers. batch_id must equal the authenticated client_id followed by --batch_ and 32 lowercase hexadecimal characters.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EdgeClientId"
+          },
+          {
+            "$ref": "#/components/parameters/EdgeTimestamp"
+          },
+          {
+            "$ref": "#/components/parameters/EdgeNonce"
+          },
+          {
+            "$ref": "#/components/parameters/EdgeContentSHA256"
+          },
+          {
+            "$ref": "#/components/parameters/EdgeSignatureVersion"
+          },
+          {
+            "$ref": "#/components/parameters/EdgeContractVersion"
+          },
+          {
+            "$ref": "#/components/parameters/EdgeSignature"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/edge-telemetry-batch-v1.schema.json"
+              },
+              "examples": {
+                "safetyTelemetry": {
+                  "externalValue": "../examples/edge-telemetry-batch-v1.json"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Batch accepted and durably stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/edge-telemetry-receipt-v1.schema.json"
+                },
+                "examples": {
+                  "accepted": {
+                    "externalValue": "../examples/edge-telemetry-receipt-v1.json"
+                  }
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An identical batch was already accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/edge-telemetry-receipt-v1.schema.json"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/EdgeError"
+          },
+          "401": {
+            "$ref": "#/components/responses/EdgeError"
+          },
+          "403": {
+            "$ref": "#/components/responses/EdgeError"
+          },
+          "409": {
+            "$ref": "#/components/responses/EdgeError"
+          },
+          "413": {
+            "$ref": "#/components/responses/EdgeError"
+          },
+          "422": {
+            "$ref": "#/components/responses/EdgeError"
+          },
+          "503": {
+            "$ref": "#/components/responses/EdgeError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "EdgeClientId": {
+        "name": "X-Edge-Client-Id",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 88,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        }
+      },
+      "EdgeTimestamp": {
+        "name": "X-Edge-Timestamp",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "EdgeNonce": {
+        "name": "X-Edge-Nonce",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{22,86}$"
+        }
+      },
+      "EdgeContentSHA256": {
+        "name": "X-Edge-Content-SHA256",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "EdgeSignatureVersion": {
+        "name": "X-Edge-Signature-Version",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "const": "hmac-sha256-v1"
+        }
+      },
+      "EdgeContractVersion": {
+        "name": "X-Edge-Contract-Version",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "const": "edge-telemetry-batch-v1"
+        }
+      },
+      "EdgeSignature": {
+        "name": "X-Edge-Signature",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "responses": {
+      "EdgeError": {
+        "description": "Stable edge intake error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "schema_version",
+                "error_id",
+                "occurred_at",
+                "http_status",
+                "code",
+                "message",
+                "retryable",
+                "violations"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "edge-telemetry-error-v1"
+                },
+                "error_id": {
+                  "type": "string"
+                },
+                "occurred_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "http_status": {
+                  "type": "integer"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "retryable": {
+                  "type": "boolean"
+                },
+                "violations": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "server_time": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

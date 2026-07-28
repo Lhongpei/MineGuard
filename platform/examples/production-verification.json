@@ -1,0 +1,46 @@
+{
+  "request_id": "verification-M001-20260728",
+  "mine_id": "M001",
+  "window_start": "2026-07-28T00:00:00Z",
+  "window_end": "2026-07-29T00:00:00Z",
+  "decision_time": "2026-07-29T01:00:00Z",
+  "operating_condition": {
+    "regime_code": "normal-production",
+    "mining_method": "longwall",
+    "seam_code": "3",
+    "face_code": "3101",
+    "shift_code": "daily",
+    "geology_zone": "zone-a",
+    "maintenance": false
+  },
+  "reported_production_t": 1000.0,
+  "production_source_id": "daily-production-report",
+  "electricity": {
+    "source_id": "production-zone-meter",
+    "production_zone_kwh": 100000.0,
+    "total_kwh": null,
+    "interference": []
+  },
+  "explosives": {
+    "explosives_used_kg": 100.0,
+    "source_id": "explosives-ledger"
+  },
+  "history": [],
+  "parameters": {
+    "parameter_version": "qinyuan-production-verification-2026.07-v1",
+    "compatibility_key": "production-verification-schema-v1",
+    "minimum_samples": 20,
+    "maximum_samples": 500,
+    "minimum_quality_score": 0.8,
+    "minimum_review_confidence": 0.9,
+    "energy_extreme_low_ratio": 0.8,
+    "energy_attention_low_ratio": 0.9,
+    "energy_attention_high_ratio": 1.1,
+    "energy_extreme_high_ratio": 1.3,
+    "explosives_attention_robust_z": 3.0,
+    "explosives_extreme_robust_z": 5.0,
+    "minimum_energy_scale_kwh_per_t": 0.01,
+    "minimum_explosives_scale_kg_per_t": 0.000001,
+    "minimum_relative_scale": 0.02
+  }
+}

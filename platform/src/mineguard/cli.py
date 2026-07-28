@@ -25,7 +25,9 @@ from .operations import BackupManager, OperationsError
 from .optimization import analyze_production
 from .personnel import match_personnel
 from .source_keys import SourceKeyStore
+from .safety import SafetyEvaluationRequest, evaluate_safety
 from .temporal import TemporalDetectionRequest, detect_temporal_anomalies
+from .verification import VerificationRequest, analyze_verification
 
 
 _DEFAULT_STATE_DIRECTORY = ".mineguard"
@@ -206,6 +208,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help=_JSON_ARGUMENT_HELP,
     )
 
+    safety = subparsers.add_parser(
+        "safety",
+        help="按版本化人员、甲烷和通风规则生成技术预警线索",
+    )
+    safety.add_argument("json", metavar="JSON", help=_JSON_ARGUMENT_HELP)
+
+    verification = subparsers.add_parser(
+        "verify-production",
+        help="核验吨煤电耗和吨煤火工品的历史条件偏离",
+    )
+    verification.add_argument(
+        "json",
+        metavar="JSON",
+        help=_JSON_ARGUMENT_HELP,
+    )
+
     server = subparsers.add_parser("serve", help="启动 JSON HTTP API")
     server.add_argument("--host", default="127.0.0.1", help="监听地址")
     server.add_argument(
@@ -253,6 +271,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--evidence-key-file",
         default=None,
         help="兼容的证据签名密钥文件；通常由 source-keys.db 托管",
+    )
+    server.add_argument(
+        "--map-geojson",
+        default=None,
+        help=(
+            "可选的官方辖区边界 GeoJSON（仅 Polygon/MultiPolygon）；"
+            "未提供时继续显示非测绘示意图"
+        ),
     )
 
     backup = subparsers.add_parser(
@@ -676,6 +702,7 @@ def _run_server(args: argparse.Namespace) -> None:
         source_key_directory=layout.source_key_directory,
         backup_directory=layout.backup_directory,
         backup_key_path=backup_key,
+        map_geojson_path=args.map_geojson,
     )
 
 
@@ -794,6 +821,22 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     args.json,
                     PersonnelMatchRequest,
                     match_personnel,
+                )
+            )
+        elif args.command == "safety":
+            _output(
+                _analyze_json(
+                    args.json,
+                    SafetyEvaluationRequest,
+                    evaluate_safety,
+                )
+            )
+        elif args.command == "verify-production":
+            _output(
+                _analyze_json(
+                    args.json,
+                    VerificationRequest,
+                    analyze_verification,
                 )
             )
         elif args.command == "serve":

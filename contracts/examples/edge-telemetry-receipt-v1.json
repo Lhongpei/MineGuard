@@ -1,0 +1,17 @@
+{
+  "schema_version": "edge-telemetry-receipt-v1",
+  "receipt_id": "edge-receipt-M001-000001",
+  "batch_id": "mine-edge-M001--batch_ed6efc44d56d2342b7e012d3216b951a",
+  "client_id": "mine-edge-M001",
+  "mine_id": "M001",
+  "status": "accepted",
+  "received_at": "2026-07-28T10:15:03Z",
+  "body_sha256": "f289284d73836288cae3191eeac928b62d78c8988418e1016e4f956c08af2aab",
+  "accepted_observations": 8,
+  "rejected_observations": 0,
+  "regulatory_outcome": "not_determined_at_intake",
+  "links": {
+    "receipt": "/v1/edge-telemetry-batches/mine-edge-M001--batch_ed6efc44d56d2342b7e012d3216b951a/receipt",
+    "alerts": "/v1/safety/alerts?mine_id=M001"
+  }
+}

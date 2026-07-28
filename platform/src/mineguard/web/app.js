@@ -10,8 +10,17 @@ const SUPERVISION_API_PATHS = {
   login: "/v1/auth/login",
   logout: "/v1/auth/logout",
   overview: "/v1/dashboard/overview",
+  safetyDashboard: "/v1/dashboard/safety",
+  mapBoundary: "/v1/map/boundary",
+  safetyAlerts: "/v1/safety/alerts",
+  edgeEvaluations: "/v1/edge-evaluation-batches",
+  safetyNotifications: "/v1/safety/notifications",
+  safetyMines: "/v1/admin/mines",
+  safetyRules: "/v1/admin/safety-rules",
+  safetyResponsibility: "/v1/admin/safety-responsibility-routes",
   trends: "/v1/dashboard/trends?days=30",
   temporal: "/v1/dashboard/temporal?days=90",
+  regulatoryReport: "/v1/reports/regulatory",
   batchProduction: "/v1/analyze/production/batch",
   batches: "/v1/analysis-batches",
   isolatePilotBatches: "/v1/admin/analysis-batches/isolate-pilots",
@@ -21,9 +30,17 @@ const SUPERVISION_API_PATHS = {
   readiness: "/ready",
   backups: "/v1/admin/backups",
   legitimateScenarios: "/v1/admin/legitimate-scenarios",
+  verificationReferences: "/v1/admin/verification-references",
 };
 
-const WORKSPACE_NAMES = ["overview", "cases", "jobs", "tools", "admin"];
+const WORKSPACE_NAMES = [
+  "overview",
+  "safety",
+  "cases",
+  "jobs",
+  "tools",
+  "admin",
+];
 
 const ROLE_LABELS = {
   admin: "系统管理员",
@@ -324,12 +341,33 @@ const state = {
   overviewLoaded: false,
   overview: null,
   overviewItems: [],
+  safetyLoading: false,
+  safetyLoaded: false,
+  safetyDashboard: null,
+  mapBoundary: null,
+  safetyAlerts: [],
+  safetyActionRunning: false,
+  safetyAttachments: {},
+  safetyRulesLoading: false,
+  safetyRulesLoaded: false,
+  safetyRules: [],
+  safetyRuleActionRunning: false,
+  safetyResponsibilityLoading: false,
+  safetyResponsibilityLoaded: false,
+  safetyResponsibilityRoutes: [],
+  safetyResponsibilityActionRunning: false,
+  edgeEvaluationsLoading: false,
+  edgeEvaluationsLoaded: false,
+  edgeEvaluations: [],
+  edgeEvaluationActionRunning: false,
   trendsLoading: false,
   trendsLoaded: false,
   analytics: null,
   temporalLoading: false,
   temporalLoaded: false,
   temporalDashboard: null,
+  regulatoryReportLoading: false,
+  regulatoryReport: null,
   casesLoading: false,
   casesLoaded: false,
   showArchivedCases: false,
@@ -367,9 +405,16 @@ const state = {
   operationsLoaded: false,
   readiness: null,
   backups: [],
+  notificationDeliveriesLoading: false,
+  notificationDeliveriesLoaded: false,
+  safetyNotifications: [],
   legitimateScenariosLoading: false,
   legitimateScenariosLoaded: false,
   legitimateScenarios: [],
+  verificationReferencesLoading: false,
+  verificationReferencesLoaded: false,
+  verificationReferences: [],
+  verificationReferenceActionRunning: false,
 };
 
 const elements = {};
@@ -378,6 +423,7 @@ let pendingConfirmation = null;
 document.addEventListener("DOMContentLoaded", () => {
   cacheElements();
   bindEvents();
+  initializeRegulatoryReportForm();
   setMode("production");
   setWorkspace("overview", false);
   checkService();
@@ -403,11 +449,13 @@ function cacheElements() {
     "principal-scopes",
     "logout-button",
     "overview-workspace-tab",
+    "safety-workspace-tab",
     "cases-workspace-tab",
     "jobs-workspace-tab",
     "tools-workspace-tab",
     "admin-workspace-tab",
     "overview-workspace",
+    "safety-workspace",
     "cases-workspace",
     "jobs-workspace",
     "tools-workspace",
@@ -454,6 +502,100 @@ function cacheElements() {
     "overview-focus-filter",
     "overview-priority-body",
     "overview-queue-empty",
+    "regulatory-report-panel",
+    "regulatory-report-form",
+    "regulatory-report-kind",
+    "regulatory-report-year",
+    "regulatory-report-month-wrap",
+    "regulatory-report-month",
+    "regulatory-report-quarter-wrap",
+    "regulatory-report-quarter",
+    "regulatory-report-timezone",
+    "generate-regulatory-report",
+    "regulatory-report-status",
+    "regulatory-report-content",
+    "regulatory-report-title",
+    "regulatory-report-reference",
+    "print-regulatory-report",
+    "regulatory-report-meta",
+    "regulatory-report-quality",
+    "regulatory-report-quality-title",
+    "regulatory-report-quality-issues",
+    "regulatory-report-summary",
+    "regulatory-report-kpis",
+    "regulatory-report-mine-body",
+    "regulatory-report-mine-empty",
+    "regulatory-report-limitations",
+    "regulatory-report-disclaimer",
+    "refresh-safety",
+    "safety-status",
+    "safety-empty",
+    "safety-empty-message",
+    "retry-safety",
+    "safety-content",
+    "safety-generated-at",
+    "safety-mine-count",
+    "safety-open-count",
+    "safety-shadow-count",
+    "safety-overdue-count",
+    "safety-verification-attention-count",
+    "safety-evaluation-health",
+    "safety-responsibility-health",
+    "edge-evaluation-admin",
+    "edge-evaluation-filter",
+    "refresh-edge-evaluations",
+    "edge-evaluation-status",
+    "edge-evaluation-body",
+    "edge-evaluation-empty",
+    "safety-level-grid",
+    "verification-heatmap",
+    "verification-heatmap-empty",
+    "safety-mine-filter",
+    "safety-level-filter",
+    "safety-status-filter",
+    "safety-map-canvas",
+    "safety-map-empty",
+    "safety-map-kicker",
+    "safety-map-title",
+    "safety-map-source",
+    "safety-mine-grid",
+    "safety-mine-empty",
+    "safety-profile-admin",
+    "safety-profile-form",
+    "safety-profile-mine-id",
+    "safety-profile-mine-name",
+    "safety-profile-gas-category",
+    "safety-profile-personnel",
+    "safety-profile-capacity",
+    "safety-profile-longitude",
+    "safety-profile-latitude",
+    "safety-profile-enabled",
+    "safety-profile-status",
+    "save-safety-profile",
+    "safety-rules-admin",
+    "refresh-safety-rules",
+    "safety-rules-status",
+    "safety-rules-list",
+    "safety-rules-empty",
+    "safety-responsibility-admin",
+    "safety-responsibility-form",
+    "safety-route-id",
+    "safety-route-mine",
+    "safety-route-category",
+    "safety-route-level",
+    "safety-route-primary",
+    "safety-route-backup",
+    "safety-route-escalation",
+    "safety-route-enabled",
+    "safety-responsibility-status",
+    "save-safety-responsibility",
+    "refresh-safety-responsibility",
+    "safety-responsibility-list",
+    "safety-responsibility-empty",
+    "safety-alert-list",
+    "safety-alert-empty",
+    "safety-action-status",
+    "safety-disclaimer",
     "case-list-view",
     "refresh-cases",
     "case-search",
@@ -567,6 +709,11 @@ function cacheElements() {
     "readiness-overall",
     "readiness-summary",
     "readiness-checks",
+    "refresh-notification-deliveries",
+    "notification-deliveries-status",
+    "notification-deliveries-table-wrap",
+    "notification-deliveries-table-body",
+    "notification-deliveries-empty",
     "backup-create-form",
     "backup-id",
     "create-backup-submit",
@@ -593,6 +740,20 @@ function cacheElements() {
     "scenario-active",
     "legitimate-scenario-form-status",
     "submit-legitimate-scenario",
+    "verification-reference-filter",
+    "refresh-verification-references",
+    "verification-references-status",
+    "verification-references-table-wrap",
+    "verification-references-table-body",
+    "verification-references-empty",
+    "verification-reference-form",
+    "verification-reference-sample",
+    "verification-reference-production-digest",
+    "verification-reference-electricity-digest",
+    "verification-reference-explosives-digest",
+    "verification-reference-evidence-refs",
+    "verification-reference-form-status",
+    "submit-verification-reference",
     "overview-reference-label-dialog",
     "overview-reference-label-title",
     "overview-reference-label-context",
@@ -696,11 +857,92 @@ function bindEvents() {
   elements["retry-overview"].addEventListener("click", loadOverview);
   elements["load-pilot-overview"].addEventListener("click", loadPilotOverview);
   elements["view-all-cases"].addEventListener("click", () => setWorkspace("cases"));
+  elements["refresh-safety"].addEventListener(
+    "click",
+    loadSafetyWorkspace,
+  );
+  elements["retry-safety"].addEventListener("click", loadSafetyWorkspace);
+  [
+    "safety-mine-filter",
+    "safety-level-filter",
+    "safety-status-filter",
+  ].forEach((id) => {
+    elements[id].addEventListener("change", renderSafetyWorkspace);
+  });
+  elements["safety-level-grid"].addEventListener(
+    "click",
+    handleSafetyLevelSelection,
+  );
+  elements["safety-mine-grid"].addEventListener(
+    "click",
+    handleSafetyMineSelection,
+  );
+  elements["safety-map-canvas"].addEventListener(
+    "click",
+    handleSafetyMineSelection,
+  );
+  elements["verification-heatmap"].addEventListener(
+    "click",
+    handleSafetyMineSelection,
+  );
+  elements["safety-profile-form"].addEventListener(
+    "submit",
+    saveSafetyMineProfile,
+  );
+  elements["refresh-safety-rules"].addEventListener(
+    "click",
+    loadSafetyRules,
+  );
+  elements["safety-rules-list"].addEventListener(
+    "click",
+    handleSafetyRuleAction,
+  );
+  elements["safety-responsibility-form"].addEventListener(
+    "submit",
+    saveSafetyResponsibilityRoute,
+  );
+  elements["refresh-safety-responsibility"].addEventListener(
+    "click",
+    loadSafetyResponsibilityRoutes,
+  );
+  elements["safety-responsibility-list"].addEventListener(
+    "click",
+    handleSafetyResponsibilityAction,
+  );
+  elements["refresh-edge-evaluations"].addEventListener(
+    "click",
+    loadEdgeEvaluations,
+  );
+  elements["edge-evaluation-filter"].addEventListener(
+    "change",
+    loadEdgeEvaluations,
+  );
+  elements["edge-evaluation-body"].addEventListener(
+    "click",
+    handleEdgeEvaluationAction,
+  );
+  elements["safety-alert-list"].addEventListener(
+    "click",
+    handleSafetyAlertAction,
+  );
   elements["overview-search"].addEventListener("input", renderOverviewQueue);
   elements["overview-focus-filter"].addEventListener(
     "change",
     renderOverviewQueue,
   );
+  elements["regulatory-report-form"].addEventListener(
+    "submit",
+    loadRegulatoryReport,
+  );
+  elements["regulatory-report-kind"].addEventListener(
+    "change",
+    configureRegulatoryReportPeriod,
+  );
+  elements["print-regulatory-report"].addEventListener(
+    "click",
+    printRegulatoryReport,
+  );
+  window.addEventListener("afterprint", clearRegulatoryReportPrintMode);
   elements["refresh-cases"].addEventListener("click", loadCases);
   elements["retry-cases"].addEventListener("click", loadCases);
   elements["show-archived-cases"].addEventListener("change", () => {
@@ -768,6 +1010,14 @@ function bindEvents() {
     isolatePilotBatches,
   );
   elements["refresh-operations"].addEventListener("click", loadOperations);
+  elements["refresh-notification-deliveries"].addEventListener(
+    "click",
+    loadNotificationDeliveries,
+  );
+  elements["notification-deliveries-table-body"].addEventListener(
+    "click",
+    handleNotificationDeliveryAction,
+  );
   elements["backup-create-form"].addEventListener("submit", createBackup);
   elements["refresh-legitimate-scenarios"].addEventListener(
     "click",
@@ -776,6 +1026,22 @@ function bindEvents() {
   elements["legitimate-scenario-form"].addEventListener(
     "submit",
     createLegitimateScenario,
+  );
+  elements["refresh-verification-references"].addEventListener(
+    "click",
+    loadVerificationReferences,
+  );
+  elements["verification-reference-filter"].addEventListener(
+    "change",
+    loadVerificationReferences,
+  );
+  elements["verification-reference-form"].addEventListener(
+    "submit",
+    createVerificationReference,
+  );
+  elements["verification-references-table-body"].addEventListener(
+    "click",
+    handleVerificationReferenceAction,
   );
   elements["overview-reference-label-form"].addEventListener(
     "submit",
@@ -1090,10 +1356,30 @@ function resetProtectedState() {
   state.overviewLoaded = false;
   state.overview = null;
   state.overviewItems = [];
+  state.safetyLoading = false;
+  state.safetyLoaded = false;
+  state.safetyDashboard = null;
+  state.safetyAlerts = [];
+  state.safetyActionRunning = false;
+  state.safetyAttachments = {};
+  state.safetyRulesLoading = false;
+  state.safetyRulesLoaded = false;
+  state.safetyRules = [];
+  state.safetyRuleActionRunning = false;
+  state.safetyResponsibilityLoading = false;
+  state.safetyResponsibilityLoaded = false;
+  state.safetyResponsibilityRoutes = [];
+  state.safetyResponsibilityActionRunning = false;
+  state.edgeEvaluationsLoading = false;
+  state.edgeEvaluationsLoaded = false;
+  state.edgeEvaluations = [];
+  state.edgeEvaluationActionRunning = false;
   state.trendsLoaded = false;
   state.analytics = null;
   state.temporalLoaded = false;
   state.temporalDashboard = null;
+  state.regulatoryReportLoading = false;
+  state.regulatoryReport = null;
   state.casesLoaded = false;
   state.showArchivedCases = false;
   state.cases = [];
@@ -1120,9 +1406,16 @@ function resetProtectedState() {
   state.operationsLoaded = false;
   state.readiness = null;
   state.backups = [];
+  state.notificationDeliveriesLoading = false;
+  state.notificationDeliveriesLoaded = false;
+  state.safetyNotifications = [];
   state.legitimateScenariosLoading = false;
   state.legitimateScenariosLoaded = false;
   state.legitimateScenarios = [];
+  state.verificationReferencesLoading = false;
+  state.verificationReferencesLoaded = false;
+  state.verificationReferences = [];
+  state.verificationReferenceActionRunning = false;
   if (
     elements["overview-reference-label-dialog"] &&
     elements["overview-reference-label-dialog"].open
@@ -1132,6 +1425,20 @@ function resetProtectedState() {
   elements["show-archived-cases"].checked = false;
   elements["show-archived-jobs"].checked = false;
   elements["show-invalidated-batches"].checked = false;
+  elements["safety-mine-filter"].value = "all";
+  elements["safety-level-filter"].value = "all";
+  elements["safety-status-filter"].value = "all";
+  elements["safety-profile-form"].reset();
+  elements["safety-profile-status"].textContent = "";
+  elements["safety-rules-status"].textContent = "";
+  elements["verification-reference-filter"].value = "";
+  elements["verification-reference-form"].reset();
+  elements["verification-reference-form-status"].textContent = "";
+  elements["regulatory-report-content"].hidden = true;
+  elements["regulatory-report-status"].textContent =
+    "请选择报告期并生成。";
+  elements["print-regulatory-report"].disabled = true;
+  clearRegulatoryReportPrintMode();
   resetUserForm();
   clearJobPoll();
 }
@@ -1176,6 +1483,15 @@ function updatePermissionControls() {
   elements["submit-pilot-job-empty"].hidden = !canRunSandbox;
   elements["load-pilot-overview"].hidden =
     state.authEnabled && !isAdminUser();
+  elements["safety-profile-admin"].hidden = !userCan("safetyProfile");
+  elements["safety-rules-admin"].hidden = !userCan("safetyRules");
+  elements["safety-responsibility-admin"].hidden =
+    !userCan("safetyRules");
+  elements["edge-evaluation-admin"].hidden =
+    !userCan("safetyRecalculate");
+  if (state.safetyLoaded) {
+    renderSafetyAlerts();
+  }
 }
 
 function isAdminUser() {
@@ -1192,7 +1508,14 @@ function userCan(capability) {
     approve: ["admin", "supervisor"],
     evidence: ["admin", "supervisor", "reviewer"],
     referenceLabel: ["admin", "supervisor"],
+    safetyAssign: ["admin", "supervisor"],
+    safetyReview: ["admin", "supervisor", "reviewer"],
+    safetyApprove: ["admin", "supervisor"],
+    safetyProfile: ["admin"],
+    safetyRules: ["admin"],
+    safetyRecalculate: ["admin", "supervisor"],
     scenarios: ["admin"],
+    verificationReferences: ["admin"],
     users: ["admin"],
   };
   return Boolean(role && (allowed[capability] || []).includes(role));
@@ -1260,6 +1583,42 @@ function setWorkspace(workspace, shouldLoad = true) {
     ) {
       loadCases();
     }
+  } else if (workspace === "safety") {
+    if (
+      shouldLoad &&
+      state.authInitialized &&
+      !state.safetyLoaded &&
+      !state.safetyLoading
+    ) {
+      loadSafetyWorkspace();
+    }
+    if (
+      shouldLoad &&
+      state.authInitialized &&
+      userCan("safetyRules") &&
+      !state.safetyRulesLoaded &&
+      !state.safetyRulesLoading
+    ) {
+      loadSafetyRules();
+    }
+    if (
+      shouldLoad &&
+      state.authInitialized &&
+      userCan("safetyRules") &&
+      !state.safetyResponsibilityLoaded &&
+      !state.safetyResponsibilityLoading
+    ) {
+      loadSafetyResponsibilityRoutes();
+    }
+    if (
+      shouldLoad &&
+      state.authInitialized &&
+      userCan("safetyRecalculate") &&
+      !state.edgeEvaluationsLoaded &&
+      !state.edgeEvaluationsLoading
+    ) {
+      loadEdgeEvaluations();
+    }
   } else if (workspace === "jobs") {
     showJobList(false);
     if (
@@ -1284,6 +1643,12 @@ function setWorkspace(workspace, shouldLoad = true) {
     if (!state.operationsLoaded && !state.operationsLoading) {
       loadOperations();
     }
+    if (
+      !state.notificationDeliveriesLoaded &&
+      !state.notificationDeliveriesLoading
+    ) {
+      loadNotificationDeliveries();
+    }
     if (!state.batchesLoaded && !state.batchesLoading) {
       loadBatches();
     }
@@ -1292,6 +1657,12 @@ function setWorkspace(workspace, shouldLoad = true) {
       !state.legitimateScenariosLoading
     ) {
       loadLegitimateScenarios();
+    }
+    if (
+      !state.verificationReferencesLoaded &&
+      !state.verificationReferencesLoading
+    ) {
+      loadVerificationReferences();
     }
   } else if (
     workspace === "overview" &&
@@ -1308,6 +1679,338 @@ function setWorkspace(workspace, shouldLoad = true) {
       loadTemporalDashboard();
     }
   }
+}
+
+function initializeRegulatoryReportForm() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(
+    parts
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+  const year = Number(values.year);
+  const month = Number(values.month);
+  elements["regulatory-report-year"].value = String(year);
+  elements["regulatory-report-month"].value =
+    String(month).padStart(2, "0");
+  elements["regulatory-report-quarter"].value =
+    `Q${Math.floor((month - 1) / 3) + 1}`;
+  configureRegulatoryReportPeriod();
+}
+
+function configureRegulatoryReportPeriod() {
+  const quarterly =
+    elements["regulatory-report-kind"].value === "quarterly";
+  elements["regulatory-report-month-wrap"].hidden = quarterly;
+  elements["regulatory-report-quarter-wrap"].hidden = !quarterly;
+}
+
+function selectedRegulatoryReportPeriod() {
+  const kind = elements["regulatory-report-kind"].value;
+  const year = Number(elements["regulatory-report-year"].value);
+  if (!Number.isInteger(year) || year < 2020 || year > 2100) {
+    throw new Error("年份必须是 2020 至 2100 的整数");
+  }
+  const suffix =
+    kind === "quarterly"
+      ? elements["regulatory-report-quarter"].value
+      : elements["regulatory-report-month"].value;
+  return {
+    kind,
+    period: `${year}-${suffix}`,
+    timezone: elements["regulatory-report-timezone"].value,
+  };
+}
+
+async function loadRegulatoryReport(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  if (state.regulatoryReportLoading) {
+    return;
+  }
+  let selection;
+  try {
+    selection = selectedRegulatoryReportPeriod();
+  } catch (error) {
+    setLoadStatus(
+      elements["regulatory-report-status"],
+      friendlyError(error),
+      "error",
+    );
+    return;
+  }
+  state.regulatoryReportLoading = true;
+  elements["generate-regulatory-report"].disabled = true;
+  elements["print-regulatory-report"].disabled = true;
+  setLoadStatus(
+    elements["regulatory-report-status"],
+    "正在按授权矿井范围汇总报告；缺报和阻断不会被隐藏…",
+  );
+  try {
+    const query = new URLSearchParams(selection);
+    const response = await requestJson(
+      `${SUPERVISION_API_PATHS.regulatoryReport}?${query.toString()}`,
+    );
+    const report = objectOrNull(response && response.report);
+    if (!report) {
+      throw new Error("报告接口未返回可读取内容");
+    }
+    state.regulatoryReport = report;
+    renderRegulatoryReport(report);
+    elements["regulatory-report-content"].hidden = false;
+    elements["print-regulatory-report"].disabled = false;
+    setLoadStatus(
+      elements["regulatory-report-status"],
+      "只读报告已生成。请先核对数据完整性，再打印或另存为 PDF。",
+      "success",
+    );
+  } catch (error) {
+    state.regulatoryReport = null;
+    elements["regulatory-report-content"].hidden = true;
+    setLoadStatus(
+      elements["regulatory-report-status"],
+      explainSupervisionError(error, "监管报告"),
+      "error",
+    );
+  } finally {
+    state.regulatoryReportLoading = false;
+    elements["generate-regulatory-report"].disabled = false;
+  }
+}
+
+function appendReportMeta(label, value) {
+  const wrapper = document.createElement("div");
+  const term = document.createElement("dt");
+  const description = document.createElement("dd");
+  term.textContent = label;
+  description.textContent = value;
+  wrapper.append(term, description);
+  elements["regulatory-report-meta"].appendChild(wrapper);
+}
+
+function appendReportKpi(label, value, note) {
+  const card = document.createElement("article");
+  card.className = "report-kpi-card";
+  const heading = document.createElement("span");
+  const primary = document.createElement("strong");
+  const explanation = document.createElement("small");
+  heading.textContent = label;
+  primary.textContent = value;
+  explanation.textContent = note;
+  card.append(heading, primary, explanation);
+  elements["regulatory-report-kpis"].appendChild(card);
+}
+
+function regulatoryOverallLabel(status) {
+  return {
+    blocked: "存在阻断 / 缺口",
+    attention: "存在需复核线索",
+    incomplete: "覆盖不完整",
+    observed_without_attention: "已覆盖范围未汇总出关注线索（非认定）",
+  }[status] || "状态待核对";
+}
+
+function regulatoryVerificationLabel(status) {
+  return {
+    ready: "已完成（非认定）",
+    insufficient_history: "历史样本不足",
+    blocked: "核验被阻断",
+    not_run: "本期未运行",
+    unknown: "状态无法识别",
+  }[status] || "状态待核对";
+}
+
+function regulatoryReportingLabel(status) {
+  return {
+    received: "已接收（非真实性认定）",
+    missing_report: "存在缺报",
+    data_incomplete: "数据 / 计算条件不足",
+    no_report_records: "无可统计应报记录",
+  }[status] || "状态待核对";
+}
+
+function appendRegulatoryMineCell(row, primaryText, secondaryText = "") {
+  const cell = document.createElement("td");
+  const primary = document.createElement("strong");
+  primary.textContent = primaryText;
+  cell.appendChild(primary);
+  if (secondaryText) {
+    const secondary = document.createElement("span");
+    secondary.className = "table-secondary";
+    secondary.textContent = secondaryText;
+    cell.appendChild(secondary);
+  }
+  row.appendChild(cell);
+}
+
+function renderRegulatoryReport(report) {
+  const period = objectOrNull(report.period) || {};
+  const scope = objectOrNull(report.scope) || {};
+  const quality = objectOrNull(report.data_quality) || {};
+  const summary = objectOrNull(report.summary) || {};
+  const reporting = objectOrNull(summary.reporting) || {};
+  const verification = objectOrNull(summary.verification) || {};
+  const safety = objectOrNull(summary.safety_alerts) || {};
+  const casework = objectOrNull(summary.casework) || {};
+  const currentSnapshot =
+    objectOrNull(report.current_safety_snapshot) || {};
+  const currentSummary = objectOrNull(currentSnapshot.summary) || {};
+
+  elements["regulatory-report-title"].textContent =
+    displayText(report.title, "监管分析报告");
+  elements["regulatory-report-reference"].textContent =
+    `报告校验引用：${displayText(report.report_reference)}`;
+  clearNode(elements["regulatory-report-meta"]);
+  appendReportMeta(
+    "报告窗口",
+    `${formatDateTime(period.start_at)} 至 ${formatDateTime(period.end_at)}`,
+  );
+  appendReportMeta(
+    "实际统计截至",
+    `${formatDateTime(period.data_end_at)}${period.complete === false ? "（本期进行中）" : ""}`,
+  );
+  appendReportMeta("统计时区", displayText(period.timezone));
+  appendReportMeta(
+    "授权范围",
+    `${formatCount(firstNumber(scope.mine_count))} 座矿井`,
+  );
+  appendReportMeta("生成时间", formatDateTime(report.generated_at));
+
+  const qualityLabels = {
+    blocked: "报告存在数据阻断，不能形成完整研判",
+    incomplete: "报告覆盖不完整，未覆盖部分不能判断正常",
+    complete_for_review: "数据已覆盖到技术复核口径（仍需人工复核）",
+  };
+  const qualityStatus = displayText(quality.status, "unknown");
+  elements["regulatory-report-quality"].className =
+    `report-quality-callout is-${qualityStatus}`;
+  elements["regulatory-report-quality-title"].textContent =
+    qualityLabels[qualityStatus] || "数据完整性状态无法识别";
+  clearNode(elements["regulatory-report-quality-issues"]);
+  const qualityIssues = arrayOrNull(quality.issues) || [];
+  if (qualityIssues.length) {
+    qualityIssues.forEach((issue) => {
+      const item = document.createElement("li");
+      item.textContent = displayText(issue);
+      elements["regulatory-report-quality-issues"].appendChild(item);
+    });
+  } else {
+    const item = document.createElement("li");
+    item.textContent =
+      "未记录数据完整性问题；这不等于安全、合规或责任认定。";
+    elements["regulatory-report-quality-issues"].appendChild(item);
+  }
+  elements["regulatory-report-summary"].textContent =
+    displayText(report.executive_summary, "本期汇总内容不足。");
+
+  clearNode(elements["regulatory-report-kpis"]);
+  const coverage = firstNumber(summary.coverage_rate);
+  appendReportKpi(
+    "报送覆盖",
+    coverage === null ? "不可计算" : formatPercent(coverage),
+    `实收 ${formatCount(firstNumber(summary.received_report_count))} / 应报 ${formatCount(firstNumber(summary.expected_report_count))} 矿次`,
+  );
+  appendReportKpi(
+    "缺报 / 无记录矿井",
+    `${formatCount(firstNumber(reporting.missing_report))} / ${formatCount(firstNumber(reporting.no_report_records))}`,
+    "没有记录不按正常处理",
+  );
+  appendReportKpi(
+    "核验阻断 / 历史不足",
+    `${formatCount(firstNumber(verification.blocked))} / ${formatCount(firstNumber(verification.insufficient_history))}`,
+    `另有 ${formatCount(firstNumber(verification.not_run))} 座本期未运行`,
+  );
+  appendReportKpi(
+    "需关注矿井",
+    `${formatCount(firstNumber(summary.attention_mines))} 座`,
+    "仅表示技术线索，需人工复核",
+  );
+  appendReportKpi(
+    "本期正式 / 影子预警",
+    `${formatCount(firstNumber(safety.operational_total))} / ${formatCount(firstNumber(safety.shadow_total))}`,
+    "影子试算不计入正式预警",
+  );
+  appendReportKpi(
+    "生成时当前开放预警",
+    `${formatCount(firstNumber(currentSummary.total_open))} 条`,
+    "当前驾驶舱快照，不是报告期末历史快照",
+  );
+
+  clearNode(elements["regulatory-report-mine-body"]);
+  const mines = arrayOrNull(report.mines) || [];
+  elements["regulatory-report-mine-empty"].hidden = mines.length > 0;
+  mines.forEach((rawMine) => {
+    const mine = objectOrNull(rawMine) || {};
+    const reportingItem = objectOrNull(mine.reporting) || {};
+    const verificationItem = objectOrNull(mine.verification) || {};
+    const alertItem = objectOrNull(mine.safety_alerts) || {};
+    const caseItem = objectOrNull(mine.casework) || {};
+    const row = document.createElement("tr");
+    row.className = `report-mine-row is-${displayText(mine.overall_status, "unknown")}`;
+    appendRegulatoryMineCell(
+      row,
+      displayText(mine.mine_name, displayText(mine.mine_id)),
+      displayText(mine.mine_id),
+    );
+    appendRegulatoryMineCell(
+      row,
+      regulatoryOverallLabel(mine.overall_status),
+      displayText(mine.overall_note),
+    );
+    appendRegulatoryMineCell(
+      row,
+      regulatoryReportingLabel(reportingItem.status),
+      `实收 ${formatCount(firstNumber(reportingItem.received_reports))} / 应报 ${formatCount(firstNumber(reportingItem.expected_reports))} 矿次`,
+    );
+    appendRegulatoryMineCell(
+      row,
+      regulatoryVerificationLabel(verificationItem.status),
+      displayText(verificationItem.note),
+    );
+    appendRegulatoryMineCell(
+      row,
+      `正式 ${formatCount(firstNumber(alertItem.operational_count))} · 影子 ${formatCount(firstNumber(alertItem.shadow_count))}`,
+      alertItem.highest_level
+        ? `最高技术线索：${displayText(alertItem.highest_level)}`
+        : "未记录正式预警；不等于安全认定",
+    );
+    appendRegulatoryMineCell(
+      row,
+      `${formatCount(firstNumber(caseItem.open_cases))} 件`,
+      `P1 ${formatCount(firstNumber(caseItem.open_p1_cases))} · P2 ${formatCount(firstNumber(caseItem.open_p2_cases))} · 待审批 ${formatCount(firstNumber(caseItem.pending_approval_cases))}`,
+    );
+    elements["regulatory-report-mine-body"].appendChild(row);
+  });
+
+  clearNode(elements["regulatory-report-limitations"]);
+  const limitations = arrayOrNull(report.limitations) || [];
+  limitations.forEach((text) => {
+    const item = document.createElement("li");
+    item.textContent = displayText(text);
+    elements["regulatory-report-limitations"].appendChild(item);
+  });
+  elements["regulatory-report-disclaimer"].textContent =
+    displayText(
+      report.disclaimer,
+      "本报告仅形成监管辅助技术线索，必须人工复核。",
+    );
+}
+
+function printRegulatoryReport() {
+  if (!state.regulatoryReport) {
+    return;
+  }
+  document.body.classList.add("print-regulatory-report");
+  window.print();
+}
+
+function clearRegulatoryReportPrintMode() {
+  document.body.classList.remove("print-regulatory-report");
 }
 
 async function requestJson(path, options = {}) {
@@ -1344,6 +2047,2731 @@ async function requestJson(path, options = {}) {
     throw error;
   }
   return body;
+}
+
+const SAFETY_LEVEL_META = {
+  red: {
+    label: "红色",
+    short: "立即核查",
+    explanation: "重大风险技术线索",
+    rank: 4,
+  },
+  orange: {
+    label: "橙色",
+    short: "优先处置",
+    explanation: "需立即组织人工核查",
+    rank: 3,
+  },
+  yellow: {
+    label: "黄色",
+    short: "尽快核查",
+    explanation: "需及时核对和处置",
+    rank: 2,
+  },
+  blue: {
+    label: "蓝色",
+    short: "持续关注",
+    explanation: "趋势或接近阈值提示",
+    rank: 1,
+  },
+  normal: {
+    label: "暂无开放预警",
+    short: "保持监测",
+    explanation: "不代表现场绝对安全",
+    rank: 0,
+  },
+  monitoring_disabled: {
+    label: "监测已停用",
+    short: "仅保留原始接入",
+    explanation: "不参与当前辖区风险统计或自动外推",
+    rank: -1,
+  },
+  unknown: {
+    label: "级别待确认",
+    short: "请核对数据",
+    explanation: "服务未返回可识别的预警级别",
+    rank: 0,
+  },
+};
+
+const SAFETY_STATUS_META = {
+  open: { label: "待查阅", tone: "open" },
+  acknowledged: { label: "已阅", tone: "acknowledged" },
+  in_progress: { label: "核查中", tone: "in-progress" },
+  resolved: { label: "已处理", tone: "resolved" },
+  closed: { label: "已关闭", tone: "closed" },
+  unknown: { label: "状态待确认", tone: "unknown" },
+};
+
+function normalizeSafetyLevel(value, allowNormal = false) {
+  const level = String(
+    typeof value === "undefined" || value === null ? "" : value,
+  ).trim().toLowerCase();
+  if (["blue", "yellow", "orange", "red"].includes(level)) {
+    return level;
+  }
+  return allowNormal &&
+    ["normal", "monitoring_disabled"].includes(level)
+    ? level
+    : "unknown";
+}
+
+function normalizeSafetyStatus(value) {
+  const status = String(
+    typeof value === "undefined" || value === null ? "" : value,
+  ).trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(SAFETY_STATUS_META, status)
+    ? status
+    : "unknown";
+}
+
+function normalizeSafetyMetric(value) {
+  const item = objectOrNull(value) || {};
+  return {
+    metricCode: nullableText(item.metric_code),
+    value: firstNumber(item.value),
+    unit: nullableText(item.unit),
+    locationCode: nullableText(item.location_code),
+    observedAt: nullableText(item.observed_at),
+    receivedAt: nullableText(item.received_at),
+    observationId: nullableText(item.observation_id),
+    revision: firstNumber(item.revision),
+    sourceId: nullableText(item.source_id),
+    statusCode: nullableText(item.status_code),
+    quality: objectOrNull(item.quality),
+  };
+}
+
+function normalizeSafetyAlert(value) {
+  const item = objectOrNull(value) || {};
+  const recipients = (arrayOrNull(item.recipients) || []).map(
+    (recipientValue) => {
+      const recipient = objectOrNull(recipientValue) || {};
+      return {
+        username: nullableText(recipient.username),
+        role: nullableText(recipient.recipient_role),
+        assignedAt: nullableText(recipient.assigned_at),
+        readAt: nullableText(recipient.read_at),
+        escalatedAt: nullableText(recipient.escalated_at),
+      };
+    },
+  );
+  return {
+    alertId: nullableText(item.alert_id),
+    mineId: nullableText(item.mine_id),
+    category: nullableText(item.category),
+    ruleCode: nullableText(item.rule_code),
+    level: normalizeSafetyLevel(item.level),
+    status: normalizeSafetyStatus(item.status),
+    title: nullableText(item.title),
+    summary: nullableText(item.summary),
+    locationCode: nullableText(item.location_code),
+    detectedAt: nullableText(item.detected_at),
+    lastSeenAt: nullableText(item.last_seen_at),
+    dueAt: nullableText(item.due_at),
+    assignee: nullableText(item.assignee),
+    occurrenceCount: firstNumber(item.occurrence_count),
+    version: firstNumber(item.version),
+    observationIds: arrayOrNull(item.observation_ids) || [],
+    details: objectOrNull(item.details) || {},
+    ruleProfile: objectOrNull(item.rule_profile) || {},
+    source: nullableText(item.source),
+    updatedAt: nullableText(item.updated_at),
+    updatedBy: nullableText(item.updated_by),
+    overdue: booleanOrNull(item.overdue) === true,
+    operational: booleanOrNull(item.operational) !== false,
+    mode:
+      nullableText(item.mode) ||
+      (booleanOrNull(item.operational) === false
+        ? "shadow"
+        : "operational"),
+    recipients,
+  };
+}
+
+function normalizeProductionVerification(value) {
+  const item = objectOrNull(value);
+  if (!item) {
+    return null;
+  }
+  const statusValue = String(item.status || "unknown")
+    .trim()
+    .toLowerCase();
+  const status = [
+    "ready",
+    "insufficient_history",
+    "blocked",
+  ].includes(statusValue)
+    ? statusValue
+    : "unknown";
+  const energy = objectOrNull(item.energy);
+  const explosives = objectOrNull(item.explosives);
+  const normalizeRarity = (assessment) => {
+    const normalizedAssessment = objectOrNull(assessment);
+    const rarity = objectOrNull(
+      normalizedAssessment
+        ? normalizedAssessment.historical_rarity
+        : null,
+    );
+    return rarity
+      ? {
+          band: nullableText(rarity.band),
+          tailProbability: firstNumber(
+            rarity.directional_tail_probability,
+          ),
+          sampleCount: firstNumber(rarity.reference_sample_count),
+        }
+      : null;
+  };
+  return {
+    runId: nullableText(item.run_id),
+    requestId: nullableText(item.request_id),
+    windowStart: nullableText(item.window_start),
+    windowEnd: nullableText(item.window_end),
+    status,
+    overallClueLevel: firstNumber(item.overall_clue_level),
+    jointlyUpgraded: booleanOrNull(item.jointly_upgraded) === true,
+    energy: energy
+      ? {
+          band: nullableText(energy.band),
+          verificationRatio: firstNumber(energy.verification_ratio),
+          direction: nullableText(energy.direction),
+          historicalRarity: normalizeRarity(energy),
+        }
+      : null,
+    explosives: explosives
+      ? {
+          band: nullableText(explosives.band),
+          robustZ: firstNumber(explosives.robust_z),
+          direction: nullableText(explosives.direction),
+          historicalRarity: normalizeRarity(explosives),
+        }
+      : null,
+    technicalClues: (arrayOrNull(item.technical_clues) || [])
+      .map(nullableText)
+      .filter((clue) => clue !== null)
+      .slice(0, 5),
+    disclaimer: nullableText(item.disclaimer),
+  };
+}
+
+function normalizeMapBoundary(value) {
+  const envelope = objectOrNull(value) || {};
+  const boundary = objectOrNull(envelope.boundary);
+  if (envelope.configured !== true || !boundary) {
+    return null;
+  }
+  const polygons = [];
+  const addPolygon = (candidate) => {
+    if (!Array.isArray(candidate)) {
+      return;
+    }
+    const rings = candidate
+      .map((ring) =>
+        Array.isArray(ring)
+          ? ring
+              .map((position) => {
+                if (!Array.isArray(position) || position.length < 2) {
+                  return null;
+                }
+                const longitude = firstNumber(position[0]);
+                const latitude = firstNumber(position[1]);
+                return longitude !== null &&
+                  longitude >= -180 &&
+                  longitude <= 180 &&
+                  latitude !== null &&
+                  latitude >= -90 &&
+                  latitude <= 90
+                  ? [longitude, latitude]
+                  : null;
+              })
+              .filter((position) => position !== null)
+          : [],
+      )
+      .filter((ring) => ring.length >= 4);
+    if (rings.length) {
+      polygons.push(rings);
+    }
+  };
+  (arrayOrNull(boundary.features) || []).forEach((featureValue) => {
+    const feature = objectOrNull(featureValue) || {};
+    const geometry = objectOrNull(feature.geometry) || {};
+    if (geometry.type === "Polygon") {
+      addPolygon(geometry.coordinates);
+    } else if (
+      geometry.type === "MultiPolygon" &&
+      Array.isArray(geometry.coordinates)
+    ) {
+      geometry.coordinates.forEach(addPolygon);
+    }
+  });
+  return polygons.length ? { polygons } : null;
+}
+
+function normalizeSafetyMine(value) {
+  const item = objectOrNull(value) || {};
+  const metricMap = objectOrNull(item.latest_metrics) || {};
+  const metrics = Object.values(metricMap).map(normalizeSafetyMetric);
+  return {
+    mineId: nullableText(item.mine_id),
+    mineName: nullableText(item.mine_name),
+    gasCategory: nullableText(item.gas_category),
+    longitude: firstNumber(item.longitude),
+    latitude: firstNumber(item.latitude),
+    approvedCapacityTpy: firstNumber(item.approved_capacity_tpy),
+    approvedPersonnel: firstNumber(
+      item.approved_underground_personnel,
+    ),
+    enabled: booleanOrNull(item.enabled),
+    metrics,
+    openAlerts: (arrayOrNull(item.open_alerts) || []).map(
+      normalizeSafetyAlert,
+    ),
+    shadowAlerts: (arrayOrNull(item.shadow_alerts) || []).map(
+      normalizeSafetyAlert,
+    ),
+    riskLevel:
+      item.enabled === false
+        ? "monitoring_disabled"
+        : normalizeSafetyLevel(item.risk_level, true),
+    productionVerification: normalizeProductionVerification(
+      item.production_verification,
+    ),
+  };
+}
+
+function normalizeSafetyDashboard(value) {
+  const body = objectOrNull(value) || {};
+  const summary = objectOrNull(body.summary) || {};
+  const shadowSummary = objectOrNull(body.shadow_summary) || {};
+  const verificationSummary =
+    objectOrNull(body.verification_summary) || {};
+  const evaluationHealth =
+    objectOrNull(body.evaluation_health) || {};
+  const responsibilityHealth =
+    objectOrNull(body.responsibility_health) || {};
+  return {
+    generatedAt: nullableText(body.generated_at),
+    summary: {
+      totalOpen: firstNumber(summary.total_open),
+      overdue: firstNumber(summary.overdue),
+      blue: firstNumber(summary.blue),
+      yellow: firstNumber(summary.yellow),
+      orange: firstNumber(summary.orange),
+      red: firstNumber(summary.red),
+    },
+    shadowSummary: {
+      totalOpen: firstNumber(shadowSummary.total_open),
+      blue: firstNumber(shadowSummary.blue),
+      yellow: firstNumber(shadowSummary.yellow),
+      orange: firstNumber(shadowSummary.orange),
+      red: firstNumber(shadowSummary.red),
+    },
+    verificationSummary: {
+      ready: firstNumber(verificationSummary.ready),
+      insufficientHistory: firstNumber(
+        verificationSummary.insufficient_history,
+      ),
+      blocked: firstNumber(verificationSummary.blocked),
+      attentionOrHigher: firstNumber(
+        verificationSummary.attention_or_higher,
+      ),
+    },
+    verificationHeatmap: (
+      arrayOrNull(body.verification_heatmap) || []
+    ).map((itemValue) => {
+      const item = objectOrNull(itemValue) || {};
+      return {
+        mineId: nullableText(item.mine_id),
+        mineName: nullableText(item.mine_name),
+        ...normalizeProductionVerification(item),
+      };
+    }),
+    evaluationHealth: {
+      pending: firstNumber(evaluationHealth.pending),
+      failed: firstNumber(evaluationHealth.failed),
+      running: firstNumber(evaluationHealth.running),
+      dead: firstNumber(evaluationHealth.dead),
+      backlog: firstNumber(evaluationHealth.backlog),
+    },
+    responsibilityHealth: {
+      unrouted: firstNumber(responsibilityHealth.unrouted),
+      unreadPrimary: firstNumber(
+        responsibilityHealth.unread_primary,
+      ),
+      unreadObserver: firstNumber(
+        responsibilityHealth.unread_observer,
+      ),
+      escalated: firstNumber(responsibilityHealth.escalated),
+      slaOverdueEscalated: firstNumber(
+        responsibilityHealth.sla_overdue_escalated,
+      ),
+    },
+    mines: (arrayOrNull(body.mines) || [])
+      .map(normalizeSafetyMine)
+      .filter((item) => item.mineId !== null),
+    disclaimer: nullableText(body.disclaimer),
+  };
+}
+
+async function loadSafetyWorkspace() {
+  if (state.safetyLoading) {
+    return;
+  }
+  state.safetyLoading = true;
+  elements["refresh-safety"].disabled = true;
+  setLoadStatus(
+    elements["safety-status"],
+    "正在读取矿井安全指标和预警台账…",
+    "loading",
+  );
+  elements["safety-action-status"].textContent = "";
+
+  try {
+    const [dashboardBody, alertBody, mapBoundaryBody] = await Promise.all([
+      requestJson(SUPERVISION_API_PATHS.safetyDashboard),
+      requestJson(`${SUPERVISION_API_PATHS.safetyAlerts}?limit=1000`),
+      requestJson(SUPERVISION_API_PATHS.mapBoundary).catch(() => ({
+        configured: false,
+        boundary: null,
+      })),
+    ]);
+    const dashboard = normalizeSafetyDashboard(dashboardBody);
+    const alertEnvelope = objectOrNull(alertBody) || {};
+    state.safetyDashboard = dashboard;
+    state.mapBoundary = normalizeMapBoundary(mapBoundaryBody);
+    state.safetyAlerts = (arrayOrNull(alertEnvelope.items) || [])
+      .map(normalizeSafetyAlert)
+      .filter((item) => item.alertId !== null && item.mineId !== null);
+    state.safetyLoaded = true;
+
+    if (!dashboard.mines.length && !state.safetyAlerts.length) {
+      elements["safety-content"].hidden = true;
+      elements["safety-empty"].hidden = false;
+      elements["safety-empty-message"].textContent =
+        "当前账号范围内尚未收到矿井安全数据；这不表示没有风险，请确认矿端接入和数据链路。";
+      setLoadStatus(
+        elements["safety-status"],
+        "尚无可展示数据，不能判断当前安全状态",
+      );
+      return;
+    }
+    elements["safety-empty"].hidden = true;
+    elements["safety-content"].hidden = false;
+    renderSafetyWorkspace();
+    setLoadStatus(
+      elements["safety-status"],
+      `已读取 ${dashboard.mines.length} 座矿井和 ${state.safetyAlerts.length} 条预警记录`,
+      "success",
+    );
+  } catch (error) {
+    state.safetyLoaded = false;
+    state.safetyDashboard = null;
+    state.mapBoundary = null;
+    state.safetyAlerts = [];
+    elements["safety-content"].hidden = true;
+    elements["safety-empty"].hidden = false;
+    elements["safety-empty-message"].textContent =
+      "暂时无法读取安全监测数据；这不表示当前没有预警或风险，请检查服务和数据链路后重试。";
+    setLoadStatus(
+      elements["safety-status"],
+      explainSupervisionError(error, "安全态势"),
+      "error",
+    );
+  } finally {
+    state.safetyLoading = false;
+    elements["refresh-safety"].disabled = false;
+  }
+}
+
+function renderSafetyWorkspace() {
+  const dashboard = state.safetyDashboard;
+  if (!dashboard) {
+    return;
+  }
+  elements["safety-generated-at"].textContent = formatDateTime(
+    dashboard.generatedAt,
+  );
+  elements["safety-mine-count"].textContent =
+    `${formatCount(dashboard.mines.length)} 座`;
+  elements["safety-open-count"].textContent =
+    `${formatCount(dashboard.summary.totalOpen)} 条`;
+  elements["safety-shadow-count"].textContent =
+    `${formatCount(dashboard.shadowSummary.totalOpen)} 条`;
+  elements["safety-overdue-count"].textContent =
+    `${formatCount(dashboard.summary.overdue)} 条`;
+  const verificationAttention =
+    dashboard.verificationSummary.attentionOrHigher;
+  elements["safety-verification-attention-count"].textContent =
+    verificationAttention === null
+      ? "未返回"
+      : `${formatNumber(verificationAttention)} 座`;
+  const evaluationHealth = dashboard.evaluationHealth;
+  const deadEvaluations = evaluationHealth.dead || 0;
+  const failedEvaluations = evaluationHealth.failed || 0;
+  const pendingEvaluations = evaluationHealth.pending || 0;
+  elements["safety-evaluation-health"].hidden =
+    deadEvaluations === 0 &&
+    failedEvaluations === 0 &&
+    pendingEvaluations === 0;
+  elements["safety-evaluation-health"].className =
+    deadEvaluations > 0 || failedEvaluations > 0
+      ? "form-status safety-evaluation-health is-error"
+      : "form-status safety-evaluation-health";
+  elements["safety-evaluation-health"].textContent =
+    deadEvaluations > 0
+      ? `${deadEvaluations} 个边缘批次的平台安全复算已进入死信；失败预警保持开放，请安排有权限人员受控重算。`
+      : failedEvaluations > 0
+        ? `${failedEvaluations} 个边缘批次的平台安全复算失败，正在按退避策略自动重试；原始数据已留存，不能显示为正常。`
+      : pendingEvaluations > 0
+        ? `${pendingEvaluations} 个边缘批次正在等待平台安全复算。`
+        : "";
+  const responsibilityHealth = dashboard.responsibilityHealth;
+  const unrouted = responsibilityHealth.unrouted || 0;
+  const unreadPrimary = responsibilityHealth.unreadPrimary || 0;
+  const unreadObserver = responsibilityHealth.unreadObserver || 0;
+  const escalated = responsibilityHealth.escalated || 0;
+  const slaOverdueEscalated =
+    responsibilityHealth.slaOverdueEscalated || 0;
+  elements["safety-responsibility-health"].hidden =
+    unrouted === 0 &&
+    unreadPrimary === 0 &&
+    unreadObserver === 0 &&
+    escalated === 0 &&
+    slaOverdueEscalated === 0;
+  elements["safety-responsibility-health"].className =
+    unrouted > 0 || escalated > 0 || slaOverdueEscalated > 0
+      ? "form-status safety-evaluation-health is-error"
+      : "form-status safety-evaluation-health";
+  elements["safety-responsibility-health"].textContent =
+    unrouted > 0
+      ? `${unrouted} 条正式预警尚未匹配责任路由，请管理员立即补齐。`
+      : slaOverdueEscalated > 0
+        ? `${slaOverdueEscalated} 条正式预警已超过办理时限并完成一次性升级通知；另有 ${unreadPrimary} 条等待主责、${unreadObserver} 个部门知会等待回执。`
+      : escalated > 0
+        ? `${escalated} 条预警已有责任路由因未读升级备岗；另有 ${unreadPrimary} 条等待主责、${unreadObserver} 个部门知会等待回执。`
+        : unreadPrimary > 0 || unreadObserver > 0
+          ? `${unreadPrimary} 条预警等待主责回执，${unreadObserver} 个并行知会部门等待回执。`
+          : "";
+  elements["safety-disclaimer"].textContent =
+    dashboard.disclaimer ||
+    "预警为辅助监管技术线索，不替代法定监测、现场处置或行政认定。";
+
+  renderSafetyMineOptions();
+  renderSafetyLevelOverview();
+  renderVerificationHeatmap();
+  renderSafetyMap();
+  renderSafetyMines();
+  renderSafetyAlerts();
+}
+
+function renderSafetyMineOptions() {
+  const select = elements["safety-mine-filter"];
+  const selected = select.value;
+  const defaultOption = document.createElement("option");
+  defaultOption.value = "all";
+  defaultOption.textContent = "全部矿井";
+  const options = [defaultOption];
+  const mines = [...state.safetyDashboard.mines].sort((left, right) =>
+    displayText(left.mineName, left.mineId).localeCompare(
+      displayText(right.mineName, right.mineId),
+      "zh-CN",
+    ),
+  );
+  mines.forEach((mine) => {
+    const option = document.createElement("option");
+    option.value = mine.mineId;
+    option.textContent = displayText(mine.mineName, mine.mineId);
+    options.push(option);
+  });
+  select.replaceChildren(...options);
+  select.value = options.some((option) => option.value === selected)
+    ? selected
+    : "all";
+}
+
+function renderSafetyLevelOverview() {
+  const grid = elements["safety-level-grid"];
+  const selected = elements["safety-level-filter"].value;
+  grid.replaceChildren();
+  ["red", "orange", "yellow", "blue"].forEach((level) => {
+    const metadata = SAFETY_LEVEL_META[level];
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `safety-level-card is-${level}`;
+    button.dataset.safetyLevel = level;
+    button.setAttribute("aria-pressed", String(selected === level));
+
+    const name = document.createElement("span");
+    name.className = "safety-level-name";
+    name.textContent = `${metadata.label} · ${metadata.short}`;
+    const count = document.createElement("strong");
+    count.textContent = formatCount(state.safetyDashboard.summary[level]);
+    const explanation = document.createElement("small");
+    explanation.textContent = metadata.explanation;
+    button.append(name, count, explanation);
+    grid.appendChild(button);
+  });
+}
+
+function renderVerificationHeatmap() {
+  const container = elements["verification-heatmap"];
+  const items = state.safetyDashboard.verificationHeatmap || [];
+  container.replaceChildren();
+  elements["verification-heatmap-empty"].hidden = items.length > 0;
+  const tones = ["normal", "yellow", "orange", "red"];
+  items.forEach((item) => {
+    const level = Number.isInteger(item.overallClueLevel)
+      ? Math.max(0, Math.min(3, item.overallClueLevel))
+      : null;
+    const tone =
+      item.status === "ready" && level !== null
+        ? tones[level]
+        : "unknown";
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = `verification-heatmap-cell is-${tone}`;
+    card.dataset.safetyMine = item.mineId;
+    card.setAttribute("role", "listitem");
+    const name = document.createElement("strong");
+    name.textContent = displayText(item.mineName, item.mineId);
+    const status = document.createElement("span");
+    status.textContent =
+      item.status === "ready"
+        ? ["常规", "关注", "较高", "优先"][level] || "待核对"
+        : item.status === "insufficient_history"
+          ? "历史不足"
+          : item.status === "blocked"
+            ? "数据阻断"
+            : "状态待确认";
+    const energy = document.createElement("small");
+    const ratio = item.energy
+      ? item.energy.verificationRatio
+      : null;
+    energy.textContent =
+      ratio === null
+        ? "吨煤电耗：不可判断"
+        : `吨煤电耗偏差：${new Intl.NumberFormat("zh-CN", {
+            signDisplay: "always",
+            maximumFractionDigits: 1,
+          }).format((ratio - 1) * 100)}%`;
+    const explosives = document.createElement("small");
+    const robustZ = item.explosives ? item.explosives.robustZ : null;
+    explosives.textContent =
+      robustZ === null
+        ? "火工品强度：不可判断"
+        : `火工品稳健偏差：${new Intl.NumberFormat("zh-CN", {
+            maximumFractionDigits: 2,
+          }).format(robustZ)}σ`;
+    const rarity = document.createElement("small");
+    const energyTail =
+      item.energy && item.energy.historicalRarity
+        ? item.energy.historicalRarity.tailProbability
+        : null;
+    const explosiveTail =
+      item.explosives && item.explosives.historicalRarity
+        ? item.explosives.historicalRarity.tailProbability
+        : null;
+    rarity.textContent =
+      energyTail === null ||
+      energyTail === undefined ||
+      explosiveTail === null ||
+      explosiveTail === undefined
+        ? "历史罕见度：样本不足或未返回"
+        : `历史尾概率：电耗 ${formatPercent(
+            energyTail,
+          )} · 火工品 ${formatPercent(explosiveTail)}`;
+    if (item.jointlyUpgraded) {
+      const joint = document.createElement("em");
+      joint.textContent = "双指标同向，优先复核";
+      card.append(name, status, energy, explosives, rarity, joint);
+    } else {
+      card.append(name, status, energy, explosives, rarity);
+    }
+    container.appendChild(card);
+  });
+}
+
+function handleSafetyLevelSelection(event) {
+  const button = event.target.closest("[data-safety-level]");
+  if (!button) {
+    return;
+  }
+  const selected = button.dataset.safetyLevel;
+  elements["safety-level-filter"].value =
+    elements["safety-level-filter"].value === selected ? "all" : selected;
+  renderSafetyWorkspace();
+}
+
+function safetyMapBucket(value, minimum, maximum, invert = false) {
+  if (maximum === minimum) {
+    return 5;
+  }
+  const normalized = Math.max(
+    0,
+    Math.min(1, (value - minimum) / (maximum - minimum)),
+  );
+  const bucket = Math.round(normalized * 10);
+  return invert ? 10 - bucket : bucket;
+}
+
+function safetyMapBoundaryPositions() {
+  if (!state.mapBoundary) {
+    return [];
+  }
+  return state.mapBoundary.polygons.flatMap((polygon) =>
+    polygon.flatMap((ring) => ring),
+  );
+}
+
+function appendSafetyMapBoundary(
+  canvas,
+  minimumLongitude,
+  maximumLongitude,
+  minimumLatitude,
+  maximumLatitude,
+) {
+  if (!state.mapBoundary) {
+    return;
+  }
+  const namespace = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(namespace, "svg");
+  svg.setAttribute("class", "safety-map-boundary");
+  svg.setAttribute("viewBox", "0 0 1000 600");
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("aria-hidden", "true");
+  const project = (longitude, latitude) => {
+    const width = maximumLongitude - minimumLongitude;
+    const height = maximumLatitude - minimumLatitude;
+    const x = width
+      ? 40 + ((longitude - minimumLongitude) / width) * 920
+      : 500;
+    const y = height
+      ? 560 - ((latitude - minimumLatitude) / height) * 520
+      : 300;
+    return [x, y];
+  };
+  state.mapBoundary.polygons.forEach((polygon) => {
+    const path = document.createElementNS(namespace, "path");
+    const commands = polygon
+      .map((ring) => {
+        const points = ring.map(([longitude, latitude]) =>
+          project(longitude, latitude),
+        );
+        return points
+          .map(
+            ([x, y], index) =>
+              `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`,
+          )
+          .join(" ")
+          .concat(" Z");
+      })
+      .join(" ");
+    path.setAttribute("d", commands);
+    path.setAttribute("fill-rule", "evenodd");
+    path.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.appendChild(path);
+  });
+  canvas.appendChild(svg);
+}
+
+function renderSafetyMap() {
+  const canvas = elements["safety-map-canvas"];
+  const validMines = state.safetyDashboard.mines.filter(
+    (mine) =>
+      mine.longitude !== null &&
+      mine.longitude >= -180 &&
+      mine.longitude <= 180 &&
+      mine.latitude !== null &&
+      mine.latitude >= -90 &&
+      mine.latitude <= 90,
+  );
+  canvas.replaceChildren();
+  const boundaryPositions = safetyMapBoundaryPositions();
+  const boundaryAvailable = boundaryPositions.length > 0;
+  elements["safety-map-kicker"].textContent = boundaryAvailable
+    ? "部署边界与矿井点位"
+    : "辖区相对位置";
+  elements["safety-map-title"].textContent = boundaryAvailable
+    ? "矿井分布图"
+    : "矿井分布示意";
+  elements["safety-map-source"].textContent = boundaryAvailable
+    ? "已加载部署方提供并经格式校验的边界 GeoJSON；边界来源、坐标系和点位精度仍须现场验收，不用于测绘或导航。"
+    : "按已登记经纬度在辖区最小、最大范围内归一展示，仅用于快速定位，不是测绘底图或导航依据。";
+  if (
+    validMines.length === 0 ||
+    (!boundaryAvailable && validMines.length < 2)
+  ) {
+    canvas.hidden = true;
+    elements["safety-map-empty"].hidden = false;
+    return;
+  }
+  canvas.hidden = false;
+  elements["safety-map-empty"].hidden = true;
+  const longitudes = [
+    ...validMines.map((mine) => mine.longitude),
+    ...boundaryPositions.map((position) => position[0]),
+  ];
+  const latitudes = [
+    ...validMines.map((mine) => mine.latitude),
+    ...boundaryPositions.map((position) => position[1]),
+  ];
+  const minimumLongitude = Math.min(...longitudes);
+  const maximumLongitude = Math.max(...longitudes);
+  const minimumLatitude = Math.min(...latitudes);
+  const maximumLatitude = Math.max(...latitudes);
+  const selectedMine = elements["safety-mine-filter"].value;
+  const selectedLevel = elements["safety-level-filter"].value;
+
+  appendSafetyMapBoundary(
+    canvas,
+    minimumLongitude,
+    maximumLongitude,
+    minimumLatitude,
+    maximumLatitude,
+  );
+  validMines.forEach((mine) => {
+    const x = safetyMapBucket(
+      mine.longitude,
+      minimumLongitude,
+      maximumLongitude,
+    );
+    const y = safetyMapBucket(
+      mine.latitude,
+      minimumLatitude,
+      maximumLatitude,
+      true,
+    );
+    const level = Object.prototype.hasOwnProperty.call(
+      SAFETY_LEVEL_META,
+      mine.riskLevel,
+    )
+      ? mine.riskLevel
+      : "unknown";
+    const metadata = SAFETY_LEVEL_META[level];
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className =
+      `safety-map-point is-${level} map-x-${x} map-y-${y}`;
+    button.dataset.safetyMine = mine.mineId;
+    button.setAttribute(
+      "aria-label",
+      `${displayText(mine.mineName, mine.mineId)}，${metadata.label}`,
+    );
+    button.setAttribute("aria-pressed", String(selectedMine === mine.mineId));
+    if (
+      selectedLevel !== "all" &&
+      !mine.openAlerts.some((alert) => alert.level === selectedLevel)
+    ) {
+      button.classList.add("is-muted");
+    }
+    const dot = document.createElement("span");
+    dot.className = "safety-map-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const label = document.createElement("small");
+    label.textContent = displayText(mine.mineName, mine.mineId);
+    button.append(dot, label);
+    canvas.appendChild(button);
+  });
+}
+
+function handleSafetyMineSelection(event) {
+  const profileButton = event.target.closest("[data-safety-profile-mine]");
+  if (profileButton) {
+    openSafetyMineProfile(profileButton.dataset.safetyProfileMine);
+    return;
+  }
+  const button = event.target.closest("[data-safety-mine]");
+  if (!button) {
+    return;
+  }
+  elements["safety-mine-filter"].value = button.dataset.safetyMine;
+  renderSafetyWorkspace();
+}
+
+function safetyMineVisible(mine) {
+  const mineFilter = elements["safety-mine-filter"].value;
+  const levelFilter = elements["safety-level-filter"].value;
+  if (mineFilter !== "all" && mine.mineId !== mineFilter) {
+    return false;
+  }
+  if (
+    levelFilter !== "all" &&
+    !mine.openAlerts.some((alert) => alert.level === levelFilter)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function gasCategoryLabel(value) {
+  return (
+    {
+      low_gas: "低瓦斯矿井",
+      high_gas: "高瓦斯矿井",
+    }[value] || "瓦斯等级未登记"
+  );
+}
+
+function findSafetyMetric(mine, metricCode, strategy = "latest") {
+  const candidates = mine.metrics.filter(
+    (metric) => metric.metricCode === metricCode && metric.value !== null,
+  );
+  if (!candidates.length) {
+    return null;
+  }
+  if (strategy === "maximum") {
+    return candidates.reduce((best, current) =>
+      current.value > best.value ? current : best,
+    );
+  }
+  return candidates.reduce((best, current) => {
+    const bestTime = new Date(best.observedAt || 0).valueOf();
+    const currentTime = new Date(current.observedAt || 0).valueOf();
+    return currentTime > bestTime ? current : best;
+  });
+}
+
+function formatSafetyMetricValue(metric) {
+  if (!metric || metric.value === null) {
+    return "未收到";
+  }
+  const units = {
+    person: "人",
+    count: "人",
+    "%": "%",
+    "m3/min": "m³/分钟",
+    Pa: "Pa",
+    "m/s": "m/s",
+  };
+  const value = new Intl.NumberFormat("zh-CN", {
+    maximumFractionDigits: 2,
+  }).format(metric.value);
+  return `${value} ${units[metric.unit] || displayText(metric.unit, "")}`.trim();
+}
+
+function metricQualityText(metric) {
+  if (!metric) {
+    return "尚无有效数据";
+  }
+  const quality = metric.quality;
+  if (!quality) {
+    return `更新 ${formatDateTime(metric.observedAt)}`;
+  }
+  if (quality.valid === false) {
+    return "数据质量异常，不能直接判断";
+  }
+  const score = Math.min(
+    ...[quality.completeness, quality.timeliness]
+      .map((value) => firstNumber(value))
+      .filter((value) => value !== null),
+  );
+  const qualityText = Number.isFinite(score)
+    ? `质量 ${formatPercent(normalizeRatio(score))}`
+    : "质量状态未返回";
+  return `${qualityText} · ${formatDateTime(metric.observedAt)}`;
+}
+
+function appendMineMetric(
+  container,
+  label,
+  metric,
+  supplemental = "",
+) {
+  const card = document.createElement("div");
+  card.className = "safety-metric-card";
+  const name = document.createElement("span");
+  name.textContent = label;
+  const value = document.createElement("strong");
+  value.textContent = formatSafetyMetricValue(metric);
+  const meta = document.createElement("small");
+  meta.textContent = supplemental || metricQualityText(metric);
+  card.append(name, value, meta);
+  container.appendChild(card);
+}
+
+function productionVerificationDisplay(verification) {
+  if (!verification) {
+    return {
+      tone: "unverified",
+      label: "未核验",
+      summary: "尚未运行吨煤耗电与吨煤火工品核验。",
+    };
+  }
+  if (verification.status === "insufficient_history") {
+    return {
+      tone: "insufficient",
+      label: "历史不足",
+      summary: "同工况且经核实的合法历史样本不足，暂不能判断偏离。",
+    };
+  }
+  if (verification.status === "blocked") {
+    return {
+      tone: "blocked",
+      label: "数据阻断",
+      summary: "当前数据存在阻断项，须先补齐或核对后再运行核验。",
+    };
+  }
+  if (verification.status !== "ready") {
+    return {
+      tone: "unknown",
+      label: "状态待确认",
+      summary: "服务未返回可识别的生产核验状态。",
+    };
+  }
+  const levels = {
+    0: {
+      tone: "normal",
+      label: "本次无关注",
+      summary: "本窗口未形成需要关注的历史偏离线索。",
+    },
+    1: {
+      tone: "attention",
+      label: "关注",
+      summary: "生产核验出现关注线索，建议结合原始台账复核。",
+    },
+    2: {
+      tone: "elevated",
+      label: "较高",
+      summary: "生产核验偏离较明显，建议优先安排人工复核。",
+    },
+    3: {
+      tone: "high",
+      label: "高",
+      summary: "生产核验形成高关注技术线索，请尽快组织人工复核。",
+    },
+  };
+  return (
+    levels[verification.overallClueLevel] || {
+      tone: "unknown",
+      label: "热度待确认",
+      summary: "核验已完成，但技术线索热度未正确返回。",
+    }
+  );
+}
+
+function appendProductionVerification(container, mine) {
+  const verification = mine.productionVerification;
+  const display = productionVerificationDisplay(verification);
+  const section = document.createElement("div");
+  section.className =
+    `safety-production-verification is-${display.tone}`;
+  const heading = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = "生产核验";
+  const badge = document.createElement("span");
+  badge.textContent = display.label;
+  heading.append(title, badge);
+  const summary = document.createElement("p");
+  summary.textContent = display.summary;
+  section.append(heading, summary);
+
+  if (verification) {
+    const facts = document.createElement("div");
+    facts.className = "safety-verification-facts";
+    if (
+      verification.energy &&
+      verification.energy.verificationRatio !== null
+    ) {
+      const energy = document.createElement("span");
+      energy.textContent =
+        `吨煤耗电比 ${formatNumber(
+          verification.energy.verificationRatio,
+          2,
+        )}`;
+      facts.appendChild(energy);
+    }
+    if (
+      verification.energy &&
+      verification.energy.historicalRarity &&
+      verification.energy.historicalRarity.tailProbability !== null &&
+      verification.energy.historicalRarity.tailProbability !== undefined
+    ) {
+      const rarity = document.createElement("span");
+      rarity.textContent =
+        `电耗历史尾概率 ${formatPercent(
+          verification.energy.historicalRarity.tailProbability,
+        )}`;
+      facts.appendChild(rarity);
+    }
+    if (
+      verification.explosives &&
+      verification.explosives.robustZ !== null
+    ) {
+      const explosives = document.createElement("span");
+      explosives.textContent =
+        `火工品稳健偏离 ${formatNumber(
+          verification.explosives.robustZ,
+          2,
+        )}`;
+      facts.appendChild(explosives);
+    }
+    if (verification.jointlyUpgraded) {
+      const joint = document.createElement("span");
+      joint.className = "is-joint";
+      joint.textContent = "两路同向印证";
+      facts.appendChild(joint);
+    }
+    if (facts.childElementCount) {
+      section.appendChild(facts);
+    }
+    const period = document.createElement("small");
+    period.textContent =
+      `核验期间 ${formatPeriod(
+        verification.windowStart,
+        verification.windowEnd,
+      )}`;
+    section.appendChild(period);
+  }
+  container.appendChild(section);
+}
+
+function renderSafetyMines() {
+  const grid = elements["safety-mine-grid"];
+  const rank = (mine) => {
+    const metadata = SAFETY_LEVEL_META[mine.riskLevel];
+    return metadata ? metadata.rank : SAFETY_LEVEL_META.normal.rank;
+  };
+  const mines = state.safetyDashboard.mines
+    .filter(safetyMineVisible)
+    .sort(
+      (left, right) =>
+        rank(right) - rank(left) ||
+        displayText(left.mineName, left.mineId).localeCompare(
+          displayText(right.mineName, right.mineId),
+          "zh-CN",
+        ),
+    );
+  grid.replaceChildren();
+  elements["safety-mine-empty"].hidden = mines.length > 0;
+
+  mines.forEach((mine) => {
+    const level = Object.prototype.hasOwnProperty.call(
+      SAFETY_LEVEL_META,
+      mine.riskLevel,
+    )
+      ? mine.riskLevel
+      : "normal";
+    const metadata = SAFETY_LEVEL_META[level];
+    const card = document.createElement("article");
+    card.className = `safety-mine-card is-${level}`;
+
+    const header = document.createElement("div");
+    header.className = "safety-mine-heading";
+    const titleWrap = document.createElement("div");
+    const eyebrow = document.createElement("span");
+    eyebrow.textContent = "矿井安全档案";
+    const title = document.createElement("h4");
+    title.textContent = displayText(mine.mineName, mine.mineId);
+    const mineId = document.createElement("small");
+    mineId.textContent = `矿井编号 ${displayText(mine.mineId)}`;
+    titleWrap.append(eyebrow, title, mineId);
+    const levelBadge = document.createElement("span");
+    levelBadge.className = `safety-level-badge is-${level}`;
+    levelBadge.textContent = metadata.label;
+    header.append(titleWrap, levelBadge);
+
+    const profile = document.createElement("p");
+    profile.className = "safety-mine-profile";
+    const capacity =
+      mine.approvedPersonnel === null
+        ? "核定人数未登记"
+        : `核定井下 ${formatNumber(mine.approvedPersonnel)} 人`;
+    const productionCapacity =
+      mine.approvedCapacityTpy === null
+        ? "产能未登记"
+        : `核定产能 ${formatNumber(
+            mine.approvedCapacityTpy / 10_000,
+            2,
+          )} 万吨/年`;
+    const enabled = mine.enabled === false ? " · 档案已停用" : "";
+    profile.textContent =
+      `${gasCategoryLabel(mine.gasCategory)} · ${capacity} · ` +
+      `${productionCapacity}${enabled}`;
+
+    const missingFields = [];
+    if (!["low_gas", "high_gas"].includes(mine.gasCategory)) {
+      missingFields.push("瓦斯等级");
+    }
+    if (mine.approvedPersonnel === null) {
+      missingFields.push("核定井下人数");
+    }
+    let missingCallout = null;
+    if (missingFields.length) {
+      missingCallout = document.createElement("div");
+      missingCallout.className = "safety-profile-missing";
+      const message = document.createElement("span");
+      message.textContent =
+        `管理员需补齐矿井档案：${missingFields.join("、")}。` +
+        "缺项期间不能形成完整阈值判断。";
+      missingCallout.appendChild(message);
+      if (userCan("safetyProfile")) {
+        const complete = document.createElement("button");
+        complete.type = "button";
+        complete.className = "text-button";
+        complete.dataset.safetyProfileMine = mine.mineId;
+        complete.textContent = "现在补齐";
+        missingCallout.appendChild(complete);
+      }
+    }
+
+    const metrics = document.createElement("div");
+    metrics.className = "safety-metric-grid";
+    const personnel = findSafetyMetric(
+      mine,
+      "personnel.underground_count",
+    );
+    let personnelSupplement = "";
+    if (
+      personnel &&
+      mine.approvedPersonnel !== null &&
+      mine.approvedPersonnel > 0
+    ) {
+      personnelSupplement =
+        `占核定人数 ${formatPercent(personnel.value / mine.approvedPersonnel)} · ` +
+        formatDateTime(personnel.observedAt);
+    }
+    appendMineMetric(
+      metrics,
+      "井下人数",
+      personnel,
+      personnelSupplement,
+    );
+    appendMineMetric(
+      metrics,
+      "甲烷最高点",
+      findSafetyMetric(
+        mine,
+        "methane.concentration_percent",
+        "maximum",
+      ),
+    );
+    appendMineMetric(
+      metrics,
+      "最新风量",
+      findSafetyMetric(mine, "ventilation.airflow_m3_min"),
+    );
+
+    const footer = document.createElement("div");
+    footer.className = "safety-mine-footer";
+    const alertSummary = document.createElement("span");
+    const overdueCount = mine.openAlerts.filter(
+      (alert) => alert.overdue,
+    ).length;
+    alertSummary.textContent =
+      `${mine.openAlerts.length} 条开放预警` +
+      (overdueCount ? ` · ${overdueCount} 条逾期` : "");
+    const view = document.createElement("button");
+    view.type = "button";
+    view.className = "text-button";
+    view.dataset.safetyMine = mine.mineId;
+    view.textContent = "查看该矿预警";
+    footer.append(alertSummary, view);
+    card.append(header, profile);
+    if (missingCallout) {
+      card.appendChild(missingCallout);
+    }
+    card.appendChild(metrics);
+    appendProductionVerification(card, mine);
+    card.appendChild(footer);
+    grid.appendChild(card);
+  });
+}
+
+function openSafetyMineProfile(mineId) {
+  if (!userCan("safetyProfile") || !state.safetyDashboard) {
+    return;
+  }
+  const mine = state.safetyDashboard.mines.find(
+    (item) => item.mineId === mineId,
+  );
+  if (!mine) {
+    return;
+  }
+  elements["safety-profile-admin"].hidden = false;
+  elements["safety-profile-admin"].open = true;
+  elements["safety-profile-mine-id"].value = displayText(mine.mineId, "");
+  elements["safety-profile-mine-name"].value = displayText(
+    mine.mineName,
+    mine.mineId,
+  );
+  elements["safety-profile-gas-category"].value =
+    ["low_gas", "high_gas"].includes(mine.gasCategory)
+      ? mine.gasCategory
+      : "low_gas";
+  elements["safety-profile-personnel"].value =
+    mine.approvedPersonnel === null ? "" : String(mine.approvedPersonnel);
+  elements["safety-profile-capacity"].value =
+    mine.approvedCapacityTpy === null
+      ? ""
+      : String(mine.approvedCapacityTpy);
+  elements["safety-profile-longitude"].value =
+    mine.longitude === null ? "" : String(mine.longitude);
+  elements["safety-profile-latitude"].value =
+    mine.latitude === null ? "" : String(mine.latitude);
+  elements["safety-profile-enabled"].checked = mine.enabled !== false;
+  elements["safety-profile-status"].textContent =
+    "已载入该矿档案，请依据正式资料核对后保存。";
+  elements["safety-profile-status"].className = "form-status";
+  elements["safety-profile-admin"].scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
+  elements["safety-profile-mine-name"].focus();
+}
+
+function optionalSafetyNumber(id) {
+  const value = elements[id].value.trim();
+  if (!value) {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+async function saveSafetyMineProfile(event) {
+  event.preventDefault();
+  if (!userCan("safetyProfile")) {
+    elements["safety-profile-status"].textContent =
+      "当前账号没有维护矿井档案的权限。";
+    elements["safety-profile-status"].className = "form-status is-error";
+    return;
+  }
+  if (!elements["safety-profile-form"].reportValidity()) {
+    return;
+  }
+  const mineId = elements["safety-profile-mine-id"].value.trim();
+  const mineName = elements["safety-profile-mine-name"].value.trim();
+  if (!mineId || !mineName) {
+    elements["safety-profile-status"].textContent =
+      "矿井编号和矿井名称不能只包含空格。";
+    elements["safety-profile-status"].className = "form-status is-error";
+    return;
+  }
+  const personnel = Number(elements["safety-profile-personnel"].value);
+  if (!Number.isInteger(personnel) || personnel <= 0) {
+    elements["safety-profile-status"].textContent =
+      "核定井下人数必须是大于 0 的整数。";
+    elements["safety-profile-status"].className = "form-status is-error";
+    elements["safety-profile-personnel"].focus();
+    return;
+  }
+  const body = {
+    mine_id: mineId,
+    mine_name: mineName,
+    gas_category: elements["safety-profile-gas-category"].value,
+    approved_underground_personnel: personnel,
+    approved_capacity_tpy: optionalSafetyNumber(
+      "safety-profile-capacity",
+    ),
+    longitude: optionalSafetyNumber("safety-profile-longitude"),
+    latitude: optionalSafetyNumber("safety-profile-latitude"),
+    enabled: elements["safety-profile-enabled"].checked,
+  };
+  elements["save-safety-profile"].disabled = true;
+  elements["safety-profile-status"].textContent =
+    "正在保存矿井档案并记录管理员操作…";
+  elements["safety-profile-status"].className = "form-status";
+  try {
+    await requestJson(SUPERVISION_API_PATHS.safetyMines, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    elements["safety-profile-status"].textContent =
+      "矿井档案已保存，正在刷新安全态势。";
+    elements["safety-profile-status"].className =
+      "form-status is-success";
+    state.safetyLoaded = false;
+    await loadSafetyWorkspace();
+  } catch (error) {
+    elements["safety-profile-status"].textContent =
+      explainSupervisionError(error, "矿井档案保存");
+    elements["safety-profile-status"].className = "form-status is-error";
+  } finally {
+    elements["save-safety-profile"].disabled = false;
+  }
+}
+
+function normalizeSafetyRule(value) {
+  const item = objectOrNull(value) || {};
+  const snapshot = objectOrNull(item.snapshot) || {};
+  const statusValue = String(item.status || "unknown")
+    .trim()
+    .toLowerCase();
+  return {
+    ruleVersion: nullableText(item.rule_version),
+    fingerprint: nullableText(item.fingerprint),
+    status: ["proposal", "draft", "approved", "retired"].includes(
+      statusValue,
+    )
+      ? statusValue
+      : "unknown",
+    effectiveFrom: nullableText(item.effective_from),
+    effectiveTo: nullableText(item.effective_to),
+    authorityReference: nullableText(snapshot.authority_reference),
+    createdAt: nullableText(item.created_at),
+    createdBy: nullableText(item.created_by),
+    approvedAt: nullableText(item.approved_at),
+    approvedBy: nullableText(item.approved_by),
+    approvalNote: nullableText(item.approval_note),
+    retiredAt: nullableText(item.retired_at),
+    retiredBy: nullableText(item.retired_by),
+    retirementNote: nullableText(item.retirement_note),
+    decisionNote: nullableText(item.decision_note),
+  };
+}
+
+function safetyRuleStatusMeta(status) {
+  return (
+    {
+      proposal: {
+        label: "方案待审批",
+        tone: "proposal",
+        explanation: "已登记但尚未获准用于平台重算。",
+      },
+      draft: {
+        label: "草案待审批",
+        tone: "draft",
+        explanation: "新规则草案，审批前不生效。",
+      },
+      approved: {
+        label: "已审批",
+        tone: "approved",
+        explanation: "在有效期内可用于平台安全重算。",
+      },
+      retired: {
+        label: "已退役",
+        tone: "retired",
+        explanation: "保留历史追溯，不再用于新重算。",
+      },
+      unknown: {
+        label: "状态待确认",
+        tone: "unknown",
+        explanation: "服务返回了无法识别的规则状态。",
+      },
+    }[status] || {
+      label: "状态待确认",
+      tone: "unknown",
+      explanation: "服务返回了无法识别的规则状态。",
+    }
+  );
+}
+
+async function loadSafetyRules() {
+  if (!userCan("safetyRules") || state.safetyRulesLoading) {
+    return;
+  }
+  state.safetyRulesLoading = true;
+  elements["refresh-safety-rules"].disabled = true;
+  elements["safety-rules-status"].textContent =
+    "正在读取规则版本和审批状态…";
+  elements["safety-rules-status"].className = "form-status";
+  try {
+    const body = await requestJson(SUPERVISION_API_PATHS.safetyRules);
+    const envelope = objectOrNull(body) || {};
+    state.safetyRules = (arrayOrNull(envelope.items) || [])
+      .map(normalizeSafetyRule)
+      .filter(
+        (rule) =>
+          rule.ruleVersion !== null && rule.fingerprint !== null,
+      );
+    state.safetyRulesLoaded = true;
+    renderSafetyRules();
+    elements["safety-rules-status"].textContent =
+      `已读取 ${state.safetyRules.length} 个规则版本。`;
+    elements["safety-rules-status"].className =
+      "form-status is-success";
+  } catch (error) {
+    state.safetyRulesLoaded = false;
+    elements["safety-rules-status"].textContent =
+      explainSupervisionError(error, "安全规则");
+    elements["safety-rules-status"].className = "form-status is-error";
+  } finally {
+    state.safetyRulesLoading = false;
+    elements["refresh-safety-rules"].disabled = false;
+  }
+}
+
+function renderSafetyRules() {
+  const list = elements["safety-rules-list"];
+  list.replaceChildren();
+  elements["safety-rules-empty"].hidden = state.safetyRules.length > 0;
+  state.safetyRules.forEach((rule) => {
+    const metadata = safetyRuleStatusMeta(rule.status);
+    const card = document.createElement("article");
+    card.className = `safety-rule-card is-${metadata.tone}`;
+    const heading = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = displayText(rule.ruleVersion, "规则版本未返回");
+    const badge = document.createElement("span");
+    badge.className = `status-badge is-${metadata.tone}`;
+    badge.textContent = metadata.label;
+    heading.append(title, badge);
+    const explanation = document.createElement("p");
+    explanation.textContent = metadata.explanation;
+    const facts = document.createElement("dl");
+    [
+      [
+        "生效期",
+        `${formatDateTime(rule.effectiveFrom)} 至 ${
+          rule.effectiveTo
+            ? formatDateTime(rule.effectiveTo)
+            : "长期有效"
+        }`,
+      ],
+      ["完整指纹", displayText(rule.fingerprint)],
+      ["规则依据", displayText(rule.authorityReference, "未返回")],
+      [
+        "审批记录",
+        rule.approvedAt
+          ? `${formatDateTime(rule.approvedAt)} · ${displayText(
+              rule.approvedBy,
+              "审批人未返回",
+            )}`
+          : "尚未审批",
+      ],
+      [
+        "退役记录",
+        rule.retiredAt
+          ? `${formatDateTime(rule.retiredAt)} · ${displayText(
+              rule.retiredBy,
+              "退役操作人未返回",
+            )}`
+          : "未退役",
+      ],
+    ].forEach(([label, value]) => {
+      const group = document.createElement("div");
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const description = document.createElement("dd");
+      description.textContent = value;
+      if (label === "完整指纹") {
+        description.title = displayText(rule.fingerprint);
+      }
+      group.append(term, description);
+      facts.appendChild(group);
+    });
+    card.append(heading, explanation, facts);
+    if (rule.approvalNote || rule.retirementNote || rule.decisionNote) {
+      const note = document.createElement("p");
+      note.className = "safety-rule-decision";
+      note.textContent = [
+        rule.approvalNote
+          ? `审批说明：${rule.approvalNote}`
+          : null,
+        rule.retirementNote
+          ? `退役说明：${rule.retirementNote}`
+          : null,
+        !rule.approvalNote &&
+        !rule.retirementNote &&
+        rule.decisionNote
+          ? `最近决定：${rule.decisionNote}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("；");
+      card.appendChild(note);
+    }
+    if (["proposal", "draft", "approved"].includes(rule.status)) {
+      const action = rule.status === "approved" ? "retire" : "approve";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className =
+        action === "retire"
+          ? "button danger compact"
+          : "button primary compact";
+      button.dataset.safetyRuleVersion = rule.ruleVersion;
+      button.dataset.safetyRuleAction = action;
+      button.disabled = state.safetyRuleActionRunning;
+      button.textContent =
+        action === "approve" ? "审批并启用" : "退役此版本";
+      card.appendChild(button);
+    }
+    list.appendChild(card);
+  });
+}
+
+async function handleSafetyRuleAction(event) {
+  const button = event.target.closest("[data-safety-rule-action]");
+  if (
+    !button ||
+    !userCan("safetyRules") ||
+    state.safetyRuleActionRunning
+  ) {
+    return;
+  }
+  const action = button.dataset.safetyRuleAction;
+  const rule = state.safetyRules.find(
+    (item) => item.ruleVersion === button.dataset.safetyRuleVersion,
+  );
+  if (
+    !rule ||
+    !["approve", "retire"].includes(action) ||
+    !rule.fingerprint
+  ) {
+    return;
+  }
+  const actionLabel = action === "approve" ? "审批并启用" : "退役规则";
+  const confirmation = await requestActionConfirmation({
+    title: actionLabel,
+    message:
+      `规则版本：${rule.ruleVersion}。完整指纹：${rule.fingerprint}。` +
+      "请确认已核对阈值、依据、适用范围和有效期。",
+    confirmLabel: actionLabel,
+    danger: action === "retire",
+    inputLabel: "审批或退役说明",
+    inputHelp: "至少 10 个字符，将永久写入规则治理和审计记录。",
+    inputPlaceholder: "说明核对依据、审批结论和适用范围",
+    inputMinLength: 10,
+    inputRequired: true,
+  });
+  if (!confirmation.confirmed) {
+    return;
+  }
+  state.safetyRuleActionRunning = true;
+  renderSafetyRules();
+  elements["safety-rules-status"].textContent =
+    `正在${actionLabel}规则 ${rule.ruleVersion}…`;
+  elements["safety-rules-status"].className = "form-status";
+  try {
+    await requestJson(
+      `${SUPERVISION_API_PATHS.safetyRules}/${encodeURIComponent(rule.ruleVersion)}/actions`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          action,
+          expected_fingerprint: rule.fingerprint,
+          note: confirmation.value,
+        }),
+      },
+    );
+    state.safetyRulesLoaded = false;
+    await loadSafetyRules();
+    elements["safety-rules-status"].textContent =
+      `${actionLabel}已完成并留痕。`;
+    elements["safety-rules-status"].className =
+      "form-status is-success";
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      state.safetyRulesLoaded = false;
+      await loadSafetyRules();
+    }
+    elements["safety-rules-status"].textContent =
+      explainSupervisionError(error, actionLabel);
+    elements["safety-rules-status"].className = "form-status is-error";
+  } finally {
+    state.safetyRuleActionRunning = false;
+    renderSafetyRules();
+  }
+}
+
+function normalizeSafetyResponsibilityRoute(value) {
+  const item = objectOrNull(value) || {};
+  return {
+    routeId: nullableText(item.route_id),
+    mineId: nullableText(item.mine_id),
+    category: nullableText(item.category),
+    minimumLevel: normalizeSafetyLevel(item.minimum_level),
+    primaryUsername: nullableText(item.primary_username),
+    backupUsername: nullableText(item.backup_username),
+    escalationMinutes: firstNumber(item.escalation_minutes),
+    enabled: booleanOrNull(item.enabled) !== false,
+    updatedAt: nullableText(item.updated_at),
+    updatedBy: nullableText(item.updated_by),
+  };
+}
+
+async function loadSafetyResponsibilityRoutes() {
+  if (
+    !userCan("safetyRules") ||
+    state.safetyResponsibilityLoading
+  ) {
+    return;
+  }
+  state.safetyResponsibilityLoading = true;
+  elements["refresh-safety-responsibility"].disabled = true;
+  elements["safety-responsibility-status"].textContent =
+    "正在读取责任路由…";
+  try {
+    const body = await requestJson(
+      SUPERVISION_API_PATHS.safetyResponsibility,
+    );
+    state.safetyResponsibilityRoutes = (
+      arrayOrNull((objectOrNull(body) || {}).items) || []
+    )
+      .map(normalizeSafetyResponsibilityRoute)
+      .filter((item) => item.routeId !== null);
+    state.safetyResponsibilityLoaded = true;
+    renderSafetyResponsibilityRoutes();
+    elements["safety-responsibility-status"].textContent =
+      `已读取 ${state.safetyResponsibilityRoutes.length} 条责任路由。`;
+    elements["safety-responsibility-status"].className =
+      "form-status is-success";
+  } catch (error) {
+    state.safetyResponsibilityLoaded = false;
+    elements["safety-responsibility-status"].textContent =
+      explainSupervisionError(error, "责任路由");
+    elements["safety-responsibility-status"].className =
+      "form-status is-error";
+  } finally {
+    state.safetyResponsibilityLoading = false;
+    elements["refresh-safety-responsibility"].disabled = false;
+  }
+}
+
+function renderSafetyResponsibilityRoutes() {
+  const list = elements["safety-responsibility-list"];
+  list.replaceChildren();
+  elements["safety-responsibility-empty"].hidden =
+    state.safetyResponsibilityRoutes.length > 0;
+  state.safetyResponsibilityRoutes.forEach((route) => {
+    const card = document.createElement("article");
+    card.className = `safety-rule-card ${
+      route.enabled ? "is-approved" : "is-retired"
+    }`;
+    const heading = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = displayText(route.routeId);
+    const badge = document.createElement("span");
+    badge.className = `status-badge ${
+      route.enabled ? "is-success" : "is-muted"
+    }`;
+    badge.textContent = route.enabled ? "已启用" : "已停用";
+    heading.append(title, badge);
+    const facts = document.createElement("dl");
+    [
+      ["矿井", displayText(route.mineId, "全部矿井")],
+      ["类别", displayText(route.category, "全部类别")],
+      [
+        "最低级别",
+        (SAFETY_LEVEL_META[route.minimumLevel] || {}).label ||
+          displayText(route.minimumLevel),
+      ],
+      ["接收账号", displayText(route.primaryUsername)],
+      ["备岗", displayText(route.backupUsername, "未配置")],
+      [
+        "未读升级",
+        route.escalationMinutes === null
+          ? "未返回"
+          : `${formatNumber(route.escalationMinutes)} 分钟`,
+      ],
+    ].forEach(([label, value]) => {
+      const group = document.createElement("div");
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const description = document.createElement("dd");
+      description.textContent = value;
+      group.append(term, description);
+      facts.appendChild(group);
+    });
+    const actions = document.createElement("div");
+    actions.className = "safety-alert-actions";
+    [
+      ["edit", "载入编辑", "button quiet compact"],
+      ["delete", "删除路由", "button danger compact"],
+    ].forEach(([action, label, className]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = className;
+      button.dataset.safetyResponsibilityId = route.routeId;
+      button.dataset.safetyResponsibilityAction = action;
+      button.disabled = state.safetyResponsibilityActionRunning;
+      button.textContent = label;
+      actions.appendChild(button);
+    });
+    card.append(heading, facts, actions);
+    list.appendChild(card);
+  });
+}
+
+function editSafetyResponsibilityRoute(route) {
+  elements["safety-route-id"].value = route.routeId || "";
+  elements["safety-route-mine"].value = route.mineId || "";
+  elements["safety-route-category"].value = route.category || "";
+  elements["safety-route-level"].value =
+    ["blue", "yellow", "orange", "red"].includes(route.minimumLevel)
+      ? route.minimumLevel
+      : "blue";
+  elements["safety-route-primary"].value =
+    route.primaryUsername || "";
+  elements["safety-route-backup"].value = route.backupUsername || "";
+  elements["safety-route-escalation"].value =
+    route.escalationMinutes || 30;
+  elements["safety-route-enabled"].checked = route.enabled;
+  elements["safety-responsibility-form"].scrollIntoView({
+    behavior: prefersReducedMotion() ? "auto" : "smooth",
+    block: "center",
+  });
+}
+
+async function saveSafetyResponsibilityRoute(event) {
+  event.preventDefault();
+  if (
+    !userCan("safetyRules") ||
+    state.safetyResponsibilityActionRunning
+  ) {
+    return;
+  }
+  const payload = {
+    route_id: elements["safety-route-id"].value.trim(),
+    mine_id: elements["safety-route-mine"].value.trim() || null,
+    category:
+      elements["safety-route-category"].value.trim() || null,
+    minimum_level: elements["safety-route-level"].value,
+    primary_username:
+      elements["safety-route-primary"].value.trim(),
+    backup_username:
+      elements["safety-route-backup"].value.trim() || null,
+    escalation_minutes: Number(
+      elements["safety-route-escalation"].value,
+    ),
+    enabled: elements["safety-route-enabled"].checked,
+  };
+  state.safetyResponsibilityActionRunning = true;
+  renderSafetyResponsibilityRoutes();
+  try {
+    await requestJson(
+      SUPERVISION_API_PATHS.safetyResponsibility,
+      {method: "POST", body: JSON.stringify(payload)},
+    );
+    elements["safety-responsibility-form"].reset();
+    elements["safety-route-escalation"].value = "30";
+    elements["safety-route-enabled"].checked = true;
+    state.safetyResponsibilityLoaded = false;
+    await loadSafetyResponsibilityRoutes();
+    elements["safety-responsibility-status"].textContent =
+      "责任路由已保存，并已尝试为未交办正式预警补充路由。";
+  } catch (error) {
+    elements["safety-responsibility-status"].textContent =
+      explainSupervisionError(error, "保存责任路由");
+    elements["safety-responsibility-status"].className =
+      "form-status is-error";
+  } finally {
+    state.safetyResponsibilityActionRunning = false;
+    renderSafetyResponsibilityRoutes();
+  }
+}
+
+async function handleSafetyResponsibilityAction(event) {
+  const button = event.target.closest(
+    "[data-safety-responsibility-action]",
+  );
+  if (
+    !button ||
+    !userCan("safetyRules") ||
+    state.safetyResponsibilityActionRunning
+  ) {
+    return;
+  }
+  const route = state.safetyResponsibilityRoutes.find(
+    (item) =>
+      item.routeId === button.dataset.safetyResponsibilityId,
+  );
+  if (!route) {
+    return;
+  }
+  if (button.dataset.safetyResponsibilityAction === "edit") {
+    editSafetyResponsibilityRoute(route);
+    return;
+  }
+  const confirmation = await requestActionConfirmation({
+    title: "删除责任路由",
+    message:
+      `将删除路由 ${route.routeId}。已有预警的哈希审计事件仍保留，` +
+      "后续新预警将不再匹配此路由。",
+    confirmLabel: "确认删除",
+    danger: true,
+  });
+  if (!confirmation.confirmed) {
+    return;
+  }
+  state.safetyResponsibilityActionRunning = true;
+  renderSafetyResponsibilityRoutes();
+  try {
+    await requestJson(
+      `${SUPERVISION_API_PATHS.safetyResponsibility}/${encodeURIComponent(route.routeId)}/actions`,
+      {
+        method: "POST",
+        body: JSON.stringify({action: "delete"}),
+      },
+    );
+    state.safetyResponsibilityLoaded = false;
+    await loadSafetyResponsibilityRoutes();
+  } catch (error) {
+    elements["safety-responsibility-status"].textContent =
+      explainSupervisionError(error, "删除责任路由");
+    elements["safety-responsibility-status"].className =
+      "form-status is-error";
+  } finally {
+    state.safetyResponsibilityActionRunning = false;
+    renderSafetyResponsibilityRoutes();
+  }
+}
+
+const EDGE_EVALUATION_STATUS_LABELS = {
+  pending: "排队中",
+  failed: "等待自动重试",
+  running: "复算中",
+  dead: "死信",
+  completed: "已完成",
+};
+
+function normalizeEdgeEvaluation(value) {
+  const item = objectOrNull(value) || {};
+  return {
+    batchId: nullableText(item.batch_id),
+    mineId: nullableText(item.mine_id),
+    receivedAt: nullableText(item.received_at),
+    status: nullableText(item.status),
+    attempts: firstNumber(item.attempts),
+    resultStatus: nullableText(item.result_status),
+    errorCode: nullableText(item.error_code),
+    updatedAt: nullableText(item.updated_at),
+    nextAttemptAt: nullableText(item.next_attempt_at),
+  };
+}
+
+async function loadEdgeEvaluations() {
+  if (
+    !userCan("safetyRecalculate") ||
+    state.edgeEvaluationsLoading
+  ) {
+    return;
+  }
+  state.edgeEvaluationsLoading = true;
+  elements["refresh-edge-evaluations"].disabled = true;
+  elements["edge-evaluation-status"].textContent =
+    "正在读取平台安全复算队列…";
+  elements["edge-evaluation-status"].className = "form-status";
+  const query = new URLSearchParams({limit: "200"});
+  const selectedStatus =
+    elements["edge-evaluation-filter"].value.trim();
+  if (selectedStatus) {
+    query.set("status", selectedStatus);
+  }
+  try {
+    const body = await requestJson(
+      `${SUPERVISION_API_PATHS.edgeEvaluations}?${query.toString()}`,
+    );
+    state.edgeEvaluations = (
+      arrayOrNull((objectOrNull(body) || {}).items) || []
+    )
+      .map(normalizeEdgeEvaluation)
+      .filter(
+        (item) => item.batchId !== null && item.mineId !== null,
+      );
+    state.edgeEvaluationsLoaded = true;
+    renderEdgeEvaluations();
+    elements["edge-evaluation-status"].textContent =
+      `已读取 ${state.edgeEvaluations.length} 个复算批次；页面最多显示 200 个。`;
+    elements["edge-evaluation-status"].className =
+      "form-status is-success";
+  } catch (error) {
+    state.edgeEvaluationsLoaded = false;
+    elements["edge-evaluation-status"].textContent =
+      explainSupervisionError(error, "安全复算队列");
+    elements["edge-evaluation-status"].className =
+      "form-status is-error";
+  } finally {
+    state.edgeEvaluationsLoading = false;
+    elements["refresh-edge-evaluations"].disabled = false;
+  }
+}
+
+function renderEdgeEvaluations() {
+  const body = elements["edge-evaluation-body"];
+  body.replaceChildren();
+  elements["edge-evaluation-empty"].hidden =
+    state.edgeEvaluations.length > 0;
+  state.edgeEvaluations.forEach((item) => {
+    const row = document.createElement("tr");
+    const identity = document.createElement("td");
+    const batch = document.createElement("strong");
+    batch.textContent = displayText(item.batchId);
+    const mine = document.createElement("small");
+    mine.textContent = `矿井：${displayText(item.mineId)}`;
+    identity.append(batch, mine);
+
+    const received = document.createElement("td");
+    received.textContent = formatDateTime(item.receivedAt);
+
+    const statusCell = document.createElement("td");
+    const badge = document.createElement("span");
+    const statusTone =
+      item.status === "completed"
+        ? "is-success"
+        : item.status === "dead" || item.status === "failed"
+          ? "is-danger"
+          : item.status === "running"
+            ? "is-info"
+            : "is-muted";
+    badge.className = `status-badge ${statusTone}`;
+    badge.textContent =
+      EDGE_EVALUATION_STATUS_LABELS[item.status] ||
+      displayText(item.status);
+    statusCell.appendChild(badge);
+    if (item.nextAttemptAt) {
+      const nextAttempt = document.createElement("small");
+      nextAttempt.textContent =
+        `下次重试：${formatDateTime(item.nextAttemptAt)}`;
+      statusCell.appendChild(nextAttempt);
+    }
+
+    const attempts = document.createElement("td");
+    attempts.textContent =
+      item.attempts === null
+        ? "—"
+        : `${formatNumber(item.attempts)} 次`;
+
+    const result = document.createElement("td");
+    result.textContent = displayText(
+      item.errorCode || item.resultStatus,
+      "尚无结果",
+    );
+    if (item.updatedAt) {
+      const updated = document.createElement("small");
+      updated.textContent =
+        `更新：${formatDateTime(item.updatedAt)}`;
+      result.appendChild(updated);
+    }
+
+    const action = document.createElement("td");
+    if (["failed", "dead"].includes(item.status)) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "button danger compact";
+      button.dataset.edgeEvaluationBatch = item.batchId;
+      button.disabled = state.edgeEvaluationActionRunning;
+      button.textContent = "受控重算";
+      action.appendChild(button);
+    } else {
+      action.textContent =
+        item.status === "completed" ? "无需操作" : "由后台自动处理";
+    }
+    row.append(
+      identity,
+      received,
+      statusCell,
+      attempts,
+      result,
+      action,
+    );
+    body.appendChild(row);
+  });
+}
+
+async function handleEdgeEvaluationAction(event) {
+  const button = event.target.closest("[data-edge-evaluation-batch]");
+  if (
+    !button ||
+    !userCan("safetyRecalculate") ||
+    state.edgeEvaluationActionRunning
+  ) {
+    return;
+  }
+  const batchId = button.dataset.edgeEvaluationBatch;
+  const item = state.edgeEvaluations.find(
+    (candidate) => candidate.batchId === batchId,
+  );
+  if (!item || !["failed", "dead"].includes(item.status)) {
+    return;
+  }
+  const confirmation = await requestActionConfirmation({
+    title: "受控重算边缘批次",
+    message:
+      `将使用监管端当前已批准规则重新计算批次 ${batchId}。` +
+      "原始数据和既有失败记录不会被删除，重算可能新增或更新技术预警。",
+    confirmLabel: "确认重算",
+    danger: true,
+  });
+  if (!confirmation.confirmed) {
+    return;
+  }
+  state.edgeEvaluationActionRunning = true;
+  renderEdgeEvaluations();
+  elements["edge-evaluation-status"].textContent =
+    `正在受控重算批次 ${batchId}…`;
+  elements["edge-evaluation-status"].className = "form-status";
+  try {
+    await requestJson(
+      `/v1/edge-telemetry-batches/${encodeURIComponent(batchId)}/recalculate`,
+      {method: "POST", body: JSON.stringify({})},
+    );
+    state.edgeEvaluationsLoaded = false;
+    await Promise.all([
+      loadEdgeEvaluations(),
+      loadSafetyWorkspace(),
+    ]);
+    elements["edge-evaluation-status"].textContent =
+      `批次 ${batchId} 已完成受控重算，结果和操作审计均已保存。`;
+    elements["edge-evaluation-status"].className =
+      "form-status is-success";
+  } catch (error) {
+    elements["edge-evaluation-status"].textContent =
+      explainSupervisionError(error, "受控重算");
+    elements["edge-evaluation-status"].className =
+      "form-status is-error";
+  } finally {
+    state.edgeEvaluationActionRunning = false;
+    renderEdgeEvaluations();
+  }
+}
+
+function safetyAlertVisible(alert) {
+  const mineFilter = elements["safety-mine-filter"].value;
+  const levelFilter = elements["safety-level-filter"].value;
+  const statusFilter = elements["safety-status-filter"].value;
+  const mine = state.safetyDashboard
+    ? state.safetyDashboard.mines.find(
+        (item) => item.mineId === alert.mineId,
+      )
+    : null;
+  return (
+    (!mine || mine.enabled !== false) &&
+    (mineFilter === "all" || alert.mineId === mineFilter) &&
+    (levelFilter === "all" || alert.level === levelFilter) &&
+    (statusFilter === "all" || alert.status === statusFilter)
+  );
+}
+
+function safetyMineName(mineId) {
+  const mine = state.safetyDashboard.mines.find(
+    (item) => item.mineId === mineId,
+  );
+  return mine ? displayText(mine.mineName, mineId) : displayText(mineId);
+}
+
+function safetyStatusBadge(status) {
+  const metadata =
+    SAFETY_STATUS_META[status] || SAFETY_STATUS_META.unknown;
+  const badge = document.createElement("span");
+  badge.className = `status-badge is-${metadata.tone}`;
+  badge.textContent = metadata.label;
+  return badge;
+}
+
+function availableSafetyActions(alert) {
+  if (!alert.operational) {
+    return userCanSafetyAction("add_note") ? ["add_note"] : [];
+  }
+  const byStatus = {
+    open: ["acknowledge", "start"],
+    acknowledged: ["start"],
+    in_progress: ["resolve"],
+    resolved: ["close", "reopen"],
+    closed: ["reopen"],
+  };
+  const actions = [...(byStatus[alert.status] || [])];
+  if (alert.status !== "closed") {
+    actions.push("assign");
+  }
+  actions.push("add_note");
+  return actions.filter(userCanSafetyAction);
+}
+
+function userCanSafetyAction(action) {
+  if (action === "assign") {
+    return userCan("safetyAssign");
+  }
+  if (["close", "reopen"].includes(action)) {
+    return userCan("safetyApprove");
+  }
+  return userCan("safetyReview");
+}
+
+function safetyActionLabel(action) {
+  return (
+    {
+      acknowledge: "标记已阅",
+      start: "开始核查",
+      resolve: "记录已处理",
+      close: "关闭预警",
+      reopen: "重新打开",
+      assign: "交办",
+      add_note: "补充说明",
+    }[action] || action
+  );
+}
+
+const SAFETY_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+const SAFETY_ATTACHMENT_MEDIA_BY_EXTENSION = {
+  pdf: "application/pdf",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  txt: "text/plain",
+  csv: "text/csv",
+  xlsx:
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  docx:
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+};
+
+function safetyAttachmentCache(alertId) {
+  if (!state.safetyAttachments[alertId]) {
+    state.safetyAttachments[alertId] = {
+      loaded: false,
+      loading: false,
+      items: [],
+    };
+  }
+  return state.safetyAttachments[alertId];
+}
+
+function normalizeSafetyAttachment(value) {
+  const item = objectOrNull(value) || {};
+  return {
+    attachmentId: nullableText(item.attachment_id),
+    alertId: nullableText(item.alert_id),
+    filename: nullableText(item.filename),
+    mediaType: nullableText(item.media_type),
+    sizeBytes: firstNumber(item.size_bytes),
+    sha256: nullableText(item.sha256),
+    note: nullableText(item.note),
+    createdAt: nullableText(item.created_at),
+    createdBy: nullableText(item.created_by),
+    alertVersion: firstNumber(item.alert_version),
+    downloadUrl: nullableText(item.download_url),
+  };
+}
+
+function renderSafetyAttachmentItems(list, summary, cache) {
+  list.replaceChildren();
+  summary.textContent = cache.loaded
+    ? `附件与核查材料（${cache.items.length}）`
+    : "附件与核查材料";
+  if (!cache.loaded) {
+    const pending = document.createElement("p");
+    pending.className = "muted-note";
+    pending.textContent = "展开后读取附件目录。";
+    list.appendChild(pending);
+    return;
+  }
+  if (!cache.items.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted-note";
+    empty.textContent = "尚未上传核查材料。";
+    list.appendChild(empty);
+    return;
+  }
+  cache.items.forEach((attachment) => {
+    const item = document.createElement("article");
+    item.className = "safety-attachment-item";
+    const text = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = displayText(attachment.filename, "附件");
+    const metadata = document.createElement("small");
+    metadata.textContent = [
+      attachment.sizeBytes === null
+        ? "大小未返回"
+        : formatFileSize(attachment.sizeBytes),
+      formatDateTime(attachment.createdAt),
+      attachment.sha256
+        ? `SHA-256 ${attachment.sha256.slice(0, 12)}…`
+        : "哈希未返回",
+    ].join(" · ");
+    text.append(name, metadata);
+    if (attachment.note) {
+      const note = document.createElement("p");
+      note.textContent = attachment.note;
+      text.appendChild(note);
+    }
+    const download = document.createElement("a");
+    download.className = "button quiet compact";
+    download.textContent = "下载核查";
+    download.href =
+      attachment.downloadUrl ||
+      `${SUPERVISION_API_PATHS.safetyAlerts}/${encodeURIComponent(
+        attachment.alertId,
+      )}/attachments/${encodeURIComponent(
+        attachment.attachmentId,
+      )}/download`;
+    download.download = attachment.filename || "";
+    download.setAttribute(
+      "aria-label",
+      `下载附件 ${displayText(attachment.filename, "未命名附件")}`,
+    );
+    item.append(text, download);
+    list.appendChild(item);
+  });
+}
+
+async function loadSafetyAttachments(alert, list, summary, status) {
+  const cache = safetyAttachmentCache(alert.alertId);
+  if (cache.loaded) {
+    renderSafetyAttachmentItems(list, summary, cache);
+    return;
+  }
+  if (cache.loading) {
+    return;
+  }
+  cache.loading = true;
+  setLoadStatus(status, "正在读取附件目录…", "loading");
+  try {
+    const body = await requestJson(
+      `${SUPERVISION_API_PATHS.safetyAlerts}/${encodeURIComponent(
+        alert.alertId,
+      )}/attachments`,
+    );
+    cache.items = (arrayOrNull(body.items) || [])
+      .map(normalizeSafetyAttachment)
+      .filter((item) => item.attachmentId);
+    cache.loaded = true;
+    renderSafetyAttachmentItems(list, summary, cache);
+    setLoadStatus(
+      status,
+      cache.items.length
+        ? `已读取 ${cache.items.length} 份材料；文件只支持强制下载，不在页面内打开。`
+        : "当前没有附件，可由复核人员上传核查材料。",
+    );
+  } catch (error) {
+    setLoadStatus(
+      status,
+      explainSupervisionError(error, "附件目录"),
+      "error",
+    );
+  } finally {
+    cache.loading = false;
+  }
+}
+
+function safetyAttachmentMediaType(file) {
+  const provided = String(file.type || "").trim().toLowerCase();
+  if (Object.values(SAFETY_ATTACHMENT_MEDIA_BY_EXTENSION).includes(provided)) {
+    return provided;
+  }
+  const extension = String(file.name || "")
+    .split(".")
+    .pop()
+    .toLowerCase();
+  return SAFETY_ATTACHMENT_MEDIA_BY_EXTENSION[extension] || null;
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(
+      ...bytes.subarray(offset, offset + chunkSize),
+    );
+  }
+  return window.btoa(binary);
+}
+
+async function sha256Hex(bytes) {
+  if (!window.crypto || !window.crypto.subtle) {
+    throw new Error("secure_hash_unavailable");
+  }
+  const digest = await window.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function uploadSafetyAttachment(
+  event,
+  alert,
+  fileInput,
+  noteInput,
+  list,
+  summary,
+  status,
+) {
+  event.preventDefault();
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) {
+    setLoadStatus(status, "请先选择一份核查材料。", "error");
+    return;
+  }
+  if (file.size <= 0 || file.size > SAFETY_ATTACHMENT_MAX_BYTES) {
+    setLoadStatus(
+      status,
+      "附件必须大于 0 字节且不超过 5 MiB。",
+      "error",
+    );
+    return;
+  }
+  const mediaType = safetyAttachmentMediaType(file);
+  if (!mediaType) {
+    setLoadStatus(
+      status,
+      "仅支持 PDF、JPG、PNG、UTF-8 TXT/CSV、XLSX 和 DOCX。",
+      "error",
+    );
+    return;
+  }
+  const form = event.currentTarget;
+  const submit = form.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  fileInput.disabled = true;
+  setLoadStatus(status, "正在计算哈希并安全上传…", "loading");
+  try {
+    const content = new Uint8Array(await file.arrayBuffer());
+    const digest = await sha256Hex(content);
+    const body = await requestJson(
+      `${SUPERVISION_API_PATHS.safetyAlerts}/${encodeURIComponent(
+        alert.alertId,
+      )}/attachments`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          filename: file.name,
+          media_type: mediaType,
+          content_base64: bytesToBase64(content),
+          sha256: digest,
+          note: noteInput.value.trim() || null,
+        }),
+      },
+    );
+    const uploaded = normalizeSafetyAttachment(body.attachment);
+    const cache = safetyAttachmentCache(alert.alertId);
+    cache.items = [
+      ...cache.items.filter(
+        (item) => item.attachmentId !== uploaded.attachmentId,
+      ),
+      uploaded,
+    ];
+    cache.loaded = true;
+    if (uploaded.alertVersion !== null) {
+      alert.version = uploaded.alertVersion;
+    }
+    renderSafetyAttachmentItems(list, summary, cache);
+    form.reset();
+    setLoadStatus(
+      status,
+      "材料已不可变留存并写入 SHA-256 审计链。",
+      "success",
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error && error.message === "secure_hash_unavailable"
+        ? "当前浏览器环境不能安全计算哈希，请通过 HTTPS 打开平台后重试。"
+        : explainSupervisionError(error, "附件上传");
+    setLoadStatus(status, message, "error");
+  } finally {
+    submit.disabled = false;
+    fileInput.disabled = false;
+  }
+}
+
+function createSafetyAttachmentPanel(alert) {
+  const details = document.createElement("details");
+  details.className = "safety-attachment-panel";
+  const summary = document.createElement("summary");
+  const cache = safetyAttachmentCache(alert.alertId);
+  summary.textContent = cache.loaded
+    ? `附件与核查材料（${cache.items.length}）`
+    : "附件与核查材料";
+  const body = document.createElement("div");
+  body.className = "safety-attachment-body";
+  const status = document.createElement("div");
+  status.className = "form-status";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  const list = document.createElement("div");
+  list.className = "safety-attachment-list";
+  renderSafetyAttachmentItems(list, summary, cache);
+  body.append(status, list);
+
+  if (userCan("safetyReview")) {
+    const form = document.createElement("form");
+    form.className = "safety-attachment-form";
+    const fileLabel = document.createElement("label");
+    const fileLabelText = document.createElement("span");
+    fileLabelText.textContent = "选择核查材料";
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.required = true;
+    fileInput.accept =
+      ".pdf,.jpg,.jpeg,.png,.txt,.csv,.xlsx,.docx," +
+      "application/pdf,image/jpeg,image/png,text/plain,text/csv";
+    fileLabel.append(fileLabelText, fileInput);
+    const noteLabel = document.createElement("label");
+    const noteLabelText = document.createElement("span");
+    noteLabelText.textContent = "材料说明（可选）";
+    const noteInput = document.createElement("input");
+    noteInput.type = "text";
+    noteInput.maxLength = 2000;
+    noteInput.placeholder = "例如：现场照片、设备日志或核查记录";
+    noteLabel.append(noteLabelText, noteInput);
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.className = "button secondary compact";
+    submit.textContent = "上传并留痕";
+    const help = document.createElement("small");
+    help.textContent =
+      "单个文件不超过 5 MiB；平台校验类型与哈希，只提供强制下载，不内联预览。";
+    form.append(fileLabel, noteLabel, submit, help);
+    form.addEventListener("submit", (event) =>
+      uploadSafetyAttachment(
+        event,
+        alert,
+        fileInput,
+        noteInput,
+        list,
+        summary,
+        status,
+      ),
+    );
+    body.appendChild(form);
+  }
+
+  details.append(summary, body);
+  details.addEventListener("toggle", () => {
+    if (details.open) {
+      loadSafetyAttachments(alert, list, summary, status);
+    }
+  });
+  return details;
+}
+
+function safetyResponsibilityReceipt(alert) {
+  if (!alert.operational) {
+    return "影子线索不交办";
+  }
+  if (!alert.recipients.length) {
+    return "尚未匹配责任路由";
+  }
+  return alert.recipients
+    .map((recipient) => {
+      const role =
+        recipient.role === "primary"
+          ? "主责"
+          : recipient.role === "backup"
+            ? "备岗"
+            : "查阅";
+      const receipt = recipient.readAt
+        ? `已读 ${formatDateTime(recipient.readAt)}`
+        : recipient.escalatedAt
+          ? `已升级 ${formatDateTime(recipient.escalatedAt)}`
+          : "待已读";
+      return `${role} ${displayText(recipient.username)}（${receipt}）`;
+    })
+    .join("；");
+}
+
+function renderSafetyAlerts() {
+  if (!state.safetyDashboard) {
+    return;
+  }
+  const list = elements["safety-alert-list"];
+  const alerts = state.safetyAlerts
+    .filter(safetyAlertVisible)
+    .sort((left, right) => {
+      const leftMetadata = SAFETY_LEVEL_META[left.level];
+      const rightMetadata = SAFETY_LEVEL_META[right.level];
+      const leftRank = leftMetadata ? leftMetadata.rank : 0;
+      const rightRank = rightMetadata ? rightMetadata.rank : 0;
+      return (
+        rightRank - leftRank ||
+        Number(right.overdue) - Number(left.overdue) ||
+        new Date(right.lastSeenAt || 0).valueOf() -
+          new Date(left.lastSeenAt || 0).valueOf()
+      );
+    });
+  list.replaceChildren();
+  elements["safety-alert-empty"].hidden = alerts.length > 0;
+  alerts.forEach((alert) => {
+    const metadata =
+      SAFETY_LEVEL_META[alert.level] || SAFETY_LEVEL_META.blue;
+    const card = document.createElement("article");
+    card.className = `safety-alert-card is-${alert.level}`;
+    if (!alert.operational) {
+      card.classList.add("is-shadow");
+    }
+
+    const heading = document.createElement("div");
+    heading.className = "safety-alert-heading";
+    const titleWrap = document.createElement("div");
+    const badges = document.createElement("div");
+    badges.className = "safety-alert-badges";
+    const levelBadge = document.createElement("span");
+    levelBadge.className = `safety-level-badge is-${alert.level}`;
+    levelBadge.textContent = `${metadata.label} · ${metadata.short}`;
+    badges.append(levelBadge, safetyStatusBadge(alert.status));
+    if (!alert.operational) {
+      const shadowBadge = document.createElement("span");
+      shadowBadge.className = "status-badge is-shadow";
+      shadowBadge.textContent = "影子试运行 · 不进入正式处置";
+      badges.appendChild(shadowBadge);
+    }
+    if (alert.overdue) {
+      const overdue = document.createElement("span");
+      overdue.className = "status-badge is-danger";
+      overdue.textContent = "已逾期";
+      badges.appendChild(overdue);
+    }
+    const title = document.createElement("h4");
+    title.textContent = displayText(alert.title, "安全预警线索");
+    titleWrap.append(badges, title);
+    const version = document.createElement("small");
+    version.textContent = `版本 ${formatCount(alert.version)}`;
+    heading.append(titleWrap, version);
+
+    const summary = document.createElement("p");
+    summary.className = "safety-alert-summary";
+    summary.textContent = displayText(
+      alert.summary,
+      "请调阅原始监测记录并人工核查。",
+    );
+    if (!alert.operational) {
+      summary.textContent =
+        `未审批规则试算结果，不计入正式预警或时限。${summary.textContent}`;
+    }
+
+    const facts = document.createElement("dl");
+    facts.className = "safety-alert-facts";
+    [
+      ["矿井", safetyMineName(alert.mineId)],
+      ["点位", displayText(alert.locationCode, "未返回")],
+      ["最近出现", formatDateTime(alert.lastSeenAt)],
+      [
+        "累计出现",
+        alert.occurrenceCount === null
+          ? "未返回"
+          : `${formatNumber(alert.occurrenceCount)} 次`,
+      ],
+      ["办理人", displayText(alert.assignee, "尚未交办")],
+      ["责任回执", safetyResponsibilityReceipt(alert)],
+      [
+        "办理期限",
+        alert.operational
+          ? formatDateTime(alert.dueAt)
+          : "不进入正式办理时限",
+      ],
+    ].forEach(([label, value]) => {
+      const group = document.createElement("div");
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const description = document.createElement("dd");
+      description.textContent = value;
+      group.append(term, description);
+      facts.appendChild(group);
+    });
+    card.append(heading, summary, facts);
+
+    const allowedActions = availableSafetyActions(alert);
+    if (allowedActions.length > 0) {
+      const actions = document.createElement("div");
+      actions.className = "safety-alert-actions";
+      const prompt = document.createElement("span");
+      prompt.textContent = "处置动作";
+      actions.appendChild(prompt);
+      allowedActions.forEach((action) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className =
+          action === "close" ? "button danger compact" : "button quiet compact";
+        button.dataset.safetyAlertId = alert.alertId;
+        button.dataset.safetyAction = action;
+        button.disabled = state.safetyActionRunning;
+        button.textContent = safetyActionLabel(action);
+        actions.appendChild(button);
+      });
+      card.appendChild(actions);
+    }
+    card.appendChild(createSafetyAttachmentPanel(alert));
+    list.appendChild(card);
+  });
+}
+
+async function handleSafetyAlertAction(event) {
+  const button = event.target.closest("[data-safety-action]");
+  if (!button || state.safetyActionRunning) {
+    return;
+  }
+  const alert = state.safetyAlerts.find(
+    (item) => item.alertId === button.dataset.safetyAlertId,
+  );
+  const action = button.dataset.safetyAction;
+  if (
+    !alert ||
+    !userCanSafetyAction(action) ||
+    !availableSafetyActions(alert).includes(action)
+  ) {
+    return;
+  }
+
+  const needsAssignee = action === "assign";
+  const needsNote = ["resolve", "close", "reopen", "add_note"].includes(
+    action,
+  );
+  const confirmation = await requestActionConfirmation({
+    title: safetyActionLabel(action),
+    message:
+      `对象：${safetyMineName(alert.mineId)} · ${displayText(alert.title)}。` +
+      "提交后将写入安全预警处置留痕。",
+    confirmLabel: safetyActionLabel(action),
+    danger: action === "close",
+    inputLabel: needsAssignee
+      ? "承办账号"
+      : needsNote
+        ? "核查依据与说明"
+        : "",
+    inputHelp: needsAssignee
+      ? "填写系统中的承办账号。"
+      : needsNote
+        ? "请写明核查材料、现场情况或状态变更依据。"
+        : "",
+    inputPlaceholder: needsAssignee
+      ? "例如 reviewer01"
+      : "请填写可追溯的处置说明",
+    inputMinLength: needsNote ? 3 : 1,
+    inputRequired: needsAssignee || needsNote,
+  });
+  if (!confirmation.confirmed) {
+    return;
+  }
+  if (alert.version === null) {
+    elements["safety-action-status"].textContent =
+      "服务未返回预警版本，已停止提交以避免覆盖他人的处置记录。";
+    elements["safety-action-status"].className = "form-status is-error";
+    return;
+  }
+
+  const payload = {
+    action,
+    expected_version: alert.version,
+  };
+  if (needsAssignee) {
+    payload.assignee = confirmation.value;
+  }
+  if (needsNote) {
+    payload.note = confirmation.value;
+  }
+  state.safetyActionRunning = true;
+  renderSafetyAlerts();
+  elements["safety-action-status"].textContent =
+    `正在提交“${safetyActionLabel(action)}”…`;
+  elements["safety-action-status"].className = "form-status";
+  try {
+    await requestJson(
+      `${SUPERVISION_API_PATHS.safetyAlerts}/${encodeURIComponent(alert.alertId)}/actions`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+    state.safetyLoaded = false;
+    await loadSafetyWorkspace();
+    if (state.safetyLoaded) {
+      elements["safety-action-status"].textContent =
+        `“${safetyActionLabel(action)}”已留痕，列表已更新。`;
+      elements["safety-action-status"].className =
+        "form-status is-success";
+    }
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      state.safetyLoaded = false;
+      await loadSafetyWorkspace();
+    }
+    elements["safety-action-status"].textContent =
+      explainSupervisionError(error, "安全预警处置");
+    elements["safety-action-status"].className = "form-status is-error";
+  } finally {
+    state.safetyActionRunning = false;
+    renderSafetyAlerts();
+  }
 }
 
 async function loadOverview() {
@@ -3709,15 +7137,19 @@ async function refreshAdmin() {
   }
   state.usersLoaded = false;
   state.operationsLoaded = false;
+  state.notificationDeliveriesLoaded = false;
   state.batchesLoaded = false;
   state.legitimateScenariosLoaded = false;
+  state.verificationReferencesLoaded = false;
   elements["refresh-admin"].disabled = true;
   try {
     await Promise.all([
       loadUsers(),
       loadOperations(),
+      loadNotificationDeliveries(),
       loadBatches(),
       loadLegitimateScenarios(),
+      loadVerificationReferences(),
     ]);
   } finally {
     elements["refresh-admin"].disabled = false;
@@ -3990,6 +7422,409 @@ async function createLegitimateScenario(event) {
     );
   } finally {
     elements["submit-legitimate-scenario"].disabled = false;
+  }
+}
+
+const VERIFICATION_REFERENCE_STATUS_LABELS = {
+  draft: "待另一人审批",
+  approved: "已批准，可进入生产基线",
+  rejected: "已驳回，只读保留",
+};
+
+function setVerificationReferenceFormStatus(message, tone = "") {
+  elements["verification-reference-form-status"].textContent = message;
+  elements["verification-reference-form-status"].className =
+    `form-status${tone ? ` is-${tone}` : ""}`;
+}
+
+function verificationReferenceError(error, action = "历史参考样本") {
+  if (error instanceof ApiError) {
+    const apiError = objectOrNull(error.body && error.body.error) || {};
+    const messages = {
+      verification_reference_conflict:
+        "样本编号已绑定其他正文或证据；不可覆盖旧样本，请核对编号或登记新样本。",
+      verification_reference_mine_not_found:
+        "样本所属矿井尚未进入矿井档案，请先登记矿井。",
+      invalid_verification_reference:
+        "样本、三类来源摘要或证据引用不符合要求，请检查完整 JSON 和 64 位小写 SHA-256。",
+      verification_reference_action_conflict:
+        "审批未完成：登记人与审批人必须不同，且样本须仍为草案、摘要和审计链均未变化。",
+      verification_reference_not_found:
+        "该历史样本不存在或已不在当前权限范围。",
+    };
+    if (messages[apiError.code]) {
+      return messages[apiError.code];
+    }
+  }
+  return explainAccessError(error, action);
+}
+
+async function loadVerificationReferences() {
+  if (
+    state.verificationReferencesLoading ||
+    !userCan("verificationReferences")
+  ) {
+    return;
+  }
+  state.verificationReferencesLoading = true;
+  elements["refresh-verification-references"].disabled = true;
+  setLoadStatus(
+    elements["verification-references-status"],
+    "正在核对样本正文、证据绑定和审批事件链…",
+    "loading",
+  );
+  try {
+    const status = elements["verification-reference-filter"].value;
+    const query = new URLSearchParams({ limit: "500" });
+    if (status) {
+      query.set("status", status);
+    }
+    const body = await requestJson(
+      `${SUPERVISION_API_PATHS.verificationReferences}?${query.toString()}`,
+    );
+    state.verificationReferences =
+      arrayOrNull(pickFirst(body, "items")) || [];
+    state.verificationReferencesLoaded = true;
+    renderVerificationReferences();
+    const draftCount = state.verificationReferences.filter(
+      (item) => pickFirst(item, "status") === "draft",
+    ).length;
+    setLoadStatus(
+      elements["verification-references-status"],
+      state.verificationReferences.length
+        ? `共 ${state.verificationReferences.length} 条；其中 ${draftCount} 条等待不同账号审批。`
+        : "当前筛选条件下没有历史参考样本。",
+    );
+  } catch (error) {
+    state.verificationReferencesLoaded = false;
+    state.verificationReferences = [];
+    renderVerificationReferences();
+    setLoadStatus(
+      elements["verification-references-status"],
+      verificationReferenceError(error, "读取历史参考样本"),
+      "error",
+    );
+  } finally {
+    state.verificationReferencesLoading = false;
+    elements["refresh-verification-references"].disabled = false;
+  }
+}
+
+function renderVerificationReferences() {
+  const body = elements["verification-references-table-body"];
+  clearNode(body);
+  const currentUserId = state.principal
+    ? nullableText(state.principal.user_id)
+    : null;
+  state.verificationReferences.forEach((rawItem) => {
+    const item = objectOrNull(rawItem) || {};
+    const sample = objectOrNull(pickFirst(item, "sample")) || {};
+    const row = document.createElement("tr");
+
+    const identityCell = document.createElement("td");
+    appendPrimarySecondary(
+      identityCell,
+      displayText(pickFirst(item, "sample_id"), "样本编号未返回"),
+      [
+        `矿井 ${displayText(pickFirst(item, "mine_id"), "未返回")}`,
+        `${formatDateTime(pickFirst(sample, "window_start"))} 至 ${formatDateTime(
+          pickFirst(sample, "window_end"),
+        )}`,
+        `样本摘要 ${shortHash(pickFirst(item, "sample_sha256"))}`,
+      ].join(" · "),
+    );
+
+    const evidenceCell = document.createElement("td");
+    const sourceDigests =
+      objectOrNull(pickFirst(item, "source_digests")) || {};
+    const evidenceRefs =
+      arrayOrNull(pickFirst(item, "evidence_refs")) || [];
+    appendPrimarySecondary(
+      evidenceCell,
+      `产量、用电、火工品 ${Object.keys(sourceDigests).length} 类摘要`,
+      `${evidenceRefs.length} 项证据引用 · 绑定摘要 ${shortHash(
+        pickFirst(item, "registration_sha256"),
+      )}`,
+    );
+
+    const statusCell = document.createElement("td");
+    const status = displayText(pickFirst(item, "status"), "unknown");
+    const statusBadge = document.createElement("span");
+    statusBadge.className =
+      `status-badge is-${status === "rejected" ? "danger" : status}`;
+    statusBadge.textContent =
+      VERIFICATION_REFERENCE_STATUS_LABELS[status] || "状态未返回";
+    statusCell.appendChild(statusBadge);
+    const actors = document.createElement("small");
+    actors.className = "table-secondary";
+    actors.textContent =
+      status === "draft"
+        ? `登记账号 ${displayText(
+          pickFirst(item, "registered_by"),
+          "未返回",
+        )} · 等待另一账号`
+        : `登记 ${displayText(
+          pickFirst(item, "registered_by"),
+          "未返回",
+        )} · 决定 ${displayText(
+          pickFirst(item, "decided_by"),
+          "未返回",
+        )}`;
+    statusCell.appendChild(actors);
+
+    const integrityCell = document.createElement("td");
+    const integrityValid =
+      pickFirst(item, "registry_integrity_valid") === true &&
+      pickFirst(item, "audit_chain_valid") === true;
+    const integrityBadge = document.createElement("span");
+    integrityBadge.className =
+      `status-badge ${integrityValid ? "is-success" : "is-danger"}`;
+    integrityBadge.textContent = integrityValid
+      ? "正文、证据和事件链有效"
+      : "完整性失败，禁止使用";
+    integrityCell.appendChild(integrityBadge);
+
+    const actionCell = document.createElement("td");
+    if (
+      status === "draft" &&
+      integrityValid &&
+      currentUserId !== nullableText(pickFirst(item, "registered_by"))
+    ) {
+      const approve = document.createElement("button");
+      approve.type = "button";
+      approve.className = "button secondary compact";
+      approve.textContent = "批准";
+      approve.dataset.verificationReferenceAction = "approve";
+      approve.dataset.sampleId = displayText(
+        pickFirst(item, "sample_id"),
+        "",
+      );
+      const reject = document.createElement("button");
+      reject.type = "button";
+      reject.className = "button quiet compact";
+      reject.textContent = "驳回";
+      reject.dataset.verificationReferenceAction = "reject";
+      reject.dataset.sampleId = approve.dataset.sampleId;
+      const actions = document.createElement("div");
+      actions.className = "heading-actions";
+      actions.append(approve, reject);
+      actionCell.appendChild(actions);
+    } else {
+      appendPrimarySecondary(
+        actionCell,
+        status === "draft"
+          ? "须由另一管理员决定"
+          : "决定已不可变留存",
+        status === "draft"
+          ? "当前登记账号不能自批"
+          : formatDateTime(pickFirst(item, "decided_at")),
+      );
+    }
+
+    row.append(
+      identityCell,
+      evidenceCell,
+      statusCell,
+      integrityCell,
+      actionCell,
+    );
+    body.appendChild(row);
+  });
+  const hasItems = state.verificationReferences.length > 0;
+  elements["verification-references-table-wrap"].hidden = !hasItems;
+  elements["verification-references-empty"].hidden = hasItems;
+}
+
+function parseVerificationEvidenceRefs(value) {
+  return [
+    ...new Set(
+      String(value || "")
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ].sort();
+}
+
+async function createVerificationReference(event) {
+  event.preventDefault();
+  if (!userCan("verificationReferences")) {
+    setVerificationReferenceFormStatus(
+      "当前账号没有历史参考样本管理权限。",
+      "error",
+    );
+    return;
+  }
+  let sample;
+  try {
+    sample = JSON.parse(
+      elements["verification-reference-sample"].value,
+    );
+    if (!objectOrNull(sample)) {
+      throw new Error("样本必须是 JSON 对象");
+    }
+  } catch (error) {
+    setVerificationReferenceFormStatus(
+      `历史样本 JSON 格式错误：${friendlyError(error)}`,
+      "error",
+    );
+    elements["verification-reference-sample"].focus();
+    return;
+  }
+  const digestIds = {
+    production: "verification-reference-production-digest",
+    electricity: "verification-reference-electricity-digest",
+    explosives: "verification-reference-explosives-digest",
+  };
+  const sourceDigests = {};
+  for (const [name, id] of Object.entries(digestIds)) {
+    const digest = elements[id].value.trim().toLocaleLowerCase("en-US");
+    if (!/^[0-9a-f]{64}$/.test(digest)) {
+      setVerificationReferenceFormStatus(
+        "三类原始材料摘要都必须是 64 位小写 SHA-256。",
+        "error",
+      );
+      elements[id].focus();
+      return;
+    }
+    sourceDigests[name] = digest;
+  }
+  const evidenceRefs = parseVerificationEvidenceRefs(
+    elements["verification-reference-evidence-refs"].value,
+  );
+  if (!evidenceRefs.length) {
+    setVerificationReferenceFormStatus(
+      "至少填写一项可追溯的证据引用。",
+      "error",
+    );
+    elements["verification-reference-evidence-refs"].focus();
+    return;
+  }
+
+  elements["submit-verification-reference"].disabled = true;
+  setVerificationReferenceFormStatus(
+    "正在校验并登记不可变历史样本草案…",
+  );
+  try {
+    const result = await requestJson(
+      SUPERVISION_API_PATHS.verificationReferences,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          sample,
+          source_digests: sourceDigests,
+          evidence_refs: evidenceRefs,
+        }),
+      },
+    );
+    elements["verification-reference-form"].reset();
+    state.verificationReferencesLoaded = false;
+    await loadVerificationReferences();
+    setVerificationReferenceFormStatus(
+      result && result.created === false
+        ? "该样本及证据已原样登记，未产生重复记录。"
+        : "样本已登记为草案；须由另一名管理员复核正文、原始材料后批准。",
+      "success",
+    );
+  } catch (error) {
+    setVerificationReferenceFormStatus(
+      verificationReferenceError(error, "登记历史参考样本"),
+      "error",
+    );
+  } finally {
+    elements["submit-verification-reference"].disabled = false;
+  }
+}
+
+async function handleVerificationReferenceAction(event) {
+  const button = event.target.closest(
+    "[data-verification-reference-action]",
+  );
+  if (
+    !button ||
+    state.verificationReferenceActionRunning ||
+    !userCan("verificationReferences")
+  ) {
+    return;
+  }
+  const action = button.dataset.verificationReferenceAction;
+  const sampleId = button.dataset.sampleId;
+  if (!["approve", "reject"].includes(action) || !sampleId) {
+    return;
+  }
+  const item = state.verificationReferences.find(
+    (candidate) => pickFirst(candidate, "sample_id") === sampleId,
+  );
+  if (!item) {
+    setLoadStatus(
+      elements["verification-references-status"],
+      "样本列表已变化，请刷新后再操作。",
+      "error",
+    );
+    return;
+  }
+  const approving = action === "approve";
+  const confirmation = await requestActionConfirmation({
+    title: `${approving ? "批准" : "驳回"}历史样本「${sampleId}」？`,
+    message: approving
+      ? "批准后，该样本仅在正文摘要、证据绑定和审计链持续有效时，才可进入同矿同工况生产核验基线；决定不可覆盖。"
+      : "驳回后记录仍只读保留，不会进入生产核验基线；决定不可覆盖。",
+    confirmLabel: approving ? "确认批准" : "确认驳回",
+    danger: !approving,
+    inputLabel: approving ? "批准依据" : "驳回原因",
+    inputHelp: "至少 10 个字符，将进入不可变审批事件。",
+    inputPlaceholder: approving
+      ? "例如：已复核三类原始材料及窗口口径，摘要一致"
+      : "例如：用电原始材料与样本窗口不一致",
+    inputRequired: true,
+    inputMinLength: 10,
+    trigger: button,
+  });
+  if (!confirmation.confirmed) {
+    return;
+  }
+  state.verificationReferenceActionRunning = true;
+  renderVerificationReferences();
+  setLoadStatus(
+    elements["verification-references-status"],
+    `正在${approving ? "批准" : "驳回"}历史样本…`,
+    "loading",
+  );
+  try {
+    await requestJson(
+      `${SUPERVISION_API_PATHS.verificationReferences}/${encodeURIComponent(
+        sampleId,
+      )}/actions`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          action,
+          expected_sample_sha256: pickFirst(item, "sample_sha256"),
+          note: confirmation.value,
+        }),
+      },
+    );
+    state.verificationReferencesLoaded = false;
+    await loadVerificationReferences();
+    setLoadStatus(
+      elements["verification-references-status"],
+      approving
+        ? "样本已由不同账号批准；生产核验仍会逐次校验正文、证据绑定和事件链。"
+        : "样本已驳回并只读留痕，不会进入生产核验基线。",
+      "success",
+    );
+  } catch (error) {
+    setLoadStatus(
+      elements["verification-references-status"],
+      verificationReferenceError(
+        error,
+        approving ? "批准历史参考样本" : "驳回历史参考样本",
+      ),
+      "error",
+    );
+  } finally {
+    state.verificationReferenceActionRunning = false;
+    renderVerificationReferences();
   }
 }
 
@@ -4321,6 +8156,238 @@ async function loadOperations() {
   elements["refresh-operations"].disabled = false;
 }
 
+async function loadNotificationDeliveries() {
+  if (state.notificationDeliveriesLoading || !isAdminUser()) {
+    return;
+  }
+  state.notificationDeliveriesLoading = true;
+  elements["refresh-notification-deliveries"].disabled = true;
+  setLoadStatus(
+    elements["notification-deliveries-status"],
+    "正在读取通知事件及各 webhook 目标的独立投递状态…",
+    "loading",
+  );
+  try {
+    const body = await requestJson(
+      `${SUPERVISION_API_PATHS.safetyNotifications}?limit=200`,
+    );
+    state.safetyNotifications =
+      arrayOrNull(pickFirst(body, "items")) || [];
+    state.notificationDeliveriesLoaded = true;
+    renderNotificationDeliveries();
+    const configured = Boolean(body && body.configured);
+    const deliveryCount = state.safetyNotifications.reduce(
+      (count, notification) =>
+        count + (arrayOrNull(notification && notification.deliveries) || []).length,
+      0,
+    );
+    setLoadStatus(
+      elements["notification-deliveries-status"],
+      configured
+        ? `已读取 ${state.safetyNotifications.length} 个通知事件、${deliveryCount} 条目标投递；成功目标不会因其他目标失败而重发。`
+        : "外部 webhook 尚未配置；站内通知事件仍保留，配置后新事件会逐目标投递。",
+    );
+  } catch (error) {
+    state.notificationDeliveriesLoaded = false;
+    state.safetyNotifications = [];
+    renderNotificationDeliveries();
+    setLoadStatus(
+      elements["notification-deliveries-status"],
+      explainAccessError(error, "通知投递记录"),
+      "error",
+    );
+  } finally {
+    state.notificationDeliveriesLoading = false;
+    elements["refresh-notification-deliveries"].disabled = false;
+  }
+}
+
+function notificationDeliveryMeta(status) {
+  const values = {
+    pending: ["待投递", "is-review"],
+    sending: ["投递中", "is-review"],
+    retry: ["等待重试", "is-review"],
+    delivered: ["已送达", "is-success"],
+    dead: ["死信待处置", "is-danger"],
+  };
+  return values[String(status || "")] || ["状态待确认", "is-unknown"];
+}
+
+function notificationErrorLabel(code) {
+  const labels = {
+    webhook_redirect_forbidden: "目标返回重定向，已拒绝跟随",
+    webhook_http_4xx: "目标拒绝请求（HTTP 4xx）",
+    webhook_http_5xx: "目标服务故障（HTTP 5xx）",
+    webhook_http_error: "目标返回异常 HTTP 状态",
+    webhook_non_success: "目标未返回成功状态",
+    webhook_transport_error: "网络连接或超时失败",
+    webhook_not_configured: "目标已从当前配置移除",
+    worker_restarted_during_delivery: "投递期间服务重启，等待安全重试",
+  };
+  return labels[String(code || "")] || displayText(code, "");
+}
+
+function renderNotificationDeliveries() {
+  const body = elements["notification-deliveries-table-body"];
+  clearNode(body);
+  let rowCount = 0;
+  state.safetyNotifications.forEach((rawNotification) => {
+    const notification = objectOrNull(rawNotification) || {};
+    const deliveries = arrayOrNull(notification.deliveries) || [];
+    const rows = deliveries.length ? deliveries : [null];
+    rows.forEach((rawDelivery) => {
+      const delivery = objectOrNull(rawDelivery);
+      const status = delivery
+        ? String(delivery.status || "")
+        : String(notification.status || "");
+      const [statusLabel, statusTone] =
+        !delivery && status === "delivered"
+          ? ["已完成", "is-success"]
+          : notificationDeliveryMeta(status);
+      const row = document.createElement("tr");
+      const subjectCell = document.createElement("td");
+      appendPrimarySecondary(
+        subjectCell,
+        displayText(notification.title, "安全预警通知"),
+        `${displayText(notification.mine_id, "矿井未返回")} · ${displayText(
+          notification.event_type,
+          "事件类型未返回",
+        )}`,
+      );
+      row.appendChild(subjectCell);
+
+      const targetCell = document.createElement("td");
+      appendPrimarySecondary(
+        targetCell,
+        delivery
+          ? displayText(delivery.webhook_id, "目标编号未返回")
+          : "未生成目标",
+        delivery
+          ? notificationErrorLabel(delivery.last_error)
+          : "旧记录或低于全部通道的推送级别",
+      );
+      row.appendChild(targetCell);
+
+      const statusCell = document.createElement("td");
+      const badge = document.createElement("span");
+      badge.className = `status-badge ${statusTone}`;
+      badge.textContent = statusLabel;
+      statusCell.appendChild(badge);
+      row.appendChild(statusCell);
+
+      addCell(
+        row,
+        delivery
+          ? `${formatCount(delivery.attempts)} 次${
+              Number(delivery.manual_retry_count || 0) > 0
+                ? ` · 人工重试 ${formatCount(delivery.manual_retry_count)} 次`
+                : ""
+            }`
+          : `${formatCount(notification.attempts)} 次`,
+      );
+      addCell(
+        row,
+        formatDateTime(
+          delivery
+            ? (
+                delivery.delivered_at ||
+                delivery.last_attempt_at ||
+                delivery.next_attempt_at
+              )
+            : (notification.delivered_at || notification.next_attempt_at),
+        ),
+      );
+
+      const actionCell = document.createElement("td");
+      if (status === "dead") {
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "table-action";
+        retry.textContent = delivery ? "重试此目标" : "重试此通知";
+        retry.dataset.notificationRetry = String(
+          notification.notification_id || "",
+        );
+        if (delivery) {
+          retry.dataset.webhookId = String(delivery.webhook_id || "");
+        }
+        retry.disabled =
+          !notification.notification_id ||
+          (delivery !== null && !delivery.webhook_id);
+        actionCell.appendChild(retry);
+      } else {
+        actionCell.textContent =
+          status === "delivered" ? "无需操作" : "系统自动处理";
+      }
+      row.appendChild(actionCell);
+      body.appendChild(row);
+      rowCount += 1;
+    });
+  });
+  elements["notification-deliveries-table-wrap"].hidden = rowCount === 0;
+  elements["notification-deliveries-empty"].hidden = rowCount !== 0;
+}
+
+async function handleNotificationDeliveryAction(event) {
+  const button = event.target.closest("[data-notification-retry]");
+  if (!button || button.disabled || !isAdminUser()) {
+    return;
+  }
+  const notificationId = button.dataset.notificationRetry;
+  const webhookId = button.dataset.webhookId || null;
+  if (!notificationId) {
+    return;
+  }
+  const confirmation = await requestActionConfirmation({
+    title: webhookId
+      ? `重新投递目标「${webhookId}」？`
+      : "重新排队这条旧版死信通知？",
+    message: webhookId
+      ? "只会重置该死信目标的重试周期；同一通知中已经送达的其他目标不会再次发送。操作将写入审计。"
+      : "这条旧版死信没有逐目标明细，将重新进入当前目标配置的队列。操作将写入审计。",
+    confirmLabel: webhookId ? "确认重试此目标" : "确认重新排队",
+  });
+  if (!confirmation.confirmed) {
+    return;
+  }
+  button.disabled = true;
+  setLoadStatus(
+    elements["notification-deliveries-status"],
+    webhookId
+      ? `正在重新排队目标 ${webhookId}…`
+      : "正在重新排队旧版死信通知…",
+    "loading",
+  );
+  try {
+    await requestJson(
+      `${SUPERVISION_API_PATHS.safetyNotifications}/${encodeURIComponent(
+        notificationId,
+      )}/retry`,
+      {
+        method: "POST",
+        body: JSON.stringify(
+          webhookId ? { webhook_id: webhookId } : {},
+        ),
+      },
+    );
+    state.notificationDeliveriesLoaded = false;
+    await loadNotificationDeliveries();
+    setLoadStatus(
+      elements["notification-deliveries-status"],
+      webhookId
+        ? `目标 ${webhookId} 已重新排队，成功目标未受影响。`
+        : "旧版死信通知已重新排队，将按当前目标配置展开。",
+      "success",
+    );
+  } catch (error) {
+    setLoadStatus(
+      elements["notification-deliveries-status"],
+      explainAccessError(error, "死信目标重试"),
+      "error",
+    );
+    button.disabled = false;
+  }
+}
+
 async function requestReadiness() {
   const response = await fetch(SUPERVISION_API_PATHS.readiness, {
     headers: { Accept: "application/json" },
@@ -4409,6 +8476,7 @@ function readinessCheckLabel(value) {
     job_database: "分析任务数据库",
     evidence_directory: "证据包目录",
     backup_directory: "备份目录",
+    safety_notification_worker: "外部预警通知投递",
   };
   const key = String(value || "");
   return labels[key] || displayText(value, "未命名检查项");
@@ -8884,4 +12952,13 @@ function fileTimestamp() {
 
 function prefersReducedMotion() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/service-worker.js").catch(() => {
+      // The online application remains fully usable when installation is
+      // blocked by browser or deployment policy.
+    });
+  });
 }

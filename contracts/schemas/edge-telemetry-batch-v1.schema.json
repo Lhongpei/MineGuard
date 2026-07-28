@@ -1,0 +1,751 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:edge-telemetry-batch:v1",
+  "title": "Mine Edge Telemetry Batch V1",
+  "description": "Read-only mine-edge telemetry sent to the county platform. Local alerts are hints only; the regulator independently validates observations and re-evaluates rules.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "batch_id",
+    "client_id",
+    "mine_id",
+    "sent_at",
+    "sequence_start",
+    "sequence_end",
+    "rule_profile",
+    "observations",
+    "local_alerts"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "edge-telemetry-batch-v1"
+    },
+    "batch_id": {
+      "$ref": "#/$defs/edgeBatchIdentifier"
+    },
+    "client_id": {
+      "$ref": "#/$defs/edgeClientIdentifier"
+    },
+    "mine_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "sent_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "sequence_start": {
+      "$ref": "#/$defs/safeInteger"
+    },
+    "sequence_end": {
+      "$ref": "#/$defs/safeInteger"
+    },
+    "rule_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_id",
+        "version",
+        "sha256"
+      ],
+      "properties": {
+        "profile_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "observations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "$ref": "#/$defs/observation"
+      }
+    },
+    "local_alerts": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "$ref": "#/$defs/localAlert"
+      }
+    }
+  },
+  "$defs": {
+    "edgeBatchIdentifier": {
+      "type": "string",
+      "minLength": 41,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,87}--batch_[0-9a-f]{32}$",
+      "description": "The receiver MUST additionally verify the cross-field relation batch_id == client_id + '--batch_' + 32 lowercase hexadecimal characters."
+    },
+    "edgeClientIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 88,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "safeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "metricCode": {
+      "type": "string",
+      "enum": [
+        "production.output_t",
+        "production.belt_instantaneous_t_h",
+        "production.belt_speed_m_s",
+        "production.belt_scale_running",
+        "production.belt_scale_fault",
+        "electricity.total_kwh",
+        "electricity.production_kwh",
+        "electricity.ventilation_kwh",
+        "electricity.drainage_kwh",
+        "electricity.compressed_air_kwh",
+        "electricity.hoisting_kwh",
+        "electricity.wash_plant_kwh",
+        "personnel.underground_count",
+        "personnel.area_count",
+        "personnel.unauthorized_entry_count",
+        "personnel.no_card_entry_count",
+        "personnel.person_card_mismatch_count",
+        "personnel.overtime_count",
+        "methane.concentration_percent",
+        "ventilation.airflow_m3_min",
+        "ventilation.pressure_pa",
+        "ventilation.speed_m_s",
+        "ventilation.main_fan_running",
+        "ventilation.main_fan_fault",
+        "ventilation.main_fan_changeover",
+        "explosive.issued_kg",
+        "explosive.used_kg",
+        "explosive.remaining_kg",
+        "detonator.issued_count",
+        "detonator.used_count",
+        "detonator.remaining_count",
+        "source.heartbeat_age_seconds",
+        "source.consecutive_failures",
+        "source.missing_state",
+        "coal.use_t",
+        "transport.shipped_t",
+        "sales.invoice_t"
+      ]
+    },
+    "intervalWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional statistics window. Receivers MUST additionally verify end > start and end <= observation.received_at. timezone preserves the source reporting convention while start/end remain offset-aware instants.",
+      "required": [
+        "start",
+        "end",
+        "timezone",
+        "aggregation"
+      ],
+      "properties": {
+        "start": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "end": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^(?:UTC|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]|[A-Za-z][A-Za-z0-9._+-]*(?:/[A-Za-z0-9._+-]+)+)$"
+        },
+        "aggregation": {
+          "type": "string",
+          "enum": [
+            "window_total",
+            "interval_delta",
+            "cumulative_register",
+            "snapshot",
+            "instantaneous_rate"
+          ]
+        },
+        "shift_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "observation_id",
+        "metric_code",
+        "value",
+        "unit",
+        "location_code",
+        "observed_at",
+        "received_at",
+        "sequence_no",
+        "revision",
+        "acquisition_mode",
+        "source_record_id",
+        "source_record_sha256",
+        "quality"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "observation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "metric_code": {
+          "$ref": "#/$defs/metricCode"
+        },
+        "value": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000000000000000
+        },
+        "unit": {
+          "type": "string",
+          "enum": [
+            "t",
+            "kg",
+            "kWh",
+            "person",
+            "count",
+            "%",
+            "m3/min",
+            "Pa",
+            "m/s",
+            "t/h",
+            "s"
+          ]
+        },
+        "location_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Logical area or device. For source.* health metrics this MUST exactly equal source_id."
+        },
+        "observed_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "received_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "sequence_no": {
+          "$ref": "#/$defs/safeInteger"
+        },
+        "revision": {
+          "$ref": "#/$defs/safeInteger"
+        },
+        "acquisition_mode": {
+          "type": "string",
+          "enum": [
+            "automatic_adapter",
+            "file_drop",
+            "api_poll",
+            "authenticated_manual_entry"
+          ]
+        },
+        "source_record_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "source_record_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_signature": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "status_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "interval": {
+          "$ref": "#/$defs/intervalWindow"
+        },
+        "quality": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "valid",
+            "completeness",
+            "timeliness",
+            "device_health",
+            "clock_synchronized",
+            "flags"
+          ],
+          "properties": {
+            "valid": {
+              "type": "boolean"
+            },
+            "completeness": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "timeliness": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "device_health": {
+              "type": "string",
+              "enum": [
+                "healthy",
+                "degraded",
+                "fault",
+                "unknown"
+              ]
+            },
+            "clock_synchronized": {
+              "type": "boolean"
+            },
+            "flags": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            }
+          }
+        },
+        "manual_attestation": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "actor_id",
+            "actor_name",
+            "recorded_at",
+            "reason"
+          ],
+          "properties": {
+            "actor_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "actor_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "recorded_at": {
+              "$ref": "#/$defs/dateTime"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "acquisition_mode": {
+                "const": "authenticated_manual_entry"
+              }
+            },
+            "required": [
+              "acquisition_mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "manual_attestation"
+            ],
+            "properties": {
+              "manual_attestation": {
+                "type": "object"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "manual_attestation": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "enum": [
+                  "ventilation.main_fan_running",
+                  "ventilation.main_fan_fault",
+                  "ventilation.main_fan_changeover",
+                  "production.belt_scale_running",
+                  "production.belt_scale_fault",
+                  "source.missing_state"
+                ]
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "enum": [
+                  0,
+                  1
+                ]
+              },
+              "unit": {
+                "const": "count"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "enum": [
+                  "production.output_t",
+                  "coal.use_t",
+                  "transport.shipped_t",
+                  "sales.invoice_t"
+                ]
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "const": "t"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "const": "production.belt_instantaneous_t_h"
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "const": "t/h"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "enum": [
+                  "production.belt_speed_m_s",
+                  "ventilation.speed_m_s"
+                ]
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "const": "m/s"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "enum": [
+                  "electricity.total_kwh",
+                  "electricity.production_kwh",
+                  "electricity.ventilation_kwh",
+                  "electricity.drainage_kwh",
+                  "electricity.compressed_air_kwh",
+                  "electricity.hoisting_kwh",
+                  "electricity.wash_plant_kwh"
+                ]
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "const": "kWh"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "enum": [
+                  "personnel.underground_count",
+                  "personnel.area_count"
+                ]
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "integer"
+              },
+              "unit": {
+                "const": "person"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "enum": [
+                  "personnel.unauthorized_entry_count",
+                  "personnel.no_card_entry_count",
+                  "personnel.person_card_mismatch_count",
+                  "personnel.overtime_count",
+                  "detonator.issued_count",
+                  "detonator.used_count",
+                  "detonator.remaining_count",
+                  "source.consecutive_failures"
+                ]
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "integer"
+              },
+              "unit": {
+                "const": "count"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "const": "methane.concentration_percent"
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "const": "%"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "const": "ventilation.airflow_m3_min"
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "const": "m3/min"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "const": "ventilation.pressure_pa"
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "const": "Pa"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "enum": [
+                  "explosive.issued_kg",
+                  "explosive.used_kg",
+                  "explosive.remaining_kg"
+                ]
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "const": "kg"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_code": {
+                "const": "source.heartbeat_age_seconds"
+              }
+            },
+            "required": [
+              "metric_code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "const": "s"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "localAlert": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_alert_id",
+        "rule_code",
+        "level",
+        "detected_at",
+        "location_code",
+        "observation_ids",
+        "summary",
+        "advisory_only"
+      ],
+      "properties": {
+        "local_alert_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "rule_code": {
+          "$ref": "#/$defs/identifier"
+        },
+        "level": {
+          "type": "string",
+          "enum": [
+            "blue",
+            "yellow",
+            "orange",
+            "red"
+          ]
+        },
+        "detected_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "location_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "observation_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "advisory_only": {
+          "const": true
+        }
+      }
+    }
+  }
+}

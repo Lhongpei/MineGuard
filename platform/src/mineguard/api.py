@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import hmac
+import csv
+import io
 import os
 import secrets
 import sys
@@ -85,6 +87,40 @@ from .external_submission import (
     to_governed_production_request,
     validate_enterprise_submission_json,
 )
+from .edge_ingest import (
+    EDGE_AUTH_WINDOW_SECONDS,
+    EDGE_BATCH_CONTRACT_VERSION,
+    EDGE_CAPABILITIES_CONTRACT_VERSION,
+    EDGE_NONCE_RETENTION_SECONDS,
+    EDGE_SIGNATURE_VERSION,
+    SIGNED_HEADERS as EDGE_SIGNED_HEADERS,
+    EdgeAuthenticationError,
+    EdgeClient,
+    authenticate_edge_request,
+    parse_edge_clients,
+    validate_edge_batch_json,
+)
+from .edge_evaluation import (
+    EdgeEvaluationBatchNotFoundError,
+    EdgeEvaluationBusyError,
+    EdgeEvaluationClaimLostError,
+    EdgeEvaluationFailedError,
+    EdgeSafetyEvaluationService,
+)
+from .edge_store import (
+    AlertNotFoundError,
+    AlertVersionConflictError,
+    EdgeBatchConflictError,
+    EdgeNonceReplayError,
+    EdgeTelemetryRepository,
+    InvalidAlertActionError,
+    InvalidVerificationReferenceActionError,
+    SafetyAttachmentConflictError,
+    SafetyRuleConflictError,
+    VerificationReferenceConflictError,
+    VerificationReferenceNotFoundError,
+    VerificationRunConflictError,
+)
 from .evidence import (
     EvidenceBundleService,
     EvidenceError,
@@ -103,6 +139,7 @@ from .jobs import (
     JobRepository,
     PublicJobError,
 )
+from .map_data import load_boundary_geojson
 from .governance import (
     AnalysisProfile,
     ConfigurationConflictError,
@@ -129,6 +166,15 @@ from .monitoring import (
     initialize_temporal_model_snapshot,
     refresh_temporal_audit,
 )
+from .notifications import (
+    SafetyNotificationDispatcher,
+    SafetyWebhook,
+    parse_safety_webhooks,
+)
+from .periodic_reports import (
+    build_periodic_regulatory_report,
+    resolve_reporting_period,
+)
 from .optimization import analyze_production
 from .operations import (
     BackupExistsError,
@@ -144,13 +190,31 @@ from .portfolio import (
     PortfolioAnalysisRequest,
     analyze_production_portfolio,
 )
+from .responsibility import SafetyResponsibilityDispatcher
 from .source_keys import SourceKeyConflictError, SourceKeyStore
+from .safety import (
+    DEFAULT_RULE_SNAPSHOT,
+    SafetyEvaluationRequest,
+    SafetyRuleSnapshot,
+    evaluate_safety,
+)
+from .safety_service import evaluate_edge_batch_safety
+from .safety_attachments import (
+    SafetyAttachmentValidationError,
+    attachment_content_disposition,
+    validate_safety_attachment,
+)
 from .runtime_manifest import build_runtime_manifest
 from .temporal import (
     TemporalDetectionParameters,
     TemporalDetectionRequest,
     TemporalObservation,
     detect_temporal_anomalies,
+)
+from .verification import (
+    HistoricalVerificationSample,
+    VerificationRequest,
+    analyze_verification,
 )
 
 
@@ -164,6 +228,17 @@ STATIC_ROUTES: dict[str, tuple[str, str]] = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/assets/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/assets/app.js": ("app.js", "application/javascript; charset=utf-8"),
+    "/manifest.webmanifest": (
+        "manifest.webmanifest",
+        "application/manifest+json; charset=utf-8",
+    ),
+    "/service-worker.js": (
+        "service-worker.js",
+        "application/javascript; charset=utf-8",
+    ),
+    "/assets/icon.svg": ("icon.svg", "image/svg+xml"),
+    "/assets/icon-192.png": ("icon-192.png", "image/png"),
+    "/assets/icon-512.png": ("icon-512.png", "image/png"),
 }
 STATIC_CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
@@ -178,6 +253,7 @@ COMPUTE_ONLY_POST_ROUTES = frozenset(
         "/v1/analyze/flow",
         "/v1/analyze/aggregation",
         "/v1/analyze/temporal",
+        "/v1/analyze/safety",
     }
 )
 
@@ -518,6 +594,165 @@ class BackupCreateRequest(StrictModel):
     ]
 
 
+class SafetyAlertActionRequest(StrictModel):
+    action: Literal[
+        "assign",
+        "acknowledge",
+        "start",
+        "resolve",
+        "close",
+        "reopen",
+        "add_note",
+    ]
+    expected_version: Annotated[int, Field(ge=1)]
+    note: Annotated[str | None, Field(min_length=1, max_length=4000)] = None
+    assignee: Annotated[str | None, Field(min_length=1, max_length=128)] = None
+
+
+class SafetyNotificationRetryRequest(StrictModel):
+    webhook_id: Annotated[
+        str | None,
+        Field(
+            min_length=1,
+            max_length=128,
+            pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        ),
+    ] = None
+
+
+class SafetyAlertAttachmentRequest(StrictModel):
+    filename: Annotated[str, Field(min_length=1, max_length=255)]
+    media_type: Annotated[str, Field(min_length=1, max_length=160)]
+    content_base64: Annotated[
+        str,
+        Field(min_length=1),
+    ]
+    sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    note: Annotated[str | None, Field(min_length=1, max_length=2000)] = None
+
+
+class SafetyResponsibilityRouteRequest(StrictModel):
+    route_id: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=128,
+            pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        ),
+    ]
+    mine_id: Annotated[
+        str | None,
+        Field(min_length=1, max_length=128),
+    ] = None
+    category: Annotated[
+        str | None,
+        Field(min_length=1, max_length=128),
+    ] = None
+    minimum_level: Literal["blue", "yellow", "orange", "red"]
+    primary_username: Annotated[str, Field(min_length=1, max_length=128)]
+    backup_username: Annotated[
+        str | None,
+        Field(min_length=1, max_length=128),
+    ] = None
+    escalation_minutes: Annotated[int, Field(ge=1, le=10_080)] = 30
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_distinct_users(
+        self,
+    ) -> "SafetyResponsibilityRouteRequest":
+        if (
+            self.backup_username is not None
+            and self.backup_username.casefold()
+            == self.primary_username.casefold()
+        ):
+            raise ValueError("primary and backup users must differ")
+        return self
+
+
+class SafetyResponsibilityRouteActionRequest(StrictModel):
+    action: Literal["delete"]
+
+
+class SafetyAlertReadRequest(StrictModel):
+    expected_version: Annotated[int, Field(ge=1)]
+
+
+class MineSafetyProfileRequest(StrictModel):
+    mine_id: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=128,
+            pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        ),
+    ]
+    mine_name: Annotated[str, Field(min_length=1, max_length=256)]
+    gas_category: Literal["low_gas", "high_gas"]
+    longitude: Annotated[float | None, Field(ge=-180, le=180)] = None
+    latitude: Annotated[float | None, Field(ge=-90, le=90)] = None
+    approved_capacity_tpy: Annotated[float | None, Field(gt=0)] = None
+    approved_underground_personnel: Annotated[int, Field(gt=0)]
+    enabled: bool = True
+
+
+class SafetyRuleRegistrationRequest(StrictModel):
+    snapshot: SafetyRuleSnapshot
+
+
+class SafetyRuleActionRequest(StrictModel):
+    action: Literal["approve", "retire"]
+    expected_fingerprint: Annotated[
+        str,
+        Field(pattern=r"^[0-9a-f]{64}$"),
+    ]
+    note: Annotated[str, Field(min_length=10, max_length=4000)]
+
+
+class VerificationReferenceRegistrationRequest(StrictModel):
+    sample: HistoricalVerificationSample
+    source_digests: Annotated[
+        dict[
+            Annotated[str, Field(min_length=1, max_length=128)],
+            Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+        ],
+        Field(min_length=3, max_length=100),
+    ]
+    evidence_refs: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=1000)]],
+        Field(min_length=1, max_length=100),
+    ]
+
+    @model_validator(mode="after")
+    def validate_governance_evidence(
+        self,
+    ) -> "VerificationReferenceRegistrationRequest":
+        required = {"production", "electricity", "explosives"}
+        if not required.issubset(self.source_digests):
+            raise ValueError(
+                "production, electricity and explosives source digests "
+                "are required"
+            )
+        if len(self.evidence_refs) != len(set(self.evidence_refs)):
+            raise ValueError("evidence_refs values must be unique")
+        safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+        if (
+            self.sample.sample_id[0] not in safe[:62]
+            or any(character not in safe for character in self.sample.sample_id)
+        ):
+            raise ValueError("sample_id is not a safe URL resource id")
+        return self
+
+
+class VerificationReferenceActionRequest(StrictModel):
+    action: Literal["approve", "reject"]
+    expected_sample_sha256: Annotated[
+        str,
+        Field(pattern=r"^[0-9a-f]{64}$"),
+    ]
+    note: Annotated[str, Field(min_length=10, max_length=4000)]
+
+
 class GovernedPortfolioIngestRequest(StrictModel):
     batch_id: Annotated[str, Field(min_length=1, max_length=200)]
     portfolio_name: Annotated[str, Field(min_length=1, max_length=200)]
@@ -575,6 +810,14 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             AggregationRequest,
             lambda request: aggregate_measurements(request),
         ),
+        "/v1/analyze/safety": (
+            SafetyEvaluationRequest,
+            lambda request: evaluate_safety(request),
+        ),
+        "/v1/analyze/verification": (
+            VerificationRequest,
+            lambda request: analyze_verification(request),
+        ),
     }
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
@@ -599,6 +842,40 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                 )
             else:
                 self._handle_external_capabilities()
+            return
+        if path == "/v1/edge-telemetry-capabilities":
+            if parsed.query:
+                self._send_edge_error(
+                    HTTPStatus.BAD_REQUEST,
+                    "QUERY_NOT_SUPPORTED",
+                    "This endpoint does not accept query parameters.",
+                    retryable=False,
+                )
+            else:
+                self._handle_edge_capabilities()
+            return
+        if path == "/v1/edge-evaluation-batches":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_collection_permission(
+                    principal,
+                    Permission.ANALYSIS_READ,
+                )
+            ):
+                self._handle_edge_evaluation_list(
+                    parsed.query,
+                    principal,
+                )
+            return
+        edge_receipt_id = self._edge_receipt_batch_id(path)
+        if edge_receipt_id is not None:
+            principal = self._require_authenticated()
+            if principal is not None:
+                self._handle_edge_receipt_get(
+                    edge_receipt_id,
+                    principal,
+                )
             return
         external_receipt_id = self._external_receipt_id(path)
         if external_receipt_id is not None:
@@ -790,10 +1067,205 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             if principal is not None:
                 self._handle_trends(parsed.query, principal)
             return
+        if path == "/v1/reports/regulatory":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_collection_permission(
+                    principal,
+                    Permission.DATA_READ,
+                )
+            ):
+                self._handle_regulatory_report(parsed.query, principal)
+            return
         if path == "/v1/dashboard/temporal":
             principal = self._require_authenticated()
             if principal is not None:
                 self._handle_temporal_dashboard(parsed.query, principal)
+            return
+        if path == "/v1/dashboard/safety":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_collection_permission(
+                    principal,
+                    Permission.DATA_READ,
+                )
+            ):
+                self._handle_safety_dashboard(principal)
+            return
+        if path == "/v1/map/boundary":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_collection_permission(
+                    principal,
+                    Permission.DATA_READ,
+                )
+            ):
+                boundary = self.server.map_boundary  # type: ignore[attr-defined]
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "configured": boundary is not None,
+                        "boundary": boundary,
+                    },
+                )
+            return
+        if path == "/v1/safety/alerts":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_collection_permission(
+                    principal,
+                    Permission.DATA_READ,
+                )
+            ):
+                self._handle_safety_alert_list(parsed.query, principal)
+            return
+        if path == "/v1/safety/runs":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_collection_permission(
+                    principal,
+                    Permission.DATA_READ,
+                )
+            ):
+                self._handle_safety_run_list(parsed.query, principal)
+            return
+        if path == "/v1/safety/notifications":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_collection_permission(
+                    principal,
+                    Permission.DATA_READ,
+                )
+            ):
+                self._handle_safety_notification_list(
+                    parsed.query,
+                    principal,
+                )
+            return
+        if path == "/v1/verification/runs":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_collection_permission(
+                    principal,
+                    Permission.ANALYSIS_READ,
+                )
+            ):
+                self._handle_verification_run_list(
+                    parsed.query,
+                    principal,
+                )
+            return
+        if path == "/v1/reports/safety-alerts.csv":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_collection_permission(
+                    principal,
+                    Permission.DATA_READ,
+                )
+            ):
+                self._handle_safety_alert_csv(parsed.query, principal)
+            return
+        if path == "/v1/admin/mines":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"items": self._edge_repository.list_mines()},
+                )
+            return
+        if path == "/v1/admin/safety-rules":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"items": self._edge_repository.list_safety_rules()},
+                )
+            return
+        if path == "/v1/admin/verification-references":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._handle_verification_reference_list(
+                    parsed.query,
+                    principal,
+                )
+            return
+        if path == "/v1/admin/safety-responsibility-routes":
+            principal = self._require_authenticated()
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "items": (
+                            self._edge_repository
+                            .list_responsibility_routes()
+                        )
+                    },
+                )
+            return
+        safety_attachment_route = self._safety_attachment_route(path)
+        if safety_attachment_route is not None:
+            if parsed.query:
+                self._send_error(
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_query",
+                    "attachment endpoints do not accept query parameters",
+                )
+                return
+            alert_id, attachment_id = safety_attachment_route
+            principal = self._require_authenticated()
+            if principal is not None:
+                if attachment_id is None:
+                    self._handle_safety_attachment_list(
+                        alert_id,
+                        principal,
+                    )
+                else:
+                    self._handle_safety_attachment_download(
+                        alert_id,
+                        attachment_id,
+                        principal,
+                    )
+            return
+        safety_alert_id = self._resource_id(path, "/v1/safety/alerts/")
+        if safety_alert_id is not None:
+            principal = self._require_authenticated()
+            if principal is not None:
+                self._handle_safety_alert_detail(
+                    safety_alert_id,
+                    principal,
+                )
             return
         if path == "/v1/cases":
             principal = self._require_authenticated()
@@ -906,6 +1378,17 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             else:
                 self._handle_external_submission(path)
             return
+        if path == "/v1/edge-telemetry-batches":
+            if parsed.query:
+                self._send_edge_error(
+                    HTTPStatus.BAD_REQUEST,
+                    "QUERY_NOT_SUPPORTED",
+                    "This endpoint does not accept query parameters.",
+                    retryable=False,
+                )
+            else:
+                self._handle_edge_batch(path)
+            return
         if path == "/v1/auth/login":
             self._handle_login()
             return
@@ -929,6 +1412,126 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                 )
             ):
                 self._handle_user_create(principal)
+            return
+        if path == "/v1/admin/mines":
+            principal = self._require_authenticated(require_csrf=True)
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._handle_mine_profile_upsert(principal)
+            return
+        if path == "/v1/admin/safety-rules":
+            principal = self._require_authenticated(require_csrf=True)
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._handle_safety_rule_register(principal)
+            return
+        if path == "/v1/admin/verification-references":
+            principal = self._require_authenticated(require_csrf=True)
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._handle_verification_reference_register(principal)
+            return
+        if (
+            path.startswith("/v1/admin/verification-references/")
+            and path.endswith("/actions")
+        ):
+            sample_id = unquote(
+                path[
+                    len("/v1/admin/verification-references/") :
+                    -len("/actions")
+                ]
+            )
+            if not sample_id or "/" in sample_id:
+                self._send_not_found()
+                return
+            principal = self._require_authenticated(require_csrf=True)
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._handle_verification_reference_action(
+                    sample_id,
+                    principal,
+                )
+            return
+        if path == "/v1/admin/safety-responsibility-routes":
+            principal = self._require_authenticated(require_csrf=True)
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._handle_safety_responsibility_route_upsert(
+                    principal
+                )
+            return
+        if (
+            path.startswith(
+                "/v1/admin/safety-responsibility-routes/"
+            )
+            and path.endswith("/actions")
+        ):
+            route_id = path[
+                len("/v1/admin/safety-responsibility-routes/") :
+                -len("/actions")
+            ]
+            if not route_id or "/" in route_id:
+                self._send_not_found()
+                return
+            principal = self._require_authenticated(require_csrf=True)
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._handle_safety_responsibility_route_action(
+                    route_id,
+                    principal,
+                )
+            return
+        if path.startswith("/v1/admin/safety-rules/") and path.endswith(
+            "/actions"
+        ):
+            rule_version = path[
+                len("/v1/admin/safety-rules/") : -len("/actions")
+            ]
+            if not rule_version or "/" in rule_version:
+                self._send_not_found()
+                return
+            principal = self._require_authenticated(require_csrf=True)
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._handle_safety_rule_action(
+                    rule_version,
+                    principal,
+                )
             return
         if path == "/v1/admin/backups":
             principal = self._require_authenticated(require_csrf=True)
@@ -1064,6 +1667,11 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             if principal is not None:
                 self._handle_portfolio_batch(principal, parsed.query)
             return
+        if path == "/v1/analyze/verification":
+            principal = self._require_authenticated(require_csrf=True)
+            if principal is not None:
+                self._handle_verification_analysis(principal)
+            return
         if path == "/v1/admin/analysis-batches/isolate-pilots":
             principal = self._require_authenticated(require_csrf=True)
             if (
@@ -1077,6 +1685,22 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/v1/analysis-batches":
             self._send_method_not_allowed("GET")
+            return
+        if path.startswith("/v1/edge-telemetry-batches/") and path.endswith(
+            "/recalculate"
+        ):
+            batch_id = path[
+                len("/v1/edge-telemetry-batches/") : -len("/recalculate")
+            ]
+            if not batch_id or "/" in batch_id:
+                self._send_not_found()
+                return
+            principal = self._require_authenticated(require_csrf=True)
+            if principal is not None:
+                self._handle_edge_batch_recalculate(
+                    batch_id,
+                    principal,
+                )
             return
 
         batch_route = self._analysis_batch_route(path)
@@ -1118,6 +1742,94 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                 self._send_not_found()
             return
 
+        safety_attachment_route = self._safety_attachment_route(path)
+        if safety_attachment_route is not None:
+            alert_id, attachment_id = safety_attachment_route
+            if attachment_id is not None:
+                self._send_method_not_allowed("GET")
+                return
+            if parsed.query:
+                self._send_error(
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_query",
+                    "attachment upload does not accept query parameters",
+                )
+                return
+            principal = self._require_authenticated(require_csrf=True)
+            if principal is not None:
+                self._handle_safety_attachment_upload(
+                    alert_id,
+                    principal,
+                )
+            return
+
+        if path.startswith("/v1/safety/alerts/") and path.endswith(
+            "/actions"
+        ):
+            alert_id = path[
+                len("/v1/safety/alerts/") : -len("/actions")
+            ]
+            if not alert_id or "/" in alert_id:
+                self._send_not_found()
+                return
+            principal = self._require_authenticated(require_csrf=True)
+            if principal is not None:
+                self._handle_safety_alert_action(alert_id, principal)
+            return
+        if path.startswith("/v1/safety/alerts/") and path.endswith(
+            "/read"
+        ):
+            alert_id = path[
+                len("/v1/safety/alerts/") : -len("/read")
+            ]
+            if not alert_id or "/" in alert_id:
+                self._send_not_found()
+                return
+            principal = self._require_authenticated(require_csrf=True)
+            if principal is not None:
+                self._handle_safety_alert_read(alert_id, principal)
+            return
+
+        if path.startswith("/v1/safety/notifications/") and path.endswith(
+            "/retry"
+        ):
+            notification_id = path[
+                len("/v1/safety/notifications/") : -len("/retry")
+            ]
+            if (
+                not notification_id
+                or len(notification_id) > 128
+                or not notification_id[0].isalnum()
+                or any(
+                    not (character.isascii() and (
+                        character.isalnum() or character in "._-"
+                    ))
+                    for character in notification_id
+                )
+            ):
+                self._send_not_found()
+                return
+            if parsed.query:
+                self._send_error(
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_query",
+                    "notification retry does not accept query parameters",
+                )
+                return
+            principal = self._require_authenticated(require_csrf=True)
+            if (
+                principal is not None
+                and self._require_permission(
+                    principal,
+                    Permission.CONFIG_MANAGE,
+                )
+            ):
+                self._handle_safety_notification_retry(
+                    notification_id,
+                    principal,
+                )
+            return
+
         run_route = self._analysis_run_route(path)
         if run_route is not None:
             run_id, suffix = run_route
@@ -1141,6 +1853,7 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             elif path in STATIC_ROUTES or path in {
                 "/v1/dashboard/overview",
                 "/v1/dashboard/temporal",
+                "/v1/reports/regulatory",
                 "/v1/cases",
             }:
                 self._send_method_not_allowed("GET")
@@ -1213,6 +1926,18 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
     @property
     def _external_clients(self) -> dict[str, ExternalClient]:
         return self.server.external_clients  # type: ignore[attr-defined]
+
+    @property
+    def _edge_clients(self) -> dict[str, EdgeClient]:
+        return self.server.edge_clients  # type: ignore[attr-defined]
+
+    @property
+    def _edge_repository(self) -> EdgeTelemetryRepository:
+        return self.server.edge_repository  # type: ignore[attr-defined]
+
+    @property
+    def _edge_evaluation_service(self) -> EdgeSafetyEvaluationService:
+        return self.server.edge_evaluation_service  # type: ignore[attr-defined]
 
     @property
     def _local_actor(self) -> str:
@@ -1370,6 +2095,23 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             )
         return False
 
+    def _require_collection_permission(
+        self,
+        principal: Principal,
+        permission: Permission,
+    ) -> bool:
+        """Authorize a collection before its handler applies all mine scopes."""
+        authorization_mine = (
+            None
+            if principal.role is Role.ADMIN
+            else next(iter(principal.mine_scopes), None)
+        )
+        return self._require_permission(
+            principal,
+            permission,
+            mine_id=authorization_mine,
+        )
+
     def _record_audit(
         self,
         principal: Principal,
@@ -1407,6 +2149,30 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
         if not resource_id or "/" in resource_id:
             return None
         return resource_id
+
+    @staticmethod
+    def _safety_attachment_route(
+        path: str,
+    ) -> tuple[str, str | None] | None:
+        prefix = "/v1/safety/alerts/"
+        if not path.startswith(prefix):
+            return None
+        parts = path[len(prefix):].split("/")
+        if (
+            len(parts) == 2
+            and parts[0]
+            and parts[1] == "attachments"
+        ):
+            return parts[0], None
+        if (
+            len(parts) == 4
+            and parts[0]
+            and parts[1] == "attachments"
+            and parts[2]
+            and parts[3] == "download"
+        ):
+            return parts[0], parts[2]
+        return None
 
     @staticmethod
     def _case_route(path: str) -> tuple[str, str] | None:
@@ -2202,6 +2968,1845 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             .isoformat()
             .replace("+00:00", "Z")
         )
+
+    @staticmethod
+    def _edge_receipt_batch_id(path: str) -> str | None:
+        prefix = "/v1/edge-telemetry-batches/"
+        suffix = "/receipt"
+        if not path.startswith(prefix) or not path.endswith(suffix):
+            return None
+        batch_id = path[len(prefix):-len(suffix)]
+        if not batch_id or "/" in batch_id:
+            return None
+        return batch_id
+
+    def _handle_edge_capabilities(self) -> None:
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "schema_version": EDGE_CAPABILITIES_CONTRACT_VERSION,
+                "service_id": "mineguard-regulatory-platform",
+                "server_time": self._utc_now_text(),
+                "batch_contract": EDGE_BATCH_CONTRACT_VERSION,
+                "submission_path": "/v1/edge-telemetry-batches",
+                "authentication": {
+                    "scheme": "hmac-sha256",
+                    "signature_version": EDGE_SIGNATURE_VERSION,
+                    "timestamp_tolerance_seconds": (
+                        EDGE_AUTH_WINDOW_SECONDS
+                    ),
+                    "nonce_retention_seconds": (
+                        EDGE_NONCE_RETENTION_SECONDS
+                    ),
+                },
+                "limits": {
+                    "max_body_bytes": MAX_REQUEST_BYTES,
+                    "max_observations": 10_000,
+                    "max_local_alerts": 1_000,
+                },
+                "features": {
+                    "read_only_collection": True,
+                    "store_and_forward": True,
+                    "manual_attestation": True,
+                    "local_alerts_advisory_only": True,
+                    "regulatory_recalculation": True,
+                    "optional_interval_window": True,
+                    "detailed_non_pii_metrics": True,
+                    "source_health_metrics": True,
+                },
+            },
+        )
+
+    def _send_edge_error(
+        self,
+        status: HTTPStatus,
+        code: str,
+        message: str,
+        *,
+        retryable: bool,
+        violations: list[dict[str, str]] | None = None,
+        include_server_time: bool = False,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "schema_version": "edge-telemetry-error-v1",
+            "error_id": str(uuid4()),
+            "occurred_at": self._utc_now_text(),
+            "http_status": int(status),
+            "code": code,
+            "message": message[:1000],
+            "retryable": retryable,
+            "violations": (violations or [])[:500],
+        }
+        if include_server_time:
+            payload["server_time"] = self._utc_now_text()
+        self._send_json(status, payload)
+
+    def _authenticate_edge_transport(
+        self,
+        *,
+        body: bytes,
+        method: str,
+        path: str,
+    ) -> EdgeClient | None:
+        if not self._edge_clients:
+            self._send_edge_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "EDGE_INTAKE_NOT_CONFIGURED",
+                "Mine edge intake authentication is not configured.",
+                retryable=False,
+            )
+            return None
+        try:
+            for header_name in EDGE_SIGNED_HEADERS:
+                if len(self.headers.get_all(header_name, [])) != 1:
+                    raise EdgeAuthenticationError(
+                        "edge request authentication failed"
+                    )
+            client, request_time, nonce, _body_sha256 = (
+                authenticate_edge_request(
+                    self._edge_clients,
+                    self.headers,
+                    body,
+                    method=method,
+                    path=path,
+                )
+            )
+            self._edge_repository.record_nonce(
+                client.client_id,
+                nonce,
+                request_time,
+            )
+            return client
+        except (EdgeAuthenticationError, EdgeNonceReplayError):
+            self._send_edge_error(
+                HTTPStatus.UNAUTHORIZED,
+                "AUTHENTICATION_FAILED",
+                "Mine edge request authentication failed.",
+                retryable=False,
+                include_server_time=True,
+            )
+            return None
+
+    def _handle_edge_batch(self, path: str) -> None:
+        try:
+            body = self._read_request_body()
+        except _RequestTooLarge:
+            self._send_edge_error(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                "REQUEST_TOO_LARGE",
+                "Request body exceeds the configured limit.",
+                retryable=False,
+            )
+            return
+        except _BadRequest:
+            self._send_edge_error(
+                HTTPStatus.BAD_REQUEST,
+                "BAD_REQUEST",
+                "Request body is missing or incomplete.",
+                retryable=False,
+            )
+            return
+        client = self._authenticate_edge_transport(
+            body=body,
+            method="POST",
+            path=path,
+        )
+        if client is None:
+            return
+        try:
+            batch = validate_edge_batch_json(body)
+        except ValidationError as error:
+            self._send_edge_error(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "VALIDATION_FAILED",
+                "Edge telemetry validation failed.",
+                retryable=False,
+                violations=self._external_validation_violations(error),
+            )
+            return
+        except ValueError:
+            self._send_edge_error(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_JSON",
+                "Edge telemetry must be valid I-JSON.",
+                retryable=False,
+            )
+            return
+        if (
+            batch.client_id != client.client_id
+            or not client.allows_mine(batch.mine_id)
+        ):
+            self._send_edge_error(
+                HTTPStatus.FORBIDDEN,
+                "CLIENT_SCOPE_DENIED",
+                "Client is not authorised for this mine.",
+                retryable=False,
+            )
+            return
+        body_sha256 = sha256_bytes(body)
+        try:
+            receipt = self._edge_repository.ingest_batch(
+                batch,
+                body_sha256=body_sha256,
+                raw_body=body,
+            )
+        except EdgeBatchConflictError:
+            self._send_edge_error(
+                HTTPStatus.CONFLICT,
+                "BATCH_ID_CONFLICT",
+                "batch_id is already bound to different content.",
+                retryable=False,
+            )
+            return
+        try:
+            self._edge_evaluation_service.evaluate_batch(
+                batch.batch_id,
+                trigger="intake",
+            )
+        except EdgeEvaluationBusyError:
+            # A worker or another intake request already owns the durable
+            # lease. The immutable receipt remains authoritative.
+            pass
+        except (
+            EdgeEvaluationClaimLostError,
+            EdgeEvaluationFailedError,
+        ):
+            # The immutable intake already succeeded. Failure is persisted,
+            # alerted and retried by the background evaluator.
+            self.log_error(
+                "platform safety recalculation failed for edge batch"
+            )
+        except EdgeEvaluationBatchNotFoundError:
+            self.log_error(
+                "stored edge batch disappeared before safety evaluation"
+            )
+        except Exception:
+            self.log_error(
+                "unexpected platform safety evaluation service failure"
+            )
+        finally:
+            self._edge_evaluation_service.notify()
+        self._send_json(
+            (
+                HTTPStatus.OK
+                if receipt["status"] == "duplicate"
+                else HTTPStatus.CREATED
+            ),
+            receipt,
+        )
+
+    def _handle_edge_receipt_get(
+        self,
+        batch_id: str,
+        principal: Principal,
+    ) -> None:
+        receipt = self._edge_repository.get_receipt(batch_id)
+        if receipt is None:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "edge_receipt_not_found",
+                "edge telemetry receipt not found",
+            )
+            return
+        if not self._require_permission(
+            principal,
+            Permission.DATA_READ,
+            mine_id=receipt["mine_id"],
+        ):
+            return
+        self._send_json(HTTPStatus.OK, receipt)
+
+    def _handle_edge_evaluation_list(
+        self,
+        query: str,
+        principal: Principal,
+    ) -> None:
+        values = parse_qs(query, keep_blank_values=True)
+        if set(values) - {"mine_id", "status", "limit"} or any(
+            len(items) != 1 for items in values.values()
+        ):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_query",
+                "unsupported or repeated edge evaluation query parameter",
+            )
+            return
+        mine_id = values.get("mine_id", [None])[0] or None
+        status = values.get("status", [None])[0] or None
+        if status is not None and status not in {
+            "pending",
+            "failed",
+            "running",
+            "dead",
+            "completed",
+        }:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_status",
+                "unsupported edge evaluation status",
+            )
+            return
+        try:
+            limit = int(values.get("limit", ["200"])[0])
+        except ValueError:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_limit",
+                "limit must be an integer",
+            )
+            return
+        if not 1 <= limit <= 500:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_limit",
+                "limit must be between 1 and 500",
+            )
+            return
+        mine_ids = self._scoped_mine_filter(principal, mine_id)
+        if mine_id is not None and mine_ids == set():
+            self._send_error(
+                HTTPStatus.FORBIDDEN,
+                "permission_denied",
+                "permission or mine scope denied",
+            )
+            return
+        items = self._edge_repository.list_batch_evaluations(
+            mine_ids=mine_ids,
+            status=status,
+            limit=limit,
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "items": items,
+                "count": len(items),
+                "limit": limit,
+            },
+        )
+
+    def _handle_edge_batch_recalculate(
+        self,
+        batch_id: str,
+        principal: Principal,
+    ) -> None:
+        document = self._edge_repository.get_batch_document(batch_id)
+        if document is None:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "edge_batch_not_found",
+                "edge telemetry batch not found",
+            )
+            return
+        try:
+            batch = validate_edge_batch_json(
+                json.dumps(
+                    document,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                allow_legacy_batch_id=True,
+            )
+        except (ValueError, ValidationError):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "stored_edge_batch_invalid",
+                "stored edge telemetry no longer validates",
+            )
+            return
+        if not self._require_permission(
+            principal,
+            Permission.ANALYSIS_RUN,
+            mine_id=batch.mine_id,
+        ):
+            return
+        try:
+            result = self._edge_evaluation_service.evaluate_batch(
+                batch_id,
+                trigger="manual",
+            )
+        except EdgeEvaluationBusyError:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "safety_recalculation_in_progress",
+                "safety recalculation is already in progress for this mine",
+            )
+            return
+        except EdgeEvaluationBatchNotFoundError:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "edge_batch_not_found",
+                "edge telemetry batch not found",
+            )
+            return
+        except (
+            EdgeEvaluationClaimLostError,
+            EdgeEvaluationFailedError,
+        ):
+            self.log_error("manual edge safety recalculation failed")
+            self._send_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "safety_recalculation_failed",
+                "safety recalculation failed",
+            )
+            return
+        except Exception:
+            self.log_error(
+                "unexpected manual edge safety recalculation failure"
+            )
+            self._send_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "safety_recalculation_failed",
+                "safety recalculation failed",
+            )
+            return
+        if result is None:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "safety_recalculation_in_progress",
+                "safety recalculation could not be claimed",
+            )
+            return
+        self._record_audit(
+            principal,
+            "edge_batch_safety_recalculated",
+            {
+                "batch_id": batch_id,
+                "mine_id": batch.mine_id,
+                "status": result.get("status"),
+            },
+        )
+        self._send_json(HTTPStatus.OK, result)
+
+    def _scoped_mine_filter(
+        self,
+        principal: Principal,
+        requested_mine_id: str | None = None,
+    ) -> set[str] | None:
+        visible = self._visible_mines(principal)
+        if requested_mine_id:
+            if visible is not None and requested_mine_id not in visible:
+                return set()
+            return {requested_mine_id}
+        return None if visible is None else set(visible)
+
+    def _handle_safety_dashboard(self, principal: Principal) -> None:
+        mine_ids = self._scoped_mine_filter(principal)
+        self._send_json(
+            HTTPStatus.OK,
+            self._edge_repository.dashboard(mine_ids),
+        )
+
+    def _handle_safety_alert_list(
+        self,
+        query: str,
+        principal: Principal,
+    ) -> None:
+        values = parse_qs(query, keep_blank_values=True)
+        allowed = {"mine_id", "status", "level", "mode", "limit"}
+        if set(values) - allowed or any(
+            len(items) != 1 for items in values.values()
+        ):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_query",
+                "unsupported or repeated safety alert query parameter",
+            )
+            return
+        mine_id = values.get("mine_id", [None])[0] or None
+        status = values.get("status", [None])[0] or None
+        level = values.get("level", [None])[0] or None
+        mode = values.get("mode", [None])[0] or None
+        if status is not None and status not in {
+            "open",
+            "acknowledged",
+            "in_progress",
+            "resolved",
+            "closed",
+        }:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_status",
+                "unsupported safety alert status",
+            )
+            return
+        if level is not None and level not in {
+            "blue",
+            "yellow",
+            "orange",
+            "red",
+        }:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_level",
+                "unsupported safety alert level",
+            )
+            return
+        if mode is not None and mode not in {"operational", "shadow"}:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_mode",
+                "mode must be operational or shadow",
+            )
+            return
+        try:
+            limit = int(values.get("limit", ["500"])[0])
+        except ValueError:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_limit",
+                "limit must be an integer",
+            )
+            return
+        mine_ids = self._scoped_mine_filter(principal, mine_id)
+        if mine_id and mine_ids == set():
+            self._send_error(
+                HTTPStatus.FORBIDDEN,
+                "permission_denied",
+                "permission or mine scope denied",
+            )
+            return
+        items = self._edge_repository.list_alerts(
+            mine_ids=mine_ids,
+            status=status,
+            level=level,
+            operational=(
+                None if mode is None else mode == "operational"
+            ),
+            limit=limit,
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            {"items": items, "count": len(items)},
+        )
+
+    def _handle_safety_run_list(
+        self,
+        query: str,
+        principal: Principal,
+    ) -> None:
+        values = parse_qs(query, keep_blank_values=True)
+        if set(values) - {"mine_id", "limit"} or any(
+            len(items) != 1 for items in values.values()
+        ):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_query",
+                "unsupported or repeated safety run query parameter",
+            )
+            return
+        mine_id = values.get("mine_id", [None])[0] or None
+        try:
+            limit = int(values.get("limit", ["100"])[0])
+        except ValueError:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_limit",
+                "limit must be an integer",
+            )
+            return
+        mine_ids = self._scoped_mine_filter(principal, mine_id)
+        if mine_id and mine_ids == set():
+            self._send_error(
+                HTTPStatus.FORBIDDEN,
+                "permission_denied",
+                "permission or mine scope denied",
+            )
+            return
+        items = self._edge_repository.list_safety_runs(
+            mine_ids=mine_ids,
+            limit=limit,
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            {"items": items, "count": len(items)},
+        )
+
+    def _handle_safety_notification_list(
+        self,
+        query: str,
+        principal: Principal,
+    ) -> None:
+        values = parse_qs(query, keep_blank_values=True)
+        if set(values) - {"status", "webhook_id", "limit"} or any(
+            len(items) != 1 for items in values.values()
+        ):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_query",
+                "unsupported or repeated notification query parameter",
+            )
+            return
+        status = values.get("status", [None])[0] or None
+        if status is not None and status not in {
+            "pending",
+            "sending",
+            "retry",
+            "delivered",
+            "dead",
+        }:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_status",
+                "unsupported notification status",
+            )
+            return
+        webhook_id = values.get("webhook_id", [None])[0] or None
+        if webhook_id is not None and (
+            len(webhook_id) > 128
+            or not webhook_id[0].isalnum()
+            or any(
+                not (character.isascii() and (
+                    character.isalnum() or character in "._-"
+                ))
+                for character in webhook_id
+            )
+        ):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_webhook_id",
+                "webhook_id is invalid",
+            )
+            return
+        try:
+            limit = int(values.get("limit", ["200"])[0])
+        except ValueError:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_limit",
+                "limit must be an integer",
+            )
+            return
+        mine_ids = self._scoped_mine_filter(principal)
+        items = self._edge_repository.list_notifications(
+            mine_ids=mine_ids,
+            status=status,
+            webhook_id=webhook_id,
+            limit=limit,
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "configured": (
+                    self.server.notification_dispatcher.configured  # type: ignore[attr-defined]
+                ),
+                "items": items,
+                "count": len(items),
+            },
+        )
+
+    def _handle_safety_notification_retry(
+        self,
+        notification_id: str,
+        principal: Principal,
+    ) -> None:
+        request = self._read_model(SafetyNotificationRetryRequest)
+        if request is None:
+            return
+        assert isinstance(request, SafetyNotificationRetryRequest)
+        existing = self._edge_repository.get_notification(notification_id)
+        if existing is None:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_notification_not_found",
+                "safety notification not found",
+            )
+            return
+        deliveries = existing["deliveries"]
+        if request.webhook_id is not None:
+            target = next(
+                (
+                    delivery
+                    for delivery in deliveries
+                    if delivery["webhook_id"] == request.webhook_id
+                ),
+                None,
+            )
+            if target is None:
+                self._send_error(
+                    HTTPStatus.NOT_FOUND,
+                    "safety_notification_delivery_not_found",
+                    "notification delivery target not found",
+                )
+                return
+            if target["status"] != "dead":
+                self._send_error(
+                    HTTPStatus.CONFLICT,
+                    "safety_notification_delivery_not_dead",
+                    "only dead notification deliveries can be retried",
+                )
+                return
+        elif deliveries and not any(
+            delivery["status"] == "dead" for delivery in deliveries
+        ):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "safety_notification_delivery_not_dead",
+                "notification has no dead delivery targets",
+            )
+            return
+        try:
+            changed = self._edge_repository.retry_notification_deliveries(
+                notification_id,
+                webhook_id=request.webhook_id,
+            )
+        except KeyError:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_notification_not_found",
+                "safety notification not found",
+            )
+            return
+        if changed == 0:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "safety_notification_delivery_not_dead",
+                "notification has no matching dead delivery targets",
+            )
+            return
+        self._record_audit(
+            principal,
+            "safety_notification_delivery_retried",
+            {
+                "notification_id": notification_id,
+                "mine_id": existing["mine_id"],
+                "webhook_id": request.webhook_id,
+                "delivery_count": changed,
+            },
+        )
+        self.server.notification_dispatcher.wake()  # type: ignore[attr-defined]
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "notification": self._edge_repository.get_notification(
+                    notification_id
+                ),
+                "requeued_delivery_count": changed,
+            },
+        )
+
+    def _handle_verification_analysis(
+        self,
+        principal: Principal,
+    ) -> None:
+        if self._auth_required and principal.role is not Role.ADMIN:
+            self._send_error(
+                HTTPStatus.FORBIDDEN,
+                "trusted_ingest_required",
+                "direct caller-supplied verification is restricted to "
+                "administrators",
+            )
+            return
+        if not self._require_permission(
+            principal,
+            Permission.ANALYSIS_RUN,
+        ):
+            return
+        request = self._read_model(VerificationRequest)
+        if request is None:
+            return
+        assert isinstance(request, VerificationRequest)
+        if not self._require_permission(
+            principal,
+            Permission.ANALYSIS_RUN,
+            mine_id=request.mine_id,
+        ):
+            return
+        request_document = request.model_dump(mode="json")
+        history_governance: dict[str, Any]
+        if self._auth_required:
+            try:
+                approved, failures = (
+                    self._edge_repository
+                    .validate_verification_reference_history(
+                        request_document["history"],
+                        expected_mine_id=request.mine_id,
+                    )
+                )
+            except Exception:
+                self.log_error(
+                    "verification reference registry integrity check failed"
+                )
+                self._send_error(
+                    HTTPStatus.CONFLICT,
+                    "verification_history_registry_integrity_failed",
+                    "verification history registry integrity could not be "
+                    "established",
+                )
+                return
+            if failures:
+                self._send_error(
+                    HTTPStatus.CONFLICT,
+                    "verification_history_governance_failed",
+                    "every historical sample must exactly match an approved "
+                    "platform verification reference",
+                    failures,
+                )
+                return
+            history_governance = {
+                "mode": "platform_approved_registry",
+                "sample_count": len(request.history),
+                "approved_references": approved,
+            }
+        else:
+            history_governance = {
+                "mode": "caller_supplied_untrusted",
+                "sample_count": len(request.history),
+                "trusted_for_production": False,
+                "note": (
+                    "authentication is disabled; caller-supplied historical "
+                    "claims were not approved by the platform registry"
+                ),
+            }
+        try:
+            result = analyze_verification(request)
+            result_document = result.model_dump(mode="json")
+            result_document["history_governance"] = history_governance
+            record, created = self._edge_repository.save_verification_run(
+                request=request_document,
+                result=result_document,
+                actor_id=principal.user_id,
+            )
+        except VerificationRunConflictError:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "verification_request_id_conflict",
+                "verification request_id is already bound to different data",
+            )
+            return
+        except Exception:
+            self.log_error("production consumption verification failed")
+            self._send_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "verification_failed",
+                "production consumption verification failed",
+            )
+            return
+        payload = deepcopy(record["result"])
+        payload["run_id"] = record["run_id"]
+        payload["created"] = created
+        self._record_audit(
+            principal,
+            "production_verification_run",
+            {
+                "run_id": record["run_id"],
+                "request_id": request.request_id,
+                "mine_id": request.mine_id,
+                "status": payload["status"],
+                "overall_clue_level": payload["overall_clue_level"],
+                "created": created,
+            },
+        )
+        self._send_json(
+            HTTPStatus.CREATED if created else HTTPStatus.OK,
+            payload,
+        )
+
+    def _handle_verification_run_list(
+        self,
+        query: str,
+        principal: Principal,
+    ) -> None:
+        values = parse_qs(query, keep_blank_values=True)
+        if set(values) - {"mine_id", "limit"} or any(
+            len(items) != 1 for items in values.values()
+        ):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_query",
+                "unsupported or repeated verification query parameter",
+            )
+            return
+        mine_id = values.get("mine_id", [None])[0] or None
+        try:
+            limit = int(values.get("limit", ["200"])[0])
+        except ValueError:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_limit",
+                "limit must be an integer",
+            )
+            return
+        mine_ids = self._scoped_mine_filter(principal, mine_id)
+        if mine_id and mine_ids == set():
+            self._send_error(
+                HTTPStatus.FORBIDDEN,
+                "permission_denied",
+                "permission or mine scope denied",
+            )
+            return
+        items = self._edge_repository.list_verification_runs(
+            mine_ids=mine_ids,
+            limit=limit,
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            {"items": items, "count": len(items)},
+        )
+
+    def _handle_safety_alert_csv(
+        self,
+        query: str,
+        principal: Principal,
+    ) -> None:
+        values = parse_qs(query, keep_blank_values=True)
+        if set(values) - {"mine_id", "status", "level", "mode"} or any(
+            len(items) != 1 for items in values.values()
+        ):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_query",
+                "unsupported or repeated report query parameter",
+            )
+            return
+        mine_id = values.get("mine_id", [None])[0] or None
+        status = values.get("status", [None])[0] or None
+        level = values.get("level", [None])[0] or None
+        mode = values.get("mode", [None])[0] or None
+        if status is not None and status not in {
+            "open",
+            "acknowledged",
+            "in_progress",
+            "resolved",
+            "closed",
+        }:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_status",
+                "unsupported safety alert status",
+            )
+            return
+        if level is not None and level not in {
+            "blue",
+            "yellow",
+            "orange",
+            "red",
+        }:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_level",
+                "unsupported safety alert level",
+            )
+            return
+        if mode is not None and mode not in {"operational", "shadow"}:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_mode",
+                "mode must be operational or shadow",
+            )
+            return
+        mine_ids = self._scoped_mine_filter(principal, mine_id)
+        if mine_id and mine_ids == set():
+            self._send_error(
+                HTTPStatus.FORBIDDEN,
+                "permission_denied",
+                "permission or mine scope denied",
+            )
+            return
+        alerts = self._edge_repository.list_alerts(
+            mine_ids=mine_ids,
+            status=status,
+            level=level,
+            operational=(
+                None if mode is None else mode == "operational"
+            ),
+            limit=1000,
+        )
+
+        def safe_cell(value: Any) -> str:
+            text = "" if value is None else str(value)
+            return "'" + text if text.startswith(("=", "+", "-", "@")) else text
+
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "预警编号",
+                "矿井编号",
+                "类别",
+                "运行模式",
+                "级别",
+                "状态",
+                "标题",
+                "位置",
+                "首次发现",
+                "最近发现",
+                "办理期限",
+                "是否逾期",
+                "办理人",
+                "出现次数",
+                "规则版本",
+                "性质说明",
+            ]
+        )
+        for alert in alerts:
+            writer.writerow(
+                [
+                    safe_cell(alert["alert_id"]),
+                    safe_cell(alert["mine_id"]),
+                    safe_cell(alert["category"]),
+                    (
+                        "正式预警"
+                        if alert["operational"]
+                        else "影子试运行（不进入正式处置）"
+                    ),
+                    alert["level"],
+                    alert["status"],
+                    safe_cell(alert["title"]),
+                    safe_cell(alert["location_code"]),
+                    alert["detected_at"],
+                    alert["last_seen_at"],
+                    alert["due_at"] or "",
+                    "是" if alert["overdue"] else "否",
+                    safe_cell(alert["assignee"]),
+                    alert["occurrence_count"],
+                    safe_cell(alert["rule_profile"].get("version")),
+                    (
+                        "辅助技术线索，不是行政或法律认定"
+                        if alert["operational"]
+                        else "未审批规则试算，不计入正式预警、时限或通知"
+                    ),
+                ]
+            )
+        encoded = b"\xef\xbb\xbf" + stream.getvalue().encode("utf-8")
+        self._record_audit(
+            principal,
+            "safety_alert_report_exported",
+            {
+                "mine_id": mine_id,
+                "status": status,
+                "level": level,
+                "mode": mode,
+                "row_count": len(alerts),
+            },
+        )
+        self._send_bytes(
+            HTTPStatus.OK,
+            encoded,
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    'attachment; filename="safety-alerts.csv"'
+                )
+            },
+        )
+
+    def _handle_safety_alert_detail(
+        self,
+        alert_id: str,
+        principal: Principal,
+    ) -> None:
+        alert = self._edge_repository.get_alert(alert_id)
+        if alert is None:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_alert_not_found",
+                "safety alert not found",
+            )
+            return
+        if not self._require_permission(
+            principal,
+            Permission.DATA_READ,
+            mine_id=alert["mine_id"],
+        ):
+            return
+        self._send_json(HTTPStatus.OK, alert)
+
+    def _handle_safety_attachment_list(
+        self,
+        alert_id: str,
+        principal: Principal,
+    ) -> None:
+        alert = self._edge_repository.get_alert(alert_id)
+        if alert is None:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_alert_not_found",
+                "safety alert not found",
+            )
+            return
+        if not self._require_permission(
+            principal,
+            Permission.DATA_READ,
+            mine_id=alert["mine_id"],
+        ):
+            return
+        items = self._edge_repository.list_alert_attachments(alert_id)
+        for item in items:
+            item["download_url"] = (
+                f"/v1/safety/alerts/{alert_id}/attachments/"
+                f"{item['attachment_id']}/download"
+            )
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "alert_id": alert_id,
+                "mine_id": alert["mine_id"],
+                "items": items,
+                "count": len(items),
+            },
+        )
+
+    def _handle_safety_attachment_upload(
+        self,
+        alert_id: str,
+        principal: Principal,
+    ) -> None:
+        alert = self._edge_repository.get_alert(alert_id)
+        if alert is None:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_alert_not_found",
+                "safety alert not found",
+            )
+            return
+        if not self._require_permission(
+            principal,
+            Permission.CASE_REVIEW,
+            mine_id=alert["mine_id"],
+        ):
+            return
+        request = self._read_model(SafetyAlertAttachmentRequest)
+        if request is None:
+            return
+        assert isinstance(request, SafetyAlertAttachmentRequest)
+        try:
+            validated = validate_safety_attachment(
+                filename=request.filename,
+                media_type=request.media_type,
+                content_base64=request.content_base64,
+                expected_sha256=request.sha256,
+            )
+            attachment = self._edge_repository.add_alert_attachment(
+                alert_id,
+                filename=validated.filename,
+                media_type=validated.media_type,
+                content=validated.content,
+                content_sha256=validated.sha256,
+                actor_id=principal.user_id,
+                note=request.note,
+            )
+        except SafetyAttachmentValidationError as error:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                error.code,
+                str(error),
+            )
+            return
+        except SafetyAttachmentConflictError:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "safety_attachment_duplicate",
+                "the same attachment content already exists for this alert",
+            )
+            return
+        except AlertNotFoundError:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_alert_not_found",
+                "safety alert not found",
+            )
+            return
+        self._record_audit(
+            principal,
+            "safety_alert_attachment_added",
+            {
+                "alert_id": alert_id,
+                "mine_id": alert["mine_id"],
+                "attachment_id": attachment["attachment_id"],
+                "filename": attachment["filename"],
+                "media_type": attachment["media_type"],
+                "size_bytes": attachment["size_bytes"],
+                "sha256": attachment["sha256"],
+            },
+        )
+        attachment["download_url"] = (
+            f"/v1/safety/alerts/{alert_id}/attachments/"
+            f"{attachment['attachment_id']}/download"
+        )
+        self._send_json(
+            HTTPStatus.CREATED,
+            {"attachment": attachment},
+        )
+
+    def _handle_safety_attachment_download(
+        self,
+        alert_id: str,
+        attachment_id: str,
+        principal: Principal,
+    ) -> None:
+        alert = self._edge_repository.get_alert(alert_id)
+        if alert is None:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_alert_not_found",
+                "safety alert not found",
+            )
+            return
+        if not self._require_permission(
+            principal,
+            Permission.DATA_READ,
+            mine_id=alert["mine_id"],
+        ):
+            return
+        attachment = self._edge_repository.get_alert_attachment(
+            alert_id,
+            attachment_id,
+        )
+        if attachment is None:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_attachment_not_found",
+                "safety alert attachment not found",
+            )
+            return
+        content = attachment["content"]
+        if (
+            len(content) != int(attachment["size_bytes"])
+            or sha256_bytes(content) != attachment["sha256"]
+        ):
+            self._record_audit(
+                principal,
+                "safety_alert_attachment_integrity_failed",
+                {
+                    "alert_id": alert_id,
+                    "mine_id": alert["mine_id"],
+                    "attachment_id": attachment_id,
+                },
+            )
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "safety_attachment_integrity_failed",
+                "stored attachment failed integrity verification",
+            )
+            return
+        self._record_audit(
+            principal,
+            "safety_alert_attachment_downloaded",
+            {
+                "alert_id": alert_id,
+                "mine_id": alert["mine_id"],
+                "attachment_id": attachment_id,
+                "sha256": attachment["sha256"],
+            },
+        )
+        self._send_bytes(
+            HTTPStatus.OK,
+            content,
+            content_type="application/octet-stream",
+            headers={
+                "Content-Disposition": attachment_content_disposition(
+                    attachment["filename"],
+                    attachment_id,
+                ),
+                "Content-Security-Policy": (
+                    "sandbox; default-src 'none'"
+                ),
+                "Cross-Origin-Resource-Policy": "same-origin",
+                "X-Download-Options": "noopen",
+            },
+        )
+
+    def _handle_safety_alert_action(
+        self,
+        alert_id: str,
+        principal: Principal,
+    ) -> None:
+        request = self._read_model(SafetyAlertActionRequest)
+        if request is None:
+            return
+        assert isinstance(request, SafetyAlertActionRequest)
+        existing = self._edge_repository.get_alert(alert_id)
+        if existing is None:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_alert_not_found",
+                "safety alert not found",
+            )
+            return
+        required_permission = {
+            "assign": Permission.CASE_ASSIGN,
+            "acknowledge": Permission.CASE_REVIEW,
+            "start": Permission.CASE_REVIEW,
+            "resolve": Permission.CASE_REVIEW,
+            "add_note": Permission.CASE_REVIEW,
+            "close": Permission.CASE_APPROVE,
+            "reopen": Permission.CASE_APPROVE,
+        }[request.action]
+        if not self._require_permission(
+            principal,
+            required_permission,
+            mine_id=existing["mine_id"],
+        ):
+            return
+        assignee = request.assignee
+        if request.action == "assign" and assignee is not None:
+            try:
+                _, assignee = self._resolve_responsibility_user(
+                    assignee,
+                    mine_id=existing["mine_id"],
+                )
+            except ValueError as error:
+                self._send_error(
+                    HTTPStatus.CONFLICT,
+                    "invalid_safety_alert_assignee",
+                    str(error),
+                )
+                return
+        try:
+            alert = self._edge_repository.apply_alert_action(
+                alert_id,
+                action=request.action,
+                expected_version=request.expected_version,
+                actor_id=principal.user_id,
+                actor_username=principal.username,
+                note=request.note,
+                assignee=assignee,
+            )
+        except AlertVersionConflictError:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "safety_alert_version_conflict",
+                "safety alert was changed by another reviewer",
+            )
+            return
+        except InvalidAlertActionError as error:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "invalid_safety_alert_action",
+                str(error),
+            )
+            return
+        except AlertNotFoundError:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_alert_not_found",
+                "safety alert not found",
+            )
+            return
+        self._record_audit(
+            principal,
+            "safety_alert_action",
+            {
+                "alert_id": alert_id,
+                "mine_id": alert["mine_id"],
+                "action": request.action,
+                "version": alert["version"],
+            },
+        )
+        self._send_json(HTTPStatus.OK, alert)
+
+    def _handle_mine_profile_upsert(
+        self,
+        principal: Principal,
+    ) -> None:
+        request = self._read_model(MineSafetyProfileRequest)
+        if request is None:
+            return
+        assert isinstance(request, MineSafetyProfileRequest)
+        profile = self._edge_repository.upsert_mine(
+            request.model_dump(mode="json"),
+            actor_id=principal.user_id,
+        )
+        self._record_audit(
+            principal,
+            "mine_safety_profile_upserted",
+            {
+                "mine_id": request.mine_id,
+                "gas_category": request.gas_category,
+                "approved_underground_personnel": (
+                    request.approved_underground_personnel
+                ),
+            },
+        )
+        self._send_json(HTTPStatus.OK, profile)
+
+    def _handle_verification_reference_list(
+        self,
+        query: str,
+        principal: Principal,
+    ) -> None:
+        values = parse_qs(query, keep_blank_values=True)
+        if set(values) - {"mine_id", "status", "limit"} or any(
+            len(items) != 1 for items in values.values()
+        ):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_query",
+                "unsupported or repeated verification reference query "
+                "parameter",
+            )
+            return
+        mine_id = values.get("mine_id", [None])[0] or None
+        status = values.get("status", [None])[0] or None
+        if status is not None and status not in {
+            "draft",
+            "approved",
+            "rejected",
+        }:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_status",
+                "status must be draft, approved or rejected",
+            )
+            return
+        try:
+            limit = int(values.get("limit", ["500"])[0])
+        except ValueError:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_limit",
+                "limit must be an integer",
+            )
+            return
+        if not 1 <= limit <= 1000:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_limit",
+                "limit must be between 1 and 1000",
+            )
+            return
+        mine_ids = self._scoped_mine_filter(principal, mine_id)
+        if mine_id and mine_ids == set():
+            self._send_error(
+                HTTPStatus.FORBIDDEN,
+                "permission_denied",
+                "permission or mine scope denied",
+            )
+            return
+        items = self._edge_repository.list_verification_references(
+            mine_ids=mine_ids,
+            status=status,
+            limit=limit,
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            {"items": items, "count": len(items)},
+        )
+
+    def _handle_verification_reference_register(
+        self,
+        principal: Principal,
+    ) -> None:
+        request = self._read_model(
+            VerificationReferenceRegistrationRequest
+        )
+        if request is None:
+            return
+        assert isinstance(
+            request,
+            VerificationReferenceRegistrationRequest,
+        )
+        mine_id = request.sample.mine_id
+        if not self._require_permission(
+            principal,
+            Permission.CONFIG_MANAGE,
+            mine_id=mine_id,
+        ):
+            return
+        if not self._edge_repository.list_mines({mine_id}):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "verification_reference_mine_not_found",
+                "verification reference mine is not registered",
+            )
+            return
+        try:
+            record, created = (
+                self._edge_repository.register_verification_reference(
+                    sample=request.sample.model_dump(mode="json"),
+                    source_digests=request.source_digests,
+                    evidence_refs=request.evidence_refs,
+                    actor_id=principal.user_id,
+                )
+            )
+        except VerificationReferenceConflictError as error:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "verification_reference_conflict",
+                str(error),
+            )
+            return
+        except ValueError as error:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_verification_reference",
+                str(error),
+            )
+            return
+        self._record_audit(
+            principal,
+            "verification_reference_registered",
+            {
+                "sample_id": record["sample_id"],
+                "mine_id": record["mine_id"],
+                "sample_sha256": record["sample_sha256"],
+                "registration_sha256": record["registration_sha256"],
+                "created": created,
+            },
+        )
+        payload = deepcopy(record)
+        payload["created"] = created
+        self._send_json(
+            HTTPStatus.CREATED if created else HTTPStatus.OK,
+            payload,
+        )
+
+    def _handle_verification_reference_action(
+        self,
+        sample_id: str,
+        principal: Principal,
+    ) -> None:
+        request = self._read_model(VerificationReferenceActionRequest)
+        if request is None:
+            return
+        assert isinstance(request, VerificationReferenceActionRequest)
+        existing = self._edge_repository.get_verification_reference(
+            sample_id
+        )
+        if existing is None:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "verification_reference_not_found",
+                "verification reference not found",
+            )
+            return
+        if not self._require_permission(
+            principal,
+            Permission.CONFIG_MANAGE,
+            mine_id=str(existing["mine_id"]),
+        ):
+            return
+        try:
+            record, changed = (
+                self._edge_repository.decide_verification_reference(
+                    sample_id,
+                    action=request.action,
+                    expected_sample_sha256=(
+                        request.expected_sample_sha256
+                    ),
+                    note=request.note,
+                    actor_id=principal.user_id,
+                )
+            )
+        except VerificationReferenceNotFoundError:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "verification_reference_not_found",
+                "verification reference not found",
+            )
+            return
+        except (
+            InvalidVerificationReferenceActionError,
+            VerificationReferenceConflictError,
+            ValueError,
+        ) as error:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "verification_reference_action_conflict",
+                str(error),
+            )
+            return
+        self._record_audit(
+            principal,
+            f"verification_reference_{request.action}",
+            {
+                "sample_id": record["sample_id"],
+                "mine_id": record["mine_id"],
+                "sample_sha256": record["sample_sha256"],
+                "status": record["status"],
+                "changed": changed,
+                "note": request.note,
+            },
+        )
+        payload = deepcopy(record)
+        payload["changed"] = changed
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _handle_safety_rule_register(
+        self,
+        principal: Principal,
+    ) -> None:
+        request = self._read_model(SafetyRuleRegistrationRequest)
+        if request is None:
+            return
+        assert isinstance(request, SafetyRuleRegistrationRequest)
+        try:
+            record, created = self._edge_repository.register_safety_rule(
+                snapshot=request.snapshot.model_dump(mode="json"),
+                fingerprint=request.snapshot.fingerprint,
+                actor_id=principal.user_id,
+                status="draft",
+            )
+        except SafetyRuleConflictError as error:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "safety_rule_conflict",
+                str(error),
+            )
+            return
+        self._record_audit(
+            principal,
+            "safety_rule_registered",
+            {
+                "rule_version": record["rule_version"],
+                "fingerprint": record["fingerprint"],
+                "created": created,
+            },
+        )
+        self._send_json(
+            HTTPStatus.CREATED if created else HTTPStatus.OK,
+            record,
+        )
+
+    def _handle_safety_rule_action(
+        self,
+        rule_version: str,
+        principal: Principal,
+    ) -> None:
+        request = self._read_model(SafetyRuleActionRequest)
+        if request is None:
+            return
+        assert isinstance(request, SafetyRuleActionRequest)
+        try:
+            record = self._edge_repository.change_safety_rule_status(
+                rule_version,
+                action=request.action,
+                expected_fingerprint=request.expected_fingerprint,
+                actor_id=principal.user_id,
+                note=request.note,
+            )
+        except KeyError:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_rule_not_found",
+                "safety rule version not found",
+            )
+            return
+        except (SafetyRuleConflictError, ValueError) as error:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "safety_rule_action_conflict",
+                str(error),
+            )
+            return
+        self._record_audit(
+            principal,
+            f"safety_rule_{request.action}",
+            {
+                "rule_version": record["rule_version"],
+                "fingerprint": record["fingerprint"],
+                "status": record["status"],
+                "note": request.note,
+            },
+        )
+        self._send_json(HTTPStatus.OK, record)
+
+    def _resolve_responsibility_user(
+        self,
+        username: str,
+        *,
+        mine_id: str | None,
+    ) -> tuple[str, str]:
+        if not self.server.auth_required:  # type: ignore[attr-defined]
+            normalized = username.strip()
+            return normalized, normalized
+        user = self._auth_store.get_user(username)
+        if user is None or not user.active:
+            raise ValueError(
+                f"responsibility user {username!r} is missing or inactive"
+            )
+        if user.role not in {
+            Role.ADMIN,
+            Role.SUPERVISOR,
+            Role.REVIEWER,
+        }:
+            raise ValueError(
+                f"responsibility user {username!r} cannot review alerts"
+            )
+        if (
+            mine_id is not None
+            and user.role is not Role.ADMIN
+            and mine_id not in user.mine_scopes
+        ):
+            raise ValueError(
+                f"responsibility user {username!r} lacks mine scope"
+            )
+        return user.user_id, user.username
+
+    def _handle_safety_responsibility_route_upsert(
+        self,
+        principal: Principal,
+    ) -> None:
+        request = self._read_model(SafetyResponsibilityRouteRequest)
+        if request is None:
+            return
+        assert isinstance(request, SafetyResponsibilityRouteRequest)
+        if request.mine_id is not None and not any(
+            item["mine_id"] == request.mine_id
+            for item in self._edge_repository.list_mines()
+        ):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "responsibility_mine_not_found",
+                "responsibility route mine is not registered",
+            )
+            return
+        try:
+            primary_id, primary_name = (
+                self._resolve_responsibility_user(
+                    request.primary_username,
+                    mine_id=request.mine_id,
+                )
+            )
+            backup_id: str | None = None
+            backup_name: str | None = None
+            if request.backup_username is not None:
+                backup_id, backup_name = (
+                    self._resolve_responsibility_user(
+                        request.backup_username,
+                        mine_id=request.mine_id,
+                    )
+                )
+            route = self._edge_repository.upsert_responsibility_route(
+                route_id=request.route_id,
+                mine_id=request.mine_id,
+                category=request.category,
+                minimum_level=request.minimum_level,
+                primary_user_id=primary_id,
+                primary_username=primary_name,
+                backup_user_id=backup_id,
+                backup_username=backup_name,
+                escalation_minutes=request.escalation_minutes,
+                enabled=request.enabled,
+                actor_id=principal.user_id,
+            )
+            newly_routed = (
+                self._edge_repository.route_unassigned_alerts()
+            )
+        except ValueError as error:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "invalid_responsibility_route",
+                str(error),
+            )
+            return
+        self._record_audit(
+            principal,
+            "safety_responsibility_route_upserted",
+            {
+                "route_id": request.route_id,
+                "mine_id": request.mine_id,
+                "category": request.category,
+                "minimum_level": request.minimum_level,
+                "newly_routed_alerts": newly_routed,
+            },
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "route": route,
+                "newly_routed_alerts": newly_routed,
+                "reconciled_alerts": newly_routed,
+            },
+        )
+
+    def _handle_safety_responsibility_route_action(
+        self,
+        route_id: str,
+        principal: Principal,
+    ) -> None:
+        request = self._read_model(
+            SafetyResponsibilityRouteActionRequest
+        )
+        if request is None:
+            return
+        assert isinstance(
+            request,
+            SafetyResponsibilityRouteActionRequest,
+        )
+        deleted = self._edge_repository.delete_responsibility_route(
+            route_id
+        )
+        if not deleted:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "responsibility_route_not_found",
+                "responsibility route not found",
+            )
+            return
+        reconciled = self._edge_repository.route_unassigned_alerts()
+        self._record_audit(
+            principal,
+            "safety_responsibility_route_deleted",
+            {
+                "route_id": route_id,
+                "reconciled_alerts": reconciled,
+            },
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "route_id": route_id,
+                "deleted": True,
+                "reconciled_alerts": reconciled,
+            },
+        )
+
+    def _handle_safety_alert_read(
+        self,
+        alert_id: str,
+        principal: Principal,
+    ) -> None:
+        request = self._read_model(SafetyAlertReadRequest)
+        if request is None:
+            return
+        assert isinstance(request, SafetyAlertReadRequest)
+        existing = self._edge_repository.get_alert(alert_id)
+        if existing is None:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "safety_alert_not_found",
+                "safety alert not found",
+            )
+            return
+        if not self._require_permission(
+            principal,
+            Permission.DATA_READ,
+            mine_id=existing["mine_id"],
+        ):
+            return
+        if existing["version"] != request.expected_version:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "safety_alert_version_conflict",
+                "safety alert was changed before the read receipt",
+            )
+            return
+        try:
+            self._edge_repository.mark_alert_read(
+                alert_id,
+                user_id=principal.user_id,
+                username=principal.username,
+            )
+        except InvalidAlertActionError as error:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "invalid_safety_alert_action",
+                str(error),
+            )
+            return
+        alert = self._edge_repository.get_alert(alert_id)
+        assert alert is not None
+        self._record_audit(
+            principal,
+            "safety_alert_read",
+            {
+                "alert_id": alert_id,
+                "mine_id": alert["mine_id"],
+                "version": alert["version"],
+            },
+        )
+        self._send_json(HTTPStatus.OK, alert)
 
     def _send_external_error(
         self,
@@ -4143,6 +6748,138 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(HTTPStatus.OK, {"analytics": report})
 
+    def _handle_regulatory_report(
+        self,
+        query: str,
+        principal: Principal,
+    ) -> None:
+        values = parse_qs(query, keep_blank_values=True)
+        required = {"kind", "period", "timezone"}
+        if set(values) != required or any(
+            len(entries) != 1 for entries in values.values()
+        ):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_query",
+                "kind, period and timezone are required exactly once",
+            )
+            return
+        generated_at = datetime.now(UTC)
+        try:
+            period = resolve_reporting_period(
+                values["kind"][0],
+                values["period"][0],
+                values["timezone"][0],
+                now=generated_at,
+            )
+        except ValueError as error:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_query",
+                str(error),
+            )
+            return
+
+        visible_mines = self._visible_mines(principal)
+        leadership_batches, governed_mode = self._leadership_batches(
+            visible_mines=visible_mines,
+            limit=1000,
+        )
+        integrity_blocked = any(
+            batch.get("integrity_valid") is not True
+            for batch in leadership_batches
+        )
+        valid_batches = [
+            batch
+            for batch in leadership_batches
+            if batch.get("integrity_valid") is True
+        ]
+        valid_batch_ids = {
+            str(batch["batch_id"]) for batch in valid_batches
+        }
+        cases = [
+            case
+            for case in self._repository.list_cases()
+            if (
+                visible_mines is None
+                or str(case["mine_id"]) in visible_mines
+            )
+            and str(case["batch_id"]) in valid_batch_ids
+        ]
+        events = {
+            str(case["case_id"]): self._repository.get_case_events(
+                str(case["case_id"])
+            )
+            for case in cases
+        }
+
+        requested_scope = (
+            None if visible_mines is None else set(visible_mines)
+        )
+        alerts = self._edge_repository.list_alerts(
+            mine_ids=requested_scope,
+            limit=1000,
+        )
+        verification_runs = self._edge_repository.list_verification_runs(
+            mine_ids=requested_scope,
+            limit=1000,
+        )
+        mine_catalog = self._edge_repository.list_mines(requested_scope)
+        if visible_mines is None:
+            scope_ids = {
+                str(item["mine_id"]) for item in mine_catalog
+            }
+            scope_ids.update(str(case["mine_id"]) for case in cases)
+            scope_ids.update(str(alert["mine_id"]) for alert in alerts)
+            scope_ids.update(
+                str(run["mine_id"]) for run in verification_runs
+            )
+            for batch in valid_batches:
+                scope_ids.update(
+                    str(item["mine_id"])
+                    for item in batch["response"].get("items", [])
+                    if item.get("mine_id")
+                )
+        else:
+            scope_ids = set(visible_mines)
+        try:
+            analytics = calculate_leadership_analytics(
+                valid_batches,
+                cases,
+                events,
+                mine_ids=scope_ids,
+                start_at=period.start_at,
+                end_at=period.data_end_at,
+                as_of=period.data_end_at,
+                timezone=period.timezone,
+            )
+            dashboard = self._edge_repository.dashboard(scope_ids)
+            report = build_periodic_regulatory_report(
+                period=period,
+                mine_ids=scope_ids,
+                analytics=analytics,
+                alerts=alerts,
+                verification_runs=verification_runs,
+                mine_catalog=mine_catalog,
+                safety_dashboard=dashboard,
+                generated_at=generated_at,
+                governed_mode=governed_mode,
+                integrity_blocked=integrity_blocked,
+                source_limits={
+                    "analysis_batches": len(leadership_batches) >= 1000,
+                    "safety_alerts": len(alerts) >= 1000,
+                    "verification_runs": len(verification_runs) >= 1000,
+                },
+            )
+        except (TypeError, ValueError) as error:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "report_generation_blocked",
+                str(error),
+            )
+            return
+        self._send_json(HTTPStatus.OK, {"report": report})
+
     @staticmethod
     def _temporal_detector_thresholds(
         parameters: TemporalDetectionParameters,
@@ -5875,6 +8612,12 @@ class MineGuardHTTPServer(ThreadingHTTPServer):
         governance_service: GovernanceService,
         source_key_store: SourceKeyStore,
         external_clients: dict[str, ExternalClient],
+        edge_repository: EdgeTelemetryRepository,
+        edge_clients: dict[str, EdgeClient],
+        edge_evaluation_service: EdgeSafetyEvaluationService,
+        notification_dispatcher: SafetyNotificationDispatcher,
+        responsibility_dispatcher: SafetyResponsibilityDispatcher,
+        map_boundary: dict[str, Any] | None,
         readiness: ReadinessChecker,
         backup_manager: BackupManager | None,
         backup_databases: dict[str, Path],
@@ -5893,6 +8636,12 @@ class MineGuardHTTPServer(ThreadingHTTPServer):
         self.governance_service = governance_service
         self.source_key_store = source_key_store
         self.external_clients = external_clients
+        self.edge_repository = edge_repository
+        self.edge_clients = edge_clients
+        self.edge_evaluation_service = edge_evaluation_service
+        self.notification_dispatcher = notification_dispatcher
+        self.responsibility_dispatcher = responsibility_dispatcher
+        self.map_boundary = map_boundary
         self.readiness = readiness
         self.backup_manager = backup_manager
         self.backup_databases = backup_databases
@@ -5900,13 +8649,25 @@ class MineGuardHTTPServer(ThreadingHTTPServer):
         self.runtime_directory = runtime_directory
         super().__init__(server_address, MineGuardRequestHandler)
         self.job_manager.start()
+        self.edge_evaluation_service.start()
+        self.notification_dispatcher.start()
+        self.responsibility_dispatcher.start()
 
     def server_close(self) -> None:
         try:
             try:
                 self.job_manager.stop()
             finally:
-                super().server_close()
+                try:
+                    self.edge_evaluation_service.stop()
+                finally:
+                    try:
+                        self.notification_dispatcher.stop()
+                    finally:
+                        try:
+                            self.responsibility_dispatcher.stop()
+                        finally:
+                            super().server_close()
         finally:
             try:
                 self.repository.close()
@@ -5922,6 +8683,7 @@ class MineGuardHTTPServer(ThreadingHTTPServer):
                         finally:
                             self.governance_repository.close()
                             self.source_key_store.close()
+                            self.edge_repository.close()
                             if self.runtime_directory is not None:
                                 self.runtime_directory.cleanup()
 
@@ -5955,10 +8717,51 @@ def create_server(
     backup_secret: bytes | None = None,
     backup_key_id: str = "local-backup-key",
     external_clients: dict[str, ExternalClient] | None = None,
+    edge_clients: dict[str, EdgeClient] | None = None,
+    safety_webhooks: tuple[SafetyWebhook, ...] = (),
+    edge_evaluation_maximum_attempts: int = 5,
+    edge_evaluation_base_retry_seconds: float = 5.0,
+    edge_evaluation_maximum_retry_seconds: float = 300.0,
+    edge_evaluation_poll_seconds: float = 1.0,
+    edge_evaluation_lease_seconds: float = 120.0,
+    responsibility_poll_seconds: float = 5.0,
+    map_geojson_path: str | Path | None = None,
 ) -> ThreadingHTTPServer:
     """Create a server instance, primarily for embedding and tests."""
 
+    map_boundary = (
+        load_boundary_geojson(map_geojson_path)
+        if map_geojson_path is not None
+        else None
+    )
     repository = LocalRepository(database_path)
+    edge_repository = EdgeTelemetryRepository(database_path)
+    edge_repository.register_safety_rule(
+        snapshot=DEFAULT_RULE_SNAPSHOT.model_dump(mode="json"),
+        fingerprint=DEFAULT_RULE_SNAPSHOT.fingerprint,
+        actor_id="system:built-in-proposal",
+        status="proposal",
+    )
+    notification_dispatcher = SafetyNotificationDispatcher(
+        edge_repository,
+        safety_webhooks,
+    )
+    responsibility_dispatcher = SafetyResponsibilityDispatcher(
+        edge_repository,
+        poll_seconds=responsibility_poll_seconds,
+    )
+    edge_evaluation_service = EdgeSafetyEvaluationService(
+        edge_repository,
+        lambda selected_repository, batch: evaluate_edge_batch_safety(
+            selected_repository,
+            batch,
+        ),
+        maximum_attempts=edge_evaluation_maximum_attempts,
+        base_retry_seconds=edge_evaluation_base_retry_seconds,
+        maximum_retry_seconds=edge_evaluation_maximum_retry_seconds,
+        poll_seconds=edge_evaluation_poll_seconds,
+        lease_seconds=edge_evaluation_lease_seconds,
+    )
     auth_store = LocalAuthStore(auth_database_path)
     job_repository = JobRepository(job_database_path)
     runtime_directory: tempfile.TemporaryDirectory[str] | None = None
@@ -6021,6 +8824,7 @@ def create_server(
     if auth_required and not auth_store.list_users():
         if bootstrap_admin is None:
             repository.close()
+            edge_repository.close()
             auth_store.close()
             job_repository.close()
             evidence_repository.close()
@@ -6210,17 +9014,134 @@ def create_server(
         source_key_store.get("__readiness__")
         return True
 
+    def edge_store_ready() -> bool:
+        return edge_repository.ready()
+
+    def edge_evaluation_ready() -> ReadinessCheckResult:
+        health = edge_repository.evaluation_health()
+        if not edge_evaluation_service.is_running():
+            return ReadinessCheckResult(
+                "not_ready",
+                "边缘批次安全复算后台线程未运行",
+            )
+        if health["dead"]:
+            return ReadinessCheckResult(
+                "degraded",
+                (
+                    f"{health['dead']} 个边缘批次安全复算进入死信；"
+                    "失败告警保持开放，须人工受控重算"
+                ),
+            )
+        if edge_evaluation_service.last_worker_error:
+            return ReadinessCheckResult(
+                "degraded",
+                "边缘批次安全复算线程仍在运行，但最近一次队列处理失败",
+            )
+        if health["backlog"]:
+            return ReadinessCheckResult(
+                "degraded",
+                (
+                    f"{health['backlog']} 个边缘批次等待安全复算"
+                    f"（待处理 {health['pending']}，"
+                    f"退避重试 {health['failed']}）"
+                ),
+            )
+        if health["running"]:
+            return ReadinessCheckResult(
+                "ready",
+                f"{health['running']} 个边缘批次正在安全复算",
+            )
+        return ReadinessCheckResult("ready", "边缘批次安全复算无积压")
+
     def worker_ready() -> ReadinessCheckResult:
         if job_manager.is_running():
             return ReadinessCheckResult("ready", "异步分析线程正常")
         return ReadinessCheckResult("not_ready", "异步分析线程未运行")
+
+    def notification_worker_ready() -> ReadinessCheckResult:
+        delivery_health = edge_repository.notification_delivery_health()
+        if not notification_dispatcher.configured:
+            if delivery_health["unfinished"]:
+                return ReadinessCheckResult(
+                    "degraded",
+                    (
+                        f"外部预警推送未配置，但有 "
+                        f"{delivery_health['unfinished']} 条既有目标投递"
+                        "尚未完成"
+                    ),
+                )
+            return ReadinessCheckResult(
+                "ready",
+                "外部预警推送未配置；站内 outbox 正常",
+            )
+        if not notification_dispatcher.is_running():
+            return ReadinessCheckResult(
+                "not_ready",
+                "外部预警推送已配置但线程未运行",
+            )
+        if notification_dispatcher.last_worker_error:
+            return ReadinessCheckResult(
+                "degraded",
+                "外部预警推送线程仍在运行，但最近一次队列处理失败",
+            )
+        if delivery_health["dead"]:
+            return ReadinessCheckResult(
+                "degraded",
+                (
+                    f"外部预警推送线程正常，但有 "
+                    f"{delivery_health['dead']} 条目标投递进入死信"
+                ),
+            )
+        if delivery_health["retry"]:
+            return ReadinessCheckResult(
+                "ready",
+                (
+                    f"外部预警推送线程正常，"
+                    f"{delivery_health['retry']} 条目标等待自动重试"
+                ),
+            )
+        return ReadinessCheckResult("ready", "外部预警推送线程正常")
+
+    def responsibility_worker_ready() -> ReadinessCheckResult:
+        health = edge_repository.responsibility_health()
+        if not responsibility_dispatcher.is_running():
+            return ReadinessCheckResult(
+                "not_ready",
+                "预警责任路由与已读升级后台线程未运行",
+            )
+        if responsibility_dispatcher.last_error:
+            return ReadinessCheckResult(
+                "degraded",
+                "预警责任路由线程仍在运行，但最近一次处理失败",
+            )
+        if health["unrouted"]:
+            return ReadinessCheckResult(
+                "degraded",
+                f"{health['unrouted']} 条正式预警尚未匹配责任路由",
+            )
+        if health["unread_primary"]:
+            return ReadinessCheckResult(
+                "ready",
+                f"{health['unread_primary']} 条预警等待主责人员已读",
+            )
+        return ReadinessCheckResult("ready", "预警责任路由与已读升级正常")
 
     readiness.register("case_store", case_store_ready)
     readiness.register("auth_store", auth_store_ready)
     readiness.register("job_store", job_store_ready)
     readiness.register("evidence_store", evidence_store_ready)
     readiness.register("governance_store", governance_store_ready)
+    readiness.register("edge_telemetry_store", edge_store_ready)
+    readiness.register("edge_safety_evaluation", edge_evaluation_ready)
     readiness.register("analysis_worker", worker_ready)
+    readiness.register(
+        "safety_notification_worker",
+        notification_worker_ready,
+    )
+    readiness.register(
+        "safety_responsibility_worker",
+        responsibility_worker_ready,
+    )
 
     configured_external_clients = dict(external_clients or {})
 
@@ -6362,6 +9283,12 @@ def create_server(
             governance_service=governance_service,
             source_key_store=source_key_store,
             external_clients=configured_external_clients,
+            edge_repository=edge_repository,
+            edge_clients=dict(edge_clients or {}),
+            edge_evaluation_service=edge_evaluation_service,
+            notification_dispatcher=notification_dispatcher,
+            responsibility_dispatcher=responsibility_dispatcher,
+            map_boundary=map_boundary,
             readiness=readiness,
             backup_manager=backup_manager,
             backup_databases=backup_databases,
@@ -6369,6 +9296,7 @@ def create_server(
         )
     except Exception:
         repository.close()
+        edge_repository.close()
         job_repository.close()
         auth_store.close()
         evidence_repository.close()
@@ -6397,6 +9325,7 @@ def serve(
     source_key_directory: str | Path = ".mineguard/source-keys",
     backup_directory: str | Path = ".mineguard/backups",
     backup_key_path: str | Path = ".mineguard/backup.key",
+    map_geojson_path: str | Path | None = None,
 ) -> None:
     """Run the MineGuard API until interrupted."""
 
@@ -6404,6 +9333,17 @@ def serve(
     backup_key = _load_or_create_secret(backup_key_path)
     external_clients = parse_external_clients(
         os.environ.get("MINEGUARD_EXTERNAL_CLIENTS_JSON")
+    )
+    edge_clients = parse_edge_clients(
+        os.environ.get("MINEGUARD_EDGE_CLIENTS_JSON")
+    )
+    safety_webhooks = parse_safety_webhooks(
+        os.environ.get("MINEGUARD_SAFETY_WEBHOOKS_JSON")
+    )
+    configured_map_path = (
+        map_geojson_path
+        or os.environ.get("MINEGUARD_MAP_GEOJSON_PATH")
+        or None
     )
     with create_server(
         host,
@@ -6423,8 +9363,89 @@ def serve(
         backup_directory=backup_directory,
         backup_secret=backup_key,
         external_clients=external_clients,
+        edge_clients=edge_clients,
+        safety_webhooks=safety_webhooks,
+        edge_evaluation_maximum_attempts=_environment_int(
+            "MINEGUARD_EDGE_EVALUATION_MAX_ATTEMPTS",
+            5,
+            minimum=1,
+            maximum=100,
+        ),
+        edge_evaluation_base_retry_seconds=_environment_float(
+            "MINEGUARD_EDGE_EVALUATION_BASE_RETRY_SECONDS",
+            5.0,
+            minimum=0.1,
+            maximum=3600.0,
+        ),
+        edge_evaluation_maximum_retry_seconds=_environment_float(
+            "MINEGUARD_EDGE_EVALUATION_MAX_RETRY_SECONDS",
+            300.0,
+            minimum=0.1,
+            maximum=86_400.0,
+        ),
+        edge_evaluation_poll_seconds=_environment_float(
+            "MINEGUARD_EDGE_EVALUATION_POLL_SECONDS",
+            1.0,
+            minimum=0.1,
+            maximum=60.0,
+        ),
+        edge_evaluation_lease_seconds=_environment_float(
+            "MINEGUARD_EDGE_EVALUATION_LEASE_SECONDS",
+            120.0,
+            minimum=1.0,
+            maximum=3600.0,
+        ),
+        responsibility_poll_seconds=_environment_float(
+            "MINEGUARD_RESPONSIBILITY_POLL_SECONDS",
+            5.0,
+            minimum=0.1,
+            maximum=3600.0,
+        ),
+        map_geojson_path=configured_map_path,
     ) as server:
         server.serve_forever()
+
+
+def _environment_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+    if not minimum <= value <= maximum:
+        raise ValueError(
+            f"{name} must be between {minimum} and {maximum}"
+        )
+    return value
+
+
+def _environment_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be numeric") from error
+    if not minimum <= value <= maximum:
+        raise ValueError(
+            f"{name} must be between {minimum} and {maximum}"
+        )
+    return value
 
 
 def _load_or_create_secret(path: str | Path) -> bytes:

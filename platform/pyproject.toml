@@ -24,7 +24,13 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-mineguard = ["web/*.html", "web/*.css", "web/*.js"]
+mineguard = [
+  "web/*.html",
+  "web/*.css",
+  "web/*.js",
+  "web/*.svg",
+  "web/*.webmanifest",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

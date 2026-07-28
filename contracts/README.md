@@ -13,14 +13,44 @@ contracts/
 │   ├── enterprise-submission-v1.schema.json
 │   ├── submission-receipt-v1.schema.json
 │   ├── error-v1.schema.json
-│   └── capabilities-v1.schema.json
-├── openapi/enterprise-submission-v1.openapi.json
-├── specs/hmac-transport-auth-v1.md
-├── specs/governed-observation-signature-v1.md
+│   ├── capabilities-v1.schema.json
+│   ├── edge-telemetry-batch-v1.schema.json
+│   ├── edge-telemetry-receipt-v1.schema.json
+│   └── edge-telemetry-capabilities-v1.schema.json
+├── openapi/
+│   ├── enterprise-submission-v1.openapi.json
+│   └── edge-telemetry-v1.openapi.json
+├── specs/
+│   ├── hmac-transport-auth-v1.md
+│   ├── edge-telemetry-hmac-v1.md
+│   └── governed-observation-signature-v1.md
 ├── examples/
 ├── VERSIONING.md
 └── scripts/validate_contracts.py
 ```
+
+矿端边缘采集服务使用独立的 `edge-telemetry-batch-v1` 边界。它面向人员、甲烷、
+通风、用电、产量和火工品等只读遥测，运输签名见
+`specs/edge-telemetry-hmac-v1.md`。矿端产生的本地预警仅为提示，监管平台必须用
+自己的规则版本重新计算，不能直接采信矿端级别。
+主通风机运行、故障和倒机分别使用三个 `ventilation.main_fan_*` 二值指标，
+单位固定为 `count`、值只能为 `0` 或 `1`，避免把含义不明的厂商状态码当作
+监管事实。
+
+V1 还定义了可选 `interval` 统计窗口，以及皮带瞬时产量/速度/运行/故障、
+区域人数、无卡入井、人卡不符、超时和雷管计数等聚合非 PII 指标。窗口存在时
+`start/end/timezone/aggregation` 必填，`shift_code` 可选；接收端必须验证
+`end > start` 且 `end <= received_at`。数据源自身健康只使用
+`source.heartbeat_age_seconds`（`s`）、`source.consecutive_failures`
+（`count` 整数）和 `source.missing_state`（`count` 0/1），并强制
+`location_code == source_id`，不在健康指标里夹带人员、设备操作或监管结论。
+炸药质量固定用 kg，雷管数量固定用 count 整数。
+
+矿端批号固定为
+`{client_id}--batch_{32位小写十六进制摘要}`。接收端必须先完成 HMAC 客户端
+认证，再同时核对报文 `client_id`、矿井授权和批号的精确客户端前缀，不能只看
+后缀格式。这样即使两个客户端选择相同摘要，也会落在不同命名空间，不能抢占
+全局 `batch_id`。为满足 128 字符批号上限，边缘客户端编码最长 88 个字符。
 
 JSON Schema 使用 Draft 2020-12，OpenAPI 使用 3.1。schema 是权威约束；
 OpenAPI 描述 HTTP 行为；Markdown 规范补充跨字段、哈希、重放和信任边界语义。
@@ -118,12 +148,14 @@ payload.observations[]                -> GovernedObservation 字段
 
 ## 本地校验
 
-无需安装项目代码即可检查全部 JSON、引用、示例摘要和固定向量：
+安装独立校验依赖后，可以检查全部 JSON、引用、Draft 2020-12 实例、示例摘要
+和固定向量：
 
 ```bash
+python -m pip install -r contracts/requirements-validation.txt
 python contracts/scripts/validate_contracts.py
 ```
 
-若环境安装了 `jsonschema`，脚本还会按 Draft 2020-12 完整验证四个示例；没有时
-会明确报告跳过，CI 应安装 `jsonschema>=4.18`。契约版本策略见
+若环境没有 `jsonschema`，脚本仍做基础检查但会明确报告跳过完整实例校验；
+发布门和 CI 不得接受该跳过。契约版本策略见
 [VERSIONING.md](VERSIONING.md)。

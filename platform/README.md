@@ -31,12 +31,24 @@ MineGuard 是面向煤矿监管的单节点内网影子运行版：接收已登�
 - 新增按矿井、兼容键和完整运行工况精确匹配的人工核验正常历史基线，使用多维
   median/MAD 和上尾最大稳健距离的 `+1` 经验稀有度；核心工况不完整或少于
   20 个合格人工核验正常样本时，明确显示未评估或历史不足；
+- 生产鉴权模式下，吨煤核验历史样本须先绑定产量、用电、火工品 SHA-256 与
+  证据引用进入不可变注册表，再由非登记人按预期摘要批准；正式分析仅接纳
+  JSON 与摘要完全匹配且审计链有效的批准样本，开发免鉴权试算则明确标记为
+  `caller_supplied_untrusted`；
 - 六类追加式历史标签与不可变合法情景版本；只有“人工核验正常”可进入正常
   基线，“经批准合法例外”只关联版本化场景解释辅助信号。历史、时序和合法情景
   只生成保守影子研判，不改写物理 L1/MCS 主结论；
 - 受治理分析落库前自动生成当前窗口时序证据：仅使用严格先前、同矿、同兼容键
   和同四轴工况的可信窗口，冷启动或读取截断时失败关闭；
 - 人脸—定位卡时间及身份交叉匹配（管理员直接分析工具）；
+- 独立矿端边缘服务的六类只读遥测接入：raw-body HMAC、客户端矿井范围、
+  nonce 防重放、批次/观测幂等、断网续传回执和原始批次留存；
+- 人员、甲烷和通风的版本化确定性规则、数据质量门、状态去抖、联合升级及
+  蓝/黄/橙/红技术预警；矿端本地预警仅作提示，平台按自己的规则重新计算；
+- 安全预警可指派、确认、开始处置、解决、关闭和重开，采用乐观锁和追加式
+  哈希审计链；规则结果不具备风机、断电、复电或其他生产控制权限；
+- 吨煤生产电耗与吨煤炸药的同矿同工况历史核验：生产电量优先、五类干扰电量
+  显式剔除、Median/MAD 稳健基线、时间防泄漏、冷启动失败关闭和同向线索升级；
 - 登录、CSRF、`admin/supervisor/reviewer/viewer` 角色权限和矿区数据域隔离；
 - 辖区总览、30 日趋势、矿井风险排序、重复异常、积压和办理时效；风险分
   采用 0—100 有界、按应报次数归一和 14 天半衰期衰减，并展示分项；
@@ -101,7 +113,8 @@ MINEGUARD_ADMIN_PASSWORD='change-this-local-password' \
 - “核查台账”查看物理、条件历史、时序和合法情景是否相互支持，办理事项并执行
   不同账号的结论复核；有审批权限的人员可追加历史参考标签；
 - “分析任务”查看批量任务进度、单窗口失败、取消和重放；
-- “系统管理”供管理员维护账号并查看配置、就绪状态和运行信息；
+- “系统管理”供管理员维护账号、合法情景和历史参考样本，执行不同账号审批，
+  并查看配置、就绪状态和运行信息；
 - “临时分析”保留管理员使用的原始 JSON 分析工具。
 
 页面中的风险分、证据等级和最小上报差额都是技术指标，不是处罚等级或违法认定。
@@ -118,6 +131,8 @@ MINEGUARD_ADMIN_PASSWORD='change-this-local-password' \
   正式总览、趋势、案件和校准统计；
 - 历史参考标签以追加事件和哈希链保存；合法情景以 `scenario_id + version`
   保存，不提供删除或原地覆盖，修订或停用必须新增版本；
+- 吨煤核验历史样本按 `sample_id` 绑定规范化正文、三类来源摘要和证据引用；
+  批准或驳回后不可改判，正文变化须使用新样本编号重新登记；
 - 证据包、办理/权限审计和备份不提供业务前端硬删除。达到本单位留存期限后的销毁，
   应按经批准的离线运维流程执行并保留审批、范围和校验记录。
 
@@ -142,6 +157,8 @@ POST /v1/ingest/production/batch
 POST /v1/ingest/production/jobs
 GET/POST /v1/analysis-runs/{run_id}/reference-labels
 GET/POST /v1/admin/legitimate-scenarios
+GET/POST /v1/admin/verification-references
+POST /v1/admin/verification-references/{sample_id}/actions
 GET/POST /v1/admin/external-event-snapshots
 GET/POST /v1/admin/external-confirmers
 ```
@@ -207,17 +224,171 @@ export MINEGUARD_EXTERNAL_CLIENTS_JSON='[{"client_id":"enterprise-client-001","e
 人员复核仍在平台侧独立完成。完整本地双进程配置见
 [本地双系统运行](../docs/本地双系统运行.md)。
 
+### 矿端边缘遥测接入
+
+上级目录的 `edge-agent/` 是第三套独立进程，负责对出煤、用电、人员、甲烷、
+火工品和通风做只读采集、规范化、本地留存与断网续传。它不 import `platform`
+或 `agent`，也没有设备写入、风机控制、断电或复电接口。双方只实现
+`../contracts/openapi/edge-telemetry-v1.openapi.json` 和固定 HMAC 向量。
+
+监管端接口为：
+
+```text
+GET  /v1/edge-telemetry-capabilities
+POST /v1/edge-telemetry-batches
+GET  /v1/edge-telemetry-batches/{batch_id}/receipt
+GET  /v1/dashboard/safety
+GET  /v1/safety/alerts
+GET  /v1/safety/alerts/{alert_id}
+POST /v1/safety/alerts/{alert_id}/actions
+GET  /v1/safety/runs
+GET/POST /v1/admin/mines
+GET/POST /v1/admin/safety-rules
+POST /v1/admin/safety-rules/{version}/actions
+GET  /v1/verification/runs
+GET  /v1/reports/regulatory
+```
+
+先生成至少 32 个随机字节并仅以 Base64 传递。例如：
+
+```bash
+EDGE_HMAC_SECRET_BASE64="$(openssl rand -base64 32 | tr -d '\n')"
+export EDGE_HMAC_SECRET_BASE64
+export MINEGUARD_EDGE_CLIENTS_JSON="$(
+  python3 -c 'import json,os; print(json.dumps([{
+    "client_id":"mine-edge-M001",
+    "mine_ids":["M001"],
+    "secrets":[os.environ["EDGE_HMAC_SECRET_BASE64"]]
+  }], separators=(",",":")))'
+)"
+```
+
+矿端配置完全相同的客户端、矿井、平台地址和
+`MINE_EDGE_UPSTREAM_HMAC_SECRET_BASE64`。不要把 Base64 文本再次当作 HMAC
+密钥本身；双方都先严格 Base64 解码。密钥只给矿端进程和监管接入层，不给浏览器、
+LLM、人工填报页或井下生产控制系统。
+
+每个新批号必须是
+`{client_id}--batch_{32位小写十六进制摘要}`，且客户端编码最长 88 字符。平台
+在落库前同时核对报文前缀和已通过 HMAC 的客户端身份，防止不同客户端抢占同一
+全局批号。升级已有试点时先升级矿端并排空旧 pending，再开启本版平台；不要给
+在途旧批次自动换号。完整兼容步骤见
+[`contracts/VERSIONING.md`](../contracts/VERSIONING.md)。
+
+平台还接受 V1 的可选 `interval` 统计窗口，以及不含个人身份的细化指标：
+皮带瞬时产量/速度/运行/故障、区域人数、无卡入井、人卡不符、超时计数和雷管
+整数计数。窗口存在时必须满足 `end > start`、`end <= received_at`，时区必须
+可解释，聚合口径只能使用合同枚举。数据源健康使用
+`source.heartbeat_age_seconds`（秒）、`source.consecutive_failures`
+（整数计数）和 `source.missing_state`（0/1）；这三项强制
+`location_code == source_id`。平台把窗口随原始观测持久化并在监管看板最新指标
+中原样展示，不把来源健康或本地状态直接解释为违法、合规或生产控制指令。
+
+首次复算前，管理员必须通过“矿井档案”或 `POST /v1/admin/mines` 配置
+`gas_category`（`low_gas`/`high_gas`）和
+`approved_underground_personnel`。未配置时平台会完整留存观测并产生蓝色
+“参数待配置”线索，不会擅自假设瓦斯等级或核定人数。默认规则快照来自建设方案，
+正式投产必须按适用规程完成版本审批。边缘端 `local_alerts` 永远只保存为提示；
+监管台账只接收平台对原始观测独立复算的结果。
+
+平台接收批次后会先尝试同步复算，同时将未完成状态持久化。后台线程持续扫描
+`pending` 和到期的 `failed` 批次，按指数退避重试；同一矿井通过数据库租约
+串行执行，进程中断后租约到期可自动恢复。默认最多尝试 5 次，之后进入死信，
+失败预警保持开放。监管负责人和管理员可在安全工作台的“平台安全复算队列”
+按状态查看批次、尝试次数、下次重试和稳定错误码，并对失败/死信批次点击
+“受控重算”；同一能力也可由具备 `analysis.run` 权限的人员调用
+`POST /v1/edge-telemetry-batches/{batch_id}/recalculate` 受控重算。`/ready`
+会分别显示等待积压、退避重试、运行中和死信。部署参数见
+`MINEGUARD_EDGE_EVALUATION_*` 环境变量。
+
+主通风机运行、故障和倒机采用三个独立二值指标，平台拒绝非 `0/1` 值，并按
+审批规则中的 `main_fan` 等级独立生成或恢复预警。矿端和平台均不提供风机控制
+接口；现场仍须完成 PLC/厂商字段的只读映射和联调。
+
+加入主通风机策略后的内置快照版本为
+`qinyuan-safety-2026.07-v2`。升级时不会修改旧版本的内容或指纹；若数据库中
+仍有缺少 `main_fan` 的旧批准版本，平台保留其审计记录但不把它解释成新版，
+并提示先退役旧版、核对完整指纹后审批 V2。
+
+站内每次新建、升级、降级、恢复以及人工办理都会先写入持久化通知 outbox。
+如需接政务消息网关，在监管端配置
+`MINEGUARD_SAFETY_WEBHOOKS_JSON`；每个目标含 `webhook_id`、HTTPS `url`、
+`minimum_level` 和至少 32 随机字节的 `secret_base64`。平台以
+`webhook_id + notification_id` 作为目标投递幂等键，发送内容摘要和 HMAC。
+每个目标独立持久化成功、重试和死信状态：单个目标失败不会阻塞其他目标，成功
+目标不会重复投递。管理员可在系统管理页查看逐目标状态并只重试 `dead` 目标，
+也可使用 `GET /v1/safety/notifications` 和
+`POST /v1/safety/notifications/{notification_id}/retry`。投递器拒绝 HTTP
+重定向。未配置外部目标时不会联网，站内预警、台账和通知 outbox 仍完整工作。
+重试接口仅接受管理员 CSRF 请求；`{"webhook_id":"county-gateway-01"}` 只重试
+指定死信目标，`{}` 重试该通知的全部死信目标，非 `dead` 状态返回冲突。
+
+管理员可在“预警责任路由”按矿井、类别和最低级别配置接收账号、备岗账号及
+未读升级分钟数。所有匹配路由并行知会，最具体的一条保持唯一主责；每条路由
+分别保留账号级已读，并在未读超时后独立升级备岗。蓝黄橙红办理期限从平台生成
+正式预警起算，超过 `due_at` 产生一次性升级事件；重开后开始新一轮期限与回执。
+路由增删会幂等重算当前开放预警，重启不会重复事件。影子预警不进入正式交办。
+`/ready` 会暴露线程停运、未路由正式预警和待已读数量，部署轮询间隔由
+`MINEGUARD_RESPONSIBILITY_POLL_SECONDS` 设置。
+
+监管一张图可用 `--map-geojson /path/boundary.geojson` 或
+`MINEGUARD_MAP_GEOJSON_PATH` 加载部署方提供的 Polygon/MultiPolygon 边界。
+平台启动时限制大小和点数、校验经纬度及闭合环并剥离非必要属性，浏览器通过
+受鉴权的 `GET /v1/map/boundary` 获取。未配置时仍只显示相对位置示意；即使
+配置成功，也必须另行验收边界来源、坐标系和点位精度，不能用于测绘或导航。
+
+安全预警卡支持核查附件闭环。复核人员、监管负责人和管理员可向
+`POST /v1/safety/alerts/{alert_id}/attachments` 提交
+`filename`、`media_type`、`content_base64`、`sha256` 和可选 `note`；
+单文件解码后最多 5 MiB，仅允许 PDF、JPEG、PNG、UTF-8 TXT/CSV 以及无宏
+XLSX/DOCX。平台核对哈希、文件特征和 OOXML 包结构，净化文件名后把内容作为
+不可变 BLOB 与元数据存入同一监管数据库，并向预警哈希事件链追加
+`attachment_added`。相同预警下的相同内容返回冲突，不提供覆盖或删除接口。
+列表和下载分别使用：
+
+```text
+GET /v1/safety/alerts/{alert_id}/attachments
+GET /v1/safety/alerts/{alert_id}/attachments/{attachment_id}/download
+```
+
+列表和下载按账号矿井范围授权；下载响应固定为
+`application/octet-stream` 和 `Content-Disposition: attachment`，不在页面
+内联渲染，并在下载前重新核对大小和 SHA-256。白名单和强制下载不替代生产环境
+的终端防病毒、敏感信息检查及材料留存制度。
+
+领导工作台提供确定性的月度/季度监管分析报告。报告只接受固定自然月
+`YYYY-MM` 或自然季度 `YYYY-Q1` 至 `YYYY-Q4`，统计时区固定显式传入
+`Asia/Shanghai`；任意起止日、自定义时区、未来报告期和重复参数均被拒绝。
+例如：
+
+```text
+GET /v1/reports/regulatory?kind=monthly&period=2026-07&timezone=Asia%2FShanghai
+GET /v1/reports/regulatory?kind=quarterly&period=2026-Q2&timezone=Asia%2FShanghai
+```
+
+接口根据当前登录账号的矿井范围复用领导统计、安全驾驶舱/预警台账和生产
+交叉核验结果。无应报记录、缺报、历史不足、核验阻断、完整性失败和读取上限
+都会显式进入报告质量状态，不能归入“正常”。页面只用安全文本节点展示内容，
+支持浏览器打印/另存为 PDF，不提供自动外发、签批、立案或状态修改。详细口径
+见 [月度季度监管报告](docs/月度季度监管报告.md)。
+
 算法 V2.1 的管理员直调接口为：
 
 ```text
 POST /v1/analyze/aggregation
 POST /v1/analyze/flow
 POST /v1/analyze/temporal
+POST /v1/analyze/safety
+POST /v1/analyze/verification
 GET  /v1/dashboard/temporal?days=90
 ```
 
 前三个接口用于配置验证、离线复现和算法人员调试；正式五量结果仍应走可信接入。
 这些沙箱直调不会自动形成正式案件、办理事件或证据包，不得替代全证据闭环。
+启用认证时，`/v1/analyze/verification` 还会逐条要求历史样本与平台已批准注册表
+精确匹配；未注册、草案、驳回、正文变化或审计链异常均返回冲突并停止分析。
+管理员可在“系统管理 → 历史参考样本治理”登记样本与证据，登记账号不能审批
+自己的样本。关闭认证仅用于本地试算，返回结果会明确标记调用方历史不可信。
 算法公式、字段、示例、冷启动和使用边界见
 [算法 V2.1 说明](docs/算法V2.1说明.md)。
 
@@ -264,6 +435,8 @@ mineguard aggregate examples/aggregation_interval.json
 mineguard flow examples/flow_anomalous.json
 mineguard temporal examples/temporal_drift.json
 mineguard personnel examples/personnel_session.json
+mineguard safety @examples/safety-evaluation.json
+mineguard verify-production @examples/production-verification.json
 mineguard demo
 pytest
 ```
