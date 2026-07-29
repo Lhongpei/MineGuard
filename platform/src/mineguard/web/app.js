@@ -34,6 +34,9 @@ const SUPERVISION_API_PATHS = {
 };
 
 const WORKSPACE_NAMES = [
+  "leadership",
+  "decisions",
+  "reports",
   "overview",
   "safety",
   "cases",
@@ -330,7 +333,8 @@ const state = {
   authEnabled: false,
   principal: null,
   csrfToken: null,
-  workspace: "overview",
+  interfaceMode: "leader",
+  workspace: "leadership",
   mode: "production",
   datasetName: "",
   currentInput: null,
@@ -366,6 +370,8 @@ const state = {
   temporalLoading: false,
   temporalLoaded: false,
   temporalDashboard: null,
+  temporalSelectedSeriesKey: null,
+  demoDatasetContexts: {},
   regulatoryReportLoading: false,
   regulatoryReport: null,
   casesLoading: false,
@@ -422,10 +428,12 @@ let pendingConfirmation = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   cacheElements();
+  relocateRegulatoryReport();
   bindEvents();
   initializeRegulatoryReportForm();
   setMode("production");
-  setWorkspace("overview", false);
+  setInterfaceMode("leader", false);
+  setWorkspace("leadership", false);
   checkService();
   initializeAuthentication();
 });
@@ -443,17 +451,32 @@ function cacheElements() {
     "login-status",
     "login-submit",
     "scope-summary",
+    "demo-dataset-banner",
+    "demo-dataset-title",
+    "demo-dataset-description",
     "principal-summary",
     "principal-name",
     "principal-role",
     "principal-scopes",
     "logout-button",
+    "page-eyebrow",
+    "page-title",
+    "intro-copy",
+    "interface-mode-note",
+    "interface-leader-mode",
+    "interface-professional-mode",
+    "leadership-workspace-tab",
+    "decisions-workspace-tab",
+    "reports-workspace-tab",
     "overview-workspace-tab",
     "safety-workspace-tab",
     "cases-workspace-tab",
     "jobs-workspace-tab",
     "tools-workspace-tab",
     "admin-workspace-tab",
+    "leadership-workspace",
+    "decisions-workspace",
+    "reports-workspace",
     "overview-workspace",
     "safety-workspace",
     "cases-workspace",
@@ -462,6 +485,21 @@ function cacheElements() {
     "admin-workspace",
     "nav-open-case-count",
     "nav-running-job-count",
+    "nav-decision-count",
+    "refresh-leadership",
+    "leadership-status",
+    "leadership-scope",
+    "leadership-updated-at",
+    "leadership-kpi-grid",
+    "leadership-attention-list",
+    "leadership-open-decisions",
+    "leadership-open-reports",
+    "leadership-open-professional",
+    "refresh-decisions",
+    "decisions-status",
+    "decision-summary-grid",
+    "leadership-decision-list",
+    "leadership-decision-empty",
     "refresh-overview",
     "overview-status",
     "overview-empty",
@@ -495,6 +533,10 @@ function cacheElements() {
     "temporal-content",
     "temporal-summary",
     "temporal-kpi-grid",
+    "temporal-series-panel",
+    "temporal-series-select",
+    "temporal-series-summary",
+    "temporal-series-chart",
     "temporal-episode-list",
     "temporal-episode-empty",
     "view-all-cases",
@@ -844,16 +886,51 @@ function cacheElements() {
   });
 }
 
+function relocateRegulatoryReport() {
+  const report = elements["regulatory-report-panel"];
+  const workspace = elements["reports-workspace"];
+  if (report && workspace && report.parentElement !== workspace) {
+    workspace.appendChild(report);
+  }
+}
+
 function bindEvents() {
   elements["login-form"].addEventListener("submit", submitLogin);
   elements["logout-button"].addEventListener("click", logout);
+  elements["interface-leader-mode"].addEventListener("click", () =>
+    setInterfaceMode("leader"),
+  );
+  elements["interface-professional-mode"].addEventListener("click", () =>
+    setInterfaceMode("professional"),
+  );
   WORKSPACE_NAMES.forEach((workspace) => {
     const tab = elements[`${workspace}-workspace-tab`];
     tab.addEventListener("click", () => setWorkspace(workspace));
     tab.addEventListener("keydown", handleWorkspaceKeydown);
   });
   elements["refresh-overview"].addEventListener("click", loadOverview);
+  elements["refresh-leadership"].addEventListener(
+    "click",
+    refreshLeadershipDashboard,
+  );
+  elements["refresh-decisions"].addEventListener(
+    "click",
+    refreshLeadershipDecisions,
+  );
+  elements["leadership-open-decisions"].addEventListener("click", () =>
+    setWorkspace("decisions"),
+  );
+  elements["leadership-open-reports"].addEventListener("click", () =>
+    setWorkspace("reports"),
+  );
+  elements["leadership-open-professional"].addEventListener("click", () =>
+    openProfessionalWorkspace("overview"),
+  );
   elements["refresh-trends"].addEventListener("click", refreshTrendWorkspace);
+  elements["temporal-series-select"].addEventListener(
+    "change",
+    handleTemporalSeriesSelection,
+  );
   elements["retry-overview"].addEventListener("click", loadOverview);
   elements["load-pilot-overview"].addEventListener("click", loadPilotOverview);
   elements["view-all-cases"].addEventListener("click", () => setWorkspace("cases"));
@@ -1273,9 +1350,9 @@ function unlockApplication() {
   state.overviewLoaded = false;
   state.trendsLoaded = false;
   state.temporalLoaded = false;
-  setWorkspace("overview", false);
-  loadOverview();
-  refreshTrendWorkspace();
+  setInterfaceMode("leader", false);
+  setWorkspace("leadership", false);
+  refreshLeadershipDashboard();
 }
 
 function showLogin(message, tone = "") {
@@ -1378,6 +1455,8 @@ function resetProtectedState() {
   state.analytics = null;
   state.temporalLoaded = false;
   state.temporalDashboard = null;
+  state.temporalSelectedSeriesKey = null;
+  state.demoDatasetContexts = {};
   state.regulatoryReportLoading = false;
   state.regulatoryReport = null;
   state.casesLoaded = false;
@@ -1439,6 +1518,7 @@ function resetProtectedState() {
     "请选择报告期并生成。";
   elements["print-regulatory-report"].disabled = true;
   clearRegulatoryReportPrintMode();
+  renderDemoDatasetBanner();
   resetUserForm();
   clearJobPoll();
 }
@@ -1472,8 +1552,8 @@ function renderPrincipal() {
   elements["principal-summary"].hidden = false;
   elements["logout-button"].hidden = !state.authEnabled;
   const isAdmin = role === "admin";
-  elements["admin-workspace-tab"].hidden = !isAdmin;
   document.body.classList.toggle("is-admin", isAdmin);
+  updateWorkspaceAvailability();
   updatePermissionControls();
 }
 
@@ -1527,6 +1607,627 @@ function availableWorkspaces() {
   );
 }
 
+function setInterfaceMode(mode, shouldLoad = true) {
+  const normalized = mode === "professional" ? "professional" : "leader";
+  state.interfaceMode = normalized;
+  const leaderMode = normalized === "leader";
+  document.body.classList.toggle("is-leader-mode", leaderMode);
+  document.body.classList.toggle("is-professional-mode", !leaderMode);
+  elements["interface-leader-mode"].classList.toggle("is-active", leaderMode);
+  elements["interface-leader-mode"].setAttribute(
+    "aria-pressed",
+    String(leaderMode),
+  );
+  elements["interface-professional-mode"].classList.toggle(
+    "is-active",
+    !leaderMode,
+  );
+  elements["interface-professional-mode"].setAttribute(
+    "aria-pressed",
+    String(!leaderMode),
+  );
+  elements["interface-mode-note"].textContent = leaderMode
+    ? "领导简洁模式：只显示态势、待决策事项和监管报告。"
+    : "监管专业模式：查看时序、来源、台账、任务和系统治理细节。";
+  elements["page-eyebrow"].textContent = leaderMode
+    ? "领导简洁驾驶舱"
+    : "监管专业工作台";
+  elements["page-title"].textContent = leaderMode
+    ? "先看今天最重要的事，再作决策"
+    : "先看辖区态势，再跟进专业核查";
+  elements["intro-copy"].textContent = leaderMode
+    ? "三分钟看完今天最需要关注、交办和审批的事项；专业分析由监管人员继续办理。"
+    : "查看多源交叉核验、时序、安全、案件和任务细节，并保留每一步办理记录。";
+  updateWorkspaceAvailability();
+
+  const visible = availableWorkspaces();
+  if (!visible.includes(state.workspace)) {
+    setWorkspace(leaderMode ? "leadership" : "overview", shouldLoad);
+  } else {
+    setWorkspace(state.workspace, shouldLoad);
+  }
+}
+
+function updateWorkspaceAvailability() {
+  const leaderWorkspaces = new Set(["leadership", "decisions", "reports"]);
+  const professionalWorkspaces = new Set([
+    "overview",
+    "safety",
+    "cases",
+    "jobs",
+    "tools",
+    "reports",
+    "admin",
+  ]);
+  WORKSPACE_NAMES.forEach((workspace) => {
+    const allowedByMode =
+      state.interfaceMode === "leader"
+        ? leaderWorkspaces.has(workspace)
+        : professionalWorkspaces.has(workspace);
+    const allowedByRole = workspace !== "admin" || isAdminUser();
+    elements[`${workspace}-workspace-tab`].hidden =
+      !allowedByMode || !allowedByRole;
+  });
+}
+
+function openProfessionalWorkspace(workspace) {
+  setInterfaceMode("professional", false);
+  setWorkspace(workspace);
+}
+
+async function refreshLeadershipDashboard() {
+  if (!state.authInitialized) {
+    return;
+  }
+  elements["refresh-leadership"].disabled = true;
+  setLoadStatus(
+    elements["leadership-status"],
+    "正在汇总报送、趋势、安全和核查事项…",
+    "loading",
+  );
+  await Promise.allSettled([
+    loadOverview(),
+    loadTrends(),
+    loadSafetyWorkspace(),
+    loadCases(),
+  ]);
+  renderLeadershipSurfaces();
+  elements["refresh-leadership"].disabled = false;
+}
+
+async function refreshLeadershipDecisions() {
+  if (!state.authInitialized) {
+    return;
+  }
+  elements["refresh-decisions"].disabled = true;
+  setLoadStatus(
+    elements["decisions-status"],
+    "正在读取待审批、超期、未分派和高优先安全线索…",
+    "loading",
+  );
+  await Promise.allSettled([
+    loadOverview(),
+    loadSafetyWorkspace(),
+    loadCases(),
+  ]);
+  renderLeadershipSurfaces();
+  elements["refresh-decisions"].disabled = false;
+}
+
+function renderLeadershipSurfaces() {
+  renderLeadershipBrief();
+  renderLeadershipDecisions();
+}
+
+function renderLeadershipBrief() {
+  const overview = state.overview && state.overview.hasBatch
+    ? state.overview
+    : null;
+  const safety = state.safetyDashboard;
+  const openCases = state.cases.filter(
+    (item) => !["closed", "resolved"].includes(item.workflowStatus),
+  );
+  const urgentCases = openCases.filter((item) =>
+    ["urgent", "high"].includes(item.priority),
+  );
+  const overdueCases = openCases.filter((item) => item.overdue);
+  const pendingApproval = openCases.filter(
+    (item) => item.workflowStatus === "pending_approval",
+  );
+  const operationalHighSafety = safety
+    ? countValue(safety.summary.red) + countValue(safety.summary.orange)
+    : null;
+  const shadowHighSafety = safety
+    ? countValue(safety.shadowSummary.red) +
+      countValue(safety.shadowSummary.orange)
+    : null;
+  const overdueSafety = safety ? safety.summary.overdue : null;
+
+  elements["leadership-scope"].textContent = overview
+    ? overview.portfolioName
+    : principalScopeSummary();
+  elements["leadership-updated-at"].textContent =
+    latestLeadershipTimestamp() || "数据时间待确认";
+
+  const coverageValue =
+    overview && overview.coverageRatio !== null
+      ? formatPercent(overview.coverageRatio)
+      : state.overviewLoaded
+        ? "无法计算"
+        : "待载入";
+  const highClueValue =
+    state.overviewLoaded || state.safetyLoaded
+      ? formatCount(
+          urgentCases.length +
+            (operationalHighSafety === null ? 0 : operationalHighSafety),
+        )
+      : "待载入";
+  const overdueValue =
+    state.casesLoaded || state.safetyLoaded
+      ? formatCount(
+          overdueCases.length +
+            (overdueSafety === null ? 0 : overdueSafety),
+        )
+      : "待载入";
+  const approvalValue = state.casesLoaded
+    ? formatCount(pendingApproval.length)
+    : state.analytics && state.analytics.performance.pendingApproval !== null
+      ? formatCount(state.analytics.performance.pendingApproval)
+      : "待载入";
+
+  const cards = [
+    {
+      label: "报送覆盖",
+      value: coverageValue,
+      note:
+        overview && overview.missingCount !== null
+          ? `${formatCount(overview.missingCount)} 座缺报；缺失不按零`
+          : "先确认应报范围和数据链路",
+      tone:
+        overview && overview.missingCount > 0 ? "warning" : "success",
+    },
+    {
+      label: "高优先线索",
+      value: highClueValue,
+      note:
+        shadowHighSafety !== null && shadowHighSafety > 0
+          ? `P1/P2 与正式红橙；另有 ${formatCount(shadowHighSafety)} 条影子红橙`
+          : "P1/P2 事项与正式红橙安全线索",
+      tone:
+        urgentCases.length +
+          (operationalHighSafety === null ? 0 : operationalHighSafety) >
+        0
+          ? "danger"
+          : "success",
+    },
+    {
+      label: "已经超期",
+      value: overdueValue,
+      note: "核查事项与正式安全预警合计",
+      tone:
+        overdueCases.length +
+          (overdueSafety === null ? 0 : overdueSafety) >
+        0
+          ? "warning"
+          : "success",
+    },
+    {
+      label: "待我审批",
+      value: approvalValue,
+      note: userCan("approve")
+        ? "只审批其他账号提交的结论"
+        : "当前账号以查看和调度为主",
+      tone: pendingApproval.length > 0 ? "review" : "success",
+    },
+  ];
+  renderLeadershipKpis(cards);
+  renderLeadershipAttention(
+    buildLeadershipAttentionItems({
+      overview,
+      safety,
+      urgentCases,
+      overdueCases,
+      pendingApproval,
+    }),
+  );
+
+  const allLoaded =
+    state.overviewLoaded &&
+    state.trendsLoaded &&
+    state.safetyLoaded &&
+    state.casesLoaded;
+  const anyLoaded =
+    state.overviewLoaded ||
+    state.trendsLoaded ||
+    state.safetyLoaded ||
+    state.casesLoaded;
+  setLoadStatus(
+    elements["leadership-status"],
+    allLoaded
+      ? "今日简报已汇总。请先处理下面三项，再按需进入专业依据。"
+      : anyLoaded
+        ? "简报已显示当前可用数据；部分模块尚未读取成功，不能据此判断无异常。"
+        : "暂时无法形成领导简报；这不表示当前没有异常或待办。",
+    allLoaded ? "success" : anyLoaded ? "" : "error",
+  );
+}
+
+function renderLeadershipKpis(cards) {
+  clearNode(elements["leadership-kpi-grid"]);
+  cards.forEach((item) => {
+    const card = document.createElement("article");
+    card.className =
+      `leadership-kpi${item.tone ? ` is-${item.tone}` : ""}`;
+    const label = document.createElement("span");
+    label.textContent = item.label;
+    const value = document.createElement("strong");
+    value.textContent = item.value;
+    const note = document.createElement("small");
+    note.textContent = item.note;
+    card.append(label, value, note);
+    elements["leadership-kpi-grid"].appendChild(card);
+  });
+}
+
+function buildLeadershipAttentionItems(context) {
+  const items = [];
+  const {
+    overview,
+    safety,
+    urgentCases,
+    overdueCases,
+    pendingApproval,
+  } = context;
+  if (overview && overview.missingCount !== null && overview.missingCount > 0) {
+    const names =
+      overview.missingIds && overview.missingIds.length
+        ? overview.missingIds.slice(0, 3).join("、")
+        : "部分矿井";
+    items.push({
+      score: 100,
+      tone: "danger",
+      eyebrow: "报送覆盖",
+      title: `${formatCount(overview.missingCount)} 座矿井缺报`,
+      detail: `${names}${overview.missingCount > 3 ? "等" : ""}尚未收到本批次数据，不能按零或正常处理。`,
+      next: "明确催报和数据链路核查责任人。",
+      target: "overview",
+    });
+  }
+  const red = safety ? countValue(safety.summary.red) : 0;
+  const orange = safety ? countValue(safety.summary.orange) : 0;
+  const shadowRed = safety ? countValue(safety.shadowSummary.red) : 0;
+  const shadowOrange = safety ? countValue(safety.shadowSummary.orange) : 0;
+  if (red + orange > 0) {
+    items.push({
+      score: 95,
+      tone: "danger",
+      eyebrow: "安全态势",
+      title: `新增或开放红橙线索 ${formatCount(red + orange)} 条`,
+      detail: `红色 ${formatCount(red)} 条、橙色 ${formatCount(orange)} 条，均为平台独立复算的技术线索。`,
+      next: "先确认现场渠道、责任人和办理时限。",
+      target: "safety",
+    });
+  }
+  if (shadowRed + shadowOrange > 0) {
+    items.push({
+      score: 87,
+      tone: "review",
+      eyebrow: "影子安全观察",
+      title: `影子红橙线索 ${formatCount(shadowRed + shadowOrange)} 条`,
+      detail: `红色 ${formatCount(shadowRed)} 条、橙色 ${formatCount(shadowOrange)} 条；影子模式不发送正式通知，也不替代现场监测。`,
+      next: "由专业人员核对规则、来源和现场情况，再决定是否纳入业务流程。",
+      target: "safety",
+    });
+  }
+  if (pendingApproval.length > 0) {
+    items.push({
+      score: 92,
+      tone: "review",
+      eyebrow: "待审批",
+      title: `${formatCount(pendingApproval.length)} 项结论等待另一人审批`,
+      detail: "提交人不能审批自己的结论，审批前应核对证据、版本和未确定项。",
+      next: userCan("approve")
+        ? "进入待我决策，逐项审批或退回。"
+        : "提醒有审批权限的负责人处理。",
+      target: "decisions",
+    });
+  }
+  if (overdueCases.length > 0 || (safety && countValue(safety.summary.overdue) > 0)) {
+    const total =
+      overdueCases.length +
+      (safety ? countValue(safety.summary.overdue) : 0);
+    items.push({
+      score: 90,
+      tone: "warning",
+      eyebrow: "办理时效",
+      title: `${formatCount(total)} 项事项或预警已经超期`,
+      detail: "超期不改变技术结论，但说明责任、资源或反馈链路需要调度。",
+      next: "核对主责人员，重新明确完成时限。",
+      target: "decisions",
+    });
+  }
+  if (urgentCases.length > 0) {
+    const first = [...urgentCases].sort(comparePriorityItems)[0];
+    items.push({
+      score: 85,
+      tone: "review",
+      eyebrow: "高优先核查",
+      title: `${first.mineName} 等 ${formatCount(urgentCases.length)} 项需优先复核`,
+      detail: first.summary,
+      next: "要求承办人调阅原始凭证并说明不确定性。",
+      target: "decisions",
+    });
+  }
+  const repeated =
+    state.analytics && state.analytics.repeated.length
+      ? objectOrNull(state.analytics.repeated[0])
+      : null;
+  if (repeated) {
+    items.push({
+      score: 75,
+      tone: "warning",
+      eyebrow: "重复趋势",
+      title: `${displayText(repeated.mine_id, "重点矿井")}出现重复技术线索`,
+      detail: `${displayText(repeated.anomaly_name, "同类线索")}在不同批次出现 ${formatCount(firstNumber(repeated.distinct_batch_count))} 次。`,
+      next: "比较近期工况与来源变化，避免只处理单次表象。",
+      target: "overview",
+    });
+  }
+  if (
+    overview &&
+    overview.inconclusiveCount !== null &&
+    overview.inconclusiveCount > 0
+  ) {
+    items.push({
+      score: 70,
+      tone: "warning",
+      eyebrow: "数据质量",
+      title: `${formatCount(overview.inconclusiveCount)} 项因数据不足无法判断`,
+      detail: "缺项、来源质量或诊断条件不足时，系统不会给出正常结论。",
+      next: "先补数和核源，再讨论业务结论。",
+      target: "overview",
+    });
+  }
+  if (!items.length) {
+    items.push({
+      score: 0,
+      tone: "neutral",
+      eyebrow: "当前摘要",
+      title: "当前可用数据未形成高优先行动项",
+      detail: "这不证明辖区安全或合规，仍应执行既定巡检并确认数据完整性。",
+      next: "查看报送覆盖和最近更新时间。",
+      target: "overview",
+    });
+  }
+  return items.sort((left, right) => right.score - left.score).slice(0, 3);
+}
+
+function renderLeadershipAttention(items) {
+  clearNode(elements["leadership-attention-list"]);
+  items.forEach((item, index) => {
+    const row = document.createElement("li");
+    row.className =
+      `leadership-attention-item is-${item.tone || "neutral"}`;
+    const number = document.createElement("span");
+    number.className = "leadership-attention-number";
+    number.textContent = String(index + 1);
+    const content = document.createElement("div");
+    const eyebrow = document.createElement("span");
+    eyebrow.className = "leadership-attention-eyebrow";
+    eyebrow.textContent = item.eyebrow;
+    const title = document.createElement("strong");
+    title.textContent = item.title;
+    const detail = document.createElement("p");
+    detail.textContent = item.detail;
+    const next = document.createElement("small");
+    next.textContent = `建议：${item.next}`;
+    content.append(eyebrow, title, detail, next);
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "table-action leadership-attention-action";
+    action.textContent =
+      item.target === "decisions" ? "去处理" : "查看依据";
+    action.addEventListener("click", () => {
+      if (item.target === "decisions") {
+        setWorkspace("decisions");
+      } else {
+        openProfessionalWorkspace(item.target);
+      }
+    });
+    row.append(number, content, action);
+    elements["leadership-attention-list"].appendChild(row);
+  });
+}
+
+function renderLeadershipDecisions() {
+  const openCases = state.cases
+    .filter((item) => !["closed", "resolved"].includes(item.workflowStatus))
+    .sort(comparePriorityItems);
+  const caseDecisions = openCases
+    .filter(
+      (item) =>
+        item.workflowStatus === "pending_approval" ||
+        item.overdue ||
+        !item.assignee ||
+        ["new", "reopened"].includes(item.workflowStatus),
+    )
+    .map((item) => ({
+      kind: "case",
+      score:
+        (item.workflowStatus === "pending_approval" ? 100 : 0) +
+        (item.overdue ? 50 : 0) +
+        (item.priority === "urgent" ? 40 : item.priority === "high" ? 25 : 0),
+      title: item.title || `${item.mineName}待复核事项`,
+      summary: item.summary,
+      meta: `${item.mineName} · ${workflowDecisionLabel(item.workflowStatus)} · ${
+        item.assignee || "责任人待明确"
+      }${item.overdue ? " · 已超期" : ""}`,
+      caseItem: item,
+    }));
+  const safetyDecisions = state.safetyAlerts
+    .filter(
+      (alert) =>
+        !["resolved", "closed"].includes(alert.status) &&
+        ["red", "orange"].includes(alert.level) &&
+        (alert.level === "red" || alert.overdue || !alert.assignee),
+    )
+    .map((alert) => ({
+      kind: "safety",
+      score:
+        (alert.level === "red" ? 90 : alert.level === "orange" ? 70 : 0) +
+        (alert.overdue ? 50 : 0),
+      title: alert.title || `${alert.mineId}安全技术线索`,
+      summary:
+        alert.summary ||
+        "平台规则形成待复核安全线索，请结合现场渠道和原始观测核对。",
+      meta: `${alert.mineId} · ${
+        SAFETY_LEVEL_META[alert.level]
+          ? SAFETY_LEVEL_META[alert.level].label
+          : "级别待确认"
+      } · ${alert.assignee || "责任人待明确"}${
+        alert.overdue ? " · 已超期" : ""
+      }${alert.mode === "shadow" ? " · 影子模式" : ""}`,
+      safetyAlert: alert,
+    }));
+  const allDecisions = [...caseDecisions, ...safetyDecisions].sort(
+    (left, right) => right.score - left.score,
+  );
+  const decisions = allDecisions.slice(0, 12);
+
+  renderDecisionSummary(openCases, safetyDecisions);
+  clearNode(elements["leadership-decision-list"]);
+  decisions.forEach((decision) => {
+    const row = document.createElement("li");
+    row.className = "leadership-decision-item";
+    const content = document.createElement("div");
+    const kind = document.createElement("span");
+    kind.className =
+      `leadership-decision-kind is-${decision.kind}`;
+    kind.textContent =
+      decision.kind === "case" ? "核查事项" : "安全线索";
+    const title = document.createElement("strong");
+    title.textContent = decision.title;
+    const summary = document.createElement("p");
+    summary.textContent = decision.summary;
+    const meta = document.createElement("small");
+    meta.textContent = decision.meta;
+    content.append(kind, title, summary, meta);
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "button quiet compact";
+    action.textContent =
+      decision.kind === "case" ? "进入办理" : "查看安全依据";
+    action.addEventListener("click", () => {
+      if (decision.kind === "case") {
+        openProfessionalWorkspace("cases");
+        openCase(decision.caseItem.caseId);
+      } else {
+        openProfessionalSafetyAlert(decision.safetyAlert);
+      }
+    });
+    row.append(content, action);
+    elements["leadership-decision-list"].appendChild(row);
+  });
+  elements["leadership-decision-empty"].hidden =
+    decisions.length > 0 || (!state.casesLoaded && !state.safetyLoaded);
+  elements["leadership-decision-list"].hidden = decisions.length === 0;
+  const decisionCount = allDecisions.length;
+  elements["nav-decision-count"].hidden = decisionCount === 0;
+  elements["nav-decision-count"].textContent =
+    decisionCount > 99 ? "99+" : String(decisionCount);
+
+  const allLoaded = state.casesLoaded && state.safetyLoaded;
+  setLoadStatus(
+    elements["decisions-status"],
+    allLoaded
+      ? decisions.length
+        ? `共识别 ${decisionCount} 项需要交办、催办或审批的事项，当前按优先级显示前 ${decisions.length} 项。`
+        : "当前可用数据没有形成待决策事项；仍须确认数据链路和例行巡检。"
+      : "当前仅显示已读取的待办；部分数据未加载成功，不能判断无事项。",
+    allLoaded ? "success" : "",
+  );
+}
+
+function renderDecisionSummary(openCases, safetyDecisions) {
+  clearNode(elements["decision-summary-grid"]);
+  const cards = [
+    [
+      "待审批",
+      openCases.filter((item) => item.workflowStatus === "pending_approval")
+        .length,
+    ],
+    ["已超期", openCases.filter((item) => item.overdue).length],
+    ["责任人待明确", openCases.filter((item) => !item.assignee).length],
+    ["红橙线索（含影子）", safetyDecisions.length],
+  ];
+  cards.forEach(([label, value]) => {
+    const card = document.createElement("article");
+    const labelNode = document.createElement("span");
+    labelNode.textContent = label;
+    const valueNode = document.createElement("strong");
+    valueNode.textContent =
+      state.casesLoaded || state.safetyLoaded ? formatCount(value) : "待载入";
+    card.append(labelNode, valueNode);
+    elements["decision-summary-grid"].appendChild(card);
+  });
+}
+
+function openProfessionalSafetyAlert(alert) {
+  openProfessionalWorkspace("safety");
+  if (!alert) {
+    return;
+  }
+  elements["safety-mine-filter"].value = alert.mineId || "all";
+  elements["safety-level-filter"].value =
+    alert.level && alert.level !== "unknown" ? alert.level : "all";
+  renderSafetyWorkspace();
+  window.setTimeout(() => {
+    elements["safety-alert-list"].scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }, 0);
+}
+
+function workflowDecisionLabel(status) {
+  const labels = {
+    pending_assignment: "待分派",
+    assigned: "已分派",
+    reviewing: "复核中",
+    supplement_requested: "待补数",
+    pending_approval: "待另一人审批",
+    closed: "已闭环",
+  };
+  return labels[status] || "状态待确认";
+}
+
+function principalScopeSummary() {
+  const principal = state.principal;
+  if (!principal) {
+    return "待载入";
+  }
+  if (principal.role === "admin") {
+    return "全部授权矿井";
+  }
+  const scopes = arrayOrNull(principal.mine_scopes) || [];
+  return scopes.length ? scopes.join("、") : "未分配矿井范围";
+}
+
+function latestLeadershipTimestamp() {
+  const values = [
+    state.overview ? state.overview.generatedAt : null,
+    state.analytics ? state.analytics.asOf : null,
+    state.safetyDashboard ? state.safetyDashboard.generatedAt : null,
+  ]
+    .map((value) => (value ? new Date(value).valueOf() : NaN))
+    .filter(Number.isFinite);
+  return values.length ? formatDateTime(new Date(Math.max(...values))) : null;
+}
+
+function countValue(value) {
+  return Number.isFinite(value) ? value : 0;
+}
+
 function handleWorkspaceKeydown(event) {
   if (
     !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
@@ -1573,7 +2274,19 @@ function setWorkspace(workspace, shouldLoad = true) {
     clearJobPoll();
   }
 
-  if (workspace === "cases") {
+  if (workspace === "leadership") {
+    if (shouldLoad && state.authInitialized) {
+      refreshLeadershipDashboard();
+    } else {
+      renderLeadershipSurfaces();
+    }
+  } else if (workspace === "decisions") {
+    if (shouldLoad && state.authInitialized) {
+      refreshLeadershipDecisions();
+    } else {
+      renderLeadershipSurfaces();
+    }
+  } else if (workspace === "cases") {
     showCaseList(false);
     if (
       shouldLoad &&
@@ -4789,6 +5502,7 @@ async function loadOverview() {
   try {
     const body = await requestJson(SUPERVISION_API_PATHS.overview);
     const overview = normalizeOverview(body);
+    setDemoDatasetContext("overview", overview.demoDataset);
     if (!overview.hasBatch) {
       state.overviewLoaded = true;
       state.overview = overview;
@@ -4847,6 +5561,13 @@ async function loadPilotOverview() {
       batch: body,
       generated_at: new Date().toISOString(),
       local_trial: true,
+      demo_dataset: {
+        active: true,
+        dataset_id: "pilot-preview",
+        name: "脱敏试点临时预览",
+        synthetic: true,
+        regulatory_use: "prohibited",
+      },
     });
     if (!overview.hasBatch) {
       throw new Error("批次接口未返回可展示的汇总");
@@ -4917,6 +5638,7 @@ function normalizeOverview(raw) {
       hasBatch: false,
       generatedAt: pickFirst(response, "generated_at", "updated_at"),
       localTrial: Boolean(response.local_trial),
+      demoDataset: normalizeDemoDatasetMetadata(response),
     };
   }
 
@@ -5038,6 +5760,7 @@ function normalizeOverview(raw) {
     localTrial: Boolean(
       pickFirst(response, "local_trial", "is_trial", "batch.local_trial"),
     ),
+    demoDataset: normalizeDemoDatasetMetadata(response),
     expectedIds,
     receivedIds,
     missingIds,
@@ -5072,6 +5795,7 @@ function renderOverview(overview) {
     overview.generatedAt,
   );
   elements["overview-trial-badge"].hidden = !overview.localTrial;
+  setDemoDatasetContext("overview", overview.demoDataset);
   elements["scope-summary"].textContent =
     `工作范围 · ${overview.portfolioName}`;
   updateOpenCaseCount(overview.openCaseCount);
@@ -5204,6 +5928,10 @@ async function loadTrends() {
   setLoadStatus(elements["trends-status"], "正在计算近 30 日趋势…", "loading");
   try {
     const body = await requestJson(SUPERVISION_API_PATHS.trends);
+    setDemoDatasetContext(
+      "trends",
+      normalizeDemoDatasetMetadata(body),
+    );
     const analytics = normalizeAnalytics(body);
     state.analytics = analytics;
     state.trendsLoaded = true;
@@ -5252,6 +5980,7 @@ async function loadTemporalDashboard() {
   try {
     const body = await requestJson(SUPERVISION_API_PATHS.temporal);
     const dashboard = normalizeTemporalDashboard(body);
+    setDemoDatasetContext("temporal", dashboard.demoDataset);
     state.temporalDashboard = dashboard;
     state.temporalLoaded = true;
     renderTemporalDashboard(dashboard);
@@ -5320,6 +6049,9 @@ function normalizeTemporalDashboard(rawResponse) {
       explanation: nullableText(episode.explanation),
     };
   });
+  const normalizedSeries = series.map((rawSeries, index) =>
+    normalizeTemporalSeries(rawSeries, index),
+  );
   const explicitStatus = String(raw.status || "").trim().toLowerCase();
   const reason = String(raw.reason || "").trim().toLowerCase();
   const inferredStatus = normalizedEpisodes.length
@@ -5343,7 +6075,9 @@ function normalizeTemporalDashboard(rawResponse) {
     insufficientHistorySeriesCount: firstNumber(
       raw.insufficient_history_series_count,
     ),
+    series: normalizedSeries,
     episodes: normalizedEpisodes,
+    demoDataset: normalizeDemoDatasetMetadata(rawResponse),
     health: {
       status: nullableText(health.status),
       pointCount: firstNumber(health.point_count),
@@ -5357,6 +6091,120 @@ function normalizeTemporalDashboard(rawResponse) {
       ),
       featureLimitReached: Boolean(health.feature_limit_reached),
     },
+  };
+}
+
+function normalizeTemporalSeries(rawSeries, index) {
+  const series = objectOrNull(rawSeries) || {};
+  const rawPoints = arrayOrNull(series.points) || [];
+  const mineId = nullableText(series.mine_id);
+  const sourceId = nullableText(series.source_id);
+  const metricCode = nullableText(series.metric_code);
+  const points = rawPoints.map((rawPoint, pointIndex) =>
+    normalizeTemporalPoint(rawPoint, pointIndex),
+  );
+  if (points.every((point) => point.timestampValue !== null)) {
+    points.sort(
+      (left, right) => left.timestampValue - right.timestampValue,
+    );
+  }
+  const anomalyPointCount = points.filter((point) => point.anomalous).length;
+  const explicitStatus = String(series.status || "")
+    .trim()
+    .toLowerCase();
+  const status = explicitStatus || (anomalyPointCount ? "anomalous" : "normal");
+  const stableId = nullableText(
+    pickFirst(series, "series_id", "series_key", "id"),
+  );
+  return {
+    key:
+      stableId ||
+      [mineId || "mine", sourceId || "source", metricCode || "metric", index]
+        .join("::"),
+    mineId,
+    sourceId,
+    metricCode,
+    status,
+    insufficientHistory:
+      booleanOrNull(series.insufficient_history) === true ||
+      status === "insufficient_history",
+    anomalyPointCount: firstNumber(
+      series.anomaly_point_count,
+      anomalyPointCount,
+    ),
+    coldStartPointCount: firstNumber(
+      series.cold_start_point_count,
+      points.filter((point) => point.baselineMedian === null).length,
+    ),
+    finalBaselineSampleCount: firstNumber(
+      series.final_baseline_sample_count,
+      points.length
+        ? points[points.length - 1].baselineSampleCount
+        : null,
+    ),
+    pointCount: firstNumber(series.point_count, points.length),
+    missingCount: firstNumber(
+      series.missing_count,
+      points.filter((point) => point.missing).length,
+    ),
+    points,
+  };
+}
+
+function normalizeTemporalPoint(rawPoint, index) {
+  const point = objectOrNull(rawPoint) || {};
+  const thresholds = objectOrNull(point.thresholds) || {};
+  const timestamp = pickFirst(
+    point,
+    "timestamp",
+    "observed_at",
+    "window_end",
+    "event_time",
+  );
+  const parsedTimestamp = timestamp ? new Date(timestamp).valueOf() : NaN;
+  const signals = (arrayOrNull(point.signals) || [])
+    .map((signal) => {
+      const detail = objectOrNull(signal);
+      return nullableText(detail ? detail.detector : signal);
+    })
+    .filter(Boolean);
+  return {
+    index,
+    timestamp,
+    timestampValue: Number.isFinite(parsedTimestamp)
+      ? parsedTimestamp
+      : null,
+    observedValue: firstNumber(
+      point.observed_value,
+      point.value,
+      point.feature_value,
+    ),
+    baselineMedian: firstNumber(
+      point.baseline_median,
+      point.baseline,
+      point.expected_value,
+    ),
+    lowerBound: firstNumber(
+      point.rolling_lower,
+      thresholds.rolling_lower,
+      thresholds.lower,
+      thresholds.lower_bound,
+    ),
+    upperBound: firstNumber(
+      point.rolling_upper,
+      thresholds.rolling_upper,
+      thresholds.upper,
+      thresholds.upper_bound,
+    ),
+    baselineSampleCount: firstNumber(point.baseline_sample_count),
+    quality: nullableText(point.quality),
+    missing: booleanOrNull(point.missing) === true,
+    anomalous:
+      booleanOrNull(point.anomalous) === true ||
+      signals.length > 0,
+    acceptedIntoBaseline:
+      booleanOrNull(point.accepted_into_baseline),
+    signals,
   };
 }
 
@@ -5422,9 +6270,9 @@ function renderTemporalDashboard(dashboard) {
       tone: hasWarnings ? "review" : "",
     },
     {
-      label: "历史不足序列",
+      label: "含冷启动阶段序列",
       value: formatCount(dashboard.insufficientHistorySeriesCount),
-      note: "基线样本不足的序列单独标注",
+      note: "表示观察期内曾有基线不足时点，不等于当前仍不足",
       tone:
         dashboard.insufficientHistorySeriesCount !== null &&
         dashboard.insufficientHistorySeriesCount > 0
@@ -5451,6 +6299,8 @@ function renderTemporalDashboard(dashboard) {
     card.append(label, value, note);
     elements["temporal-kpi-grid"].appendChild(card);
   });
+
+  renderTemporalSeriesPanel(dashboard);
 
   clearNode(elements["temporal-episode-list"]);
   dashboard.episodes.forEach((episode, index) => {
@@ -5486,6 +6336,432 @@ function renderTemporalDashboard(dashboard) {
     : isColdStart
       ? "历史数据不足，暂不生成预警事件；请勿据此判断为正常。"
       : "当前未形成时序预警事件；“未预警”不等于“无问题”。";
+}
+
+function handleTemporalSeriesSelection() {
+  state.temporalSelectedSeriesKey =
+    elements["temporal-series-select"].value || null;
+  if (state.temporalDashboard) {
+    renderTemporalSeriesChart(state.temporalDashboard);
+  }
+}
+
+function renderTemporalSeriesPanel(dashboard) {
+  const select = elements["temporal-series-select"];
+  const series = [...dashboard.series].sort((left, right) => {
+    const warningDifference =
+      Number(temporalSeriesHasWarnings(right)) -
+      Number(temporalSeriesHasWarnings(left));
+    return (
+      warningDifference ||
+      temporalSeriesLabel(left).localeCompare(
+        temporalSeriesLabel(right),
+        "zh-CN",
+      )
+    );
+  });
+  const options = series.map((item) => {
+    const option = document.createElement("option");
+    option.value = item.key;
+    option.textContent = temporalSeriesLabel(item);
+    return option;
+  });
+  select.replaceChildren(...options);
+  select.disabled = series.length === 0;
+
+  const previousKey = state.temporalSelectedSeriesKey;
+  const previousStillAvailable = series.some(
+    (item) => item.key === previousKey,
+  );
+  const preferred =
+    series.find(temporalSeriesHasWarnings) ||
+    series[0] ||
+    null;
+  state.temporalSelectedSeriesKey = previousStillAvailable
+    ? previousKey
+    : preferred
+      ? preferred.key
+      : null;
+  if (state.temporalSelectedSeriesKey) {
+    select.value = state.temporalSelectedSeriesKey;
+  }
+  renderTemporalSeriesChart(dashboard);
+}
+
+function temporalSeriesHasWarnings(series) {
+  return (
+    series.status === "anomalous" ||
+    (series.anomalyPointCount !== null && series.anomalyPointCount > 0)
+  );
+}
+
+function temporalSeriesLabel(series) {
+  const mine = series.mineId || "矿井未标识";
+  const source = temporalSourceLabel(series.sourceId, series.metricCode);
+  const warning = temporalSeriesHasWarnings(series)
+    ? ` · ${formatCount(series.anomalyPointCount)} 个预警点`
+    : series.insufficientHistory
+      ? " · 历史不足"
+      : "";
+  return `${mine} · ${source}${warning}`;
+}
+
+function renderTemporalSeriesChart(dashboard) {
+  const chart = elements["temporal-series-chart"];
+  const series =
+    dashboard.series.find(
+      (item) => item.key === state.temporalSelectedSeriesKey,
+    ) || null;
+  clearNode(chart);
+  elements["temporal-series-panel"].classList.toggle(
+    "is-empty",
+    !series,
+  );
+
+  if (!series) {
+    elements["temporal-series-summary"].textContent =
+      "当前响应未返回可绘制的序列点。没有曲线不代表没有问题，请先核对数据入库、特征治理和查询范围。";
+    chart.setAttribute(
+      "aria-label",
+      "当前响应未返回可绘制的近 90 日序列",
+    );
+    appendTemporalSvgElement(
+      chart,
+      "title",
+      {},
+      "近 90 日时序曲线暂无数据",
+    );
+    appendTemporalSvgElement(
+      chart,
+      "text",
+      {
+        class: "temporal-chart-empty-text",
+        x: 480,
+        y: 160,
+        "text-anchor": "middle",
+      },
+      "暂无可绘制序列，请核对数据是否已入库",
+    );
+    return;
+  }
+
+  const chartPoints = series.points.map((point, chartIndex) => ({
+    ...point,
+    chartIndex,
+  }));
+  const observedPoints = chartPoints.filter(
+    (point) =>
+      !point.missing &&
+      point.observedValue !== null,
+  );
+  const plotValues = chartPoints.flatMap((point) =>
+    [
+      point.observedValue,
+      point.baselineMedian,
+      point.lowerBound,
+      point.upperBound,
+    ].filter((value) => value !== null),
+  );
+  const seriesLabel = temporalSeriesLabel(series);
+  const dateRange = temporalSeriesDateRange(chartPoints);
+  const anomalyCount = observedPoints.filter(
+    (point) => point.anomalous,
+  ).length;
+  const missingCount = firstNumber(
+    series.missingCount,
+    chartPoints.filter((point) => point.missing).length,
+  );
+  const latestPoint = chartPoints[chartPoints.length - 1] || null;
+  const currentBaselineAvailable =
+    latestPoint !== null && latestPoint.baselineMedian !== null;
+  const baselineNote = !currentBaselineAvailable
+    ? " 当前基线仍然不足，曲线仅供查看数据积累情况。"
+    : series.insufficientHistory
+      ? ` 观察期前段有 ${formatCount(series.coldStartPointCount)} 个冷启动时点，后续已形成基线；红点只提示需要复核。`
+      : " 曲线断开表示缺测或没有有效数值；红点只提示需要复核。";
+  elements["temporal-series-summary"].textContent =
+    `${seriesLabel}；${dateRange}共返回 ${formatCount(series.pointCount)} 个时点，` +
+    `其中有效观测 ${formatCount(observedPoints.length)} 个、缺测标记 ${formatCount(missingCount)} 个、预警时点 ${formatCount(anomalyCount)} 个。` +
+    baselineNote;
+
+  const chartDescription =
+    `${seriesLabel}，${dateRange}，有效观测 ${observedPoints.length} 个，` +
+    `预警时点 ${anomalyCount} 个。`;
+  chart.setAttribute("aria-label", chartDescription);
+  appendTemporalSvgElement(chart, "title", {}, `${seriesLabel}近 90 日变化`);
+  appendTemporalSvgElement(chart, "desc", {}, chartDescription);
+
+  if (!plotValues.length || !observedPoints.length) {
+    appendTemporalSvgElement(
+      chart,
+      "text",
+      {
+        class: "temporal-chart-empty-text",
+        x: 480,
+        y: 160,
+        "text-anchor": "middle",
+      },
+      "该序列没有可绘制的有效观测值",
+    );
+    return;
+  }
+
+  const width = 960;
+  const height = 320;
+  const margin = { top: 22, right: 24, bottom: 48, left: 70 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  let minimum = Math.min(...plotValues);
+  let maximum = Math.max(...plotValues);
+  const valueSpan = maximum - minimum;
+  const padding =
+    valueSpan > 0
+      ? valueSpan * 0.08
+      : Math.max(Math.abs(maximum) * 0.05, 1);
+  minimum -= padding;
+  maximum += padding;
+
+  const timestampValues = chartPoints.map((point) => point.timestampValue);
+  const useTimestamps =
+    timestampValues.length > 1 &&
+    timestampValues.every((value) => value !== null) &&
+    timestampValues[0] !== timestampValues[timestampValues.length - 1];
+  const timestampMinimum = useTimestamps
+    ? Math.min(...timestampValues)
+    : 0;
+  const timestampMaximum = useTimestamps
+    ? Math.max(...timestampValues)
+    : Math.max(chartPoints.length - 1, 1);
+  const xFor = (point) => {
+    const value = useTimestamps
+      ? point.timestampValue
+      : point.chartIndex;
+    return (
+      margin.left +
+      ((value - timestampMinimum) /
+        Math.max(timestampMaximum - timestampMinimum, 1)) *
+        plotWidth
+    );
+  };
+  const yFor = (value) =>
+    margin.top +
+    ((maximum - value) / Math.max(maximum - minimum, 1)) *
+      plotHeight;
+
+  for (let index = 0; index <= 4; index += 1) {
+    const y = margin.top + (plotHeight * index) / 4;
+    const tickValue = maximum - ((maximum - minimum) * index) / 4;
+    appendTemporalSvgElement(chart, "line", {
+      class: "temporal-chart-gridline",
+      x1: margin.left,
+      x2: width - margin.right,
+      y1: y,
+      y2: y,
+    });
+    appendTemporalSvgElement(
+      chart,
+      "text",
+      {
+        class: "temporal-chart-axis-label",
+        x: margin.left - 10,
+        y: y + 4,
+        "text-anchor": "end",
+      },
+      formatNumber(tickValue, 1),
+    );
+  }
+
+  temporalBoundSegments(chartPoints).forEach((segment) => {
+    const upper = segment.map(
+      (point) => `${xFor(point)},${yFor(point.upperBound)}`,
+    );
+    const lower = [...segment]
+      .reverse()
+      .map((point) => `${xFor(point)},${yFor(point.lowerBound)}`);
+    appendTemporalSvgElement(chart, "polygon", {
+      class: "temporal-bound-band",
+      points: [...upper, ...lower].join(" "),
+    });
+  });
+
+  appendTemporalPolylines(
+    chart,
+    chartPoints,
+    (point) => point.lowerBound,
+    xFor,
+    yFor,
+    "temporal-bound-line",
+  );
+  appendTemporalPolylines(
+    chart,
+    chartPoints,
+    (point) => point.upperBound,
+    xFor,
+    yFor,
+    "temporal-bound-line",
+  );
+  appendTemporalPolylines(
+    chart,
+    chartPoints,
+    (point) => point.baselineMedian,
+    xFor,
+    yFor,
+    "temporal-baseline-line",
+  );
+  appendTemporalPolylines(
+    chart,
+    chartPoints,
+    (point) => (point.missing ? null : point.observedValue),
+    xFor,
+    yFor,
+    "temporal-observed-line",
+  );
+
+  observedPoints
+    .filter((point) => point.anomalous)
+    .forEach((point) => {
+      const marker = appendTemporalSvgElement(chart, "circle", {
+        class: "temporal-anomaly-point",
+        cx: xFor(point),
+        cy: yFor(point.observedValue),
+        r: 5,
+      });
+      appendTemporalSvgElement(
+        marker,
+        "title",
+        {},
+        `${formatDateTime(point.timestamp)}：观测值 ${formatNumber(point.observedValue, 2)}，触发 ${point.signals.length ? point.signals.map(temporalDetectorLabel).join("、") : "时序预警"}`,
+      );
+    });
+
+  appendTemporalSvgElement(chart, "line", {
+    class: "temporal-chart-axis",
+    x1: margin.left,
+    x2: width - margin.right,
+    y1: margin.top + plotHeight,
+    y2: margin.top + plotHeight,
+  });
+  appendTemporalSvgElement(
+    chart,
+    "text",
+    {
+      class: "temporal-chart-axis-label is-date",
+      x: margin.left,
+      y: height - 15,
+      "text-anchor": "start",
+    },
+    temporalPointDateLabel(chartPoints[0], "第 1 个时点"),
+  );
+  appendTemporalSvgElement(
+    chart,
+    "text",
+    {
+      class: "temporal-chart-axis-label is-date",
+      x: width - margin.right,
+      y: height - 15,
+      "text-anchor": "end",
+    },
+    temporalPointDateLabel(
+      chartPoints[chartPoints.length - 1],
+      `第 ${chartPoints.length} 个时点`,
+    ),
+  );
+}
+
+function temporalSeriesDateRange(points) {
+  if (!points.length) {
+    return "观察期间未返回，";
+  }
+  const start = formatDateOnly(points[0].timestamp);
+  const end = formatDateOnly(points[points.length - 1].timestamp);
+  if (start && end) {
+    return `${start === end ? start : `${start} 至 ${end}`}，`;
+  }
+  return "观察期间未返回，";
+}
+
+function temporalPointDateLabel(point, fallback) {
+  return formatDateOnly(point && point.timestamp) || fallback;
+}
+
+function temporalBoundSegments(points) {
+  const segments = [];
+  let current = [];
+  points.forEach((point) => {
+    if (point.lowerBound === null || point.upperBound === null) {
+      if (current.length > 1) {
+        segments.push(current);
+      }
+      current = [];
+      return;
+    }
+    current.push(point);
+  });
+  if (current.length > 1) {
+    segments.push(current);
+  }
+  return segments;
+}
+
+function appendTemporalPolylines(
+  chart,
+  points,
+  valueFor,
+  xFor,
+  yFor,
+  className,
+) {
+  const segments = [];
+  let current = [];
+  points.forEach((point) => {
+    const value = valueFor(point);
+    if (value === null) {
+      if (current.length) {
+        segments.push(current);
+      }
+      current = [];
+      return;
+    }
+    current.push({ point, value });
+  });
+  if (current.length) {
+    segments.push(current);
+  }
+  segments.forEach((segment) => {
+    if (segment.length === 1) {
+      appendTemporalSvgElement(chart, "circle", {
+        class: `${className} is-single-point`,
+        cx: xFor(segment[0].point),
+        cy: yFor(segment[0].value),
+        r: 2.5,
+      });
+      return;
+    }
+    appendTemporalSvgElement(chart, "polyline", {
+      class: className,
+      points: segment
+        .map(
+          ({ point, value }) =>
+            `${xFor(point)},${yFor(value)}`,
+        )
+        .join(" "),
+    });
+  });
+}
+
+function appendTemporalSvgElement(parent, tagName, attributes, textValue) {
+  const node = document.createElementNS(
+    "http://www.w3.org/2000/svg",
+    tagName,
+  );
+  Object.entries(attributes).forEach(([name, value]) => {
+    node.setAttribute(name, String(value));
+  });
+  if (typeof textValue !== "undefined") {
+    node.textContent = String(textValue);
+  }
+  parent.appendChild(node);
+  return node;
 }
 
 function setTemporalStatusBadge(label, tone) {
@@ -5532,6 +6808,153 @@ function temporalDetectorLabel(code) {
     source_low_quality: "来源质量偏低",
   };
   return labels[code] || String(code);
+}
+
+function normalizeDemoDatasetMetadata(rawResponse) {
+  const response = objectOrNull(rawResponse) || {};
+  const nested = objectOrNull(
+    pickFirst(
+      response,
+      "temporal",
+      "dashboard",
+      "overview",
+      "analytics",
+      "report",
+      "result",
+    ),
+  );
+  const batch = objectOrNull(response.batch);
+  const candidates = [response, nested, batch].filter(Boolean);
+  const rawDemoDataset = pickAcross(candidates, "demo_dataset");
+  const demoDataset = objectOrNull(rawDemoDataset) || {};
+  const metadataCandidates = [demoDataset, ...candidates];
+  const explicitDatasetActive = booleanOrNull(
+    pickAcross([demoDataset], "active", "enabled", "is_demo", "demo"),
+  );
+  const explicitResponseDemo = booleanOrNull(
+    pickAcross(candidates, "is_demo", "demo"),
+  );
+  const rawDemoFlag = booleanOrNull(rawDemoDataset);
+  const synthetic = booleanOrNull(
+    pickAcross(metadataCandidates, "synthetic", "is_synthetic"),
+  );
+  const dataMode = nullableText(
+    pickAcross(metadataCandidates, "data_mode", "mode"),
+  );
+  const normalizedMode = String(dataMode || "")
+    .trim()
+    .toLowerCase()
+    .split("-")
+    .join("_");
+  const modeMarksDemo =
+    normalizedMode.includes("demo") ||
+    ["synthetic", "test", "test_fixture", "pilot", "local_trial"].includes(
+      normalizedMode,
+    );
+  const hasDemoDescriptor = Boolean(
+    nullableText(
+      pickAcross(
+        [demoDataset],
+        "dataset_id",
+        "id",
+        "name",
+        "label",
+      ),
+    ),
+  );
+  const inferredDemo =
+    synthetic === true ||
+    modeMarksDemo ||
+    hasDemoDescriptor;
+  let enabled = inferredDemo;
+  if (explicitResponseDemo !== null) {
+    enabled = explicitResponseDemo;
+  }
+  if (rawDemoFlag !== null) {
+    enabled = rawDemoFlag;
+  }
+  if (explicitDatasetActive !== null) {
+    enabled = explicitDatasetActive;
+  }
+  if (!enabled) {
+    return null;
+  }
+  return {
+    dataMode,
+    synthetic: synthetic !== false,
+    datasetId: nullableText(
+      pickAcross(metadataCandidates, "dataset_id", "id"),
+    ),
+    name: nullableText(
+      pickAcross(
+        metadataCandidates,
+        "name",
+        "label",
+        "dataset_name",
+        "portfolio_name",
+      ),
+    ),
+    periodStart: pickAcross(
+      metadataCandidates,
+      "period_start",
+      "window_start",
+      "start_at",
+    ),
+    periodEnd: pickAcross(
+      metadataCandidates,
+      "period_end",
+      "window_end",
+      "end_at",
+    ),
+    warning: nullableText(
+      pickAcross(
+        metadataCandidates,
+        "warning",
+        "disclaimer",
+        "message",
+      ),
+    ),
+  };
+}
+
+function setDemoDatasetContext(source, metadata) {
+  if (metadata) {
+    state.demoDatasetContexts[source] = metadata;
+  } else {
+    delete state.demoDatasetContexts[source];
+  }
+  renderDemoDatasetBanner();
+}
+
+function renderDemoDatasetBanner() {
+  const banner = elements["demo-dataset-banner"];
+  if (!banner) {
+    return;
+  }
+  const contexts = Object.values(state.demoDatasetContexts);
+  const metadata = contexts.find((item) => item.name) || contexts[0] || null;
+  const active = metadata !== null;
+  banner.hidden = !active;
+  document.body.classList.toggle("has-demo-dataset", active);
+  if (!active) {
+    return;
+  }
+  const identity = metadata.name || metadata.datasetId;
+  elements["demo-dataset-title"].textContent = identity
+    ? `当前正在查看演示数据：${identity}`
+    : "当前正在查看模拟演示数据";
+  const period = formatPeriod(metadata.periodStart, metadata.periodEnd);
+  const parts = [];
+  if (period !== "分析期间未返回") {
+    parts.push(`模拟期间：${period}。`);
+  }
+  if (metadata.warning) {
+    parts.push(`${metadata.warning} `);
+  }
+  parts.push(
+    "所有矿井、数值、异常和办理记录均为功能演示内容，严禁用于正式统计、监管认定或对外报送。",
+  );
+  elements["demo-dataset-description"].textContent = parts.join("");
 }
 
 function normalizeAnalytics(rawResponse) {

@@ -11,7 +11,7 @@
     <title>企业可信数据填报助手</title>
     <link rel="stylesheet" href="./styles.css">
   </head>
-  <body>
+  <body class="is-simple-mode">
     <a class="skip-link" href="#workspace">跳到填报区</a>
 
     <header class="topbar">
@@ -50,7 +50,41 @@
       </div>
     </header>
 
+    <section class="enterprise-mode-bar" aria-label="界面模式">
+      <div class="enterprise-mode-switch" role="group" aria-label="切换界面模式">
+        <button
+          class="enterprise-mode-button is-active"
+          id="simpleModeButton"
+          type="button"
+          aria-pressed="true"
+        >
+          快捷填报
+        </button>
+        <button
+          class="enterprise-mode-button"
+          id="professionalModeButton"
+          type="button"
+          aria-pressed="false"
+        >
+          专业工具
+        </button>
+      </div>
+      <p id="enterpriseModeNote">
+        快捷填报：页面只提示当前该做什么，按顺序完成即可。
+      </p>
+    </section>
+
     <section class="system-status-bar" aria-label="运行状态">
+      <div class="system-status-item simple-system-status is-checking" id="simpleStatusItem">
+        <span class="status-indicator" aria-hidden="true"></span>
+        <span>
+          <small>当前可用状态</small>
+          <strong id="simpleStatusText">正在检查</strong>
+        </span>
+        <small class="simple-status-hint" id="simpleStatusHint">
+          请稍候，系统正在检查填报和提交能力。
+        </small>
+      </div>
       <div class="system-status-item is-checking" id="agentStatusItem">
         <span class="status-indicator" aria-hidden="true"></span>
         <span><small>企业填报服务</small><strong id="agentStatusText">正在检查</strong></span>
@@ -163,7 +197,6 @@
           class="role-guide"
           id="roleGuide"
           aria-labelledby="roleGuideTitle"
-          open
           hidden
         >
           <summary class="role-guide-summary">
@@ -623,9 +656,22 @@
             <div><strong>逐项溯源</strong><span>每个数字展示来源和可信度</span></div>
             <div><strong>人工把关</strong><span>登录账号确认后才可发送</span></div>
           </div>
-          <button class="button button-primary button-large" id="welcomeStartButton" type="button">
-            开始一份新填报
-          </button>
+          <p class="welcome-action-hint" id="welcomeActionHint">
+            系统会优先提示继续未完成的填报，避免重复新建。
+          </p>
+          <div class="welcome-actions">
+            <button class="button button-primary button-large" id="welcomeStartButton" type="button">
+              开始一份新填报
+            </button>
+            <button
+              class="button button-secondary"
+              id="welcomeNewDraftButton"
+              type="button"
+              hidden
+            >
+              新建另一份
+            </button>
+          </div>
         </section>
 
         <section class="editor" id="editor" hidden>
@@ -638,21 +684,56 @@
               <p id="draftMeta">尚未保存</p>
             </div>
             <div class="editor-actions">
-              <button class="button button-secondary" id="runCoalHealthButton" type="button" disabled>
-                一键煤炭体检
-              </button>
-              <button class="button button-quiet" id="undoButton" type="button" disabled>
-                撤销修改
-              </button>
-              <button class="button button-danger-quiet" id="deleteDraftButton" type="button">
-                移除草稿
-              </button>
+              <details class="editor-more-actions" id="editorMoreActions">
+                <summary class="button button-quiet">更多操作</summary>
+                <div class="editor-more-menu">
+                  <button
+                    class="button button-secondary"
+                    id="runCoalHealthButton"
+                    type="button"
+                    disabled
+                  >
+                    一键煤炭体检
+                  </button>
+                  <button class="button button-quiet" id="undoButton" type="button" disabled>
+                    撤销修改
+                  </button>
+                  <button class="button button-danger-quiet" id="deleteDraftButton" type="button">
+                    移除草稿
+                  </button>
+                </div>
+              </details>
               <span class="save-state" id="saveState" aria-live="polite">已保存</span>
               <button class="button button-quiet save-retry" id="retrySaveButton" type="button" hidden>
                 重试保存
               </button>
             </div>
           </div>
+
+          <section class="simple-task-card" id="simpleTaskCard" aria-labelledby="simpleTaskTitle">
+            <div class="simple-task-main">
+              <p class="eyebrow">当前只需完成这一项</p>
+              <div class="simple-task-title-line">
+                <span class="simple-task-step" id="simpleTaskStep">第 1 步</span>
+                <h3 id="simpleTaskTitle">填写企业和统计信息</h3>
+              </div>
+              <p id="simpleTaskDescription">
+                填写带“必填”标记的内容，系统会自动保存。
+              </p>
+              <div class="simple-task-progress" aria-label="填报完成进度">
+                <span id="simpleTaskProgressText">已完成 0/6 步</span>
+                <span class="simple-task-progress-track" aria-hidden="true">
+                  <span id="simpleTaskProgressFill"></span>
+                </span>
+              </div>
+              <p class="simple-task-meta" id="simpleTaskMeta">
+                暂无来源材料，尚未进入核对。
+              </p>
+            </div>
+            <button class="button button-primary button-large" id="simpleTaskButton" type="button">
+              开始填写基本信息
+            </button>
+          </section>
 
           <nav class="stepper" aria-label="填报步骤">
             <ol id="stepList">
@@ -1095,7 +1176,7 @@
                   <small id="reviewPersistenceHint">核对状态正在检查是否可持久保存。</small>
                 </div>
                 <button class="button button-secondary" id="confirmHighConfidenceButton" type="button">
-                  核对后确认全部高可信度项
+                  核对后确认本页高可信度项
                 </button>
               </div>
 

@@ -3183,6 +3183,7 @@ class LocalRepository:
         engine_version: str,
         *,
         context_obj: Any | None = None,
+        created_at: str | datetime | None = None,
     ) -> dict[str, Any]:
         """Atomically persist one idempotent batch, its runs and review cases."""
 
@@ -3193,7 +3194,12 @@ class LocalRepository:
         context = _json_value(context_obj) if context_obj is not None else None
         response_hash = sha256_json(response)
         context_hash = sha256_json(context)
-        created_at = _now()
+        created_at_text = (
+            _now()
+            if created_at is None
+            else _timestamp(created_at, "created_at")
+        )
+        assert created_at_text is not None
 
         with self._lock, self._connection:
             existing = self._connection.execute(
@@ -3246,7 +3252,7 @@ class LocalRepository:
                     context_hash,
                     canonical_json(context) if context is not None else None,
                     "created",
-                    created_at,
+                    created_at_text,
                 ),
             )
             created_row = self._connection.execute(
@@ -3261,7 +3267,7 @@ class LocalRepository:
                 reason=None,
                 before=None,
                 after=self._batch_lifecycle_state(created_row),
-                created_at=created_at,
+                created_at=created_at_text,
             )
 
             inputs_by_mine = {
@@ -3306,7 +3312,7 @@ class LocalRepository:
                             result_hash,
                             canonical_json(analysis_result),
                             engine_version,
-                            created_at,
+                            created_at_text,
                         ),
                     )
                     self._insert_algorithm_features(
@@ -3317,7 +3323,7 @@ class LocalRepository:
                         analysis_result=analysis_result,
                         context_snapshot=context,
                         engine_version=engine_version,
-                        created_at=created_at,
+                        created_at=created_at_text,
                     )
 
                 if item.get("review_priority") == "NONE":
@@ -3326,7 +3332,7 @@ class LocalRepository:
                     batch_id=batch_id,
                     item=item,
                     run_id=run_id,
-                    created_at=created_at,
+                    created_at=created_at_text,
                 )
 
         return {"created": True, "batch": response}
@@ -5587,6 +5593,7 @@ class LocalRepository:
         note: str | None = None,
         disposition: str | None = None,
         assignee: str | None = None,
+        occurred_at: str | datetime | None = None,
     ) -> dict[str, Any]:
         actor = actor.strip()
         if not actor:
@@ -5595,6 +5602,12 @@ class LocalRepository:
             raise InvalidCaseActionError("expected_version must be positive")
         note = note.strip() if note is not None else None
         assignee = assignee.strip() if assignee is not None else None
+        occurred_at_text = (
+            _now()
+            if occurred_at is None
+            else _timestamp(occurred_at, "occurred_at")
+        )
+        assert occurred_at_text is not None
 
         with self._lock, self._connection:
             row = self._connection.execute(
@@ -5607,6 +5620,15 @@ class LocalRepository:
             if before["version"] != expected_version:
                 raise VersionConflictError(
                     "case version changed; reload before applying the action"
+                )
+            previous_update = _timestamp(
+                before["updated_at"],
+                "case.updated_at",
+            )
+            assert previous_update is not None
+            if occurred_at_text < previous_update:
+                raise InvalidCaseActionError(
+                    "occurred_at cannot predate the current case state"
                 )
 
             workflow = str(before["workflow_status"])
@@ -5625,7 +5647,7 @@ class LocalRepository:
                     raise InvalidCaseActionError(
                         "note is required for archive_case"
                     )
-                archived_at = _now()
+                archived_at = occurred_at_text
                 updates["archived_at"] = archived_at
                 updates["archived_by"] = actor
                 updates["archived_reason"] = note
@@ -5686,7 +5708,7 @@ class LocalRepository:
                 updates["workflow_status"] = "pending_approval"
                 updates["disposition"] = disposition
                 updates["conclusion_by"] = actor
-                updates["conclusion_at"] = _now()
+                updates["conclusion_at"] = occurred_at_text
                 updates["approval_by"] = None
                 updates["approval_at"] = None
                 updates["approval_note"] = None
@@ -5724,7 +5746,7 @@ class LocalRepository:
                 if action == "approve":
                     updates["workflow_status"] = "closed"
                     updates["approval_by"] = actor
-                    updates["approval_at"] = _now()
+                    updates["approval_at"] = occurred_at_text
                     updates["approval_note"] = note
                 else:
                     updates["workflow_status"] = "reviewing"
@@ -5746,9 +5768,9 @@ class LocalRepository:
                 updates["workflow_status"] = "closed"
                 updates["disposition"] = disposition
                 updates["conclusion_by"] = actor
-                updates["conclusion_at"] = _now()
+                updates["conclusion_at"] = occurred_at_text
                 updates["approval_by"] = actor
-                updates["approval_at"] = _now()
+                updates["approval_at"] = occurred_at_text
                 updates["approval_note"] = (
                     "兼容模式直接关闭；启用认证时接口禁止该旁路。"
                 )
@@ -5767,7 +5789,7 @@ class LocalRepository:
             else:  # pragma: no cover - protected by the public type/API model
                 raise InvalidCaseActionError("unsupported action")
 
-            updated_at = _now()
+            updated_at = occurred_at_text
             updates["version"] = int(before["version"]) + 1
             updates["updated_at"] = updated_at
             assignments = ", ".join(f"{column} = ?" for column in updates)

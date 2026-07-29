@@ -41,6 +41,11 @@ mineguard serve --host 127.0.0.1 --port 8080 --state-directory .mineguard
 上述边缘密钥只是本机演示固定值；实际部署必须替换为 `openssl rand -base64 32`
 生成并由密钥系统保管的随机值。
 
+如果暂时没有现场数据，想先体验领导端的 30/90 日趋势、缺报、案件闭环和安全
+线索，请改用独立 `.mineguard-demo` 状态目录，并按
+[90 天演示数据使用说明](platform/docs/90天演示数据使用说明.md)生成 6 座
+虚构矿井的数据；不要把合成数据写入上面的 `.mineguard` 正式状态目录。
+
 在另一个终端启动企业智能体：
 
 ```bash

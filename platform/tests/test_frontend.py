@@ -132,6 +132,57 @@ def test_leader_workspaces_use_workflow_apis_and_keep_statuses_separate() -> Non
     assert "audit_chain_valid" in script
 
 
+def test_leadership_simple_mode_is_default_and_keeps_professional_mode() -> None:
+    html, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    for identifier in (
+        'id="interface-leader-mode"',
+        'id="interface-professional-mode"',
+        'id="leadership-workspace"',
+        'id="decisions-workspace"',
+        'id="reports-workspace"',
+    ):
+        assert identifier in html
+    for label in (
+        "领导简洁模式",
+        "今日态势",
+        "待我决策",
+        "监管报告",
+        "今天只看四件事",
+        "今日需要关注的 3 件事",
+    ):
+        assert label in html
+    assert 'interfaceMode: "leader"' in script
+    assert 'setInterfaceMode("leader", false)' in script
+    assert 'openProfessionalWorkspace("overview")' in script
+    assert "refreshLeadershipDashboard" in script
+    assert "renderLeadershipDecisions" in script
+    assert "缺失不按零" in script
+
+
+def test_leadership_summary_is_deterministic_and_does_not_persist_identity() -> None:
+    _, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    for source in (
+        "state.overview",
+        "state.analytics",
+        "state.safetyDashboard",
+        "state.cases",
+    ):
+        assert source in script
+    for forbidden in (
+        "localStorage",
+        "sessionStorage",
+        "innerHTML",
+        "insertAdjacentHTML",
+    ):
+        assert forbidden not in script
+    assert "技术线索" in script
+    assert "不证明辖区安全或合规" in script
+
+
 def test_admin_can_govern_historical_verification_references() -> None:
     html, _ = parse_frontend()
     script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
@@ -311,6 +362,83 @@ def test_temporal_dashboard_is_plain_language_and_never_overstates() -> None:
     )
     for status in ("anomalous", "normal", "insufficient_history"):
         assert status in script
+
+
+def test_temporal_dashboard_keeps_points_and_draws_an_explainable_svg() -> None:
+    html, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    for identifier in (
+        'id="temporal-series-select"',
+        'id="temporal-series-summary"',
+        'id="temporal-series-chart"',
+    ):
+        assert identifier in html
+    assert "选一条序列看 90 日变化" in html
+    assert "阴影和上下界来自算法基线" in html
+    for field in (
+        "series.points",
+        "point.observed_value",
+        "point.baseline_median",
+        "thresholds.rolling_lower",
+        "thresholds.rolling_upper",
+        "point.anomalous",
+        "point.missing",
+    ):
+        assert field in script
+    assert "function normalizeTemporalSeries(" in script
+    assert "function renderTemporalSeriesChart(" in script
+    assert "series.find(temporalSeriesHasWarnings)" in script
+    assert 'document.createElementNS(' in script
+    assert '"polygon"' in script
+    assert '"polyline"' in script
+    assert '"circle"' in script
+    assert "曲线断开表示缺测或没有有效数值" in script
+    assert "红点只提示需要复核" in script
+    assert "含冷启动阶段序列" in script
+    assert "不等于当前仍不足" in script
+    assert "后续已形成基线" in script
+    assert "innerHTML" not in script
+    for selector in (
+        ".temporal-series-panel",
+        ".temporal-series-chart",
+        ".temporal-observed-line",
+        ".temporal-baseline-line",
+        ".temporal-bound-band",
+        ".temporal-anomaly-point",
+    ):
+        assert selector in styles
+
+
+def test_demo_dataset_has_a_global_non_official_watermark() -> None:
+    html, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    for identifier in (
+        'id="demo-dataset-banner"',
+        'id="demo-dataset-title"',
+        'id="demo-dataset-description"',
+    ):
+        assert identifier in html
+    assert "严禁用于正式统计、监管认定或对外报送" in html
+    assert "function normalizeDemoDatasetMetadata(" in script
+    assert "function setDemoDatasetContext(" in script
+    assert "function renderDemoDatasetBanner(" in script
+    assert 'dataset_id: "pilot-preview"' in script
+    assert "localTrial === true" not in script
+    for marker in (
+        '"demo_dataset"',
+        '"data_mode"',
+        '"synthetic"',
+        '"local_trial"',
+    ):
+        assert marker in script
+    assert "textContent" in script
+    assert "innerHTML" not in script
+    assert ".demo-dataset-banner" in styles
+    assert ".demo-dataset-banner-inner" in styles
 
 
 def test_safety_workspace_has_leader_summary_mine_files_and_alert_ledger() -> None:

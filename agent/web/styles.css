@@ -234,6 +234,50 @@ p {
   background: var(--red);
 }
 
+.enterprise-mode-bar {
+  align-items: center;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 18px;
+  min-height: 56px;
+  padding: 8px 28px;
+}
+
+.enterprise-mode-switch {
+  background: #e9efeb;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  display: inline-grid;
+  flex: 0 0 auto;
+  grid-template-columns: repeat(2, minmax(110px, 1fr));
+  padding: 3px;
+}
+
+.enterprise-mode-button {
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 800;
+  min-height: 34px;
+  padding: 6px 14px;
+}
+
+.enterprise-mode-button.is-active {
+  background: var(--surface);
+  box-shadow: 0 2px 8px rgba(26, 54, 42, 0.09);
+  color: var(--green-dark);
+}
+
+.enterprise-mode-bar > p {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+}
+
 .system-status-bar {
   align-items: center;
   background: #edf3ef;
@@ -263,6 +307,32 @@ p {
 
 .system-status-item strong {
   font-size: 12px;
+}
+
+.simple-system-status {
+  flex: 1 1 auto;
+}
+
+.simple-status-hint {
+  font-size: 11px !important;
+  line-height: 1.45;
+  margin-left: 8px;
+}
+
+.is-professional-mode .simple-system-status {
+  display: none;
+}
+
+.is-simple-mode #agentStatusItem,
+.is-simple-mode #platformStatusItem,
+.is-simple-mode #assistantStatusItem,
+.is-simple-mode .system-status-help {
+  display: none;
+}
+
+.is-simple-mode #agentTaskButton,
+.is-simple-mode #coalChatButton {
+  display: none;
 }
 
 .status-indicator {
@@ -364,7 +434,7 @@ p {
 .app-shell {
   display: grid;
   grid-template-columns: 310px minmax(0, 1fr);
-  min-height: calc(100vh - 132px);
+  min-height: calc(100vh - 188px);
 }
 
 .draft-panel {
@@ -624,6 +694,20 @@ p {
   line-height: 1.5;
 }
 
+.welcome-action-hint {
+  color: var(--ink-soft);
+  font-size: 13px;
+  margin: -12px auto 16px;
+}
+
+.welcome-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+}
+
 .editor {
   margin: 0 auto;
   max-width: 1280px;
@@ -650,6 +734,178 @@ p {
 .editor-title-line,
 .editor-actions {
   gap: 10px;
+}
+
+.editor-more-actions {
+  position: relative;
+}
+
+.editor-more-actions > summary {
+  list-style: none;
+}
+
+.editor-more-actions > summary::-webkit-details-marker {
+  display: none;
+}
+
+.editor-more-actions > summary::after {
+  content: "⌄";
+  font-size: 12px;
+  margin-left: 2px;
+}
+
+.editor-more-actions[open] > summary::after {
+  content: "⌃";
+}
+
+.editor-more-menu {
+  align-items: stretch;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 5px;
+  min-width: 190px;
+  padding: 8px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+}
+
+.editor-more-menu .button {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.is-professional-mode .editor-more-actions {
+  display: contents;
+}
+
+.is-professional-mode .editor-more-actions > summary {
+  display: none;
+}
+
+.is-professional-mode .editor-more-menu {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  display: flex;
+  min-width: 0;
+  padding: 0;
+  position: static;
+}
+
+.is-professional-mode .editor-more-menu .button {
+  justify-content: center;
+  width: auto;
+}
+
+.simple-task-card {
+  align-items: center;
+  background:
+    linear-gradient(120deg, rgba(8, 122, 91, 0.08), rgba(23, 127, 130, 0.03)),
+    var(--surface);
+  border: 1px solid #b9d9cc;
+  border-radius: 16px;
+  display: grid;
+  gap: 22px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin-bottom: 16px;
+  padding: 20px 22px;
+}
+
+.is-professional-mode .simple-task-card {
+  display: none;
+}
+
+.simple-task-card.is-readonly {
+  background: var(--paper);
+  border-color: var(--line);
+}
+
+.simple-task-title-line {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  margin: 5px 0 6px;
+}
+
+.simple-task-title-line h3 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.simple-task-step {
+  background: var(--green);
+  border-radius: 999px;
+  color: white;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 4px 9px;
+}
+
+.simple-task-card.is-readonly .simple-task-step {
+  background: var(--ink-soft);
+}
+
+.simple-task-main > p:not(.eyebrow) {
+  color: var(--ink-soft);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.simple-task-progress {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(120px, 260px);
+  margin-top: 12px;
+}
+
+.simple-task-progress > span:first-child {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.simple-task-progress-track {
+  background: #dfe8e2;
+  border-radius: 999px;
+  height: 7px;
+  overflow: hidden;
+}
+
+.simple-task-progress-track > span {
+  background: var(--green);
+  display: block;
+  height: 100%;
+  transition: width 180ms ease;
+}
+
+.simple-task-meta {
+  font-size: 11px;
+  margin-top: 8px !important;
+}
+
+.is-simple-mode .stepper ol {
+  grid-template-columns: repeat(6, minmax(112px, 1fr));
+  min-width: 672px;
+}
+
+.is-simple-mode .stepper small {
+  display: none;
+}
+
+.is-simple-mode .stepper button {
+  justify-content: center;
+  padding-bottom: 12px;
+  padding-top: 12px;
+}
+
+.is-simple-mode #confirmHighConfidenceButton {
+  display: none;
 }
 
 .save-state {
@@ -3855,6 +4111,21 @@ p {
     justify-content: flex-end;
   }
 
+  .enterprise-mode-bar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 6px;
+    padding: 9px 16px;
+  }
+
+  .enterprise-mode-switch {
+    width: 100%;
+  }
+
+  .enterprise-mode-bar > p {
+    text-align: center;
+  }
+
   .brand .eyebrow,
   .connection-state {
     display: none;
@@ -3940,13 +4211,115 @@ p {
     align-items: flex-start;
   }
 
-  .editor-actions .button-quiet,
+  .editor-actions > .button-quiet,
   .save-state {
     display: none;
   }
 
   .editor-actions .save-retry {
     display: inline-flex;
+  }
+
+  .simple-task-card {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+    padding: 18px;
+  }
+
+  .simple-task-card > .button {
+    width: 100%;
+  }
+
+  .simple-task-progress {
+    grid-template-columns: auto minmax(80px, 1fr);
+  }
+
+  .is-simple-mode .table-wrap {
+    border: 0;
+    overflow: visible;
+  }
+
+  .is-simple-mode .measurement-table {
+    display: block;
+    min-width: 0;
+  }
+
+  .is-simple-mode .measurement-table thead {
+    display: none;
+  }
+
+  .is-simple-mode .measurement-table tbody {
+    display: grid;
+    gap: 12px;
+  }
+
+  .is-simple-mode .measurement-table tr {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow: hidden;
+  }
+
+  .is-simple-mode .measurement-table tr.needs-review {
+    border-color: #e3c76d;
+  }
+
+  .is-simple-mode .measurement-table td {
+    border: 0;
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+    padding: 10px 12px;
+  }
+
+  .is-simple-mode .measurement-table td::before {
+    color: var(--ink-soft);
+    font-size: 10px;
+    font-weight: 800;
+  }
+
+  .is-simple-mode .measurement-table td:nth-child(1),
+  .is-simple-mode .measurement-table td:nth-child(4),
+  .is-simple-mode .measurement-table td:nth-child(6),
+  .is-simple-mode .measurement-table td:nth-child(7),
+  .is-simple-mode .measurement-table td.empty-row {
+    grid-column: 1 / -1;
+  }
+
+  .is-simple-mode .measurement-table td:nth-child(1)::before {
+    content: "填报项目";
+  }
+
+  .is-simple-mode .measurement-table td:nth-child(2)::before {
+    content: "数字";
+  }
+
+  .is-simple-mode .measurement-table td:nth-child(3)::before {
+    content: "单位";
+  }
+
+  .is-simple-mode .measurement-table td:nth-child(4)::before {
+    content: "来源";
+  }
+
+  .is-simple-mode .measurement-table td:nth-child(5)::before {
+    content: "提取可信度";
+  }
+
+  .is-simple-mode .measurement-table td:nth-child(6)::before {
+    content: "人工核对";
+  }
+
+  .is-simple-mode .measurement-table td:nth-child(7)::before {
+    content: "其他操作";
+  }
+
+  .is-simple-mode .measurement-table input[type="number"],
+  .is-simple-mode .measurement-table .unit-input {
+    max-width: none;
+    width: 100%;
   }
 
   .step-panel {
@@ -4096,6 +4469,26 @@ p {
 
   .welcome-points {
     display: none;
+  }
+
+  .welcome-actions,
+  .welcome-actions .button {
+    width: 100%;
+  }
+
+  .simple-task-title-line {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .simple-task-progress {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .editor-more-menu {
+    max-width: calc(100vw - 28px);
+    min-width: 210px;
   }
 
   .role-guide-summary {
@@ -4269,8 +4662,10 @@ p {
 
 @media print {
   .topbar,
+  .enterprise-mode-bar,
   .system-status-bar,
   .draft-panel,
+  .simple-task-card,
   .stepper,
   .persistent-notice,
   .credential-notice,

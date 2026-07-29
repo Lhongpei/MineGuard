@@ -716,3 +716,54 @@ def test_responsive_layout_is_present() -> None:
     assert "@media (max-width: 780px)" in CSS
     assert "@media (max-width: 520px)" in CSS
     assert "@media print" in CSS
+
+
+def test_quick_reporting_mode_is_default_and_professional_tools_remain() -> None:
+    for token in (
+        '<body class="is-simple-mode">',
+        'id="simpleModeButton"',
+        'id="professionalModeButton"',
+        'id="simpleStatusItem"',
+        'id="simpleTaskCard"',
+        'id="editorMoreActions"',
+        'id="welcomeNewDraftButton"',
+    ):
+        assert token in HTML
+    assert 'interfaceMode: "simple"' in JS
+    assert 'setEnterpriseMode("simple", false)' in JS
+    assert 'document.body.classList.toggle("is-simple-mode"' in JS
+    assert 'document.body.classList.toggle("is-professional-mode"' in JS
+    assert ".is-simple-mode #agentTaskButton" in CSS
+    assert ".is-simple-mode #coalChatButton" in CSS
+    assert ".is-professional-mode .simple-task-card" in CSS
+    for retained in ("煤炭智能任务", "煤炭业务对话", "当前账号操作说明"):
+        assert retained in HTML
+    for forbidden in ("localStorage", "sessionStorage"):
+        assert forbidden not in HTML
+        assert forbidden not in JS
+
+
+def test_quick_workflow_keeps_event_snapshot_and_review_boundaries() -> None:
+    assert "function hasRegulatorEventSnapshot(draft)" in JS
+    assert JS.count("hasRegulatorEventSnapshot(draft)") >= 5
+    assert "即使没有特殊事件也必须导入空结果快照" in JS
+    assert "核对后确认本页高可信度项" in HTML
+    assert ".slice(pageStart, pageStart + state.measurementPageSize)" in JS
+    assert "不会处理其他分页" in JS
+    assert ".is-simple-mode #confirmHighConfidenceButton" in CSS
+    assert "renderSimpleTaskGuide();" in JS
+    assert 'dataset.actionAllowed = String(actionAllowed)' in JS
+
+
+def test_enterprise_mode_behavior_in_jsdom() -> None:
+    script = Path(__file__).with_name("frontend_enterprise_mode_dom.test.js")
+    completed = subprocess.run(
+        ["node", str(script)],
+        cwd=WEB_ROOT.parent,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "JSDOM enterprise mode checks passed" in completed.stdout

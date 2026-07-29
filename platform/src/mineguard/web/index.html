@@ -75,14 +75,31 @@
       </div>
     </header>
 
+    <section
+      id="demo-dataset-banner"
+      class="demo-dataset-banner"
+      role="status"
+      aria-live="polite"
+      hidden
+    >
+      <div class="demo-dataset-banner-inner">
+        <span class="demo-dataset-mark" aria-hidden="true">演示数据</span>
+        <div>
+          <strong id="demo-dataset-title">当前正在查看模拟演示数据</strong>
+          <p id="demo-dataset-description">
+            所有矿井、数值、异常和办理记录均为功能演示内容，严禁用于正式统计、监管认定或对外报送。
+          </p>
+        </div>
+      </div>
+    </section>
+
     <main id="main-content" class="page-shell">
       <section class="intro" aria-labelledby="page-title">
         <div>
-          <p class="eyebrow">领导监管工作台</p>
+          <p id="page-eyebrow" class="eyebrow">领导简洁驾驶舱</p>
           <h1 id="page-title">先看辖区态势，再跟进重点线索</h1>
-          <p class="intro-copy">
-            汇总各矿数据报送与交叉核验情况，把需要补数和复核的事项排在前面，
-            并保留每一步办理记录。
+          <p id="intro-copy" class="intro-copy">
+            三分钟看完今天最需要关注、交办和审批的事项；专业分析由监管人员继续办理。
           </p>
         </div>
         <div class="scope-note">
@@ -91,16 +108,81 @@
         </div>
       </section>
 
+      <section class="interface-mode-bar" aria-labelledby="interface-mode-title">
+        <div>
+          <strong id="interface-mode-title">当前界面</strong>
+          <span id="interface-mode-note">领导简洁模式：只显示态势、待决策事项和监管报告。</span>
+        </div>
+        <div class="interface-mode-switch" role="group" aria-label="切换界面模式">
+          <button
+            id="interface-leader-mode"
+            class="interface-mode-button is-active"
+            type="button"
+            aria-pressed="true"
+          >
+            领导简洁模式
+          </button>
+          <button
+            id="interface-professional-mode"
+            class="interface-mode-button"
+            type="button"
+            aria-pressed="false"
+          >
+            监管专业模式
+          </button>
+        </div>
+      </section>
+
       <nav class="workspace-nav" aria-label="监管工作区">
         <div class="workspace-tabs" role="tablist" aria-label="监管工作区">
           <button
-            id="overview-workspace-tab"
+            id="leadership-workspace-tab"
             class="workspace-tab is-active"
             type="button"
             role="tab"
             aria-selected="true"
+            aria-controls="leadership-workspace"
+            data-workspace="leadership"
+          >
+            <span aria-hidden="true">①</span>
+            今日态势
+          </button>
+          <button
+            id="decisions-workspace-tab"
+            class="workspace-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="decisions-workspace"
+            data-workspace="decisions"
+            tabindex="-1"
+          >
+            <span aria-hidden="true">②</span>
+            待我决策
+            <span id="nav-decision-count" class="nav-count" hidden></span>
+          </button>
+          <button
+            id="reports-workspace-tab"
+            class="workspace-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="reports-workspace"
+            data-workspace="reports"
+            tabindex="-1"
+          >
+            <span aria-hidden="true">③</span>
+            监管报告
+          </button>
+          <button
+            id="overview-workspace-tab"
+            class="workspace-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
             aria-controls="overview-workspace"
             data-workspace="overview"
+            tabindex="-1"
           >
             <span aria-hidden="true">①</span>
             辖区总览
@@ -177,11 +259,118 @@
       </nav>
 
       <section
+        id="leadership-workspace"
+        class="workspace-panel leadership-workspace"
+        role="tabpanel"
+        aria-labelledby="leadership-workspace-tab"
+        tabindex="0"
+      >
+        <div class="workspace-heading leadership-heading">
+          <div>
+            <p class="section-kicker">领导 3 分钟速览</p>
+            <h2>今天只看四件事</h2>
+            <p>数据有没有收齐、重大线索有没有新增、事项有没有超期、哪些结论需要决策。</p>
+          </div>
+          <button id="refresh-leadership" class="button quiet compact" type="button">
+            刷新今日态势
+          </button>
+        </div>
+
+        <div id="leadership-status" class="data-load-status" role="status" aria-live="polite">
+          正在汇总领导简报…
+        </div>
+
+        <div class="leadership-meta">
+          <span>当前授权范围</span>
+          <strong id="leadership-scope">待载入</strong>
+          <span>简报更新时间</span>
+          <strong id="leadership-updated-at">—</strong>
+        </div>
+
+        <div
+          id="leadership-kpi-grid"
+          class="leadership-kpi-grid"
+          aria-label="领导今日关键指标"
+        ></div>
+
+        <section class="leadership-attention" aria-labelledby="leadership-attention-title">
+          <div class="section-toolbar">
+            <div>
+              <p class="section-kicker">按行动顺序排列</p>
+              <h3 id="leadership-attention-title">今日需要关注的 3 件事</h3>
+              <p>每条只说明发生了什么、为什么需要关注和建议下一步，不自动形成监管认定。</p>
+            </div>
+          </div>
+          <ol id="leadership-attention-list" class="leadership-attention-list"></ol>
+        </section>
+
+        <section class="leadership-quick-actions" aria-labelledby="leadership-quick-title">
+          <div>
+            <p class="section-kicker">下一步</p>
+            <h3 id="leadership-quick-title">领导只处理决策，专业人员查看算法</h3>
+          </div>
+          <div class="leadership-action-buttons">
+            <button id="leadership-open-decisions" class="button primary" type="button">
+              查看待我决策
+            </button>
+            <button id="leadership-open-reports" class="button quiet" type="button">
+              生成监管报告
+            </button>
+            <button id="leadership-open-professional" class="button quiet" type="button">
+              查看专业分析依据
+            </button>
+          </div>
+        </section>
+
+        <p class="legal-note">
+          绿色、无红色预警或“技术一致”均不等于安全或合规；缺报、断流和历史不足也不能解释为正常。
+        </p>
+      </section>
+
+      <section
+        id="decisions-workspace"
+        class="workspace-panel decisions-workspace"
+        role="tabpanel"
+        aria-labelledby="decisions-workspace-tab"
+        tabindex="0"
+        hidden
+      >
+        <div class="workspace-heading">
+          <div>
+            <p class="section-kicker">只列需要交办、催办或审批的事项</p>
+            <h2>待我决策</h2>
+            <p>领导在这里决定责任人、办理时限和是否批准；原始数据与算法细节由承办人员复核。</p>
+          </div>
+          <button id="refresh-decisions" class="button quiet compact" type="button">
+            刷新待办
+          </button>
+        </div>
+        <div id="decisions-status" class="data-load-status" role="status" aria-live="polite">
+          正在读取待决策事项…
+        </div>
+        <div id="decision-summary-grid" class="decision-summary-grid"></div>
+        <ol id="leadership-decision-list" class="leadership-decision-list"></ol>
+        <p id="leadership-decision-empty" class="workspace-empty compact-empty" hidden>
+          当前没有可识别的待决策事项。数据读取不完整时不能据此判断辖区无风险。
+        </p>
+      </section>
+
+      <section
+        id="reports-workspace"
+        class="workspace-panel reports-workspace"
+        role="tabpanel"
+        aria-labelledby="reports-workspace-tab"
+        tabindex="0"
+        hidden
+      ></section>
+
+      <section
         id="overview-workspace"
         class="workspace-panel"
         role="tabpanel"
         aria-labelledby="overview-workspace-tab"
         tabindex="0"
+        hidden
       >
         <div class="workspace-heading">
           <div>
@@ -327,6 +516,45 @@
                   class="temporal-kpi-grid"
                   aria-label="时序异常与数据质量关键指标"
                 ></div>
+                <section
+                  id="temporal-series-panel"
+                  class="temporal-series-panel"
+                  aria-labelledby="temporal-series-title"
+                >
+                  <div class="temporal-series-toolbar">
+                    <div>
+                      <h5 id="temporal-series-title">选一条序列看 90 日变化</h5>
+                      <p>优先展示出现预警的序列；曲线用于定位变化时间，不直接给出责任或违法结论。</p>
+                    </div>
+                    <label for="temporal-series-select">
+                      <span>查看矿井与指标</span>
+                      <select id="temporal-series-select"></select>
+                    </label>
+                  </div>
+                  <p
+                    id="temporal-series-summary"
+                    class="temporal-series-summary"
+                  ></p>
+                  <div class="temporal-chart-shell">
+                    <svg
+                      id="temporal-series-chart"
+                      class="temporal-series-chart"
+                      viewBox="0 0 960 320"
+                      preserveAspectRatio="xMidYMid meet"
+                      role="img"
+                      aria-label="所选矿井与指标近 90 日观测值、历史基线和预警点"
+                    ></svg>
+                  </div>
+                  <ul class="temporal-chart-legend" aria-label="曲线图例">
+                    <li><i class="is-observed" aria-hidden="true"></i>观测值</li>
+                    <li><i class="is-baseline" aria-hidden="true"></i>历史基线</li>
+                    <li><i class="is-bound" aria-hidden="true"></i>基线参考范围</li>
+                    <li><i class="is-anomaly" aria-hidden="true"></i>预警时点</li>
+                  </ul>
+                  <p class="chart-note">
+                    纵轴是当前序列的分析特征值；阴影和上下界来自算法基线。“超界”只表示值得核对原始凭证、设备状态和业务口径。
+                  </p>
+                </section>
                 <div class="temporal-episode-heading">
                   <h5>需要人工复核的预警事件</h5>
                   <span>按事件起止时间展示，不把单点波动直接写成结论</span>

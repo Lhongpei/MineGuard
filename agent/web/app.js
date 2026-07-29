@@ -347,6 +347,7 @@
   });
 
   const state = {
+    interfaceMode: "simple",
     drafts: [],
     activeDraft: null,
     step: 1,
@@ -458,6 +459,7 @@
   function init() {
     cacheElements();
     bindStaticEvents();
+    setEnterpriseMode("simple", false);
     applyAgentTaskPreset("full");
     setImportFormat("json");
     renderApprovalEvents();
@@ -470,6 +472,12 @@
     [
       "connectionState",
       "connectionText",
+      "simpleModeButton",
+      "professionalModeButton",
+      "enterpriseModeNote",
+      "simpleStatusItem",
+      "simpleStatusText",
+      "simpleStatusHint",
       "agentStatusItem",
       "agentStatusText",
       "platformStatusItem",
@@ -497,8 +505,11 @@
       "draftListFooter",
       "draftListSummary",
       "loadMoreDraftsButton",
+      "workspace",
       "welcomeCard",
       "welcomeStartButton",
+      "welcomeNewDraftButton",
+      "welcomeActionHint",
       "coalChatWorkbench",
       "coalChatWorkbenchTitle",
       "closeCoalChatButton",
@@ -574,6 +585,15 @@
       "draftTitle",
       "draftStatus",
       "draftMeta",
+      "editorMoreActions",
+      "simpleTaskCard",
+      "simpleTaskStep",
+      "simpleTaskTitle",
+      "simpleTaskDescription",
+      "simpleTaskProgressText",
+      "simpleTaskProgressFill",
+      "simpleTaskMeta",
+      "simpleTaskButton",
       "undoButton",
       "deleteDraftButton",
       "saveState",
@@ -665,6 +685,15 @@
   }
 
   function bindStaticEvents() {
+    els.simpleModeButton.addEventListener("click", () =>
+      setEnterpriseMode("simple"),
+    );
+    els.professionalModeButton.addEventListener("click", () =>
+      setEnterpriseMode("professional"),
+    );
+    els.simpleTaskButton.addEventListener("click", () =>
+      void handleSimpleTaskAction(),
+    );
     els.loginForm.addEventListener("submit", (event) => {
       event.preventDefault();
       void login();
@@ -672,7 +701,10 @@
     els.loginDialog.addEventListener("cancel", (event) => event.preventDefault());
     els.logoutButton.addEventListener("click", () => void logout());
     els.newDraftButton.addEventListener("click", () => void createDraft());
-    els.welcomeStartButton.addEventListener("click", () => void createDraft());
+    els.welcomeStartButton.addEventListener("click", () =>
+      void handleWelcomePrimaryAction(),
+    );
+    els.welcomeNewDraftButton.addEventListener("click", () => void createDraft());
     els.agentTaskButton.addEventListener("click", () => void openAgentWorkbench());
     els.coalChatButton.addEventListener("click", () => void openCoalChat());
     els.closeCoalChatButton.addEventListener("click", closeCoalChat);
@@ -891,6 +923,35 @@
         scheduleCoalChatPoll(0);
       }
     });
+  }
+
+  function setEnterpriseMode(mode, userInitiated = true) {
+    const professional = mode === "professional";
+    state.interfaceMode = professional ? "professional" : "simple";
+    document.body.classList.toggle("is-simple-mode", !professional);
+    document.body.classList.toggle("is-professional-mode", professional);
+    els.simpleModeButton.classList.toggle("is-active", !professional);
+    els.simpleModeButton.setAttribute("aria-pressed", String(!professional));
+    els.professionalModeButton.classList.toggle("is-active", professional);
+    els.professionalModeButton.setAttribute("aria-pressed", String(professional));
+    els.enterpriseModeNote.textContent = professional
+      ? "专业工具：可使用煤炭业务对话、智能任务、详细运行状态和完整操作工具。"
+      : "快捷填报：页面只提示当前该做什么，按顺序完成即可。";
+    els.editorMoreActions.open = professional;
+    if (!professional) {
+      els.roleGuide.open = false;
+      if (userInitiated && !els.agentWorkbench.hidden) closeAgentWorkbench();
+      if (userInitiated && !els.coalChatWorkbench.hidden) closeCoalChat();
+    }
+    renderOperationalStatus();
+    renderSimpleTaskGuide();
+    if (userInitiated) {
+      showToast(
+        professional
+          ? "已进入专业工具，填报草稿和权限没有变化。"
+          : "已返回快捷填报，系统会提示当前下一项任务。",
+      );
+    }
   }
 
   function bindTablistKeyboard(tablist) {
@@ -1130,7 +1191,60 @@
     } else {
       els.platformStatusItem.removeAttribute("title");
     }
+    renderSimpleOperationalStatus(connected, platform, llmConfigured);
     if (state.activeDraft) renderSubmission();
+  }
+
+  function renderSimpleOperationalStatus(connected, platform, llmConfigured) {
+    let status = "checking";
+    let label = "正在检查";
+    let hint = "请稍候，系统正在检查填报和提交能力。";
+    if (state.serviceHealth && !connected) {
+      status = "error";
+      label = "服务未连接";
+      hint = "当前不能安全保存，请联系管理员恢复企业填报服务。";
+    } else if (connected && !state.principal) {
+      status = "ok";
+      label = "服务正常，请先登录";
+      hint = "登录后系统会自动检查草稿权限和监管提交接口。";
+    } else if (connected && !hasPermission("read")) {
+      status = "warning";
+      label = "账号权限不足";
+      hint = "当前账号不能查看填报，请联系管理员调整权限。";
+    } else if (connected && !platform) {
+      label = "正在检查提交能力";
+      hint = "草稿功能已经可用，监管接口状态仍在读取。";
+    } else if (connected && !platform.configured) {
+      status = "warning";
+      label = "可以编辑，暂不能提交";
+      hint = "监管接口尚未配置；可以先保存草稿，配置完成后再提交。";
+    } else if (
+      connected &&
+      (platform.reachable === false || platform.compatible === false)
+    ) {
+      status = "error";
+      label = "可以编辑，提交接口异常";
+      hint =
+        platform.compatible === false
+          ? "监管接口版本不兼容，请联系管理员处理后再提交。"
+          : "监管接口暂时不可达，请保存草稿并稍后重试。";
+    } else if (
+      connected &&
+      platform.reachable === true &&
+      platform.compatible !== false
+    ) {
+      status = "ok";
+      label = "系统正常，可以填报";
+      hint = llmConfigured
+        ? "保存、智能提取和监管提交均可用。"
+        : "保存和监管提交可用；自由文字智能提取暂未启用。";
+    } else if (connected) {
+      status = "warning";
+      label = "可以填报，提交前再检查";
+      hint = "监管接口已经配置但尚未完成连通性确认。";
+    }
+    setStatusItem(els.simpleStatusItem, els.simpleStatusText, status, label);
+    els.simpleStatusHint.textContent = hint;
   }
 
   function setStatusItem(item, textNode, status, label) {
@@ -1841,7 +1955,7 @@
 
     const actorId = String(principal.actor_id || "");
     if (els.roleGuide.dataset.principalId !== actorId) {
-      els.roleGuide.open = true;
+      els.roleGuide.open = state.interfaceMode === "professional";
     }
     const guide = principalOperationGuide(principal);
     els.roleGuide.hidden = false;
@@ -1888,6 +2002,8 @@
       !principal || !hasPermission("read") || !hasPermission("write");
     els.welcomeStartButton.disabled =
       !principal || !hasPermission("read") || !hasPermission("write");
+    els.welcomeNewDraftButton.disabled =
+      !principal || !hasPermission("read") || !hasPermission("write");
     els.refreshDraftsButton.disabled = !principal || !hasPermission("read");
     els.credentialNotice.hidden = !credentialRotationRequired();
     els.accessNotice.hidden =
@@ -1904,6 +2020,7 @@
       els.accessNotice.hidden = true;
       renderAgentWorkbenchControls();
       renderCoalChatControls();
+      renderWelcomeActions();
       return;
     }
     els.currentUserName.textContent = principal.name || principal.actor_id;
@@ -1924,6 +2041,7 @@
     }
     renderAgentWorkbenchControls();
     renderCoalChatControls();
+    renderWelcomeActions();
   }
 
   function staleSessionError() {
@@ -2137,6 +2255,7 @@
     state.activeOperation = "新建草稿";
     setBusy(els.newDraftButton, true, "正在新建…");
     setBusy(els.welcomeStartButton, true, "正在新建…");
+    setBusy(els.welcomeNewDraftButton, true, "正在新建…");
     try {
       const payload = await api(endpoints.drafts(), {
         method: "POST",
@@ -2166,6 +2285,7 @@
       state.activeOperation = "";
       setBusy(els.newDraftButton, false);
       setBusy(els.welcomeStartButton, false);
+      setBusy(els.welcomeNewDraftButton, false);
       renderAuthentication();
     }
   }
@@ -2865,7 +2985,43 @@
     els.undoButton.disabled = state.undoStack.length === 0 || draft.status === "submitted";
   }
 
+  function renderWelcomeActions() {
+    const resumable = state.drafts.find((draft) => draft.status !== "submitted");
+    const canCreate =
+      Boolean(state.principal) &&
+      hasPermission("read") &&
+      hasPermission("write");
+    if (resumable && state.principal && hasPermission("read")) {
+      els.welcomeStartButton.dataset.draftId = resumable.id;
+      els.welcomeStartButton.textContent =
+        `继续未完成填报：${truncateText(resumable.title || "未命名草稿", 22)}`;
+      els.welcomeStartButton.disabled = false;
+      els.welcomeNewDraftButton.hidden = !canCreate;
+      els.welcomeNewDraftButton.disabled = !canCreate;
+      els.welcomeActionHint.textContent =
+        "已找到未完成的填报，建议先继续处理，避免同一统计期重复新建。";
+      return;
+    }
+    delete els.welcomeStartButton.dataset.draftId;
+    els.welcomeStartButton.textContent = "开始一份新填报";
+    els.welcomeStartButton.disabled = !canCreate;
+    els.welcomeNewDraftButton.hidden = true;
+    els.welcomeActionHint.textContent = canCreate
+      ? "当前没有未完成填报，可以开始新建。"
+      : "当前账号不能新建填报，请查看账号操作说明。";
+  }
+
+  async function handleWelcomePrimaryAction() {
+    const draftId = String(els.welcomeStartButton.dataset.draftId || "");
+    if (draftId) {
+      await openDraft(draftId);
+      return;
+    }
+    await createDraft();
+  }
+
   function renderDraftList() {
+    renderWelcomeActions();
     const knownTotal = Math.max(state.draftTotal, state.drafts.length);
     els.draftListSummary.textContent = state.loading && state.drafts.length
       ? `正在加载更多…已显示 ${state.drafts.length}/${knownTotal} 份`
@@ -3156,6 +3312,23 @@
       fragment.append(row);
     });
     els.approvalEventList.replaceChildren(fragment);
+  }
+
+  function hasRegulatorEventSnapshot(draft) {
+    return Boolean(
+      draft &&
+        Array.isArray(draft.approval_event_evidence) &&
+        draft.approval_event_evidence.some(
+          (record) =>
+            record &&
+            !(
+              String(record.source_kind || "").toLowerCase() === "manual" &&
+              String(record.extraction_method || "").toLowerCase() ===
+                "human_entry"
+            ) &&
+            Boolean(String(record.content_sha256 || "").trim()),
+        ),
+    );
   }
 
   function guideToApprovalImport() {
@@ -4137,8 +4310,9 @@
       state.reviewLoading ||
       !canFinalizeWith("confirm") ||
       !state.reviewState ||
-      !rows.some((row) => !row.confirmed && row.confidence >= 0.9);
+      !visibleRows.some((row) => !row.confirmed && row.confidence >= 0.9);
     renderReviewHint();
+    renderSimpleTaskGuide();
   }
 
   async function removeMeasurement(index, button) {
@@ -4247,12 +4421,15 @@
 
   async function confirmHighConfidenceMeasurements() {
     if (!state.activeDraft) return;
-    const candidates = state.activeDraft.measurements.filter(
+    const pageStart = (state.measurementPage - 1) * state.measurementPageSize;
+    const candidates = state.activeDraft.measurements
+      .slice(pageStart, pageStart + state.measurementPageSize)
+      .filter(
       (row) => !row.confirmed && row.confidence !== null && row.confidence >= 0.9,
-    );
+      );
     if (!candidates.length) return;
     const accepted = window.confirm(
-      `将确认 ${candidates.length} 个高可信度提取项。可信度只表示提取清晰，不代表事实真实。请确认您已经逐项对照过原始材料。`,
+      `将确认当前页 ${candidates.length} 个高可信度提取项，不会处理其他分页。可信度只表示提取清晰，不代表事实真实。请确认您已经逐项对照过原始材料。`,
     );
     if (!accepted) return;
     await setMeasurementReviews(
@@ -4373,6 +4550,7 @@
       });
     }
     els.questionList.replaceChildren(fragment);
+    renderSimpleTaskGuide();
   }
 
   function questionIsResolved(question) {
@@ -4748,6 +4926,11 @@
     ) {
       errors.push("请明确填写操作上下文四轴。");
     }
+    if (!hasRegulatorEventSnapshot(draft)) {
+      errors.push(
+        "请导入监管事件快照；即使没有特殊事件也必须导入空结果快照。",
+      );
+    }
     if (!draft.sources.length) errors.push("请至少导入一份真实来源。");
     if (!draft.measurements.length) errors.push("尚无填报数字，请运行智能提取。");
     if (draft.measurements.some((row) => row.value === "" || !Number.isFinite(Number(row.value)))) {
@@ -4771,6 +4954,7 @@
       idle.append(el("span", "", "检"), copy);
       els.preflightSummary.replaceChildren(idle);
       els.checkList.replaceChildren();
+      renderSimpleTaskGuide();
       return;
     }
 
@@ -4799,6 +4983,7 @@
       fragment.append(row);
     });
     els.checkList.replaceChildren(fragment);
+    renderSimpleTaskGuide();
   }
 
   function renderConfirmation() {
@@ -4868,6 +5053,7 @@
       els.confirmationPermissionHint.textContent =
         "点击后将以当前登录账号执行 authenticated_click 确认。";
     }
+    renderSimpleTaskGuide();
   }
 
   function canConfirmDraft(draft) {
@@ -8699,6 +8885,7 @@
     els.receiptCard.hidden = !submitted;
     if (submitted) renderReceipt();
     renderEvidence();
+    renderSimpleTaskGuide();
   }
 
   function openSubmitDialog() {
@@ -9158,6 +9345,176 @@
     els.nextStepButton.textContent =
       state.step === 5 ? "进入提交与回执" : "保存并进入下一步";
     els.stepHint.textContent = stepHint(state.step);
+    renderSimpleTaskGuide();
+  }
+
+  function renderSimpleTaskGuide() {
+    if (!els.simpleTaskCard) return;
+    const draft = state.activeDraft;
+    els.simpleTaskCard.hidden = !draft;
+    if (!draft) return;
+
+    const targetStep = suggestedStep(draft);
+    const completedSteps = [1, 2, 3, 4, 5, 6].filter((step) =>
+      isStepComplete(step),
+    ).length;
+    const unreviewed = draft.measurements.filter((row) => !row.confirmed).length;
+    const unresolvedQuestions = draft.questions.filter(
+      (row) => row.required && !questionIsResolved(row),
+    ).length;
+    const blockers = draft.preflight
+      ? Math.max(0, Number(draft.preflight.blockers) || 0)
+      : 0;
+    const submitted = draft.status === "submitted";
+    const plans = {
+      1: {
+        title: "填写企业和统计信息",
+        description: hasRegulatorEventSnapshot(draft)
+          ? "填写带“必填”标记的企业、时段和实际工况，系统会自动保存。"
+          : "填写必填信息，并导入监管事件快照；即使没有特殊事件也必须导入空结果快照。",
+        action: "开始填写基本信息",
+      },
+      2: {
+        title: "导入真实业务材料",
+        description: "选择系统导出的 JSON、CSV，或在已配置智能辅助时粘贴文字。",
+        action: "去导入业务材料",
+      },
+      3: {
+        title: "核对数字并处理缺项",
+        description:
+          unreviewed || unresolvedQuestions
+            ? `还有 ${unreviewed} 个数字和 ${unresolvedQuestions} 个必答缺项需要处理。`
+            : "检查每个数字的来源，并回答系统标出的必答缺项。",
+        action: "继续核对",
+      },
+      4: {
+        title: "运行提交前检查",
+        description: blockers
+          ? `当前仍有 ${blockers} 个阻断问题；重新检查后按提示修正。`
+          : "系统会检查完整性、来源和逻辑关系，不会替您作真实性确认。",
+        action: "运行提交前检查",
+      },
+      5: {
+        title: "由有权账号确认",
+        description: "确认人核对汇总内容并作真实性声明；该动作会写入审计记录。",
+        action: "去完成企业确认",
+      },
+      6: {
+        title: submitted ? "本次填报已经完成" : "提交并保存平台回执",
+        description: submitted
+          ? "平台回执和完整操作留痕已经保存，可随时查看或下载。"
+          : "最后检查提交条件，明确确认后发送监管平台并保存回执。",
+        action: submitted ? "查看回执" : "进入提交页面",
+      },
+    };
+    const canWrite = hasPermission("write");
+    const canConfirm = canFinalizeWith("confirm");
+    const canSubmit = canFinalizeWith("submit");
+    const actionAllowed =
+      submitted ||
+      (targetStep <= 2 && canWrite) ||
+      (targetStep === 3 && (canWrite || canConfirm)) ||
+      (targetStep === 4 && canWrite) ||
+      (targetStep === 5 && canConfirm) ||
+      (targetStep === 6 && canSubmit);
+    const waitingPlans = {
+      1: {
+        title: "等待经办人补充基本信息",
+        description: "当前账号不能编辑草稿；请查看缺项并转交具有编辑权限的经办人。",
+      },
+      2: {
+        title: "等待经办人导入业务材料",
+        description: "当前账号不能导入来源；请转交具有编辑权限的经办人继续。",
+      },
+      3: {
+        title: "等待有权人员完成核对",
+        description: "当前账号不能修改缺项或确认数字；可以查看草稿当前状态。",
+      },
+      4: {
+        title: "等待经办人运行提交前检查",
+        description: "当前账号不能写入预检结果；请转交具有编辑权限的经办人。",
+      },
+      5: {
+        title: "等待确认人完成企业确认",
+        description: "只有具有确认权限且凭据有效的企业账号才能执行该动作。",
+      },
+      6: {
+        title: "等待提交人发送监管平台",
+        description: "只有具有提交权限且凭据有效的企业账号才能执行最终提交。",
+      },
+    };
+    const plan = actionAllowed
+      ? plans[targetStep]
+      : {
+          ...waitingPlans[targetStep],
+          action: "查看当前状态",
+        };
+    els.simpleTaskStep.textContent = submitted
+      ? "已完成"
+      : `第 ${targetStep} 步，共 6 步`;
+    els.simpleTaskTitle.textContent = plan.title;
+    els.simpleTaskDescription.textContent = plan.description;
+    els.simpleTaskButton.textContent = plan.action;
+    els.simpleTaskButton.dataset.targetStep = String(targetStep);
+    els.simpleTaskButton.dataset.actionAllowed = String(actionAllowed);
+    els.simpleTaskButton.className = actionAllowed
+      ? "button button-primary button-large"
+      : "button button-secondary button-large";
+    els.simpleTaskCard.classList.toggle("is-readonly", !actionAllowed);
+    els.simpleTaskProgressText.textContent = `已完成 ${completedSteps}/6 步`;
+    els.simpleTaskProgressFill.style.width =
+      `${Math.round((completedSteps / 6) * 100)}%`;
+    const meta = [
+      `来源 ${draft.sources.length} 份`,
+      `待核对 ${unreviewed} 项`,
+      `必答缺项 ${unresolvedQuestions} 项`,
+      hasRegulatorEventSnapshot(draft) ? "事件快照已导入" : "事件快照待导入",
+    ];
+    if (draft.preflight) meta.push(`预检阻断 ${blockers} 项`);
+    els.simpleTaskMeta.textContent = meta.join(" · ");
+  }
+
+  async function handleSimpleTaskAction() {
+    if (!state.activeDraft) {
+      if (hasPermission("read") && hasPermission("write")) {
+        await createDraft();
+      } else {
+        showToast("当前账号不能新建填报，请查看账号操作说明。", "error");
+      }
+      return;
+    }
+    const targetStep = Number(els.simpleTaskButton.dataset.targetStep) || 1;
+    goToStep(targetStep);
+    if (els.simpleTaskButton.dataset.actionAllowed !== "true") {
+      showToast("当前账号仅可查看这一步，请按提示转交有权人员。");
+      return;
+    }
+    if (targetStep === 4 && state.activeDraft.status !== "submitted") {
+      await runValidation();
+      return;
+    }
+    const focusTargets = {
+      1: () =>
+        Array.from(els.draftForm.querySelectorAll('[data-panel="1"] [required]')).find(
+          (field) => !String(field.value || "").trim(),
+        ) || (!hasRegulatorEventSnapshot(state.activeDraft) ? els.addEventButton : null),
+      2: () => els.chooseFileButton,
+      3: () =>
+        els.measurementBody.querySelector(
+          "tr.needs-review input[type='checkbox']:not(:disabled)",
+        ) ||
+        els.questionList.querySelector("input:not(:disabled), textarea:not(:disabled)") ||
+        els.runAssistButton,
+      5: () =>
+        els.draftForm.elements.namedItem("signature.statement_accepted") ||
+        els.confirmDraftButton,
+      6: () =>
+        state.activeDraft.status === "submitted"
+          ? els.copyReceiptButton
+          : els.submitButton,
+    };
+    const target = focusTargets[targetStep] ? focusTargets[targetStep]() : null;
+    if (target && typeof target.focus === "function") target.focus();
   }
 
   function isStepComplete(step) {
@@ -9178,7 +9535,8 @@
         context.regime_code &&
         context.shift_code &&
         context.season_code &&
-        context.maintenance !== null,
+        context.maintenance !== null &&
+        hasRegulatorEventSnapshot(draft),
       );
     }
     if (step === 2) return draft.sources.length > 0;
@@ -9196,7 +9554,7 @@
 
   function stepHint(step) {
     const hints = {
-      1: "请完善企业、时段和实际工况",
+      1: "请完善企业、时段、实际工况并导入监管事件快照",
       2: "导入真实业务记录并注明来源",
       3: "逐项查看来源并人工确认",
       4: "预检不会代替监管审核",
@@ -9236,7 +9594,8 @@
       context.regime_code &&
       context.shift_code &&
       context.season_code &&
-      context.maintenance !== null,
+      context.maintenance !== null &&
+      hasRegulatorEventSnapshot(draft),
     );
   }
 
@@ -9247,7 +9606,11 @@
       const errors = validateBasicStep();
       if (errors.length) {
         showToast(errors[0], "error");
-        focusFirstInvalid();
+        if (!hasRegulatorEventSnapshot(state.activeDraft)) {
+          els.addEventButton.focus();
+        } else {
+          focusFirstInvalid();
+        }
         return;
       }
     }
@@ -9305,6 +9668,10 @@
       [
         draft.operational_context.maintenance !== null,
         "请选择是否处于检修状态。",
+      ],
+      [
+        hasRegulatorEventSnapshot(draft),
+        "请导入监管事件快照；即使没有特殊事件也必须导入空结果快照。",
       ],
     ];
     required.forEach(([value, message]) => {

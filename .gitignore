@@ -11,6 +11,7 @@ out/
 next-env.d.ts
 .wrangler/
 .mineguard/
+.mineguard-demo/
 .enterprise-agent/
 agent/data/
 *.db

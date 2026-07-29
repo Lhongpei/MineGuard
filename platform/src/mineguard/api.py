@@ -3391,9 +3391,13 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_safety_dashboard(self, principal: Principal) -> None:
         mine_ids = self._scoped_mine_filter(principal)
+        dashboard = self._edge_repository.dashboard(mine_ids)
+        dashboard["demo_dataset"] = self._active_demo_dataset(
+            None if mine_ids is None else tuple(sorted(mine_ids))
+        )
         self._send_json(
             HTTPStatus.OK,
-            self._edge_repository.dashboard(mine_ids),
+            dashboard,
         )
 
     def _handle_safety_alert_list(
@@ -6515,8 +6519,75 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
         context = batch.get("context")
         return bool(
             isinstance(context, dict)
+            and context.get("demo_seed") is not True
             and str(context.get("kind", "")).startswith("governed_")
         )
+
+    @staticmethod
+    def _demo_dataset_from_batch(
+        batch: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(batch, dict):
+            return None
+        context = batch.get("context")
+        if (
+            not isinstance(context, dict)
+            or context.get("demo_seed") is not True
+        ):
+            return None
+        dataset = context.get("demo_dataset")
+        if (
+            not isinstance(dataset, dict)
+            or dataset.get("active") is not True
+            or not isinstance(dataset.get("dataset_id"), str)
+        ):
+            return None
+        return {
+            key: dataset.get(key)
+            for key in (
+                "active",
+                "dataset_id",
+                "schema_version",
+                "anchor_date",
+                "days",
+                "mine_count",
+                "classification",
+                "regulatory_use",
+            )
+        }
+
+    def _active_demo_dataset(
+        self,
+        visible_mines: tuple[str, ...] | None,
+    ) -> dict[str, Any] | None:
+        for batch in self._repository.list_batches(limit=1000):
+            if visible_mines is not None and not any(
+                str(item.get("mine_id")) in visible_mines
+                for item in batch["response"].get("items", [])
+            ):
+                continue
+            dataset = self._demo_dataset_from_batch(batch)
+            if dataset is not None:
+                return dataset
+        return None
+
+    @staticmethod
+    def _report_payload_with_demo_notice(
+        report: BaseModel | dict[str, Any],
+        demo_dataset: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        payload = (
+            report.model_dump(mode="json")
+            if isinstance(report, BaseModel)
+            else dict(report)
+        )
+        if demo_dataset is not None:
+            payload["demo_dataset"] = demo_dataset
+            payload["demo_disclaimer"] = (
+                "本报告全部来自合成演示数据，只用于功能体验，"
+                "严禁用于监管认定、企业评价、正式统计或对外报送。"
+            )
+        return payload
 
     def _leadership_batches(
         self,
@@ -6573,6 +6644,7 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                         else "local_trial"
                     ),
                     "batch_data_mode": None,
+                    "demo_dataset": None,
                     "trust_notice": (
                         "内网影子运行：尚未接收可信治理批次。"
                         if trusted_service
@@ -6587,11 +6659,8 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             return
 
         batch_id = str(latest["batch_id"])
-        context = latest.get("context")
-        trusted_shadow = bool(
-            isinstance(context, dict)
-            and str(context.get("kind", "")).startswith("governed_")
-        )
+        demo_dataset = self._demo_dataset_from_batch(latest)
+        trusted_shadow = self._is_governed_batch(latest)
         trusted_service = self._auth_required
         batch = self._decorate_batch(
             latest["response"],
@@ -6621,19 +6690,29 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                         mine_ids=visible_mines,
                     )
                 ),
-                "local_trial": not trusted_shadow,
+                "local_trial": bool(
+                    demo_dataset is not None or not trusted_shadow
+                ),
                 "operating_mode": (
-                    "trusted_intranet_shadow"
+                    "demo_seed"
+                    if demo_dataset is not None
+                    else "trusted_intranet_shadow"
                     if trusted_service
                     else "local_trial"
                 ),
                 "batch_data_mode": (
-                    "governed_trusted"
+                    "demo_seed"
+                    if demo_dataset is not None
+                    else "governed_trusted"
                     if trusted_shadow
                     else "legacy_or_direct_analysis"
                 ),
+                "demo_dataset": demo_dataset,
                 "trust_notice": (
-                    (
+                    "当前为全量合成演示数据，仅用于功能体验，严禁用于"
+                    "监管认定、企业评价或正式统计。"
+                    if demo_dataset is not None
+                    else (
                         "内网影子运行：技术状态、复核优先级与办理状态"
                         "相互独立，任何线索均需调阅原始证据人工复核。"
                     )
@@ -6746,7 +6825,15 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                 str(error),
             )
             return
-        self._send_json(HTTPStatus.OK, {"analytics": report})
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "analytics": report,
+                "demo_dataset": self._active_demo_dataset(
+                    visible_mines
+                ),
+            },
+        )
 
     def _handle_regulatory_report(
         self,
@@ -6878,7 +6965,18 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                 str(error),
             )
             return
-        self._send_json(HTTPStatus.OK, {"report": report})
+        demo_dataset = self._active_demo_dataset(visible_mines)
+        report_payload = self._report_payload_with_demo_notice(
+            report,
+            demo_dataset,
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "report": report_payload,
+                "demo_dataset": demo_dataset,
+            },
+        )
 
     @staticmethod
     def _temporal_detector_thresholds(
@@ -7174,6 +7272,7 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             ),
             "feature_version": ALGORITHM_FEATURE_VERSION,
             "generated_at": end_at.isoformat(),
+            "demo_dataset": self._active_demo_dataset(visible_mines),
         }
         if feature_limit_reached:
             self._send_json(

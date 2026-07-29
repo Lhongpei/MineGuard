@@ -18,6 +18,16 @@ from . import __version__
 from .aggregation import AggregationRequest, aggregate_measurements
 from .api import _load_or_create_secret, serve
 from .auth import LocalAuthStore
+from .casework import LocalRepository
+from .demo_seed import (
+    DEFAULT_DEMO_STATE_DIRECTORY,
+    DemoSeedError,
+    claim_demo_state_directory,
+    clear_demo_data,
+    demo_seed_status,
+    seed_demo_data,
+)
+from .edge_store import EdgeTelemetryRepository
 from .evidence import EvidenceBundleService
 from .flow import FlowAnalysisRequest, analyze_material_flow
 from .models import PersonnelMatchRequest, ProductionAnalysisRequest
@@ -335,6 +345,58 @@ def _build_parser() -> argparse.ArgumentParser:
         "--key-id",
         default="local-evidence-key",
         help="证据清单中的密钥标识",
+    )
+
+    seed_demo = subparsers.add_parser(
+        "seed-demo",
+        help="在隔离状态目录生成多矿时序演示数据",
+    )
+    seed_demo.add_argument(
+        "--state-directory",
+        default=DEFAULT_DEMO_STATE_DIRECTORY,
+        help=(
+            "仅用于演示的独立状态目录（默认 .mineguard-demo；"
+            "拒绝使用无演示所有权标记的非空目录）"
+        ),
+    )
+    seed_demo.add_argument(
+        "--days",
+        type=int,
+        default=90,
+        help="生成窗口天数，21—365（默认 90）",
+    )
+    seed_demo.add_argument(
+        "--anchor-date",
+        default=None,
+        help=(
+            "最后一个完整窗口的结束日 YYYY-MM-DD；默认今天零点，"
+            "即截至前一完整自然日"
+        ),
+    )
+    seed_demo.add_argument(
+        "--reset",
+        action="store_true",
+        help="先清除同一演示命名空间后按新参数重建",
+    )
+
+    demo_status = subparsers.add_parser(
+        "demo-status",
+        help="检查隔离演示数据的数量和完整性",
+    )
+    demo_status.add_argument(
+        "--state-directory",
+        default=DEFAULT_DEMO_STATE_DIRECTORY,
+        help="已由 seed-demo 创建的演示状态目录",
+    )
+
+    clear_demo = subparsers.add_parser(
+        "clear-demo",
+        help="清除隔离状态目录中的演示业务数据",
+    )
+    clear_demo.add_argument(
+        "--state-directory",
+        default=DEFAULT_DEMO_STATE_DIRECTORY,
+        help="已由 seed-demo 创建的演示状态目录",
     )
 
     subparsers.add_parser("demo", help="运行内置生产与人员交叉验证示例")
@@ -706,6 +768,44 @@ def _run_server(args: argparse.Namespace) -> None:
     )
 
 
+def _run_demo_command(args: argparse.Namespace) -> None:
+    create = args.command == "seed-demo"
+    state_root = claim_demo_state_directory(
+        args.state_directory,
+        create=create,
+    )
+    layout = _state_layout(state_root)
+    repository = LocalRepository(layout.database)
+    edge_repository = EdgeTelemetryRepository(layout.database)
+    try:
+        if args.command == "seed-demo":
+            result = seed_demo_data(
+                repository,
+                edge_repository,
+                days=args.days,
+                anchor_date=args.anchor_date,
+                reset=args.reset,
+            )
+        elif args.command == "clear-demo":
+            result = clear_demo_data(repository, edge_repository)
+        else:
+            result = demo_seed_status(repository, edge_repository)
+        _output(
+            {
+                **result,
+                "state_directory": str(state_root),
+                "database": str(layout.database),
+                "serve_command": (
+                    "mineguard serve --state-directory "
+                    f"{state_root}"
+                ),
+            }
+        )
+    finally:
+        edge_repository.close()
+        repository.close()
+
+
 def _port(value: str) -> int:
     try:
         port = int(value)
@@ -849,6 +949,12 @@ def _main(argv: Sequence[str] | None = None) -> int:
             _run_restore_backup(args)
         elif args.command == "verify-evidence":
             return _run_verify_evidence(args)
+        elif args.command in {
+            "seed-demo",
+            "demo-status",
+            "clear-demo",
+        }:
+            _run_demo_command(args)
         elif args.command == "demo":
             production_request = ProductionAnalysisRequest.model_validate(
                 _DEMO_PRODUCTION
@@ -877,7 +983,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
             stream=sys.stderr,
         )
         return 2
-    except _CliInputError as error:
+    except (_CliInputError, DemoSeedError) as error:
         _output(
             {
                 "error": {

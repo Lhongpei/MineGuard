@@ -1,0 +1,187 @@
+\usepackage[a4paper,top=25mm,bottom=24mm,left=25mm,right=22mm,headheight=15pt]{geometry}
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\setmainfont{DejaVu Serif}
+\setsansfont{DejaVu Sans}
+\setmonofont{DejaVu Sans Mono}
+\setCJKmainfont[AutoFakeBold=2.0]{Droid Sans Fallback}
+\setCJKsansfont[AutoFakeBold=2.0]{Droid Sans Fallback}
+\setCJKmonofont{Droid Sans Fallback}
+
+\usepackage{booktabs}
+\usepackage{amssymb}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage[most]{tcolorbox}
+\usepackage{titlesec}
+\usepackage{lastpage}
+\usepackage{microtype}
+
+\definecolor{ManualBlue}{HTML}{17365D}
+\definecolor{ManualTeal}{HTML}{167D8D}
+\definecolor{ManualLight}{HTML}{EDF4F7}
+\definecolor{ManualOrange}{HTML}{B85C00}
+\definecolor{ManualRed}{HTML}{A61B1B}
+\definecolor{ManualGray}{HTML}{53606D}
+\definecolor{ManualLine}{HTML}{C9D5DD}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=ManualBlue,
+  urlcolor=ManualTeal,
+  pdftitle={\ManualTitle},
+  pdfauthor={MineGuard 项目组},
+  pdfsubject={软件使用手册},
+  pdfkeywords={MineGuard, 煤炭, 监管, 企业填报, 使用手册},
+  bookmarksnumbered=true,
+  bookmarksopen=true
+}
+
+\ctexset{
+  chapter={
+    format=\Huge\bfseries\color{ManualBlue},
+    name={第,章},
+    number=\chinese{chapter},
+    beforeskip=0pt,
+    afterskip=22pt
+  },
+  section={format=\Large\bfseries\color{ManualBlue}},
+  subsection={format=\large\bfseries\color{ManualTeal}}
+}
+\titleformat{\paragraph}[runin]{\bfseries\color{ManualBlue}}{}{0pt}{}[。]
+
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.35em}
+\setlist{itemsep=0.25em,topsep=0.35em,leftmargin=2.2em}
+\setlist[enumerate,1]{label=\arabic*.}
+\renewcommand{\arraystretch}{1.35}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{ManualGray}\ManualShortTitle}
+\fancyhead[R]{\small\color{ManualGray}文档版本 V1.0}
+\fancyfoot[L]{\small\color{ManualGray}内部使用｜技术辅助系统}
+\fancyfoot[R]{\small\color{ManualGray}第 \thepage\ 页 / 共 \pageref*{LastPage} 页}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0.4pt}
+
+\fancypagestyle{plain}{
+  \fancyhf{}
+  \fancyfoot[L]{\small\color{ManualGray}内部使用｜技术辅助系统}
+  \fancyfoot[R]{\small\color{ManualGray}第 \thepage\ 页 / 共 \pageref*{LastPage} 页}
+  \renewcommand{\headrulewidth}{0pt}
+  \renewcommand{\footrulewidth}{0.4pt}
+}
+
+\newtcolorbox{importantbox}{
+  enhanced,
+  breakable,
+  colback=ManualLight,
+  colframe=ManualBlue,
+  boxrule=0.8pt,
+  arc=1.5mm,
+  left=3mm,right=3mm,top=2mm,bottom=2mm,
+  title={重要说明},
+  fonttitle=\bfseries
+}
+\newtcolorbox{warningbox}{
+  enhanced,
+  breakable,
+  colback=orange!6,
+  colframe=ManualOrange,
+  boxrule=0.8pt,
+  arc=1.5mm,
+  left=3mm,right=3mm,top=2mm,bottom=2mm,
+  title={注意},
+  fonttitle=\bfseries
+}
+\newtcolorbox{dangerbox}{
+  enhanced,
+  breakable,
+  colback=red!4,
+  colframe=ManualRed,
+  boxrule=0.8pt,
+  arc=1.5mm,
+  left=3mm,right=3mm,top=2mm,bottom=2mm,
+  title={禁止事项},
+  fonttitle=\bfseries
+}
+\newtcolorbox{tipbox}{
+  enhanced,
+  breakable,
+  colback=green!4,
+  colframe=ManualTeal,
+  boxrule=0.8pt,
+  arc=1.5mm,
+  left=3mm,right=3mm,top=2mm,bottom=2mm,
+  title={操作提示},
+  fonttitle=\bfseries
+}
+
+\newcommand{\ui}[1]{\textsf{\bfseries #1}}
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\status}[1]{\textsf{#1}}
+\newcommand{\blankline}{\par\noindent\rule{\textwidth}{0.4pt}\par}
+
+\newcommand{\MakeManualCover}[5]{
+  \begin{titlepage}
+    \thispagestyle{empty}
+    \vspace*{18mm}
+    {\sffamily\bfseries\fontsize{18pt}{22pt}\selectfont\color{ManualTeal} MineGuard 煤炭智能辅助监管系统\par}
+    \vspace{8mm}
+    \noindent{\color{ManualBlue}\rule{\textwidth}{2.2pt}}
+    \vspace{20mm}
+    {\centering
+      {\sffamily\bfseries\fontsize{31pt}{39pt}\selectfont\color{ManualBlue} #1\par}
+      \vspace{9mm}
+      {\sffamily\fontsize{16pt}{22pt}\selectfont\color{ManualGray} #2\par}
+    }
+    \vfill
+    \begin{tcolorbox}[colback=ManualLight,colframe=ManualLine,boxrule=0.5pt,arc=1mm]
+      \begin{tabularx}{\linewidth}{P{31mm}Y}
+        \textbf{适用软件} & #3\\
+        \textbf{文档版本} & V1.0\\
+        \textbf{发布日期} & 2026 年 7 月 29 日\\
+        \textbf{适用对象} & #4\\
+        \textbf{文档属性} & 内部使用，正式软件操作与培训材料\\
+      \end{tabularx}
+    \end{tcolorbox}
+    \vspace{8mm}
+    {\small\color{ManualGray}#5\par}
+    \vspace{12mm}
+    {\centering\small\color{ManualGray}MineGuard 项目组\par}
+  \end{titlepage}
+}
+
+\newcommand{\DocumentControl}[2]{
+  \chapter*{文档控制}
+  \addcontentsline{toc}{chapter}{文档控制}
+  \begin{longtable}{P{34mm}P{110mm}}
+    \toprule
+    \textbf{项目} & \textbf{内容}\\
+    \midrule
+    文档名称 & \ManualTitle\\
+    软件版本 & #1\\
+    文档版本 & V1.0\\
+    发布日期 & 2026 年 7 月 29 日\\
+    适用范围 & #2\\
+    维护原则 & 软件页面、权限或业务流程发生变化时，应同步修订本手册并重新导出 PDF。\\
+    \bottomrule
+  \end{longtable}
+
+  \section*{修订记录}
+  \begin{longtable}{P{20mm}P{30mm}P{25mm}P{70mm}}
+    \toprule
+    \textbf{版本} & \textbf{日期} & \textbf{状态} & \textbf{说明}\\
+    \midrule
+    V1.0 & 2026-07-29 & 正式初版 & 按当前软件实现整理角色权限、标准操作、异常处理、安全边界与部署访问说明。\\
+    \bottomrule
+  \end{longtable}
+}
