@@ -695,8 +695,11 @@ def test_frontend_has_no_secret_or_platform_code_dependency() -> None:
 def test_destructive_draft_delete_requires_confirmation_and_submission_locks() -> None:
     assert 'id="deleteConfirmation"' in HTML
     assert 'id="confirmDeleteButton"' in HTML
+    assert 'id="simpleDeleteDraftButton"' in HTML
+    assert "els.simpleDeleteDraftButton.addEventListener" in JS
+    assert "从普通工作列表移除，数据库和审计记录仍会保留" in JS
     assert '!== "移除"' in JS
-    assert 'draft.status === "submitted"' in JS
+    assert 'draft.status !== "draft"' in JS
     assert "草稿已从工作列表移除；审计留痕仍保留" in JS
     assert "这不是物理擦除" in HTML
 
@@ -727,6 +730,7 @@ def test_quick_reporting_mode_is_default_and_professional_tools_remain() -> None
         'id="simpleTaskCard"',
         'id="editorMoreActions"',
         'id="welcomeNewDraftButton"',
+        'id="welcomeAutofillButton"',
     ):
         assert token in HTML
     assert 'interfaceMode: "simple"' in JS
@@ -741,6 +745,15 @@ def test_quick_reporting_mode_is_default_and_professional_tools_remain() -> None
     for forbidden in ("localStorage", "sessionStorage"):
         assert forbidden not in HTML
         assert forbidden not in JS
+
+
+def test_agent_autofill_is_source_grounded_and_never_auto_submits() -> None:
+    assert "handleWelcomeAutofillAction" in JS
+    assert "让 Agent 自动填入草稿" in JS
+    assert "Agent 会自动写入可验证字段" in JS
+    assert "自由文字和历史推断只形成" in HTML
+    assert "待核对建议，不能冒充原始观测" in HTML
+    assert "不会自动确认或提交" in HTML
 
 
 def test_quick_workflow_keeps_event_snapshot_and_review_boundaries() -> None:
@@ -767,3 +780,57 @@ def test_enterprise_mode_behavior_in_jsdom() -> None:
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "JSDOM enterprise mode checks passed" in completed.stdout
+
+
+def test_agent_v2_task_center_is_governed_and_uses_centralized_contract() -> None:
+    for element_id in (
+        'id="agentCenterButton"',
+        'id="agentCenterQuickCard"',
+        'id="agentV2Workbench"',
+        'id="startAgentV2HealthButton"',
+        'id="agentV2FlowList"',
+        'id="agentV2FlowSummary"',
+        'id="agentV2JobForm"',
+        'id="agentV2JobList"',
+        'id="agentV2MemoryProposalList"',
+        'id="agentV2SkillProposalList"',
+    ):
+        assert element_id in HTML
+    for adapter in (
+        "agentFlows:",
+        "agentFlowCancel:",
+        "agentFlowRetry:",
+        "agentJobs:",
+        "agentMemoryProposals:",
+        "agentSkillProposals:",
+        "agentSkillVersions:",
+    ):
+        assert adapter in JS
+    for path in (
+        "/agent/flows",
+        "/agent/jobs",
+        "/agent/memory/proposals",
+        "/agent/skill-proposals",
+        "/agent/skill-versions",
+    ):
+        assert path in JS
+    assert "workflow_name: \"daily_coal_health\"" in JS
+    assert "expected_revision: proposal.revision" in JS
+    assert "expected_revision: job.revision" in JS
+    assert "智能体可以持续检查和提出建议，但没有确认、签名或提交权限" in HTML
+    assert "技能批准后只发布版本，仍需服务加载后才能执行" in HTML
+    assert ".is-simple-mode .agent-v2-professional-only" in CSS
+
+
+def test_agent_v2_task_center_behavior_in_jsdom() -> None:
+    script = Path(__file__).with_name("frontend_agent_v2_dom.test.js")
+    completed = subprocess.run(
+        ["node", str(script)],
+        cwd=WEB_ROOT.parent,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=25,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "JSDOM agent V2 task center checks passed" in completed.stdout

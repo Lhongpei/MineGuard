@@ -7,6 +7,7 @@ from typing import Any
 
 from conftest import complete_values
 
+from enterprise_agent import __version__
 from enterprise_agent.http_api import EnterpriseAgentHTTPServer
 from enterprise_agent.service import EnterpriseAgentService
 from enterprise_agent.storage import Repository
@@ -230,7 +231,7 @@ def test_head_health_is_probe_friendly_and_has_no_body() -> None:
             "Content-Security-Policy", ""
         )
         assert response.getheader("Server", "").startswith(
-            "EnterpriseReportingAgent/0.1"
+            f"EnterpriseReportingAgent/{__version__}"
         )
         assert response.read() == b""
     finally:

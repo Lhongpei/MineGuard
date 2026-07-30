@@ -38,6 +38,12 @@
 - 煤炭通识只向模型发送当前问题和至多一轮受控通识上下文，不发送草稿、工具结果
   或企业历史；模型不可用、响应非法或并发受限时自动使用本地受控知识回答；
 - 无模型时“一键煤炭体检”仍执行固定确定性工具组合，不伪装为模型推理；
+- 煤炭 Agent V2 耐久任务流：来源、时序、物理和历史四专家并行核验，
+  确定性反方复核与负责人摘要，任务取消/重试、服务重启恢复、每日/间隔/事件
+  调度，以及带审计链的任务中心；
+- 受治理业务记忆和技能目录：先提案、后审批，共享记忆和全部技能强制由另一名
+  对应治理人员批准；记忆使用 `governance_review`，技能使用 `skill_admin`，
+  技能批准后保持 `approved_inactive`，不会热加载或立即执行；
 - 无模型密钥时 JSON/CSV、问答、校验、确认和提交能力仍然完整；
 - 标准库 HTTP API、CLI，以及同源静态前端托管。
 
@@ -50,6 +56,7 @@ cd agent
 python -m venv .venv
 . .venv/bin/activate
 pip install -e .
+enterprise-agent --version
 enterprise-agent serve
 ```
 
@@ -71,13 +78,19 @@ systemd 沙箱、启停日志和备份恢复步骤见
 
 领导查看、填报经办、复核确认、报送提交及职责分离的完整操作步骤见
 [分级账号操作手册](docs/分级账号操作手册.md)。前端会基于登录会话中的
-`read/write/confirm/submit` 实际权限生成个性化指引；`role` 只用于岗位展示和审计，
+`read/write/confirm/submit/governance_review/skill_admin` 实际权限生成个性化
+指引；`role` 只用于岗位展示和审计，
 不能授予操作能力。
 
 网页默认采用“快捷填报”：合并运行状态、优先继续未完成草稿，并按当前权限只提示
 下一项可执行任务。“专业工具”保留煤炭智能任务、业务对话、详细状态与高级草稿操作。
 模式切换只改变显示，不改变服务端权限、草稿、当前步骤或确认/提交门禁，也不在浏览器
 持久化身份与模式。
+
+“智能体任务中心”在快捷模式优先展示领导可读结论，在专业模式中增加每日/间隔计划
+及记忆、技能治理。事件计划和事件发送已提供 HTTP API，当前网页不提供配置入口。
+完整架构、状态机、权限矩阵、调度 API、环境变量和恢复边界见
+[煤炭 Agent V2 耐久任务流与治理使用说明](docs/煤炭Agent-V2任务流.md)。
 
 通过回环地址前置 HTTPS 反向代理时，必须同时设置
 `ENTERPRISE_AGENT_SECURE_COOKIE=true` 和精确的
@@ -121,9 +134,9 @@ enterprise-agent hash-password
 [{
   "actor_id": "operator-001",
   "name": "张三",
-  "role": "企业经办人",
+  "role": "企业管理员",
   "password_hash": "pbkdf2_sha256$600000$...$...",
-  "permissions": ["read", "write", "confirm", "submit"],
+  "permissions": ["read", "write", "confirm", "submit", "governance_review", "skill_admin"],
   "must_change_password": false
 }]
 ```
@@ -242,6 +255,24 @@ enterprise-agent hash-password
 - `POST /api/v1/agent/runs/{run_id}/approve`：提交
   `{approval_id, decision:"approve"|"reject"}`，批准只对绑定了参数摘要和草稿
   修订号的单个动作有效；
+- `GET /api/v1/agent/workflows`：列出 Agent V2 当前可执行的只读工作流；
+- `GET|POST /api/v1/agent/flows`、`GET /api/v1/agent/flows/{flow_id}`：
+  分页读取本人耐久任务、发起 `daily_coal_health` 和读取四专家、反方复核及
+  负责人摘要；
+- `POST /api/v1/agent/flows/{flow_id}/cancel|retry`：取消未结束任务，或重试本人
+  `blocked`/`failed` 任务；
+- `GET|POST /api/v1/agent/jobs`、`GET|PATCH|DELETE /api/v1/agent/jobs/{job_id}`、
+  `POST /api/v1/agent/jobs/{job_id}/run`：管理本人每日、间隔或事件计划；删除为
+  保留审计的软删除；
+- `GET|POST /api/v1/agent/events`：读取本人事件或发送带 `client_event_id`
+  幂等键的业务事件，触发同账号、同事件名和同草稿的已启用计划；
+- `GET|POST /api/v1/agent/memory/proposals` 和
+  `POST /api/v1/agent/memory/proposals/{proposal_id}/decision`：提出、查看和审批
+  受治理记忆；`GET|DELETE /api/v1/agent/memories/{memory_id}` 用于查看或撤销；
+- `GET|POST /api/v1/agent/skill-proposals` 和
+  `POST /api/v1/agent/skill-proposals/{proposal_id}/decision`：提出、查看和四眼
+  审批只读技能目录；`GET|DELETE /api/v1/agent/skill-versions/{version_id}`
+  用于查看或停用已批准但未热加载的目录版本；
 - `GET|POST /api/v1/chat/sessions`：分页读取本人会话，或用
   `{title, draft_id, client_request_id}` 新建煤炭业务对话；
 - `GET|DELETE /api/v1/chat/sessions/{session_id}`：读取或软删除本人会话；
@@ -254,10 +285,12 @@ enterprise-agent hash-password
 请求中发送 `X-CSRF-Token`。服务同时拒绝异源 `Origin`/`Sec-Fetch-Site`。
 
 权限对应关系为：查看、预检和审计需要 `read`，创建、编辑、导入和模型辅助
-需要 `write`，人工确认需要 `confirm`，向监管端提交需要 `submit`。HTTP 层
+需要 `write`，人工确认需要 `confirm`，向监管端提交需要 `submit`；业务记忆治理
+需要 `governance_review`，只读技能目录治理需要 `skill_admin`。HTTP 层
 完全忽略请求体中的 `actor`、`actor_id`、姓名、岗位和 `X-Actor-ID`；审计
 经办人及确认人的 ID、姓名、岗位只能来自登录会话生成的 principal。
-任何 `must_change_password=true` 的账号即使配置了权限，也不能确认或提交；
+任何 `must_change_password=true` 的账号即使配置了权限，也不能确认、提交或执行
+治理审批；
 管理员须在密钥系统换掉 `password_hash`、将该标志置为 `false` 并重启服务。
 
 煤炭任务的读取、发起、拒绝和取消需要 `read`，因此只读人员也能检查已保存草稿；
@@ -265,6 +298,49 @@ enterprise-agent hash-password
 `approve` 时还会再次检查当前账号的 `write` 权限。任何账号都不能通过 Harness
 调用人工确认或监管提交。任务列表只返回有界摘要，完整工具结果只在本人任务详情
 中返回。
+
+Agent V2 的手工体检同样只需 `read`，因为工作流不含草稿写能力。创建、修改、立即
+运行或软删除计划，以及提出记忆/技能，需要 `write`；记忆审批和撤销需要有效
+`governance_review`，技能审批和停用需要有效
+`skill_admin`，不再从 `confirm` 隐式继承。V2 任务、计划和触发事件按当前账号
+隔离。当前企业 HTTP
+服务按单企业安全域部署，共享记忆可在本实例内访问，个人记忆仍仅本人可见。
+
+### 煤炭 Agent V2 耐久任务流
+
+V2 当前只执行 `daily_coal_health/2.0`：先固定当前草稿的修订号和内容摘要，再
+并行运行来源凭证、时序质量、物理平衡、历史交叉四个只读专家，最后由本地确定性
+反方核验器生成关注级别、负责人摘要和人工复核建议。它不调用模型、外网或浏览器，
+不会修改草稿、人工确认、签名、监管提交或控制设备。
+
+单次体检按煤炭监管价值优先覆盖最多 64 个指标，历史交叉验证按 8 个指标分批执行；
+负责人摘要明确显示已分析/总数/未覆盖数量。覆盖不完整时结论自动降级为需关注并标记
+`limited`，不会把编码排序截断后的局部结果冒充全量结论。
+
+任务状态为 `queued / running / blocked / succeeded / failed / cancelled`。
+排队任务可立即取消，运行任务会在只读步骤边界响应取消；只有失败和受阻任务可
+重试。服务重启时，正在运行的只读步骤会记录为中断，未取消任务增加一次尝试并
+重新排队，已完成任务不会重放。每次尝试、步骤和状态变化都有持久化事件链。
+
+后台计划支持：
+
+- `daily`：指定 `HH:MM` 和 IANA 时区；
+- `interval`：300–2592000 秒；
+- `event`：由 `/api/v1/agent/events` 的受控业务事件触发。
+
+计划始终绑定一份已存在草稿，不会自动抓取企业系统数据、创建下一期草稿或改动统计
+窗口。`edge-agent/` 仍按独立合同直接向监管端发送只读遥测，不向企业 Agent 注入
+数据。若要实现“数据到齐即体检”，部署单位还需建设有来源签名、草稿导入、幂等和
+最小权限服务认证的上游适配器；当前仓库没有通用爬虫或机器账号适配器。
+
+业务记忆和技能的“学习”只保存提案、审批、版本及来源，不允许模型直接自我修改。
+共享记忆必须由另一名 `governance_review` 账号批准，技能必须由另一名
+`skill_admin` 账号批准；`confirm` 不授予治理权限。技能批准后只进入目录，返回
+`runtime_activation=approved_inactive`；仍需代码审查、测试、发布和显式注册后
+才可能执行。
+
+部署配置、可复制 API 例子、SQLite 表和故障处置详见
+[煤炭 Agent V2 耐久任务流与治理使用说明](docs/煤炭Agent-V2任务流.md)。
 
 煤炭业务对话先在本地完成“领域准入”，再做“新闻、通识或企业数据”意图路由：
 

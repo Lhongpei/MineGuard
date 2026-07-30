@@ -110,6 +110,11 @@ class HarnessStore:
             "tool_profile": tool_profile,
         }
         with self.repository._transaction() as db:
+            if draft_id is not None:
+                self.repository._assert_active_draft_in_transaction(
+                    db,
+                    draft_id,
+                )
             actor_active = db.execute(
                 """
                 SELECT COUNT(*) AS amount FROM agent_runs

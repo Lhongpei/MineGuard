@@ -7,6 +7,10 @@ import threading
 import uuid
 from typing import Any
 
+from .agent_v2.governance import GovernanceStore
+from .agent_v2.models import FlowRuntimeConfig
+from .agent_v2.runtime import AgentFlowRuntime
+from .agent_v2.scheduler import AgentJobScheduler
 from .chat import CoalChatRuntime
 from .client import PlatformClient
 from .errors import (
@@ -25,6 +29,7 @@ from .models import (
     provenance_record,
 )
 from .security import normalize_observation, observation_payload
+from .settings import AgentV2Config
 from .skills import SkillRegistry, build_skill_registry
 from .storage import Repository
 from .util import (
@@ -504,6 +509,7 @@ class EnterpriseAgentService:
         platform_client: PlatformClient | None = None,
         llm_provider: OpenAICompatibleProvider | None = None,
         skill_registry: SkillRegistry | None = None,
+        agent_v2_config: AgentV2Config | None = None,
     ):
         self.repository = repository
         self.platform_client = platform_client
@@ -513,6 +519,8 @@ class EnterpriseAgentService:
             if skill_registry is not None
             else build_skill_registry()
         )
+        self.agent_v2_config = agent_v2_config or AgentV2Config()
+        self.governance = GovernanceStore(repository)
         # A single local service process must never race two network attempts
         # for one persisted idempotency record. SQLite remains the durable
         # cross-restart authority; this lock closes the in-process window.
@@ -520,6 +528,8 @@ class EnterpriseAgentService:
         self._harness_lock = threading.RLock()
         self._harness: HarnessRuntime | None = None
         self._chat: CoalChatRuntime | None = None
+        self._agent_v2: AgentFlowRuntime | None = None
+        self._agent_jobs: AgentJobScheduler | None = None
 
     def enable_harness(self) -> HarnessRuntime:
         """Start the long-lived harness only for the HTTP serve process."""
@@ -535,6 +545,27 @@ class EnterpriseAgentService:
                     self._harness,
                     skills=self.skills,
                 )
+            if self.agent_v2_config.enabled and self._agent_v2 is None:
+                self._agent_v2 = AgentFlowRuntime(
+                    self,
+                    config=FlowRuntimeConfig(
+                        worker_count=self.agent_v2_config.worker_count,
+                        specialist_worker_count=(
+                            self.agent_v2_config.specialist_worker_count
+                        ),
+                        lease_seconds=(
+                            self.agent_v2_config.flow_lease_seconds
+                        ),
+                    ),
+                )
+                self._agent_jobs = AgentJobScheduler(
+                    self.repository,
+                    self._agent_v2,
+                    poll_seconds=(
+                        self.agent_v2_config.scheduler_poll_seconds
+                    ),
+                    auto_start=self.agent_v2_config.scheduler_enabled,
+                )
             return self._harness
 
     @property
@@ -549,8 +580,26 @@ class EnterpriseAgentService:
             raise RuntimeError("煤炭对话仅在企业端 serve 进程中启用")
         return self._chat
 
+    @property
+    def agent_v2(self) -> AgentFlowRuntime:
+        if self._agent_v2 is None:
+            raise RuntimeError("Agent V2 仅在已启用的企业端 serve 进程中运行")
+        return self._agent_v2
+
+    @property
+    def agent_jobs(self) -> AgentJobScheduler:
+        if self._agent_jobs is None:
+            raise RuntimeError("Agent V2 调度器当前不可用")
+        return self._agent_jobs
+
     def disable_harness(self) -> None:
         with self._harness_lock:
+            if self._agent_jobs is not None:
+                self._agent_jobs.close()
+                self._agent_jobs = None
+            if self._agent_v2 is not None:
+                self._agent_v2.close()
+                self._agent_v2 = None
             if self._harness is not None:
                 self._harness.close()
                 self._harness = None
@@ -715,6 +764,12 @@ class EnterpriseAgentService:
         actor: str,
         expected_revision: int | None = None,
     ) -> None:
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 1
+        ):
+            raise ValueError("expected_revision 必须是正整数")
         self.repository.soft_delete(
             draft_id,
             actor=_actor(actor),

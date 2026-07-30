@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -14,6 +15,96 @@ from typing import Any
 from .errors import ConflictError, NotFoundError, ValidationBlockedError
 from .security import observation_review_fingerprint
 from .util import canonical_json, parse_aware_datetime, sha256_json, utc_text
+
+_SCHEMA_VERSION = 4
+
+
+def _install_schema_guards(db: sqlite3.Connection) -> None:
+    """Give upgraded SQLite tables the same future-write guards as fresh ones."""
+
+    guards = {
+        "agent_flows": (
+            "NEW.status NOT IN "
+            "('queued','running','blocked','succeeded','failed','cancelled') "
+            "OR NEW.attempt < 1 OR NEW.revision < 1 "
+            "OR NEW.dispatch_ready NOT IN (0,1) "
+            "OR NEW.cancel_requested NOT IN (0,1)"
+        ),
+        "agent_jobs": (
+            "NEW.schedule_kind NOT IN ('daily','interval','event') "
+            "OR NEW.enabled NOT IN (0,1) OR NEW.revision < 1 "
+            "OR NEW.event_count < 0"
+        ),
+        "agent_trigger_events": "NEW.progress_revision < 0",
+        "agent_memory_proposals": (
+            "NEW.scope_type NOT IN ('user','draft','mine','enterprise') "
+            "OR NEW.status NOT IN ('pending','approved','rejected') "
+            "OR NEW.revision < 1 OR NEW.event_count < 0"
+        ),
+        "agent_memories": (
+            "NEW.scope_type NOT IN ('user','draft','mine','enterprise') "
+            "OR NEW.status NOT IN ('active','revoked','superseded') "
+            "OR NEW.version < 1 OR NEW.revision < 1 "
+            "OR NOT EXISTS ("
+            "SELECT 1 FROM agent_memory_proposals AS proposal "
+            "WHERE proposal.proposal_id = NEW.proposal_id"
+            ") OR EXISTS ("
+            "SELECT 1 FROM agent_memories AS other "
+            "WHERE other.memory_id <> NEW.memory_id "
+            "AND (other.proposal_id = NEW.proposal_id OR ("
+            "other.scope_type = NEW.scope_type "
+            "AND other.scope_id = NEW.scope_id "
+            "AND other.memory_key = NEW.memory_key "
+            "AND other.version = NEW.version))"
+            ")"
+        ),
+        "agent_skill_proposals": (
+            "NEW.status NOT IN ('pending','approved','rejected') "
+            "OR NEW.revision < 1 OR NEW.event_count < 0"
+        ),
+        "agent_skill_versions": (
+            "NEW.status NOT IN ('active','retired','superseded') "
+            "OR NEW.runtime_activation NOT IN "
+            "('proposal_only','approved_inactive') "
+            "OR NEW.version < 1 OR NEW.revision < 1 "
+            "OR NOT EXISTS ("
+            "SELECT 1 FROM agent_skill_proposals AS proposal "
+            "WHERE proposal.proposal_id = NEW.proposal_id"
+            ") OR EXISTS ("
+            "SELECT 1 FROM agent_skill_versions AS other "
+            "WHERE other.skill_version_id <> NEW.skill_version_id "
+            "AND (other.proposal_id = NEW.proposal_id OR ("
+            "other.skill_name = NEW.skill_name "
+            "AND other.version = NEW.version))"
+            ")"
+        ),
+    }
+    for table, invalid_when in guards.items():
+        for operation in ("INSERT", "UPDATE"):
+            trigger_name = (
+                f"guard_{table}_{operation.casefold()}_v4"
+            )
+            db.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {trigger_name}
+                BEFORE {operation} ON {table}
+                WHEN {invalid_when}
+                BEGIN
+                    SELECT RAISE(ABORT, '{table} constraint violation');
+                END
+                """
+            )
+    for operation in ("UPDATE", "DELETE"):
+        trigger_name = f"guard_draft_audit_{operation.casefold()}_v4"
+        db.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {trigger_name}
+            BEFORE {operation} ON draft_audit
+            BEGIN
+                SELECT RAISE(ABORT, 'draft_audit is append-only');
+            END
+            """
+        )
 
 
 class Repository:
@@ -32,6 +123,7 @@ class Repository:
             self._memory_connection = self._connect()
         try:
             self._initialize()
+            self._ensure_wal()
         except sqlite3.Error as error:
             raise ValueError(
                 f"无法打开企业端数据库 {self.path}；请检查路径、权限或数据库完整性"
@@ -48,13 +140,59 @@ class Repository:
             isolation_level=None,
             check_same_thread=False,
         )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=10000")
-        if self.path != ":memory:":
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=FULL")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=10000")
+            if self.path != ":memory:":
+                connection.execute("PRAGMA synchronous=FULL")
+            return connection
+        except Exception:
+            connection.close()
+            raise
+
+    def _ensure_wal(self) -> None:
+        """Enable WAL once, retrying only the cross-process bootstrap race."""
+
+        if self.path == ":memory:":
+            return
+        deadline = time.monotonic() + 10.0
+        delay = 0.01
+        last_error: sqlite3.OperationalError | None = None
+        while time.monotonic() < deadline:
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = self._connect()
+                current = connection.execute(
+                    "PRAGMA journal_mode"
+                ).fetchone()
+                if current is not None and str(current[0]).lower() == "wal":
+                    return
+                selected = connection.execute(
+                    "PRAGMA journal_mode=WAL"
+                ).fetchone()
+                if (
+                    selected is not None
+                    and str(selected[0]).lower() == "wal"
+                ):
+                    return
+                raise sqlite3.OperationalError(
+                    "数据库文件系统不支持 WAL 日志模式"
+                )
+            except sqlite3.OperationalError as error:
+                last_error = error
+                if "locked" not in str(error).lower() and "busy" not in str(
+                    error
+                ).lower():
+                    raise
+            finally:
+                if connection is not None:
+                    connection.close()
+            time.sleep(delay)
+            delay = min(delay * 2, 0.25)
+        raise last_error or sqlite3.OperationalError(
+            "启用 WAL 日志模式超时"
+        )
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -64,8 +202,11 @@ class Repository:
                 connection.execute("BEGIN IMMEDIATE")
                 yield connection
                 connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
+            except BaseException:
+                # KeyboardInterrupt, cancellation and SystemExit must not leave
+                # the shared in-memory connection inside an open transaction.
+                with suppress(sqlite3.Error):
+                    connection.execute("ROLLBACK")
                 raise
             finally:
                 if self._memory_connection is None:
@@ -85,10 +226,41 @@ class Repository:
         with self._lock:
             db = self._memory_connection or self._connect()
             try:
-                # sqlite3.executescript owns its transaction boundary; nesting
-                # it inside BEGIN IMMEDIATE would make the outer COMMIT invalid.
+                version_table = db.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'app_schema_versions'
+                    """
+                ).fetchone()
+                if version_table is not None:
+                    current_version = db.execute(
+                        """
+                        SELECT version FROM app_schema_versions
+                        WHERE component = 'enterprise_agent'
+                        """
+                    ).fetchone()
+                    if (
+                        current_version is not None
+                        and int(current_version["version"]) > _SCHEMA_VERSION
+                    ):
+                        raise ValueError(
+                            "数据库 schema 版本高于当前程序支持版本；"
+                            "拒绝由旧程序降级打开"
+                        )
+                # ``executescript`` commits any transaction that existed before
+                # it starts.  Begin the exclusive migration *inside* the script
+                # so every CREATE/ALTER/version write below is serialized across
+                # Repository instances and processes.
                 db.executescript(
                     """
+                    BEGIN EXCLUSIVE;
+
+                    CREATE TABLE IF NOT EXISTS app_schema_versions (
+                        component TEXT PRIMARY KEY,
+                        version INTEGER NOT NULL CHECK (version >= 1),
+                        updated_at TEXT NOT NULL
+                    );
+
                     CREATE TABLE IF NOT EXISTS drafts (
                         draft_id TEXT PRIMARY KEY,
                         document_json TEXT NOT NULL,
@@ -314,8 +486,313 @@ class Repository:
                             REFERENCES chat_sessions(session_id)
                     );
 
+                    CREATE TABLE IF NOT EXISTS agent_flows (
+                        flow_id TEXT PRIMARY KEY,
+                        actor_id TEXT NOT NULL,
+                        workflow_name TEXT NOT NULL,
+                        workflow_version TEXT NOT NULL,
+                        draft_id TEXT,
+                        goal_text TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL CHECK (
+                            status IN (
+                                'queued', 'running', 'blocked', 'succeeded',
+                                'failed', 'cancelled'
+                            )
+                        ),
+                        trigger_type TEXT NOT NULL DEFAULT 'manual',
+                        trigger_ref TEXT,
+                        client_request_id TEXT,
+                        state_json TEXT NOT NULL DEFAULT '{}',
+                        current_step TEXT,
+                        attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),
+                        dispatch_ready INTEGER NOT NULL DEFAULT 1 CHECK (
+                            dispatch_ready IN (0, 1)
+                        ),
+                        run_owner TEXT,
+                        lease_expires_at TEXT,
+                        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+                        cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (
+                            cancel_requested IN (0, 1)
+                        ),
+                        summary TEXT,
+                        error_code TEXT,
+                        error_message TEXT,
+                        event_count INTEGER NOT NULL DEFAULT 0,
+                        event_head_hash TEXT NOT NULL DEFAULT
+                            '0000000000000000000000000000000000000000000000000000000000000000',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        started_at TEXT,
+                        completed_at TEXT,
+                        UNIQUE(actor_id, client_request_id),
+                        FOREIGN KEY (draft_id) REFERENCES drafts(draft_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_agent_flows_actor_status
+                        ON agent_flows(actor_id, status, updated_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_agent_flows_status_updated
+                        ON agent_flows(status, updated_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_agent_flows_draft_updated
+                        ON agent_flows(draft_id, updated_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS agent_flow_steps (
+                        flow_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+                        attempt INTEGER NOT NULL CHECK (attempt >= 1),
+                        step_key TEXT NOT NULL,
+                        specialist TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (
+                            status IN (
+                                'running', 'succeeded', 'failed', 'cancelled'
+                            )
+                        ),
+                        input_json TEXT NOT NULL DEFAULT '{}',
+                        result_json TEXT,
+                        result_sha256 TEXT,
+                        error_code TEXT,
+                        error_message TEXT,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        PRIMARY KEY (flow_id, sequence),
+                        UNIQUE(flow_id, attempt, step_key),
+                        FOREIGN KEY (flow_id) REFERENCES agent_flows(flow_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_agent_flow_steps_attempt
+                        ON agent_flow_steps(flow_id, attempt, sequence);
+
+                    CREATE TABLE IF NOT EXISTS agent_flow_events (
+                        flow_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+                        event_type TEXT NOT NULL,
+                        actor_id TEXT NOT NULL,
+                        details_json TEXT NOT NULL,
+                        occurred_at TEXT NOT NULL,
+                        previous_hash TEXT NOT NULL,
+                        event_hash TEXT NOT NULL,
+                        PRIMARY KEY (flow_id, sequence),
+                        FOREIGN KEY (flow_id) REFERENCES agent_flows(flow_id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS agent_memory_proposals (
+                        proposal_id TEXT PRIMARY KEY,
+                        scope_type TEXT NOT NULL CHECK (
+                            scope_type IN ('user', 'draft', 'mine', 'enterprise')
+                        ),
+                        scope_id TEXT NOT NULL,
+                        memory_key TEXT NOT NULL,
+                        value_json TEXT NOT NULL,
+                        source_refs_json TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (
+                            status IN ('pending', 'approved', 'rejected')
+                        ),
+                        revision INTEGER NOT NULL CHECK (revision >= 1),
+                        proposed_by TEXT NOT NULL,
+                        reviewed_by TEXT,
+                        reviewed_at TEXT,
+                        decision_reason TEXT,
+                        proposal_sha256 TEXT NOT NULL,
+                        audit_json TEXT NOT NULL,
+                        event_count INTEGER NOT NULL DEFAULT 0,
+                        event_head_hash TEXT NOT NULL DEFAULT
+                            '0000000000000000000000000000000000000000000000000000000000000000',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS agent_memories (
+                        memory_id TEXT PRIMARY KEY,
+                        scope_type TEXT NOT NULL CHECK (
+                            scope_type IN ('user', 'draft', 'mine', 'enterprise')
+                        ),
+                        scope_id TEXT NOT NULL,
+                        memory_key TEXT NOT NULL,
+                        version INTEGER NOT NULL CHECK (version >= 1),
+                        value_json TEXT NOT NULL,
+                        provenance_json TEXT NOT NULL,
+                        proposal_id TEXT NOT NULL UNIQUE,
+                        status TEXT NOT NULL CHECK (
+                            status IN ('active', 'revoked', 'superseded')
+                        ),
+                        created_by TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        revision INTEGER NOT NULL CHECK (revision >= 1),
+                        revoked_by TEXT,
+                        revoked_at TEXT,
+                        record_sha256 TEXT NOT NULL,
+                        UNIQUE(scope_type, scope_id, memory_key, version),
+                        FOREIGN KEY (proposal_id)
+                            REFERENCES agent_memory_proposals(proposal_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_agent_memories_active_scope
+                        ON agent_memories (
+                            scope_type, scope_id, memory_key, status, version DESC
+                        );
+
+                    CREATE TABLE IF NOT EXISTS agent_skill_proposals (
+                        proposal_id TEXT PRIMARY KEY,
+                        skill_name TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        procedure_json TEXT NOT NULL,
+                        allowed_tools_json TEXT NOT NULL,
+                        source_refs_json TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (
+                            status IN ('pending', 'approved', 'rejected')
+                        ),
+                        revision INTEGER NOT NULL CHECK (revision >= 1),
+                        proposed_by TEXT NOT NULL,
+                        reviewed_by TEXT,
+                        reviewed_at TEXT,
+                        decision_reason TEXT,
+                        proposal_sha256 TEXT NOT NULL,
+                        audit_json TEXT NOT NULL,
+                        event_count INTEGER NOT NULL DEFAULT 0,
+                        event_head_hash TEXT NOT NULL DEFAULT
+                            '0000000000000000000000000000000000000000000000000000000000000000',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS agent_skill_versions (
+                        skill_version_id TEXT PRIMARY KEY,
+                        skill_name TEXT NOT NULL,
+                        version INTEGER NOT NULL CHECK (version >= 1),
+                        description TEXT NOT NULL,
+                        procedure_json TEXT NOT NULL,
+                        allowed_tools_json TEXT NOT NULL,
+                        source_refs_json TEXT NOT NULL,
+                        proposal_id TEXT NOT NULL UNIQUE,
+                        status TEXT NOT NULL CHECK (
+                            status IN ('active', 'retired', 'superseded')
+                        ),
+                        runtime_activation TEXT NOT NULL CHECK (
+                            runtime_activation IN (
+                                'proposal_only', 'approved_inactive'
+                            )
+                        ),
+                        approved_by TEXT NOT NULL,
+                        approved_at TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        revision INTEGER NOT NULL CHECK (revision >= 1),
+                        retired_by TEXT,
+                        retired_at TEXT,
+                        retirement_reason TEXT,
+                        record_sha256 TEXT NOT NULL,
+                        UNIQUE(skill_name, version),
+                        FOREIGN KEY (proposal_id)
+                            REFERENCES agent_skill_proposals(proposal_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_agent_skill_versions_active
+                        ON agent_skill_versions (
+                            skill_name, status, version DESC
+                        );
+
+                    CREATE TABLE IF NOT EXISTS agent_jobs (
+                        job_id TEXT PRIMARY KEY,
+                        actor_id TEXT NOT NULL,
+                        client_request_id TEXT,
+                        name TEXT NOT NULL,
+                        workflow_name TEXT NOT NULL,
+                        draft_id TEXT,
+                        goal_text TEXT NOT NULL,
+                        schedule_kind TEXT NOT NULL CHECK (
+                            schedule_kind IN ('daily', 'interval', 'event')
+                        ),
+                        schedule_json TEXT NOT NULL,
+                        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                        next_run_at TEXT,
+                        pending_run_at TEXT,
+                        last_run_at TEXT,
+                        last_flow_id TEXT,
+                        last_error TEXT,
+                        revision INTEGER NOT NULL CHECK (revision >= 1),
+                        event_count INTEGER NOT NULL DEFAULT 0,
+                        event_head_hash TEXT NOT NULL DEFAULT
+                            '0000000000000000000000000000000000000000000000000000000000000000',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        deleted_at TEXT,
+                        FOREIGN KEY (draft_id) REFERENCES drafts(draft_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_agent_jobs_actor_updated
+                        ON agent_jobs(actor_id, updated_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_agent_jobs_due
+                        ON agent_jobs(enabled, next_run_at)
+                        WHERE deleted_at IS NULL;
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                        idx_agent_jobs_client_request
+                    ON agent_jobs(actor_id, client_request_id)
+                    WHERE client_request_id IS NOT NULL;
+
+                    CREATE TABLE IF NOT EXISTS agent_job_events (
+                        job_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+                        event_type TEXT NOT NULL,
+                        actor_id TEXT NOT NULL,
+                        details_json TEXT NOT NULL,
+                        occurred_at TEXT NOT NULL,
+                        previous_hash TEXT NOT NULL,
+                        event_hash TEXT NOT NULL,
+                        PRIMARY KEY (job_id, sequence),
+                        FOREIGN KEY (job_id) REFERENCES agent_jobs(job_id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS agent_trigger_events (
+                        event_id TEXT PRIMARY KEY,
+                        actor_id TEXT NOT NULL,
+                        client_event_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        draft_id TEXT,
+                        payload_json TEXT NOT NULL,
+                        payload_sha256 TEXT NOT NULL,
+                        matched_jobs_json TEXT,
+                        triggered_jobs_json TEXT NOT NULL,
+                        record_sha256 TEXT,
+                        progress_revision INTEGER NOT NULL DEFAULT 0,
+                        progress_sha256 TEXT,
+                        occurred_at TEXT NOT NULL,
+                        UNIQUE(actor_id, client_event_id),
+                        FOREIGN KEY (draft_id) REFERENCES drafts(draft_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_agent_trigger_events_actor_time
+                        ON agent_trigger_events(actor_id, occurred_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS agent_trigger_claims (
+                        event_id TEXT PRIMARY KEY,
+                        owner_id TEXT NOT NULL,
+                        lease_expires_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (event_id)
+                            REFERENCES agent_trigger_events(event_id)
+                    );
+
                     """
                 )
+                # Re-check while holding the cross-process migration lock.  A
+                # newer binary may have upgraded the file after the optimistic
+                # pre-check but before this process acquired the lock.
+                current_version = db.execute(
+                    """
+                    SELECT version FROM app_schema_versions
+                    WHERE component = 'enterprise_agent'
+                    """
+                ).fetchone()
+                if (
+                    current_version is not None
+                    and int(current_version["version"]) > _SCHEMA_VERSION
+                ):
+                    raise ValueError(
+                        "数据库 schema 版本高于当前程序支持版本；"
+                        "拒绝由旧程序降级打开"
+                    )
                 submission_columns = {
                     str(row["name"])
                     for row in db.execute("PRAGMA table_info(submissions)").fetchall()
@@ -445,6 +922,170 @@ class Repository:
                     WHERE client_message_id IS NOT NULL
                     """
                 )
+                job_columns = {
+                    str(row["name"])
+                    for row in db.execute(
+                        "PRAGMA table_info(agent_jobs)"
+                    ).fetchall()
+                }
+                if "pending_run_at" not in job_columns:
+                    db.execute(
+                        "ALTER TABLE agent_jobs "
+                        "ADD COLUMN pending_run_at TEXT"
+                    )
+                trigger_columns = {
+                    str(row["name"])
+                    for row in db.execute(
+                        "PRAGMA table_info(agent_trigger_events)"
+                    ).fetchall()
+                }
+                if "matched_jobs_json" not in trigger_columns:
+                    db.execute(
+                        "ALTER TABLE agent_trigger_events "
+                        "ADD COLUMN matched_jobs_json TEXT"
+                    )
+                if "record_sha256" not in trigger_columns:
+                    db.execute(
+                        "ALTER TABLE agent_trigger_events "
+                        "ADD COLUMN record_sha256 TEXT"
+                    )
+                if "progress_revision" not in trigger_columns:
+                    db.execute(
+                        "ALTER TABLE agent_trigger_events "
+                        "ADD COLUMN progress_revision INTEGER "
+                        "NOT NULL DEFAULT 0"
+                    )
+                if "progress_sha256" not in trigger_columns:
+                    db.execute(
+                        "ALTER TABLE agent_trigger_events "
+                        "ADD COLUMN progress_sha256 TEXT"
+                    )
+                flow_columns = {
+                    str(row["name"])
+                    for row in db.execute(
+                        "PRAGMA table_info(agent_flows)"
+                    ).fetchall()
+                }
+                if "run_owner" not in flow_columns:
+                    db.execute(
+                        "ALTER TABLE agent_flows ADD COLUMN run_owner TEXT"
+                    )
+                if "lease_expires_at" not in flow_columns:
+                    db.execute(
+                        "ALTER TABLE agent_flows "
+                        "ADD COLUMN lease_expires_at TEXT"
+                    )
+                if "dispatch_ready" not in flow_columns:
+                    db.execute(
+                        "ALTER TABLE agent_flows ADD COLUMN dispatch_ready "
+                        "INTEGER NOT NULL DEFAULT 1"
+                    )
+                governance_columns: dict[str, dict[str, str]] = {
+                    "agent_memory_proposals": {
+                        "reviewed_by": "TEXT",
+                        "reviewed_at": "TEXT",
+                        "decision_reason": "TEXT",
+                        "proposal_sha256": "TEXT NOT NULL DEFAULT ''",
+                        "audit_json": "TEXT NOT NULL DEFAULT '[]'",
+                        "event_count": "INTEGER NOT NULL DEFAULT 0",
+                        "event_head_hash": (
+                            "TEXT NOT NULL DEFAULT '" + ("0" * 64) + "'"
+                        ),
+                        "updated_at": "TEXT NOT NULL DEFAULT ''",
+                    },
+                    "agent_memories": {
+                        "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
+                        "revision": "INTEGER NOT NULL DEFAULT 1",
+                        "revoked_by": "TEXT",
+                        "revoked_at": "TEXT",
+                        "record_sha256": "TEXT NOT NULL DEFAULT ''",
+                        "updated_at": "TEXT NOT NULL DEFAULT ''",
+                    },
+                    "agent_skill_proposals": {
+                        "reviewed_by": "TEXT",
+                        "reviewed_at": "TEXT",
+                        "decision_reason": "TEXT",
+                        "proposal_sha256": "TEXT NOT NULL DEFAULT ''",
+                        "audit_json": "TEXT NOT NULL DEFAULT '[]'",
+                        "event_count": "INTEGER NOT NULL DEFAULT 0",
+                        "event_head_hash": (
+                            "TEXT NOT NULL DEFAULT '" + ("0" * 64) + "'"
+                        ),
+                        "updated_at": "TEXT NOT NULL DEFAULT ''",
+                    },
+                    "agent_skill_versions": {
+                        "runtime_activation": (
+                            "TEXT NOT NULL DEFAULT 'approved_inactive'"
+                        ),
+                        "revision": "INTEGER NOT NULL DEFAULT 1",
+                        "retired_by": "TEXT",
+                        "retired_at": "TEXT",
+                        "retirement_reason": "TEXT",
+                        "record_sha256": "TEXT NOT NULL DEFAULT ''",
+                        "updated_at": "TEXT NOT NULL DEFAULT ''",
+                    },
+                }
+                for table, expected_columns in governance_columns.items():
+                    existing = {
+                        str(row["name"])
+                        for row in db.execute(
+                            f"PRAGMA table_info({table})"
+                        ).fetchall()
+                    }
+                    for column, definition in expected_columns.items():
+                        if column not in existing:
+                            db.execute(
+                                f"ALTER TABLE {table} "
+                                f"ADD COLUMN {column} {definition}"
+                            )
+                _install_schema_guards(db)
+                # These indexes reference columns introduced by the migration,
+                # so they must be created only after the ALTER statements.
+                db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        idx_agent_memory_proposals_scope
+                    ON agent_memory_proposals (
+                        scope_type, scope_id, updated_at DESC
+                    )
+                    """
+                )
+                db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        idx_agent_memory_proposals_actor
+                    ON agent_memory_proposals (
+                        proposed_by, status, updated_at DESC
+                    )
+                    """
+                )
+                db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        idx_agent_skill_proposals_actor
+                    ON agent_skill_proposals (
+                        proposed_by, status, updated_at DESC
+                    )
+                    """
+                )
+                db.execute(
+                    """
+                    INSERT INTO app_schema_versions (
+                        component, version, updated_at
+                    ) VALUES ('enterprise_agent', ?, ?)
+                    ON CONFLICT(component) DO UPDATE SET
+                        version = excluded.version,
+                        updated_at = excluded.updated_at
+                    WHERE app_schema_versions.version < excluded.version
+                    """,
+                    (_SCHEMA_VERSION, utc_text()),
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                if db.in_transaction:
+                    with suppress(sqlite3.Error):
+                        db.execute("ROLLBACK")
+                raise
             finally:
                 if self._memory_connection is None:
                     db.close()
@@ -726,6 +1367,99 @@ class Repository:
             raise NotFoundError("草稿不存在")
         return self._row(row, submission)
 
+    @staticmethod
+    def _assert_active_draft_in_transaction(
+        db: sqlite3.Connection,
+        draft_id: str,
+    ) -> sqlite3.Row:
+        """Resolve a live draft while sharing the caller's write transaction.
+
+        Agent task/job creation first performs a friendly read-side check, but
+        that alone leaves a time-of-check/time-of-use window with soft deletion.
+        Callers that create or reactivate draft-bound work use this second check
+        under ``BEGIN IMMEDIATE`` so deletion and task creation are serialized.
+        """
+
+        row = db.execute(
+            "SELECT * FROM drafts WHERE draft_id = ?",
+            (draft_id,),
+        ).fetchone()
+        if row is None or row["deleted_at"] is not None:
+            raise NotFoundError("草稿不存在")
+        return row
+
+    @staticmethod
+    def _draft_audit_integrity_in_transaction(
+        db: sqlite3.Connection,
+        draft_id: str,
+    ) -> dict[str, Any]:
+        """Verify the complete draft audit chain in the current transaction."""
+
+        rows = db.execute(
+            """
+            SELECT * FROM draft_audit
+            WHERE draft_id = ?
+            ORDER BY sequence
+            """,
+            (draft_id,),
+        ).fetchall()
+        expected_previous = "0" * 64
+        creator: str | None = None
+        for expected_sequence, row in enumerate(rows, start=1):
+            try:
+                details = json.loads(row["details_json"])
+                event = {
+                    "draft_id": str(row["draft_id"]),
+                    "sequence": int(row["sequence"]),
+                    "event_type": str(row["event_type"]),
+                    "actor": str(row["actor"]),
+                    "occurred_at": str(row["occurred_at"]),
+                    "details": details,
+                    "previous_hash": str(row["previous_hash"]),
+                }
+                calculated_hash = sha256_json(event)
+            except (
+                json.JSONDecodeError,
+                OverflowError,
+                RecursionError,
+                TypeError,
+                UnicodeError,
+                ValueError,
+            ):
+                return {
+                    "valid": False,
+                    "event_count": len(rows),
+                    "failed_sequence": expected_sequence,
+                    "creator": creator,
+                }
+            if expected_sequence == 1:
+                if event["event_type"] != "draft_created":
+                    return {
+                        "valid": False,
+                        "event_count": len(rows),
+                        "failed_sequence": 1,
+                        "creator": None,
+                    }
+                creator = event["actor"]
+            if (
+                event["sequence"] != expected_sequence
+                or event["previous_hash"] != expected_previous
+                or calculated_hash != str(row["event_hash"])
+            ):
+                return {
+                    "valid": False,
+                    "event_count": len(rows),
+                    "failed_sequence": event["sequence"],
+                    "creator": creator,
+                }
+            expected_previous = str(row["event_hash"])
+        return {
+            "valid": bool(rows) and creator is not None,
+            "event_count": len(rows),
+            "head_hash": expected_previous,
+            "creator": creator,
+        }
+
     def replace_draft(
         self,
         draft_id: str,
@@ -921,15 +1655,23 @@ class Repository:
         draft_id: str,
         *,
         actor: str,
-        expected_revision: int | None = None,
+        expected_revision: int,
     ) -> None:
         now = utc_text()
         with self._transaction() as db:
-            row = db.execute(
-                "SELECT * FROM drafts WHERE draft_id = ?", (draft_id,)
-            ).fetchone()
-            if row is None or row["deleted_at"] is not None:
-                raise NotFoundError("草稿不存在")
+            row = self._assert_active_draft_in_transaction(db, draft_id)
+            # Authentication and ``write`` authorization belong to the HTTP
+            # boundary.  One deployment/database is one enterprise tenant, so
+            # another authorised writer may take over a colleague's draft.
+            # The audit event below records the actual deleting principal.
+            audit_integrity = self._draft_audit_integrity_in_transaction(
+                db,
+                draft_id,
+            )
+            if not audit_integrity["valid"]:
+                raise ConflictError("草稿审计完整性校验失败，拒绝删除")
+            if int(row["revision"]) != expected_revision:
+                raise ConflictError(f"草稿已更新，当前修订号为 {row['revision']}")
             succeeded = db.execute(
                 """
                 SELECT 1 FROM submissions
@@ -951,33 +1693,83 @@ class Repository:
             if pending is not None:
                 raise ConflictError("草稿正在提交，暂时不能删除")
             if (
-                expected_revision is not None
-                and int(row["revision"]) != expected_revision
+                row["confirmed_revision"] is not None
+                or row["confirmation_json"] is not None
             ):
-                raise ConflictError(f"草稿已更新，当前修订号为 {row['revision']}")
+                raise ConflictError(
+                    "草稿已经人工确认，不可直接删除；"
+                    "如需废弃，请先修改草稿使原确认失效并重新核对"
+                )
+            active_flow = db.execute(
+                """
+                SELECT 1 FROM agent_flows
+                WHERE draft_id = ? AND status IN ('queued', 'running')
+                LIMIT 1
+                """,
+                (draft_id,),
+            ).fetchone()
+            if active_flow is not None:
+                raise ConflictError(
+                    "草稿仍有排队或运行中的煤炭智能体任务，"
+                    "请先等待任务结束或取消任务"
+                )
+            enabled_job = db.execute(
+                """
+                SELECT 1 FROM agent_jobs
+                WHERE draft_id = ? AND enabled = 1 AND deleted_at IS NULL
+                LIMIT 1
+                """,
+                (draft_id,),
+            ).fetchone()
+            if enabled_job is not None:
+                raise ConflictError(
+                    "草稿仍绑定启用的智能体计划，请先停用或删除计划"
+                )
+            active_harness_run = db.execute(
+                """
+                SELECT 1 FROM agent_runs
+                WHERE draft_id = ?
+                  AND status IN ('queued', 'running', 'waiting_approval')
+                LIMIT 1
+                """,
+                (draft_id,),
+            ).fetchone()
+            if active_harness_run is not None:
+                raise ConflictError(
+                    "草稿仍有未结束的智能体运行，请先等待完成或取消运行"
+                )
+            next_revision = int(row["revision"]) + 1
             db.execute(
                 """
                 UPDATE drafts
-                SET deleted_at = ?, confirmed_revision = NULL,
-                    confirmation_json = NULL, updated_at = ?
+                SET deleted_at = ?, revision = ?,
+                    confirmed_revision = NULL, confirmation_json = NULL,
+                    updated_at = ?
                 WHERE draft_id = ?
                 """,
-                (now, now, draft_id),
+                (now, next_revision, now, draft_id),
             )
-            db.execute(
+            revoked_reviews = db.execute(
                 """
                 UPDATE observation_reviews
                 SET revoked_at = ?
                 WHERE draft_id = ? AND revoked_at IS NULL
                 """,
                 (now, draft_id),
-            )
+            ).rowcount
+            document = json.loads(row["document_json"])
             self._append_audit(
                 db,
                 draft_id=draft_id,
                 event_type="draft_deleted",
                 actor=actor,
-                details={"revision": int(row["revision"])},
+                details={
+                    "deletion_kind": "soft_delete",
+                    "previous_revision": int(row["revision"]),
+                    "revision": next_revision,
+                    "document_sha256": sha256_json(document),
+                    "invalidated_observation_reviews": revoked_reviews,
+                },
                 occurred_at=now,
             )
 

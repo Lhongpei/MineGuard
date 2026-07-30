@@ -98,6 +98,24 @@ class SpyService:
         )
         return {"draft_id": draft_id, "status": "succeeded"}
 
+    def delete_draft(
+        self,
+        draft_id: str,
+        *,
+        actor: str,
+        expected_revision: int | None,
+    ) -> None:
+        self.calls.append(
+            (
+                "delete",
+                {
+                    "draft_id": draft_id,
+                    "actor": actor,
+                    "expected_revision": expected_revision,
+                },
+            )
+        )
+
 
 def _account(
     actor_id: str,
@@ -495,6 +513,51 @@ def test_permissions_are_checked_before_business_actions() -> None:
         assert not any(
             call[0] in {"confirm", "submit", "reviews"}
             for call in service.calls
+        )
+
+        status, error, _ = _request(
+            connection,
+            "DELETE",
+            "/api/v1/drafts/draft-1",
+            {"expected_revision": 1},
+            cookie=reader_cookie,
+            csrf=reader_csrf,
+        )
+        assert status == 403
+        assert error["error"]["code"] == "permission_denied"
+        assert not any(call[0] == "delete" for call in service.calls)
+
+        status, error, _ = _request(
+            connection,
+            "DELETE",
+            "/api/v1/drafts/draft-1",
+            {"expected_revision": 1},
+            cookie=editor_cookie,
+        )
+        assert status == 403
+        assert error["error"]["code"] == "csrf_token_invalid"
+        assert not any(call[0] == "delete" for call in service.calls)
+
+        status, result, _ = _request(
+            connection,
+            "DELETE",
+            "/api/v1/drafts/draft-1",
+            {
+                "expected_revision": 1,
+                "actor": "forged-owner",
+            },
+            cookie=editor_cookie,
+            csrf=editor_csrf,
+        )
+        assert status == 200
+        assert result == {"deleted": True}
+        assert service.calls[-1] == (
+            "delete",
+            {
+                "draft_id": "draft-1",
+                "actor": "editor",
+                "expected_revision": 1,
+            },
         )
 
 

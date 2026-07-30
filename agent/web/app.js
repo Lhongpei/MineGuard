@@ -37,6 +37,24 @@
       `/agent/runs/${encodeURIComponent(runId)}/cancel`,
     agentRunApprove: (runId) =>
       `/agent/runs/${encodeURIComponent(runId)}/approve`,
+    agentFlows: () => "/agent/flows",
+    agentFlow: (flowId) => `/agent/flows/${encodeURIComponent(flowId)}`,
+    agentFlowCancel: (flowId) =>
+      `/agent/flows/${encodeURIComponent(flowId)}/cancel`,
+    agentFlowRetry: (flowId) =>
+      `/agent/flows/${encodeURIComponent(flowId)}/retry`,
+    agentJobs: () => "/agent/jobs",
+    agentJob: (jobId) => `/agent/jobs/${encodeURIComponent(jobId)}`,
+    agentJobRun: (jobId) =>
+      `/agent/jobs/${encodeURIComponent(jobId)}/run`,
+    agentMemoryProposals: () => "/agent/memory/proposals",
+    agentMemoryProposalDecision: (proposalId) =>
+      `/agent/memory/proposals/${encodeURIComponent(proposalId)}/decision`,
+    agentMemories: () => "/agent/memories",
+    agentSkillProposals: () => "/agent/skill-proposals",
+    agentSkillProposalDecision: (proposalId) =>
+      `/agent/skill-proposals/${encodeURIComponent(proposalId)}/decision`,
+    agentSkillVersions: () => "/agent/skill-versions",
     chatSessions: (limit = 30, offset = 0) =>
       `/chat/sessions?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
     chatSessionsCreate: () => "/chat/sessions",
@@ -405,6 +423,28 @@
       pollFailures: 0,
       requestSequence: 0,
     },
+    agentV2: {
+      selectedTab: "overview",
+      flows: [],
+      selectedFlowId: "",
+      detail: null,
+      jobs: [],
+      memoryProposals: [],
+      memories: [],
+      skillProposals: [],
+      skillVersions: [],
+      flowsLoaded: false,
+      jobsLoaded: false,
+      governanceLoaded: false,
+      loading: false,
+      detailLoading: false,
+      error: "",
+      requestSequence: 0,
+      busy: new Set(),
+      pollTimer: null,
+      pollStartedAt: 0,
+      pollFailures: 0,
+    },
     chat: {
       sessions: [],
       total: 0,
@@ -463,6 +503,7 @@
     applyAgentTaskPreset("full");
     setImportFormat("json");
     renderApprovalEvents();
+    renderAgentV2();
     renderOperationalStatus();
     void loadPublicHealth();
     void restoreSession();
@@ -508,8 +549,67 @@
       "workspace",
       "welcomeCard",
       "welcomeStartButton",
+      "welcomeAutofillButton",
       "welcomeNewDraftButton",
       "welcomeActionHint",
+      "agentCenterButton",
+      "agentCenterQuickCard",
+      "agentCenterQuickStatus",
+      "agentCenterQuickSummary",
+      "agentCenterQuickMeta",
+      "openAgentCenterQuickButton",
+      "runAgentCenterQuickButton",
+      "agentV2Workbench",
+      "agentV2WorkbenchTitle",
+      "closeAgentV2WorkbenchButton",
+      "refreshAgentV2Button",
+      "agentV2Error",
+      "agentV2ErrorText",
+      "agentV2StatAttention",
+      "agentV2StatActive",
+      "agentV2StatCompleted",
+      "agentV2StatScheduled",
+      "agentV2BoundDraft",
+      "startAgentV2HealthButton",
+      "agentV2FlowListSummary",
+      "agentV2FlowList",
+      "agentV2FlowDetailEmpty",
+      "agentV2FlowDetailContent",
+      "agentV2FlowTitle",
+      "agentV2FlowMeta",
+      "agentV2FlowStatus",
+      "agentV2FlowSummary",
+      "agentV2FlowFindings",
+      "cancelAgentV2FlowButton",
+      "retryAgentV2FlowButton",
+      "agentV2StepList",
+      "agentV2JobForm",
+      "agentV2JobName",
+      "agentV2JobScheduleKind",
+      "agentV2JobDailyField",
+      "agentV2JobDailyTime",
+      "agentV2JobIntervalField",
+      "agentV2JobIntervalMinutes",
+      "agentV2JobTimezoneField",
+      "agentV2JobTimezone",
+      "agentV2JobPermissionHint",
+      "createAgentV2JobButton",
+      "agentV2JobList",
+      "agentV2MemoryProposalForm",
+      "agentV2MemoryScope",
+      "agentV2MemoryKey",
+      "agentV2MemoryValue",
+      "agentV2MemoryReason",
+      "createAgentV2MemoryProposalButton",
+      "agentV2SkillProposalForm",
+      "agentV2SkillName",
+      "agentV2SkillDescription",
+      "agentV2SkillProcedure",
+      "createAgentV2SkillProposalButton",
+      "agentV2MemoryProposalList",
+      "agentV2SkillProposalList",
+      "agentV2MemoryList",
+      "agentV2SkillVersionList",
       "coalChatWorkbench",
       "coalChatWorkbenchTitle",
       "closeCoalChatButton",
@@ -594,6 +694,7 @@
       "simpleTaskProgressFill",
       "simpleTaskMeta",
       "simpleTaskButton",
+      "simpleDeleteDraftButton",
       "undoButton",
       "deleteDraftButton",
       "saveState",
@@ -694,6 +795,7 @@
     els.simpleTaskButton.addEventListener("click", () =>
       void handleSimpleTaskAction(),
     );
+    els.simpleDeleteDraftButton.addEventListener("click", openDeleteDialog);
     els.loginForm.addEventListener("submit", (event) => {
       event.preventDefault();
       void login();
@@ -704,7 +806,54 @@
     els.welcomeStartButton.addEventListener("click", () =>
       void handleWelcomePrimaryAction(),
     );
+    els.welcomeAutofillButton.addEventListener("click", () =>
+      void handleWelcomeAutofillAction(),
+    );
     els.welcomeNewDraftButton.addEventListener("click", () => void createDraft());
+    els.agentCenterButton.addEventListener("click", () => void openAgentV2Workbench());
+    els.openAgentCenterQuickButton.addEventListener("click", () =>
+      void openAgentV2Workbench(),
+    );
+    els.closeAgentV2WorkbenchButton.addEventListener(
+      "click",
+      closeAgentV2Workbench,
+    );
+    els.refreshAgentV2Button.addEventListener("click", () =>
+      void refreshAgentV2Workbench(),
+    );
+    els.runAgentCenterQuickButton.addEventListener("click", () =>
+      void startAgentV2HealthCheck(),
+    );
+    els.startAgentV2HealthButton.addEventListener("click", () =>
+      void startAgentV2HealthCheck(),
+    );
+    els.cancelAgentV2FlowButton.addEventListener("click", () =>
+      void cancelSelectedAgentV2Flow(),
+    );
+    els.retryAgentV2FlowButton.addEventListener("click", () =>
+      void retrySelectedAgentV2Flow(),
+    );
+    document.querySelectorAll("[data-agent-center-tab]").forEach((button) => {
+      button.addEventListener("click", () =>
+        void selectAgentV2Tab(button.dataset.agentCenterTab),
+      );
+    });
+    els.agentV2JobScheduleKind.addEventListener(
+      "change",
+      renderAgentV2JobScheduleFields,
+    );
+    els.agentV2JobForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void createAgentV2Job();
+    });
+    els.agentV2MemoryProposalForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void createAgentV2MemoryProposal();
+    });
+    els.agentV2SkillProposalForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void createAgentV2SkillProposal();
+    });
     els.agentTaskButton.addEventListener("click", () => void openAgentWorkbench());
     els.coalChatButton.addEventListener("click", () => void openCoalChat());
     els.closeCoalChatButton.addEventListener("click", closeCoalChat);
@@ -916,6 +1065,15 @@
       }
       if (
         !document.hidden &&
+        !els.agentV2Workbench.hidden &&
+        state.agentV2.selectedFlowId &&
+        state.agentV2.detail &&
+        agentV2ActiveStatuses.has(state.agentV2.detail.status)
+      ) {
+        scheduleAgentV2Poll(0);
+      }
+      if (
+        !document.hidden &&
         !els.coalChatWorkbench.hidden &&
         state.chat.pendingReply &&
         !state.chat.deliveryUnknown
@@ -935,16 +1093,21 @@
     els.professionalModeButton.classList.toggle("is-active", professional);
     els.professionalModeButton.setAttribute("aria-pressed", String(professional));
     els.enterpriseModeNote.textContent = professional
-      ? "专业工具：可使用煤炭业务对话、智能任务、详细运行状态和完整操作工具。"
-      : "快捷填报：页面只提示当前该做什么，按顺序完成即可。";
+      ? "专业工具：可管理智能体定时任务、记忆与技能治理，并使用详细分析工具。"
+      : "快捷填报：页面只提示当前该做什么；智能体任务中心只展示易懂结论。";
     els.editorMoreActions.open = professional;
     if (!professional) {
       els.roleGuide.open = false;
       if (userInitiated && !els.agentWorkbench.hidden) closeAgentWorkbench();
       if (userInitiated && !els.coalChatWorkbench.hidden) closeCoalChat();
+      if (state.agentV2.selectedTab !== "overview") {
+        state.agentV2.selectedTab = "overview";
+        renderAgentV2Tabs();
+      }
     }
     renderOperationalStatus();
     renderSimpleTaskGuide();
+    renderAgentV2();
     if (userInitiated) {
       showToast(
         professional
@@ -1391,6 +1554,14 @@
       els.agentRunAnswer,
       els.agentApprovalDetails,
       els.agentStepList,
+      els.agentV2FlowList,
+      els.agentV2FlowFindings,
+      els.agentV2StepList,
+      els.agentV2JobList,
+      els.agentV2MemoryProposalList,
+      els.agentV2SkillProposalList,
+      els.agentV2MemoryList,
+      els.agentV2SkillVersionList,
     ].forEach((container) => container.replaceChildren());
 
     els.draftTitle.textContent = "新填报";
@@ -1432,6 +1603,19 @@
     els.agentApprovalPermissionHint.textContent = "";
     els.approveAgentApprovalButton.removeAttribute("title");
     els.rejectAgentApprovalButton.removeAttribute("title");
+    els.agentV2Workbench.hidden = true;
+    els.agentV2FlowDetailContent.hidden = true;
+    els.agentV2FlowDetailEmpty.hidden = false;
+    els.agentV2Error.hidden = true;
+    els.agentV2ErrorText.textContent = "";
+    els.agentV2MemoryProposalForm.reset();
+    els.agentV2SkillProposalForm.reset();
+    els.agentV2JobForm.reset();
+    els.agentV2JobName.value = "每日煤炭体检";
+    els.agentV2JobDailyTime.value = "09:00";
+    els.agentV2JobIntervalMinutes.value = "60";
+    els.agentV2JobTimezone.value = "Asia/Shanghai";
+    renderAgentV2JobScheduleFields();
 
     els.coalChatWorkbench.hidden = true;
     els.agentWorkbench.hidden = true;
@@ -1455,8 +1639,10 @@
     const previousPrincipal = state.principal;
     state.sessionGeneration += 1;
     state.agent.requestSequence += 1;
+    state.agentV2.requestSequence += 1;
     state.chat.requestSequence += 1;
     stopAgentPolling();
+    stopAgentV2Polling();
     stopCoalChatPolling();
     if (preserveWorkspace) {
       state.sessionRecovery = {
@@ -1481,6 +1667,9 @@
     state.agent.creating = false;
     state.agent.listLoading = false;
     state.agent.detailLoading = false;
+    state.agentV2.loading = false;
+    state.agentV2.detailLoading = false;
+    state.agentV2.busy.clear();
     state.chat.listLoading = false;
     state.chat.detailLoading = false;
     state.chat.creating = false;
@@ -1536,6 +1725,24 @@
       state.agent.detailError = "";
       state.agent.pollStartedAt = 0;
       state.agent.pollFailures = 0;
+      state.agentV2.selectedTab = "overview";
+      state.agentV2.flows = [];
+      state.agentV2.selectedFlowId = "";
+      state.agentV2.detail = null;
+      state.agentV2.jobs = [];
+      state.agentV2.memoryProposals = [];
+      state.agentV2.memories = [];
+      state.agentV2.skillProposals = [];
+      state.agentV2.skillVersions = [];
+      state.agentV2.flowsLoaded = false;
+      state.agentV2.jobsLoaded = false;
+      state.agentV2.governanceLoaded = false;
+      state.agentV2.loading = false;
+      state.agentV2.detailLoading = false;
+      state.agentV2.error = "";
+      state.agentV2.busy.clear();
+      state.agentV2.pollStartedAt = 0;
+      state.agentV2.pollFailures = 0;
       state.chat.sessions = [];
       state.chat.total = 0;
       state.chat.selectedSessionId = "";
@@ -1560,6 +1767,7 @@
       renderAll();
     }
     renderAgentWorkbench();
+    renderAgentV2();
     renderCoalChat();
     renderDraftList();
     renderAuthentication();
@@ -1658,7 +1866,14 @@
     const granted = new Set(
       principal && Array.isArray(principal.permissions)
         ? principal.permissions.filter((permission) =>
-            ["read", "write", "confirm", "submit"].includes(permission),
+            [
+              "read",
+              "write",
+              "confirm",
+              "submit",
+              "governance_review",
+              "skill_admin",
+            ].includes(permission),
           )
         : [],
     );
@@ -1666,6 +1881,8 @@
     const canWrite = granted.has("write");
     const canConfirm = granted.has("confirm");
     const canSubmit = granted.has("submit");
+    const canGovernanceReview = granted.has("governance_review");
+    const canManageSkills = granted.has("skill_admin");
     const credentialLocked = Boolean(
       principal &&
       (principal.must_change_password || principal.temporary_demo),
@@ -1901,6 +2118,12 @@
       if (effectiveSubmit) {
         restrictions.push("提交状态未知时先查询记录，不要更换幂等编号盲目重复报送。");
       }
+      if (canGovernanceReview && !credentialLocked) {
+        capabilities.push("审批或撤销受治理业务记忆，并与提案人保持四眼分离。");
+      }
+      if (canManageSkills && !credentialLocked) {
+        capabilities.push("审批或停用只读技能目录；批准后仍不会自动加载执行。");
+      }
     }
 
     return {
@@ -1925,6 +2148,18 @@
           label: "监管提交",
           granted: canSubmit,
           locked: canSubmit && credentialLocked,
+        },
+        {
+          key: "governance_review",
+          label: "业务记忆治理",
+          granted: canGovernanceReview,
+          locked: canGovernanceReview && credentialLocked,
+        },
+        {
+          key: "skill_admin",
+          label: "只读技能治理",
+          granted: canManageSkills,
+          locked: canManageSkills && credentialLocked,
         },
       ],
     };
@@ -2002,9 +2237,13 @@
       !principal || !hasPermission("read") || !hasPermission("write");
     els.welcomeStartButton.disabled =
       !principal || !hasPermission("read") || !hasPermission("write");
+    els.welcomeAutofillButton.disabled =
+      !principal || !hasPermission("read") || !hasPermission("write");
     els.welcomeNewDraftButton.disabled =
       !principal || !hasPermission("read") || !hasPermission("write");
     els.refreshDraftsButton.disabled = !principal || !hasPermission("read");
+    els.agentCenterButton.disabled = !principal || !hasPermission("read");
+    els.openAgentCenterQuickButton.disabled = !principal || !hasPermission("read");
     els.credentialNotice.hidden = !credentialRotationRequired();
     els.accessNotice.hidden =
       !principal || hasPermission("write") || credentialRotationRequired();
@@ -2019,6 +2258,7 @@
       els.demoBadge.hidden = true;
       els.accessNotice.hidden = true;
       renderAgentWorkbenchControls();
+      renderAgentV2();
       renderCoalChatControls();
       renderWelcomeActions();
       return;
@@ -2040,6 +2280,7 @@
         "当前账号被标记为待换密；可用功能以实际权限为准，后端禁止确认、提交。请联系管理员更新密码摘要。";
     }
     renderAgentWorkbenchControls();
+    renderAgentV2();
     renderCoalChatControls();
     renderWelcomeActions();
   }
@@ -2255,6 +2496,7 @@
     state.activeOperation = "新建草稿";
     setBusy(els.newDraftButton, true, "正在新建…");
     setBusy(els.welcomeStartButton, true, "正在新建…");
+    setBusy(els.welcomeAutofillButton, true, "正在创建草稿…");
     setBusy(els.welcomeNewDraftButton, true, "正在新建…");
     try {
       const payload = await api(endpoints.drafts(), {
@@ -2285,6 +2527,7 @@
       state.activeOperation = "";
       setBusy(els.newDraftButton, false);
       setBusy(els.welcomeStartButton, false);
+      setBusy(els.welcomeAutofillButton, false);
       setBusy(els.welcomeNewDraftButton, false);
       renderAuthentication();
     }
@@ -2969,6 +3212,7 @@
     renderStepper();
     lockSubmittedDraft();
     renderAgentWorkbenchControls();
+    renderAgentV2();
     renderCoalChatControls();
   }
 
@@ -2981,7 +3225,7 @@
     els.draftStatus.className = `status-badge status-${draft.status}`;
     const updated = draft.updated_at ? formatDateTime(draft.updated_at) : "尚未保存时间";
     els.draftMeta.textContent = `草稿编号 ${draft.id} · 更新于 ${updated}`;
-    els.deleteDraftButton.disabled = draft.status === "submitted";
+    els.deleteDraftButton.disabled = draft.status !== "draft";
     els.undoButton.disabled = state.undoStack.length === 0 || draft.status === "submitted";
   }
 
@@ -2996,6 +3240,8 @@
       els.welcomeStartButton.textContent =
         `继续未完成填报：${truncateText(resumable.title || "未命名草稿", 22)}`;
       els.welcomeStartButton.disabled = false;
+      els.welcomeAutofillButton.textContent = "让 Agent 补全这份草稿";
+      els.welcomeAutofillButton.disabled = !canCreate;
       els.welcomeNewDraftButton.hidden = !canCreate;
       els.welcomeNewDraftButton.disabled = !canCreate;
       els.welcomeActionHint.textContent =
@@ -3005,6 +3251,8 @@
     delete els.welcomeStartButton.dataset.draftId;
     els.welcomeStartButton.textContent = "开始一份新填报";
     els.welcomeStartButton.disabled = !canCreate;
+    els.welcomeAutofillButton.textContent = "让 Agent 从材料自动填入";
+    els.welcomeAutofillButton.disabled = !canCreate;
     els.welcomeNewDraftButton.hidden = true;
     els.welcomeActionHint.textContent = canCreate
       ? "当前没有未完成填报，可以开始新建。"
@@ -3018,6 +3266,34 @@
       return;
     }
     await createDraft();
+  }
+
+  async function handleWelcomeAutofillAction() {
+    if (!hasPermission("read") || !hasPermission("write")) {
+      showToast("当前账号需要查看和编辑权限才能让 Agent 自动填入草稿。", "error");
+      return;
+    }
+    if (state.activeOperation) {
+      showToast(`正在${state.activeOperation}，请稍候。`, "error");
+      return;
+    }
+    setBusy(els.welcomeAutofillButton, true, "正在准备…");
+    try {
+      const resumable = state.drafts.find((draft) => draft.status !== "submitted");
+      if (resumable) {
+        await openDraft(resumable.id);
+      } else {
+        await createDraft();
+      }
+      if (!state.activeDraft || state.activeDraft.status === "submitted") return;
+      goToStep(2);
+      showToast(
+        "请选择 ERP、MES、地磅或化验系统导出的 JSON/CSV；Agent 会自动写入可验证字段。",
+      );
+      els.chooseFileButton.focus();
+    } finally {
+      setBusy(els.welcomeAutofillButton, false);
+    }
   }
 
   function renderDraftList() {
@@ -3381,7 +3657,7 @@
       els.pasteLabel.textContent = "粘贴监管事件快照 JSON";
       els.importButton.textContent = "导入监管事件快照";
     } else {
-      els.importButton.textContent = "导入并开始提取";
+      els.importButton.textContent = "让 Agent 自动填入草稿";
       setImportFormat(state.importFormat);
     }
   }
@@ -3643,7 +3919,7 @@
       showToast(
         state.importFormat === "text"
           ? "文字材料已交给助手读取，结果仍需人工核对。"
-          : "来源已导入，正在进行智能提取。",
+          : "来源已导入并自动写入草稿，正在检查缺项和来源完整性。",
       );
       await runAssistant({
         quietStart: true,
@@ -5145,7 +5421,9 @@
       return;
     }
     stopAgentPolling();
+    stopAgentV2Polling();
     els.agentWorkbench.hidden = true;
+    els.agentV2Workbench.hidden = true;
     els.coalChatWorkbench.hidden = false;
     if (state.activeDraft && !state.chat.draftChoiceTouched) {
       els.coalChatUseCurrentDraft.checked = true;
@@ -6736,6 +7014,1900 @@
     return group;
   }
 
+  const agentV2ActiveStatuses = new Set([
+    "queued",
+    "running",
+    "waiting",
+    "retrying",
+  ]);
+
+  const agentV2AttentionStatuses = new Set([
+    "blocked",
+    "failed",
+    "lost",
+  ]);
+
+  function agentV2StatusLabel(status) {
+    const labels = {
+      idle: "尚未读取",
+      queued: "等待执行",
+      running: "正在检查",
+      waiting: "等待处理",
+      retrying: "正在重试",
+      blocked: "需要关注",
+      succeeded: "已完成",
+      completed: "已完成",
+      failed: "执行失败",
+      cancelled: "已取消",
+      lost: "执行中断",
+      enabled: "已启用",
+      disabled: "已停用",
+      pending: "待审批",
+      approved: "已批准",
+      rejected: "已拒绝",
+      active: "已生效",
+      retired: "已停用",
+    };
+    const normalized = String(status || "idle").toLowerCase();
+    return labels[normalized] || normalized.replace(/_/g, " ");
+  }
+
+  function normalizeAgentV2Status(status, fallback = "idle") {
+    const normalized = String(status || fallback)
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
+    return normalized || fallback;
+  }
+
+  function agentV2FlowId(source) {
+    return String(
+      (source && (source.flow_id || source.id || source.task_id)) || "",
+    );
+  }
+
+  function normalizeAgentV2Flow(raw) {
+    const source = raw && typeof raw === "object" ? raw : {};
+    const stateData =
+      source.state && typeof source.state === "object"
+        ? source.state
+        : source.state_json && typeof source.state_json === "object"
+          ? source.state_json
+          : {};
+    const steps = Array.isArray(source.steps)
+      ? source.steps
+      : Array.isArray(stateData.steps)
+        ? stateData.steps
+        : [];
+    return {
+      ...source,
+      flow_id: agentV2FlowId(source),
+      workflow_name: String(
+        source.workflow_name || source.workflow || "daily_coal_health",
+      ),
+      goal_text: String(source.goal_text || source.goal || ""),
+      draft_id: String(source.draft_id || stateData.draft_id || ""),
+      status: normalizeAgentV2Status(source.status, "queued"),
+      revision: Number(source.revision || 1),
+      current_step: String(
+        source.current_step ||
+          source.current_step_name ||
+          stateData.current_step ||
+          "",
+      ),
+      trigger_type: String(
+        source.trigger_type ||
+          (source.trigger && source.trigger.type) ||
+          "manual",
+      ),
+      created_at: source.created_at || source.queued_at || "",
+      updated_at: source.updated_at || source.completed_at || source.created_at || "",
+      completed_at: source.completed_at || "",
+      summary:
+        source.summary !== undefined
+          ? source.summary
+          : source.result_summary !== undefined
+            ? source.result_summary
+            : stateData.summary,
+      error_message: String(
+        source.error_message ||
+          (typeof source.error === "string" ? source.error : "") ||
+          (source.error && source.error.message) ||
+          (stateData.error && stateData.error.message) ||
+          "",
+      ),
+      steps: steps.map(normalizeAgentV2Step),
+      state: stateData,
+    };
+  }
+
+  function normalizeAgentV2Step(raw, index = 0) {
+    const source = raw && typeof raw === "object" ? raw : {};
+    const result =
+      source.result && typeof source.result === "object" ? source.result : {};
+    return {
+      ...source,
+      step_key: String(
+        source.step_key || source.key || source.name || `step-${index + 1}`,
+      ),
+      title: String(
+        source.title ||
+          source.label ||
+          source.name ||
+          source.step_key ||
+          `步骤 ${index + 1}`,
+      ),
+      specialist: String(source.specialist || source.worker || ""),
+      status: normalizeAgentV2Status(source.status, "queued"),
+      summary: String(
+        source.summary ||
+          result.summary ||
+          result.message ||
+          (result.executive_brief && result.executive_brief.headline) ||
+          source.error_message ||
+          (source.error && source.error.message) ||
+          "",
+      ),
+      started_at: source.started_at || "",
+      completed_at: source.completed_at || "",
+    };
+  }
+
+  function unwrapAgentV2Entity(payload, key) {
+    if (!payload || typeof payload !== "object") return null;
+    if (payload[key] && typeof payload[key] === "object") return payload[key];
+    if (payload.item && typeof payload.item === "object") return payload.item;
+    return payload;
+  }
+
+  function agentV2List(payload, ...keys) {
+    if (Array.isArray(payload)) return payload;
+    if (!payload || typeof payload !== "object") return [];
+    for (const key of keys) {
+      if (Array.isArray(payload[key])) return payload[key];
+    }
+    return Array.isArray(payload.items) ? payload.items : [];
+  }
+
+  async function openAgentV2Workbench() {
+    if (!state.principal || !hasPermission("read")) {
+      showToast("请先使用有读取权限的企业账号登录。", "error");
+      return;
+    }
+    stopAgentPolling();
+    stopCoalChatPolling();
+    els.agentWorkbench.hidden = true;
+    els.coalChatWorkbench.hidden = true;
+    els.agentV2Workbench.hidden = false;
+    if (state.interfaceMode !== "professional") {
+      state.agentV2.selectedTab = "overview";
+    }
+    renderAgentV2();
+    els.agentV2Workbench.focus();
+    await loadAgentV2Flows();
+    if (
+      state.agentV2.selectedFlowId &&
+      (!state.agentV2.detail ||
+        state.agentV2.detail.flow_id !== state.agentV2.selectedFlowId)
+    ) {
+      await loadAgentV2Flow(state.agentV2.selectedFlowId);
+    } else if (!state.agentV2.selectedFlowId && state.agentV2.flows.length) {
+      await selectAgentV2Flow(state.agentV2.flows[0].flow_id);
+    }
+    if (
+      state.interfaceMode === "professional" &&
+      state.agentV2.selectedTab !== "overview"
+    ) {
+      await loadAgentV2TabData(state.agentV2.selectedTab);
+    }
+  }
+
+  function closeAgentV2Workbench() {
+    stopAgentV2Polling();
+    els.agentV2Workbench.hidden = true;
+    const target =
+      state.interfaceMode === "simple"
+        ? els.openAgentCenterQuickButton
+        : els.agentCenterButton;
+    if (target && !target.disabled) target.focus();
+  }
+
+  async function refreshAgentV2Workbench() {
+    if (state.agentV2.loading || state.agentV2.busy.has("refresh")) return;
+    state.agentV2.busy.add("refresh");
+    setBusy(els.refreshAgentV2Button, true, "刷新中…");
+    state.agentV2.error = "";
+    renderAgentV2Error();
+    try {
+      await loadAgentV2Flows({ force: true });
+      if (state.agentV2.selectedFlowId) {
+        await loadAgentV2Flow(state.agentV2.selectedFlowId, { force: true });
+      }
+      if (state.interfaceMode === "professional") {
+        if (state.agentV2.selectedTab === "schedules") {
+          await loadAgentV2Jobs({ force: true });
+        }
+        if (state.agentV2.selectedTab === "governance") {
+          await loadAgentV2Governance({ force: true });
+        }
+      }
+    } finally {
+      state.agentV2.busy.delete("refresh");
+      setBusy(els.refreshAgentV2Button, false);
+      renderAgentV2();
+    }
+  }
+
+  async function selectAgentV2Tab(tabName) {
+    const allowed = ["overview", "schedules", "governance"];
+    const next = allowed.includes(tabName) ? tabName : "overview";
+    if (state.interfaceMode !== "professional" && next !== "overview") {
+      showToast("请切换到“专业工具”后管理定时任务、记忆和技能。");
+      return;
+    }
+    state.agentV2.selectedTab = next;
+    renderAgentV2Tabs();
+    await loadAgentV2TabData(next);
+  }
+
+  async function loadAgentV2TabData(tabName) {
+    if (tabName === "overview") {
+      await loadAgentV2Flows();
+    } else if (tabName === "schedules") {
+      await loadAgentV2Jobs();
+    } else if (tabName === "governance") {
+      await loadAgentV2Governance();
+    }
+  }
+
+  async function loadAgentV2Flows(options = {}) {
+    if (
+      !state.principal ||
+      !hasPermission("read") ||
+      state.agentV2.loading ||
+      (state.agentV2.flowsLoaded && !options.force)
+    ) {
+      renderAgentV2();
+      return;
+    }
+    const sessionGeneration = state.sessionGeneration;
+    state.agentV2.loading = true;
+    state.agentV2.error = "";
+    renderAgentV2();
+    try {
+      const payload = await api(endpoints.agentFlows(), { timeoutMs: 20000 });
+      if (sessionRequestIsStale(sessionGeneration)) return;
+      const rows = agentV2List(payload, "flows");
+      state.agentV2.flows = rows
+        .map(normalizeAgentV2Flow)
+        .filter((flow) => flow.flow_id);
+      state.agentV2.flowsLoaded = true;
+      if (
+        state.agentV2.selectedFlowId &&
+        !state.agentV2.flows.some(
+          (flow) => flow.flow_id === state.agentV2.selectedFlowId,
+        )
+      ) {
+        state.agentV2.selectedFlowId = "";
+        state.agentV2.detail = null;
+      }
+    } catch (error) {
+      if (sessionRequestIsStale(sessionGeneration, error)) return;
+      state.agentV2.error = error.message;
+    } finally {
+      if (!sessionRequestIsStale(sessionGeneration)) {
+        state.agentV2.loading = false;
+        renderAgentV2();
+      }
+    }
+  }
+
+  async function selectAgentV2Flow(flowId) {
+    if (!flowId) return;
+    state.agentV2.selectedFlowId = flowId;
+    state.agentV2.detail = null;
+    state.agentV2.pollStartedAt = Date.now();
+    state.agentV2.pollFailures = 0;
+    renderAgentV2();
+    await loadAgentV2Flow(flowId);
+  }
+
+  async function loadAgentV2Flow(flowId, options = {}) {
+    if (
+      !flowId ||
+      !state.principal ||
+      !hasPermission("read") ||
+      (state.agentV2.detailLoading && !options.polling)
+    ) {
+      return;
+    }
+    const sessionGeneration = state.sessionGeneration;
+    const sequence = ++state.agentV2.requestSequence;
+    if (!options.polling) state.agentV2.detailLoading = true;
+    renderAgentV2FlowDetail();
+    try {
+      const payload = await api(endpoints.agentFlow(flowId), {
+        timeoutMs: 20000,
+      });
+      if (
+        sessionRequestIsStale(sessionGeneration) ||
+        sequence !== state.agentV2.requestSequence ||
+        state.agentV2.selectedFlowId !== flowId
+      ) {
+        return;
+      }
+      const flow = normalizeAgentV2Flow(
+        unwrapAgentV2Entity(payload, "flow"),
+      );
+      if (!flow.flow_id) throw new Error("服务返回的任务详情缺少任务编号。");
+      state.agentV2.detail = flow;
+      state.agentV2.error = "";
+      state.agentV2.pollFailures = 0;
+      upsertAgentV2Flow(flow);
+      if (agentV2ActiveStatuses.has(flow.status)) {
+        scheduleAgentV2Poll(1800);
+      } else {
+        stopAgentV2Polling();
+      }
+    } catch (error) {
+      if (
+        sessionRequestIsStale(sessionGeneration, error) ||
+        sequence !== state.agentV2.requestSequence ||
+        state.agentV2.selectedFlowId !== flowId
+      ) {
+        return;
+      }
+      state.agentV2.pollFailures += 1;
+      state.agentV2.error = error.message;
+      if (
+        options.polling &&
+        state.agentV2.pollFailures < 5 &&
+        state.agentV2.detail &&
+        agentV2ActiveStatuses.has(state.agentV2.detail.status)
+      ) {
+        scheduleAgentV2Poll(
+          Math.min(10000, 1800 * state.agentV2.pollFailures),
+        );
+      }
+    } finally {
+      if (sequence === state.agentV2.requestSequence) {
+        state.agentV2.detailLoading = false;
+        renderAgentV2();
+      }
+    }
+  }
+
+  function upsertAgentV2Flow(flow) {
+    const index = state.agentV2.flows.findIndex(
+      (item) => item.flow_id === flow.flow_id,
+    );
+    if (index >= 0) {
+      state.agentV2.flows.splice(index, 1, {
+        ...state.agentV2.flows[index],
+        ...flow,
+      });
+    } else {
+      state.agentV2.flows.unshift(flow);
+    }
+  }
+
+  async function startAgentV2HealthCheck() {
+    if (state.agentV2.busy.has("create-flow")) return;
+    if (!state.principal || !hasPermission("read") || !state.activeDraft) {
+      showToast(
+        state.activeDraft
+          ? "当前账号没有读取该草稿的权限。"
+          : "请先从左侧打开一份需要体检的草稿。",
+        "error",
+      );
+      return;
+    }
+    state.agentV2.busy.add("create-flow");
+    const draftId = state.activeDraft.id;
+    [els.runAgentCenterQuickButton, els.startAgentV2HealthButton].forEach(
+      (button) => setBusy(button, true, "正在发起…"),
+    );
+    try {
+      const payload = await api(endpoints.agentFlows(), {
+        method: "POST",
+        body: {
+          workflow_name: "daily_coal_health",
+          draft_id: draftId,
+          goal_text:
+            "对当前草稿执行每日煤炭体检，汇总来源、时间、煤流平衡和历史异常，给出负责人可读结论。只读分析，不修改、确认或提交草稿。",
+          client_request_id: newClientRequestId("daily-health"),
+        },
+        timeoutMs: 30000,
+      });
+      const flow = normalizeAgentV2Flow(
+        unwrapAgentV2Entity(payload, "flow"),
+      );
+      if (!flow.flow_id) throw new Error("服务没有返回新任务编号。");
+      upsertAgentV2Flow(flow);
+      state.agentV2.flowsLoaded = true;
+      state.agentV2.selectedFlowId = flow.flow_id;
+      state.agentV2.detail = flow;
+      state.agentV2.error = "";
+      state.agentV2.pollStartedAt = Date.now();
+      state.agentV2.pollFailures = 0;
+      els.agentWorkbench.hidden = true;
+      els.coalChatWorkbench.hidden = true;
+      els.agentV2Workbench.hidden = false;
+      state.agentV2.selectedTab = "overview";
+      renderAgentV2();
+      els.agentV2Workbench.focus();
+      if (agentV2ActiveStatuses.has(flow.status)) scheduleAgentV2Poll(800);
+      showToast("每日煤炭体检已发起，可离开页面后稍后回来查看。");
+    } catch (error) {
+      state.agentV2.error = error.message;
+      renderAgentV2();
+      showToast(`体检没有发起成功：${error.message}`, "error");
+    } finally {
+      state.agentV2.busy.delete("create-flow");
+      [els.runAgentCenterQuickButton, els.startAgentV2HealthButton].forEach(
+        (button) => setBusy(button, false),
+      );
+      renderAgentV2();
+    }
+  }
+
+  async function cancelSelectedAgentV2Flow() {
+    const flow = state.agentV2.detail;
+    if (
+      !flow ||
+      !agentV2ActiveStatuses.has(flow.status) ||
+      state.agentV2.busy.has("flow-action")
+    ) {
+      return;
+    }
+    state.agentV2.busy.add("flow-action");
+    setBusy(els.cancelAgentV2FlowButton, true, "取消中…");
+    try {
+      const payload = await api(endpoints.agentFlowCancel(flow.flow_id), {
+        method: "POST",
+        body: { expected_revision: flow.revision },
+        timeoutMs: 20000,
+      });
+      const next = normalizeAgentV2Flow(
+        unwrapAgentV2Entity(payload, "flow"),
+      );
+      state.agentV2.detail = next.flow_id
+        ? next
+        : { ...flow, status: "cancelled" };
+      upsertAgentV2Flow(state.agentV2.detail);
+      stopAgentV2Polling();
+      showToast("任务已取消；已经产生的只读检查记录仍会保留。");
+    } catch (error) {
+      state.agentV2.error = error.message;
+      showToast(`取消失败：${error.message}`, "error");
+    } finally {
+      state.agentV2.busy.delete("flow-action");
+      setBusy(els.cancelAgentV2FlowButton, false);
+      renderAgentV2();
+    }
+  }
+
+  async function retrySelectedAgentV2Flow() {
+    const flow = state.agentV2.detail;
+    if (
+      !flow ||
+      !["blocked", "failed"].includes(flow.status) ||
+      state.agentV2.busy.has("flow-action")
+    ) {
+      return;
+    }
+    state.agentV2.busy.add("flow-action");
+    setBusy(els.retryAgentV2FlowButton, true, "重新发起…");
+    try {
+      const payload = await api(endpoints.agentFlowRetry(flow.flow_id), {
+        method: "POST",
+        body: { expected_revision: flow.revision },
+        timeoutMs: 30000,
+      });
+      const next = normalizeAgentV2Flow(
+        unwrapAgentV2Entity(payload, "flow"),
+      );
+      if (!next.flow_id) throw new Error("服务没有返回重试后的任务。");
+      state.agentV2.detail = next;
+      state.agentV2.selectedFlowId = next.flow_id;
+      upsertAgentV2Flow(next);
+      state.agentV2.pollStartedAt = Date.now();
+      state.agentV2.pollFailures = 0;
+      if (agentV2ActiveStatuses.has(next.status)) scheduleAgentV2Poll(800);
+      showToast("任务已重新发起。");
+    } catch (error) {
+      state.agentV2.error = error.message;
+      showToast(`重新执行失败：${error.message}`, "error");
+    } finally {
+      state.agentV2.busy.delete("flow-action");
+      setBusy(els.retryAgentV2FlowButton, false);
+      renderAgentV2();
+    }
+  }
+
+  function scheduleAgentV2Poll(delayMs) {
+    stopAgentV2Polling();
+    const flow = state.agentV2.detail;
+    if (
+      !flow ||
+      !agentV2ActiveStatuses.has(flow.status) ||
+      els.agentV2Workbench.hidden
+    ) {
+      return;
+    }
+    if (!state.agentV2.pollStartedAt) state.agentV2.pollStartedAt = Date.now();
+    if (Date.now() - state.agentV2.pollStartedAt > 180_000) {
+      state.agentV2.error =
+        "任务仍在后台执行，页面已停止自动刷新。请稍后点击“刷新”查看。";
+      renderAgentV2();
+      return;
+    }
+    state.agentV2.pollTimer = window.setTimeout(() => {
+      state.agentV2.pollTimer = null;
+      void loadAgentV2Flow(flow.flow_id, { polling: true });
+    }, Math.max(0, Number(delayMs) || 0));
+  }
+
+  function stopAgentV2Polling() {
+    if (state.agentV2.pollTimer !== null) {
+      window.clearTimeout(state.agentV2.pollTimer);
+      state.agentV2.pollTimer = null;
+    }
+  }
+
+  function normalizeAgentV2Job(raw) {
+    const source = raw && typeof raw === "object" ? raw : {};
+    const schedule =
+      source.schedule && typeof source.schedule === "object"
+        ? source.schedule
+        : source.schedule_json && typeof source.schedule_json === "object"
+          ? source.schedule_json
+          : {};
+    return {
+      ...source,
+      job_id: String(source.job_id || source.id || ""),
+      name: String(source.name || "每日煤炭体检"),
+      workflow_name: String(source.workflow_name || "daily_coal_health"),
+      draft_id: String(source.draft_id || ""),
+      schedule_kind: String(source.schedule_kind || schedule.kind || "daily"),
+      schedule,
+      enabled: source.enabled !== false && source.status !== "disabled",
+      revision: Number(source.revision || 1),
+      next_run_at: source.next_run_at || "",
+      last_run_at: source.last_run_at || "",
+      last_flow_id: String(source.last_flow_id || ""),
+    };
+  }
+
+  async function loadAgentV2Jobs(options = {}) {
+    if (
+      !state.principal ||
+      !hasPermission("read") ||
+      state.agentV2.busy.has("load-jobs") ||
+      (state.agentV2.jobsLoaded && !options.force)
+    ) {
+      renderAgentV2Jobs();
+      return;
+    }
+    const sessionGeneration = state.sessionGeneration;
+    state.agentV2.busy.add("load-jobs");
+    renderAgentV2Jobs();
+    try {
+      const payload = await api(endpoints.agentJobs(), { timeoutMs: 20000 });
+      if (sessionRequestIsStale(sessionGeneration)) return;
+      state.agentV2.jobs = agentV2List(payload, "jobs")
+        .map(normalizeAgentV2Job)
+        .filter((job) => job.job_id);
+      state.agentV2.jobsLoaded = true;
+      state.agentV2.error = "";
+    } catch (error) {
+      if (sessionRequestIsStale(sessionGeneration, error)) return;
+      state.agentV2.error = error.message;
+    } finally {
+      if (!sessionRequestIsStale(sessionGeneration)) {
+        state.agentV2.busy.delete("load-jobs");
+        renderAgentV2();
+      }
+    }
+  }
+
+  function renderAgentV2JobScheduleFields() {
+    const daily = els.agentV2JobScheduleKind.value !== "interval";
+    els.agentV2JobDailyField.hidden = !daily;
+    els.agentV2JobIntervalField.hidden = daily;
+    els.agentV2JobTimezoneField.hidden = !daily;
+    els.agentV2JobDailyTime.required = daily;
+    els.agentV2JobIntervalMinutes.required = !daily;
+  }
+
+  async function createAgentV2Job() {
+    if (state.agentV2.busy.has("create-job")) return;
+    if (!hasPermission("write") || !state.activeDraft) {
+      showToast(
+        state.activeDraft
+          ? "当前账号没有创建定时任务的编辑权限。"
+          : "请先打开需要定时体检的草稿。",
+        "error",
+      );
+      return;
+    }
+    const scheduleKind = els.agentV2JobScheduleKind.value;
+    const intervalMinutes = Number(els.agentV2JobIntervalMinutes.value);
+    if (
+      scheduleKind === "interval" &&
+      (!Number.isFinite(intervalMinutes) ||
+        intervalMinutes < 5 ||
+        intervalMinutes > 10080)
+    ) {
+      showToast("间隔时间须为 5 到 10080 分钟。", "error");
+      els.agentV2JobIntervalMinutes.focus();
+      return;
+    }
+    const schedule =
+      scheduleKind === "interval"
+        ? {
+            interval_seconds: Math.round(intervalMinutes * 60),
+          }
+        : {
+            time: els.agentV2JobDailyTime.value,
+            timezone: els.agentV2JobTimezone.value,
+          };
+    if (scheduleKind === "daily" && !schedule.time) {
+      showToast("请选择每天执行时间。", "error");
+      return;
+    }
+    state.agentV2.busy.add("create-job");
+    setBusy(els.createAgentV2JobButton, true, "创建中…");
+    try {
+      const payload = await api(endpoints.agentJobs(), {
+        method: "POST",
+        body: {
+          name: els.agentV2JobName.value.trim() || "每日煤炭体检",
+          workflow_name: "daily_coal_health",
+          draft_id: state.activeDraft.id,
+          schedule_kind: scheduleKind,
+          schedule,
+          enabled: true,
+        },
+        timeoutMs: 20000,
+      });
+      const job = normalizeAgentV2Job(
+        unwrapAgentV2Entity(payload, "job"),
+      );
+      if (!job.job_id) throw new Error("服务没有返回定时任务编号。");
+      state.agentV2.jobs.unshift(job);
+      state.agentV2.jobsLoaded = true;
+      els.agentV2JobName.value = "每日煤炭体检";
+      showToast("定时任务已创建；它只会执行只读煤炭体检。");
+    } catch (error) {
+      state.agentV2.error = error.message;
+      showToast(`创建失败：${error.message}`, "error");
+    } finally {
+      state.agentV2.busy.delete("create-job");
+      setBusy(els.createAgentV2JobButton, false);
+      renderAgentV2();
+    }
+  }
+
+  async function updateAgentV2Job(job, action) {
+    if (
+      !job ||
+      !hasPermission("write") ||
+      state.agentV2.busy.has(`job-${job.job_id}`)
+    ) {
+      return;
+    }
+    state.agentV2.busy.add(`job-${job.job_id}`);
+    renderAgentV2Jobs();
+    try {
+      let payload;
+      if (action === "run") {
+        payload = await api(endpoints.agentJobRun(job.job_id), {
+          method: "POST",
+          body: {
+            client_request_id: newClientRequestId("job-run"),
+          },
+          timeoutMs: 30000,
+        });
+        const flow = normalizeAgentV2Flow(
+          unwrapAgentV2Entity(payload, "flow"),
+        );
+        if (flow.flow_id) {
+          upsertAgentV2Flow(flow);
+          state.agentV2.flowsLoaded = true;
+          state.agentV2.selectedFlowId = flow.flow_id;
+          state.agentV2.detail = flow;
+        }
+        const refreshedJob = normalizeAgentV2Job(
+          unwrapAgentV2Entity(payload, "job"),
+        );
+        if (refreshedJob.job_id) {
+          const index = state.agentV2.jobs.findIndex(
+            (item) => item.job_id === job.job_id,
+          );
+          if (index >= 0) state.agentV2.jobs.splice(index, 1, refreshedJob);
+        }
+        showToast("定时任务已立即执行，可在“今日概览”查看进度。");
+      } else {
+        payload = await api(endpoints.agentJob(job.job_id), {
+          method: "PATCH",
+          body: {
+            enabled: !job.enabled,
+            expected_revision: job.revision,
+          },
+          timeoutMs: 20000,
+        });
+        const next = normalizeAgentV2Job(
+          unwrapAgentV2Entity(payload, "job"),
+        );
+        const index = state.agentV2.jobs.findIndex(
+          (item) => item.job_id === job.job_id,
+        );
+        if (index >= 0) {
+          state.agentV2.jobs.splice(
+            index,
+            1,
+            next.job_id ? next : { ...job, enabled: !job.enabled },
+          );
+        }
+        showToast(job.enabled ? "定时任务已停用。" : "定时任务已启用。");
+      }
+      state.agentV2.error = "";
+    } catch (error) {
+      state.agentV2.error = error.message;
+      showToast(`操作失败：${error.message}`, "error");
+    } finally {
+      state.agentV2.busy.delete(`job-${job.job_id}`);
+      renderAgentV2();
+    }
+  }
+
+  async function deleteAgentV2Job(job) {
+    if (
+      !job ||
+      !hasPermission("write") ||
+      state.agentV2.busy.has(`job-${job.job_id}`)
+    ) {
+      return;
+    }
+    if (
+      !window.confirm(
+        `确定移除定时任务“${job.name}”吗？历史执行记录仍会保留。`,
+      )
+    ) {
+      return;
+    }
+    state.agentV2.busy.add(`job-${job.job_id}`);
+    renderAgentV2Jobs();
+    try {
+      await api(endpoints.agentJob(job.job_id), {
+        method: "DELETE",
+        body: { expected_revision: job.revision },
+        timeoutMs: 20000,
+      });
+      state.agentV2.jobs = state.agentV2.jobs.filter(
+        (item) => item.job_id !== job.job_id,
+      );
+      showToast("定时任务已移除；历史体检记录仍保留。");
+    } catch (error) {
+      state.agentV2.error = error.message;
+      showToast(`移除失败：${error.message}`, "error");
+    } finally {
+      state.agentV2.busy.delete(`job-${job.job_id}`);
+      renderAgentV2();
+    }
+  }
+
+  function normalizeAgentV2Proposal(raw, kind) {
+    const source = raw && typeof raw === "object" ? raw : {};
+    return {
+      ...source,
+      proposal_id: String(source.proposal_id || source.id || ""),
+      kind,
+      status: normalizeAgentV2Status(source.status, "pending"),
+      revision: Number(source.revision || 1),
+      title: String(
+        source.title ||
+          source.key ||
+          source.memory_key ||
+          source.skill_name ||
+          (kind === "memory" ? "业务记忆提案" : "只读技能提案"),
+      ),
+      description: String(
+        source.reason ||
+          source.description ||
+          source.value ||
+          source.value_text ||
+          "",
+      ),
+      created_at: source.created_at || "",
+    };
+  }
+
+  async function loadAgentV2Governance(options = {}) {
+    if (
+      !state.principal ||
+      !hasPermission("read") ||
+      state.agentV2.busy.has("load-governance") ||
+      (state.agentV2.governanceLoaded && !options.force)
+    ) {
+      renderAgentV2Governance();
+      return;
+    }
+    const sessionGeneration = state.sessionGeneration;
+    state.agentV2.busy.add("load-governance");
+    renderAgentV2Governance();
+    try {
+      const [memoryPayload, memoriesPayload, skillPayload, versionsPayload] =
+        await Promise.all([
+          api(endpoints.agentMemoryProposals(), { timeoutMs: 20000 }),
+          api(endpoints.agentMemories(), { timeoutMs: 20000 }),
+          api(endpoints.agentSkillProposals(), { timeoutMs: 20000 }),
+          api(endpoints.agentSkillVersions(), { timeoutMs: 20000 }),
+        ]);
+      if (sessionRequestIsStale(sessionGeneration)) return;
+      state.agentV2.memoryProposals = agentV2List(
+        memoryPayload,
+        "proposals",
+        "memory_proposals",
+      )
+        .map((item) => normalizeAgentV2Proposal(item, "memory"))
+        .filter((item) => item.proposal_id);
+      state.agentV2.memories = agentV2List(memoriesPayload, "memories");
+      state.agentV2.skillProposals = agentV2List(
+        skillPayload,
+        "proposals",
+        "skill_proposals",
+      )
+        .map((item) => normalizeAgentV2Proposal(item, "skill"))
+        .filter((item) => item.proposal_id);
+      state.agentV2.skillVersions = agentV2List(
+        versionsPayload,
+        "skill_versions",
+        "skills",
+      );
+      state.agentV2.governanceLoaded = true;
+      state.agentV2.error = "";
+    } catch (error) {
+      if (sessionRequestIsStale(sessionGeneration, error)) return;
+      state.agentV2.error = error.message;
+    } finally {
+      if (!sessionRequestIsStale(sessionGeneration)) {
+        state.agentV2.busy.delete("load-governance");
+        renderAgentV2();
+      }
+    }
+  }
+
+  async function createAgentV2MemoryProposal() {
+    if (state.agentV2.busy.has("create-memory")) return;
+    if (!hasPermission("write")) {
+      showToast("当前账号没有提出业务记忆的编辑权限。", "error");
+      return;
+    }
+    const scopeType = els.agentV2MemoryScope.value;
+    const scopeId =
+      scopeType === "draft"
+        ? state.activeDraft && state.activeDraft.id
+        : state.principal && state.principal.actor_id;
+    if (!scopeId) {
+      showToast("请先打开草稿，再提出仅限当前草稿的记忆。", "error");
+      return;
+    }
+    state.agentV2.busy.add("create-memory");
+    setBusy(els.createAgentV2MemoryProposalButton, true, "提交中…");
+    try {
+      const payload = await api(endpoints.agentMemoryProposals(), {
+        method: "POST",
+        body: {
+          scope_type: scopeType,
+          scope_id: String(scopeId),
+          key: els.agentV2MemoryKey.value.trim(),
+          value: els.agentV2MemoryValue.value.trim(),
+          reason: els.agentV2MemoryReason.value.trim(),
+          source_refs: [],
+        },
+        timeoutMs: 20000,
+      });
+      const proposal = normalizeAgentV2Proposal(
+        unwrapAgentV2Entity(payload, "proposal"),
+        "memory",
+      );
+      if (!proposal.proposal_id) throw new Error("服务没有返回记忆提案编号。");
+      state.agentV2.memoryProposals.unshift(proposal);
+      state.agentV2.governanceLoaded = true;
+      els.agentV2MemoryProposalForm.reset();
+      showToast("记忆提案已提交，审批前不会影响智能体判断。");
+    } catch (error) {
+      state.agentV2.error = error.message;
+      showToast(`提案提交失败：${error.message}`, "error");
+    } finally {
+      state.agentV2.busy.delete("create-memory");
+      setBusy(els.createAgentV2MemoryProposalButton, false);
+      renderAgentV2();
+    }
+  }
+
+  async function createAgentV2SkillProposal() {
+    if (state.agentV2.busy.has("create-skill")) return;
+    if (!hasPermission("write")) {
+      showToast("当前账号没有提出技能的编辑权限。", "error");
+      return;
+    }
+    const skillName = els.agentV2SkillName.value.trim();
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skillName)) {
+      showToast("技能标识只能使用小写字母、数字和连字符。", "error");
+      els.agentV2SkillName.focus();
+      return;
+    }
+    const procedure = els.agentV2SkillProcedure.value
+      .split(/\r?\n/)
+      .map((step) => step.trim())
+      .filter(Boolean);
+    if (!procedure.length) {
+      showToast("请至少填写一个技能执行步骤。", "error");
+      return;
+    }
+    state.agentV2.busy.add("create-skill");
+    setBusy(els.createAgentV2SkillProposalButton, true, "提交中…");
+    try {
+      const payload = await api(endpoints.agentSkillProposals(), {
+        method: "POST",
+        body: {
+          skill_name: skillName,
+          description: els.agentV2SkillDescription.value.trim(),
+          procedure,
+          allowed_tools: ["draft_summary", "deterministic_preflight"],
+          source_refs: [],
+        },
+        timeoutMs: 20000,
+      });
+      const proposal = normalizeAgentV2Proposal(
+        unwrapAgentV2Entity(payload, "proposal"),
+        "skill",
+      );
+      if (!proposal.proposal_id) throw new Error("服务没有返回技能提案编号。");
+      state.agentV2.skillProposals.unshift(proposal);
+      state.agentV2.governanceLoaded = true;
+      els.agentV2SkillProposalForm.reset();
+      showToast("技能提案已保存，审批发布后仍需由服务加载才能执行。");
+    } catch (error) {
+      state.agentV2.error = error.message;
+      showToast(`提案提交失败：${error.message}`, "error");
+    } finally {
+      state.agentV2.busy.delete("create-skill");
+      setBusy(els.createAgentV2SkillProposalButton, false);
+      renderAgentV2();
+    }
+  }
+
+  async function decideAgentV2Proposal(proposal, decision) {
+    if (
+      !proposal ||
+      proposal.status !== "pending" ||
+      !canFinalizeWith("confirm") ||
+      state.agentV2.busy.has(`proposal-${proposal.proposal_id}`)
+    ) {
+      return;
+    }
+    const approve = decision === "approve";
+    const needsOtherReviewer =
+      proposal.proposed_by ===
+        String((state.principal && state.principal.actor_id) || "") &&
+      (proposal.kind === "skill" || proposal.scope_type !== "user");
+    if (approve && needsOtherReviewer) {
+      showToast("该共享提案必须由另一名有确认权限的人员批准。", "error");
+      return;
+    }
+    const approvalEffect =
+      proposal.kind === "memory"
+        ? "作为受治理业务记忆生效"
+        : "发布为受治理技能版本；服务加载该版本后才能执行";
+    if (
+      approve &&
+      !window.confirm(`确认批准“${proposal.title}”吗？批准后将${approvalEffect}。`)
+    ) {
+      return;
+    }
+    state.agentV2.busy.add(`proposal-${proposal.proposal_id}`);
+    renderAgentV2Governance();
+    try {
+      const endpoint =
+        proposal.kind === "memory"
+          ? endpoints.agentMemoryProposalDecision(proposal.proposal_id)
+          : endpoints.agentSkillProposalDecision(proposal.proposal_id);
+      const payload = await api(endpoint, {
+        method: "POST",
+        body: {
+          decision: approve ? "approve" : "reject",
+          reason: approve
+            ? "由当前有确认权限的账号核验后批准。"
+            : "由当前有确认权限的账号拒绝，需补充或修正依据。",
+          expected_revision: proposal.revision,
+        },
+        timeoutMs: 20000,
+      });
+      const next = normalizeAgentV2Proposal(
+        unwrapAgentV2Entity(payload, "proposal"),
+        proposal.kind,
+      );
+      const collection =
+        proposal.kind === "memory"
+          ? state.agentV2.memoryProposals
+          : state.agentV2.skillProposals;
+      const index = collection.findIndex(
+        (item) => item.proposal_id === proposal.proposal_id,
+      );
+      if (index >= 0) {
+        collection.splice(
+          index,
+          1,
+          next.proposal_id
+            ? next
+            : { ...proposal, status: approve ? "approved" : "rejected" },
+        );
+      }
+      state.agentV2.governanceLoaded = false;
+      showToast(
+        approve
+          ? proposal.kind === "memory"
+            ? "记忆提案已批准并留痕。"
+            : "技能版本已批准发布；需服务加载后才能执行。"
+          : "提案已拒绝并留痕。",
+      );
+      await loadAgentV2Governance({ force: true });
+    } catch (error) {
+      state.agentV2.error = error.message;
+      showToast(`审批失败：${error.message}`, "error");
+    } finally {
+      state.agentV2.busy.delete(`proposal-${proposal.proposal_id}`);
+      renderAgentV2();
+    }
+  }
+
+  function renderAgentV2() {
+    renderAgentV2Tabs();
+    renderAgentV2Error();
+    renderAgentV2QuickCard();
+    renderAgentV2Summary();
+    renderAgentV2FlowList();
+    renderAgentV2FlowDetail();
+    renderAgentV2JobScheduleFields();
+    renderAgentV2Jobs();
+    renderAgentV2Governance();
+    renderAgentV2Controls();
+  }
+
+  function renderAgentV2Tabs() {
+    document.querySelectorAll("[data-agent-center-tab]").forEach((button) => {
+      const selected =
+        button.dataset.agentCenterTab === state.agentV2.selectedTab;
+      button.classList.toggle("is-active", selected);
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+    document.querySelectorAll("[data-agent-center-panel]").forEach((panel) => {
+      panel.hidden =
+        panel.dataset.agentCenterPanel !== state.agentV2.selectedTab;
+    });
+  }
+
+  function renderAgentV2Error() {
+    els.agentV2Error.hidden = !state.agentV2.error;
+    els.agentV2ErrorText.textContent = state.agentV2.error || "";
+  }
+
+  function agentV2LatestFlow() {
+    const rows = [...state.agentV2.flows];
+    rows.sort((left, right) => {
+      const leftAt = Date.parse(left.updated_at || left.created_at || "") || 0;
+      const rightAt =
+        Date.parse(right.updated_at || right.created_at || "") || 0;
+      return rightAt - leftAt;
+    });
+    return rows[0] || null;
+  }
+
+  function agentV2FlowNeedsAttention(flow) {
+    if (!flow) return false;
+    if (agentV2IntegrityFailed(flow) || flow.dispatch_ready === false) return true;
+    if (agentV2AttentionStatuses.has(flow.status)) return true;
+    const summary =
+      flow.summary && typeof flow.summary === "object" ? flow.summary : {};
+    const brief =
+      flow.state &&
+      flow.state.executive_brief &&
+      typeof flow.state.executive_brief === "object"
+        ? flow.state.executive_brief
+        : {};
+    const critic =
+      flow.state &&
+      flow.state.critic &&
+      typeof flow.state.critic === "object"
+        ? flow.state.critic
+        : {};
+    const priority = String(
+      brief.priority || critic.priority || summary.priority || summary.risk_level || "",
+    ).toLowerCase();
+    return (
+      ["critical", "high", "medium", "严重", "高", "中"].includes(priority) ||
+      (Array.isArray(summary.attention_items) &&
+        summary.attention_items.length > 0) ||
+      (Array.isArray(summary.risks) && summary.risks.length > 0)
+    );
+  }
+
+  function renderAgentV2QuickCard() {
+    const latest = agentV2LatestFlow();
+    const corrupt = state.agentV2.flows.filter(
+      agentV2IntegrityFailed,
+    ).length;
+    const attention = state.agentV2.flows.filter(
+      agentV2FlowNeedsAttention,
+    ).length;
+    const active = state.agentV2.flows.filter(
+      (flow) =>
+        !agentV2IntegrityFailed(flow) &&
+        flow.dispatch_ready !== false &&
+        agentV2ActiveStatuses.has(flow.status),
+    ).length;
+    let status = "idle";
+    let summary =
+      "打开任务中心，可让智能体持续检查当前草稿并给出易懂结论。";
+    let meta = "智能体不能代替人工确认，也不能提交监管平台。";
+    if (state.agentV2.loading) {
+      status = "running";
+      summary = "正在读取智能体任务状态…";
+    } else if (corrupt) {
+      status = "blocked";
+      summary = `有 ${corrupt} 项任务审计完整性异常，结论已隐藏，请联系管理员核查。`;
+    } else if (attention) {
+      status = "blocked";
+      summary = `有 ${attention} 项任务需要关注，请打开查看原因和建议。`;
+    } else if (active) {
+      status = "running";
+      summary = `有 ${active} 项体检正在执行，完成后会生成负责人可读结论。`;
+    } else if (latest) {
+      status = latest.status;
+      summary = agentV2LeaderSummary(latest);
+      meta = `最近更新：${formatDateTime(
+        latest.updated_at || latest.created_at,
+      )}`;
+    } else if (state.agentV2.flowsLoaded) {
+      summary = state.activeDraft
+        ? "当前还没有智能体任务，可立即体检这份草稿。"
+        : "当前还没有智能体任务，请先打开一份草稿。";
+    }
+    els.agentCenterQuickStatus.textContent = agentV2StatusLabel(status);
+    els.agentCenterQuickStatus.className = `agent-v2-status status-${status}`;
+    els.agentCenterQuickSummary.textContent = truncateText(summary, 180);
+    els.agentCenterQuickMeta.textContent = meta;
+  }
+
+  function renderAgentV2Summary() {
+    const now = new Date();
+    const todayKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+    const completedToday = state.agentV2.flows.filter((flow) => {
+      if (agentV2IntegrityFailed(flow)) return false;
+      if (!["succeeded", "completed"].includes(flow.status)) return false;
+      const date = new Date(flow.completed_at || flow.updated_at || "");
+      if (Number.isNaN(date.getTime())) return false;
+      return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}` ===
+        todayKey;
+    }).length;
+    const attention = state.agentV2.flows.filter(
+      agentV2FlowNeedsAttention,
+    ).length;
+    els.agentV2StatAttention.textContent = String(attention);
+    els.agentV2StatActive.textContent = String(
+      state.agentV2.flows.filter((flow) =>
+        !agentV2IntegrityFailed(flow) &&
+        flow.dispatch_ready !== false &&
+        agentV2ActiveStatuses.has(flow.status),
+      ).length,
+    );
+    els.agentV2StatCompleted.textContent = String(completedToday);
+    els.agentV2StatScheduled.textContent = String(
+      state.agentV2.jobs.filter(
+        (job) =>
+          job.enabled &&
+          job.integrity &&
+          typeof job.integrity === "object" &&
+          job.integrity.valid === true,
+      ).length,
+    );
+    els.agentV2BoundDraft.textContent = state.activeDraft
+      ? `当前草稿：${
+          state.activeDraft.enterprise.name ||
+          state.activeDraft.enterprise.mine_name ||
+          state.activeDraft.id
+        }（${state.activeDraft.id}）`
+      : "请先从左侧打开一份草稿。";
+  }
+
+  function renderAgentV2FlowList() {
+    const fragment = document.createDocumentFragment();
+    if (state.agentV2.loading && !state.agentV2.flows.length) {
+      fragment.append(el("p", "agent-v2-empty", "正在读取任务记录…"));
+    } else if (!state.agentV2.flows.length) {
+      fragment.append(
+        el(
+          "p",
+          "agent-v2-empty",
+          state.agentV2.flowsLoaded
+            ? "还没有智能体任务。打开草稿后可立即体检。"
+            : "打开任务中心后读取任务记录。",
+        ),
+      );
+    } else {
+      state.agentV2.flows.forEach((flow) => {
+        const integrityFailed = agentV2IntegrityFailed(flow);
+        const dispatchPending =
+          !integrityFailed &&
+          flow.status === "queued" &&
+          flow.dispatch_ready === false;
+        const button = el("button", "agent-v2-flow-item");
+        button.type = "button";
+        button.classList.toggle(
+          "is-active",
+          flow.flow_id === state.agentV2.selectedFlowId,
+        );
+        button.setAttribute(
+          "aria-current",
+          flow.flow_id === state.agentV2.selectedFlowId ? "true" : "false",
+        );
+        button.addEventListener("click", () =>
+          void selectAgentV2Flow(flow.flow_id),
+        );
+        const head = el("span", "agent-v2-flow-item-head");
+        head.append(
+          el("strong", "", agentV2WorkflowLabel(flow.workflow_name)),
+          agentV2StatusNode(
+            integrityFailed || dispatchPending ? "blocked" : flow.status,
+          ),
+        );
+        button.append(
+          head,
+          el(
+            "small",
+            "",
+            integrityFailed
+              ? "审计完整性异常，结论已隐藏"
+              : dispatchPending
+                ? "派发确认尚未完成，未执行任何业务工具"
+                : truncateText(agentV2LeaderSummary(flow), 70),
+          ),
+          el(
+            "small",
+            "",
+            integrityFailed
+              ? "记录时间不可信"
+              : formatDateTime(flow.updated_at || flow.created_at),
+          ),
+        );
+        fragment.append(button);
+      });
+    }
+    els.agentV2FlowList.replaceChildren(fragment);
+    els.agentV2FlowList.setAttribute(
+      "aria-busy",
+      String(state.agentV2.loading),
+    );
+    els.agentV2FlowListSummary.textContent = state.agentV2.loading
+      ? "正在读取"
+      : `共 ${state.agentV2.flows.length} 项`;
+  }
+
+  function renderAgentV2FlowDetail() {
+    const flow =
+      state.agentV2.detail &&
+      state.agentV2.detail.flow_id === state.agentV2.selectedFlowId
+        ? state.agentV2.detail
+        : state.agentV2.flows.find(
+            (item) => item.flow_id === state.agentV2.selectedFlowId,
+          ) || null;
+    if (!flow) {
+      els.agentV2FlowDetailContent.hidden = true;
+      els.agentV2FlowDetailEmpty.hidden = false;
+      if (state.agentV2.detailLoading) {
+        els.agentV2FlowDetailEmpty.replaceChildren(
+          el("p", "agent-v2-empty", "正在读取任务详情…"),
+        );
+      } else {
+        els.agentV2FlowDetailEmpty.replaceChildren(
+          el("span", "", "巡"),
+          el("h3", "", "选择一项任务查看结论"),
+          el(
+            "p",
+            "",
+            "领导先看结论和需关注事项；需要时再展开各专业步骤。",
+          ),
+        );
+      }
+      return;
+    }
+    els.agentV2FlowDetailEmpty.hidden = true;
+    els.agentV2FlowDetailContent.hidden = false;
+    els.agentV2FlowTitle.textContent = agentV2WorkflowLabel(flow.workflow_name);
+    const integrityFailed = agentV2IntegrityFailed(flow);
+    const triggerType =
+      flow.trigger && typeof flow.trigger === "object"
+        ? flow.trigger.type
+        : flow.trigger_type;
+    els.agentV2FlowMeta.textContent = integrityFailed
+      ? "审计完整性异常，元数据不可信"
+      : [
+          flow.current_step
+            ? `当前步骤：${agentV2StepLabel(flow.current_step)}`
+            : "",
+          triggerType ? `触发：${agentV2TriggerLabel(triggerType)}` : "",
+          flow.updated_at ? `更新：${formatDateTime(flow.updated_at)}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
+    const visibleStatus = integrityFailed ? "blocked" : flow.status;
+    els.agentV2FlowStatus.textContent = agentV2StatusLabel(visibleStatus);
+    els.agentV2FlowStatus.className =
+      `agent-v2-status status-${visibleStatus}`;
+    els.agentV2FlowSummary.textContent = agentV2LeaderSummary(flow);
+    renderAgentV2Findings(flow);
+    renderAgentV2Steps(flow);
+    els.cancelAgentV2FlowButton.hidden =
+      integrityFailed || !agentV2ActiveStatuses.has(flow.status);
+    els.retryAgentV2FlowButton.hidden =
+      agentV2IntegrityFailed(flow) ||
+      !["blocked", "failed"].includes(flow.status);
+    const actionBusy = state.agentV2.busy.has("flow-action");
+    els.cancelAgentV2FlowButton.disabled = actionBusy;
+    els.retryAgentV2FlowButton.disabled = actionBusy;
+  }
+
+  function agentV2WorkflowLabel(name) {
+    return String(name || "") === "daily_coal_health"
+      ? "每日煤炭体检"
+      : String(name || "煤炭智能任务").replace(/_/g, " ");
+  }
+
+  function agentV2IntegrityFailed(flow) {
+    return Boolean(
+      flow &&
+        (!flow.integrity ||
+          typeof flow.integrity !== "object" ||
+          flow.integrity.valid !== true),
+    );
+  }
+
+  function agentV2TriggerLabel(trigger) {
+    const labels = {
+      manual: "人工发起",
+      schedule: "定时执行",
+      event: "数据事件",
+      retry: "失败重试",
+    };
+    return labels[String(trigger || "")] || String(trigger || "未知");
+  }
+
+  function agentV2StepLabel(step) {
+    const labels = {
+      preflight: "准备与权限检查",
+      prepare_evidence: "汇集只读证据",
+      source: "来源凭证核验",
+      temporal: "时间与连续性检查",
+      physical: "煤流物理关系复算",
+      historical: "历史基线与异常分析",
+      critic: "反方复核",
+      critic_and_executive_brief: "反方复核与负责人摘要",
+      brief: "生成负责人摘要",
+    };
+    const normalized = String(step || "").toLowerCase();
+    return labels[normalized] || String(step || "").replace(/_/g, " ");
+  }
+
+  function agentV2SpecialistLabel(specialist) {
+    const labels = {
+      orchestrator: "任务协调员",
+      source: "来源凭证专家",
+      temporal: "时序质量专家",
+      physical: "煤流平衡专家",
+      historical: "历史交叉验证专家",
+      dissenting_critic: "反方核验员",
+      executive_brief: "负责人摘要员",
+    };
+    const normalized = String(specialist || "").toLowerCase();
+    return labels[normalized] || String(specialist || "").replace(/_/g, " ");
+  }
+
+  function agentV2LeaderSummary(flow) {
+    if (!flow) return "尚无任务结论。";
+    if (agentV2IntegrityFailed(flow)) {
+      return "任务审计完整性校验失败，结论和步骤证据已遮蔽，请联系管理员核查。";
+    }
+    const source =
+      flow.summary && typeof flow.summary === "object" ? flow.summary : {};
+    const stateSummary =
+      flow.state &&
+      flow.state.summary &&
+      typeof flow.state.summary === "object"
+        ? flow.state.summary
+        : {};
+    const executiveBrief =
+      flow.state &&
+      flow.state.executive_brief &&
+      typeof flow.state.executive_brief === "object"
+        ? flow.state.executive_brief
+        : {};
+    const candidates = [
+      typeof flow.summary === "string" ? flow.summary : "",
+      source.executive_summary,
+      source.headline,
+      source.conclusion,
+      source.summary,
+      source.message,
+      stateSummary.executive_summary,
+      stateSummary.headline,
+      stateSummary.conclusion,
+      executiveBrief.headline,
+      flow.error_message,
+    ];
+    const selected = candidates.find(
+      (value) => typeof value === "string" && value.trim(),
+    );
+    if (selected) return truncateText(selected.trim(), 900);
+    if (agentV2ActiveStatuses.has(flow.status)) {
+      return flow.current_step
+        ? `正在进行“${agentV2StepLabel(
+            flow.current_step,
+          )}”，完成后会生成负责人可读结论。`
+        : "智能体正在执行只读煤炭体检，完成后会生成负责人可读结论。";
+    }
+    if (flow.status === "cancelled") {
+      return "该任务已取消，没有形成新的完整体检结论。";
+    }
+    if (agentV2AttentionStatuses.has(flow.status)) {
+      return "本次体检未完整完成，请查看专业步骤中的失败原因后重新执行。";
+    }
+    return "本次任务已结束，服务未提供可展示的文字摘要，请展开步骤查看记录。";
+  }
+
+  function agentV2FlowFindings(flow) {
+    if (agentV2IntegrityFailed(flow)) return [];
+    const summary =
+      flow && flow.summary && typeof flow.summary === "object"
+        ? flow.summary
+        : {};
+    const stateSummary =
+      flow &&
+      flow.state &&
+      flow.state.summary &&
+      typeof flow.state.summary === "object"
+        ? flow.state.summary
+        : {};
+    const executiveBrief =
+      flow &&
+      flow.state &&
+      flow.state.executive_brief &&
+      typeof flow.state.executive_brief === "object"
+        ? flow.state.executive_brief
+        : {};
+    const critic =
+      flow &&
+      flow.state &&
+      flow.state.critic &&
+      typeof flow.state.critic === "object"
+        ? flow.state.critic
+        : {};
+    const collections = [
+      summary.attention_items,
+      summary.findings,
+      summary.risks,
+      summary.recommendations,
+      stateSummary.attention_items,
+      stateSummary.findings,
+      executiveBrief.next_actions,
+      executiveBrief.key_points,
+      critic.evidence_conflicts,
+    ];
+    const results = [];
+    collections.forEach((items) => {
+      if (!Array.isArray(items)) return;
+      items.forEach((item) => {
+        let text = "";
+        if (typeof item === "string") {
+          text = item;
+        } else if (item && typeof item === "object") {
+          text = String(
+            item.message ||
+              item.summary ||
+              item.title ||
+              item.description ||
+              item.recommendation ||
+              "",
+          );
+        }
+        text = text.trim();
+        if (text && !results.includes(text)) results.push(text);
+      });
+    });
+    return results.slice(0, 8);
+  }
+
+  function renderAgentV2Findings(flow) {
+    const findings = agentV2FlowFindings(flow);
+    if (!findings.length) {
+      els.agentV2FlowFindings.replaceChildren();
+      return;
+    }
+    const list = el("ul", "agent-v2-finding-list");
+    findings.forEach((finding) =>
+      list.append(el("li", "", truncateText(finding, 400))),
+    );
+    els.agentV2FlowFindings.replaceChildren(list);
+  }
+
+  function renderAgentV2Steps(flow) {
+    const fragment = document.createDocumentFragment();
+    if (agentV2IntegrityFailed(flow)) {
+      fragment.append(
+        el(
+          "p",
+          "agent-v2-empty",
+          "审计完整性异常，专业步骤已停止展示；不要据此作出业务判断。",
+        ),
+      );
+    } else if (!flow.steps.length) {
+      fragment.append(
+        el(
+          "p",
+          "agent-v2-empty",
+          agentV2ActiveStatuses.has(flow.status)
+            ? "专业步骤正在生成，请稍后刷新。"
+            : "服务未返回可展示的步骤记录。",
+        ),
+      );
+    } else {
+      flow.steps.forEach((step, index) => {
+        const card = el("article", "agent-v2-step-card");
+        const copy = el("div");
+        copy.append(
+          el("strong", "", agentV2StepLabel(step.title || step.step_key)),
+        );
+        const detail = [
+          step.specialist
+            ? `专业角色：${agentV2SpecialistLabel(step.specialist)}`
+            : "",
+          step.summary,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        if (detail) copy.append(el("p", "", truncateText(detail, 500)));
+        card.append(
+          el("span", "agent-v2-step-index", String(index + 1)),
+          copy,
+          agentV2StatusNode(step.status),
+        );
+        fragment.append(card);
+      });
+    }
+    els.agentV2StepList.replaceChildren(fragment);
+  }
+
+  function agentV2StatusNode(status) {
+    return el(
+      "span",
+      `agent-v2-status status-${normalizeAgentV2Status(status)}`,
+      agentV2StatusLabel(status),
+    );
+  }
+
+  function renderAgentV2Jobs() {
+    const canWrite = hasPermission("write");
+    els.agentV2JobPermissionHint.textContent = canWrite
+      ? state.activeDraft
+        ? "定时任务将绑定当前草稿，只执行只读体检。"
+        : "请先打开一份草稿。"
+      : "当前账号只有查看权限，不能创建或修改定时任务。";
+    const fragment = document.createDocumentFragment();
+    if (state.agentV2.busy.has("load-jobs") && !state.agentV2.jobs.length) {
+      fragment.append(el("p", "agent-v2-empty", "正在读取定时任务…"));
+    } else if (!state.agentV2.jobs.length) {
+      fragment.append(
+        el(
+          "p",
+          "agent-v2-empty",
+          state.agentV2.jobsLoaded
+            ? "还没有定时任务。可在上方为当前草稿创建每日体检。"
+            : "进入本页后读取定时任务。",
+        ),
+      );
+    } else {
+      state.agentV2.jobs.forEach((job) => {
+        const auditInvalid = Boolean(
+          !job.integrity ||
+            typeof job.integrity !== "object" ||
+            job.integrity.valid !== true,
+        );
+        const card = el("article", "agent-v2-job-card");
+        const head = el("div", "agent-v2-job-head");
+        const title = el("div");
+        title.append(
+          el("h4", "", job.name),
+          el("p", "", agentV2JobScheduleLabel(job)),
+        );
+        head.append(
+          title,
+          agentV2StatusNode(
+            auditInvalid ? "blocked" : job.enabled ? "enabled" : "disabled",
+          ),
+        );
+        const meta = el(
+          "p",
+          "",
+          [
+            job.next_run_at
+              ? `下次：${formatDateTime(job.next_run_at)}`
+              : "下次时间待计算",
+            job.last_run_at
+              ? `上次：${formatDateTime(job.last_run_at)}`
+              : "尚未执行",
+            job.draft_id ? `草稿：${job.draft_id}` : "",
+          ]
+            .filter(Boolean)
+            .join(" · "),
+        );
+        const actions = el("div", "button-row");
+        if (auditInvalid) {
+          card.append(
+            el(
+              "p",
+              "agent-v2-alert",
+              "审计完整性异常：已禁止运行、启停和移除，请由运维人员核对数据库与审计链。",
+            ),
+          );
+        }
+        const busy = state.agentV2.busy.has(`job-${job.job_id}`);
+        const runButton = el("button", "button button-secondary", "立即运行");
+        runButton.type = "button";
+        runButton.disabled = !canWrite || busy || auditInvalid;
+        runButton.addEventListener("click", () =>
+          void updateAgentV2Job(job, "run"),
+        );
+        const toggleButton = el(
+          "button",
+          "button button-secondary",
+          job.enabled ? "停用" : "启用",
+        );
+        toggleButton.type = "button";
+        toggleButton.disabled = !canWrite || busy || auditInvalid;
+        toggleButton.addEventListener("click", () =>
+          void updateAgentV2Job(job, "toggle"),
+        );
+        const deleteButton = el(
+          "button",
+          "button button-danger-quiet",
+          "移除",
+        );
+        deleteButton.type = "button";
+        deleteButton.disabled = !canWrite || busy || auditInvalid;
+        deleteButton.addEventListener("click", () =>
+          void deleteAgentV2Job(job),
+        );
+        actions.append(runButton, toggleButton, deleteButton);
+        card.append(head, meta, actions);
+        fragment.append(card);
+      });
+    }
+    els.agentV2JobList.replaceChildren(fragment);
+  }
+
+  function agentV2JobScheduleLabel(job) {
+    if (job.schedule_kind === "event") {
+      return `收到业务事件 ${
+        job.schedule.event_type || "（未配置）"
+      } 时执行`;
+    }
+    if (job.schedule_kind === "interval") {
+      const seconds = Number(
+        job.schedule.interval_seconds || job.interval_seconds || 0,
+      );
+      const minutes = seconds > 0 ? Math.round(seconds / 60) : 0;
+      return minutes
+        ? `每隔 ${minutes} 分钟执行（不受时区影响）`
+        : "按固定间隔执行";
+    }
+    return `每天 ${job.schedule.time || job.daily_time || "09:00"} 执行 · ${
+      job.schedule.timezone || "Asia/Shanghai"
+    }`;
+  }
+
+  function renderAgentV2Governance() {
+    const canWrite = hasPermission("write");
+    const canApproveMemory = canFinalizeWith("governance_review");
+    const canApproveSkill = canFinalizeWith("skill_admin");
+    [
+      els.agentV2MemoryKey,
+      els.agentV2MemoryValue,
+      els.agentV2MemoryReason,
+      els.agentV2MemoryScope,
+      els.createAgentV2MemoryProposalButton,
+      els.agentV2SkillName,
+      els.agentV2SkillDescription,
+      els.agentV2SkillProcedure,
+      els.createAgentV2SkillProposalButton,
+    ].forEach((control) => {
+      control.disabled = !canWrite;
+    });
+    renderAgentV2ProposalCollection(
+      els.agentV2MemoryProposalList,
+      state.agentV2.memoryProposals,
+      canApproveMemory,
+      "还没有记忆提案。",
+    );
+    renderAgentV2ProposalCollection(
+      els.agentV2SkillProposalList,
+      state.agentV2.skillProposals,
+      canApproveSkill,
+      "还没有技能提案。",
+    );
+    renderAgentV2AssetCollection(
+      els.agentV2MemoryList,
+      state.agentV2.memories,
+      "memory",
+    );
+    renderAgentV2AssetCollection(
+      els.agentV2SkillVersionList,
+      state.agentV2.skillVersions,
+      "skill",
+    );
+  }
+
+  function renderAgentV2ProposalCollection(
+    container,
+    proposals,
+    canApprove,
+    emptyText,
+  ) {
+    const fragment = document.createDocumentFragment();
+    if (state.agentV2.busy.has("load-governance") && !proposals.length) {
+      fragment.append(el("p", "agent-v2-empty", "正在读取治理提案…"));
+    } else if (!proposals.length) {
+      fragment.append(el("p", "agent-v2-empty", emptyText));
+    } else {
+      proposals.forEach((proposal) => {
+        const card = el("article", "agent-v2-proposal-card");
+        const head = el("div", "agent-v2-proposal-head");
+        head.append(
+          el("h5", "", proposal.title),
+          agentV2StatusNode(proposal.status),
+        );
+        card.append(
+          head,
+          el(
+            "p",
+            "",
+            truncateText(
+              proposal.description || "提案未提供可展示的理由。",
+              500,
+            ),
+          ),
+        );
+        if (proposal.status === "pending") {
+          const actions = el("div", "button-row");
+          const busy = state.agentV2.busy.has(
+            `proposal-${proposal.proposal_id}`,
+          );
+          const needsOtherReviewer =
+            proposal.proposed_by ===
+              String((state.principal && state.principal.actor_id) || "") &&
+            (proposal.kind === "skill" || proposal.scope_type !== "user");
+          if (needsOtherReviewer) {
+            card.append(
+              el(
+                "p",
+                "",
+                "为防止自批，该提案须由另一名具有相应治理审批权限的人员批准；提案人仍可拒绝撤回。",
+              ),
+            );
+          }
+          const rejectButton = el(
+            "button",
+            "button button-secondary",
+            "拒绝",
+          );
+          rejectButton.type = "button";
+          rejectButton.disabled = !canApprove || busy;
+          rejectButton.title = canApprove
+            ? ""
+            : "需要相应治理审批权限，且账号不能处于待换密状态";
+          rejectButton.addEventListener("click", () =>
+            void decideAgentV2Proposal(proposal, "reject"),
+          );
+          const approveButton = el(
+            "button",
+            "button button-primary",
+            "核验后批准",
+          );
+          approveButton.type = "button";
+          approveButton.disabled = !canApprove || busy || needsOtherReviewer;
+          approveButton.title = needsOtherReviewer
+            ? "共享记忆或技能不能由提案人本人批准"
+            : rejectButton.title;
+          approveButton.addEventListener("click", () =>
+            void decideAgentV2Proposal(proposal, "approve"),
+          );
+          actions.append(rejectButton, approveButton);
+          card.append(actions);
+        }
+        fragment.append(card);
+      });
+    }
+    container.replaceChildren(fragment);
+  }
+
+  function renderAgentV2AssetCollection(container, items, kind) {
+    const fragment = document.createDocumentFragment();
+    if (!items.length) {
+      fragment.append(
+        el(
+          "p",
+          "agent-v2-empty",
+          kind === "memory" ? "暂无已生效记忆。" : "暂无已发布技能。",
+        ),
+      );
+    } else {
+      items.forEach((raw) => {
+        const source = raw && typeof raw === "object" ? raw : {};
+        const title = String(
+          source.key ||
+            source.memory_key ||
+            source.skill_name ||
+            source.name ||
+            (kind === "memory" ? "业务记忆" : "只读技能"),
+        );
+        const description = String(
+          source.value ||
+            source.value_text ||
+            source.description ||
+            source.summary ||
+            "",
+        );
+        const card = el("article", "agent-v2-asset-card");
+        card.append(
+          el("h5", "", title),
+          el(
+            "p",
+            "",
+            truncateText(
+              description ||
+                (kind === "memory"
+                  ? "已生效"
+                  : "已发布，需服务加载后执行"),
+              500,
+            ),
+          ),
+        );
+        fragment.append(card);
+      });
+    }
+    container.replaceChildren(fragment);
+  }
+
+  function renderAgentV2Controls() {
+    const canRead = Boolean(state.principal && hasPermission("read"));
+    const canWrite = canRead && hasPermission("write");
+    const hasDraft = Boolean(state.activeDraft);
+    const creatingFlow = state.agentV2.busy.has("create-flow");
+    els.agentCenterButton.disabled = !canRead;
+    els.openAgentCenterQuickButton.disabled = !canRead;
+    els.runAgentCenterQuickButton.disabled =
+      !canRead || !hasDraft || creatingFlow;
+    els.startAgentV2HealthButton.disabled =
+      !canRead || !hasDraft || creatingFlow;
+    els.createAgentV2JobButton.disabled =
+      !canWrite || !hasDraft || state.agentV2.busy.has("create-job");
+    els.refreshAgentV2Button.disabled =
+      !canRead || state.agentV2.busy.has("refresh");
+  }
+
   function newClientRequestId(prefix) {
     const randomId =
       window.crypto && typeof window.crypto.randomUUID === "function"
@@ -6749,8 +8921,10 @@
       showToast("请先使用有读取权限的企业账号登录。", "error");
       return;
     }
+    stopAgentV2Polling();
     stopCoalChatPolling();
     els.coalChatWorkbench.hidden = true;
+    els.agentV2Workbench.hidden = true;
     els.agentWorkbench.hidden = false;
     renderAgentWorkbench();
     els.agentWorkbench.focus();
@@ -9461,6 +11635,15 @@
       ? "button button-primary button-large"
       : "button button-secondary button-large";
     els.simpleTaskCard.classList.toggle("is-readonly", !actionAllowed);
+    els.simpleDeleteDraftButton.hidden = draft.status !== "draft";
+    els.simpleDeleteDraftButton.disabled =
+      draft.status !== "draft" || !canWrite;
+    els.simpleDeleteDraftButton.title =
+      draft.status !== "draft"
+        ? "已经人工确认或提交的记录不能移除"
+        : canWrite
+          ? "从普通工作列表移除，数据库和审计记录仍会保留"
+          : "当前账号没有移除草稿所需的 write 权限";
     els.simpleTaskProgressText.textContent = `已完成 ${completedSteps}/6 步`;
     els.simpleTaskProgressFill.style.width =
       `${Math.round((completedSteps / 6) * 100)}%`;
@@ -10056,10 +12239,10 @@
   function openDeleteDialog() {
     if (
       !state.activeDraft ||
-      state.activeDraft.status === "submitted" ||
+      state.activeDraft.status !== "draft" ||
       !hasPermission("write")
     ) {
-      showToast("当前账号不能移除这份草稿。", "error");
+      showToast("只有尚未人工确认的草稿才能移除。", "error");
       return;
     }
     if (state.activeOperation) {
@@ -10073,7 +12256,11 @@
 
   async function deleteDraft() {
     const draft = state.activeDraft;
-    if (!draft || draft.status === "submitted" || els.deleteConfirmation.value.trim() !== "移除") {
+    if (
+      !draft ||
+      draft.status !== "draft" ||
+      els.deleteConfirmation.value.trim() !== "移除"
+    ) {
       return;
     }
     if (state.activeOperation) {
@@ -10112,6 +12299,7 @@
       els.editor.hidden = true;
       els.welcomeCard.hidden = false;
       renderDraftList();
+      renderAgentV2();
       renderCoalChatControls();
       showToast("草稿已从工作列表移除；审计留痕仍保留。");
     } catch (error) {
@@ -10143,7 +12331,11 @@
       submitted ||
       !canConfirmDraft(state.activeDraft) ||
       !canFinalizeWith("confirm");
-    els.deleteDraftButton.disabled = submitted || !hasPermission("write");
+    els.deleteDraftButton.disabled =
+      state.activeDraft.status !== "draft" || !hasPermission("write");
+    els.simpleDeleteDraftButton.disabled =
+      state.activeDraft.status !== "draft" || !hasPermission("write");
+    els.simpleDeleteDraftButton.hidden = state.activeDraft.status !== "draft";
   }
 
   function openDialogById(dialogId) {

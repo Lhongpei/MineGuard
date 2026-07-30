@@ -207,3 +207,42 @@ def test_coal_news_search_defaults_and_bounded_environment(
     monkeypatch.setenv("COAL_NEWS_SEARCH_MAX_RESULTS", "99")
     with pytest.raises(ValueError, match="MAX_RESULTS"):
         Settings.from_environment()
+
+
+def test_agent_v2_defaults_and_bounded_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "AGENT_V2_ENABLED",
+        "AGENT_V2_SCHEDULER_ENABLED",
+        "AGENT_V2_SCHEDULER_POLL_SECONDS",
+        "AGENT_V2_WORKER_COUNT",
+        "AGENT_V2_SPECIALIST_WORKER_COUNT",
+        "AGENT_V2_FLOW_LEASE_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    defaults = Settings.from_environment().agent_v2
+    assert defaults.enabled is True
+    assert defaults.scheduler_enabled is True
+    assert defaults.scheduler_poll_seconds == 5.0
+    assert defaults.worker_count == 2
+    assert defaults.specialist_worker_count == 4
+    assert defaults.flow_lease_seconds == 120
+
+    monkeypatch.setenv("AGENT_V2_ENABLED", "false")
+    monkeypatch.setenv("AGENT_V2_SCHEDULER_ENABLED", "false")
+    monkeypatch.setenv("AGENT_V2_SCHEDULER_POLL_SECONDS", "0.5")
+    monkeypatch.setenv("AGENT_V2_WORKER_COUNT", "3")
+    monkeypatch.setenv("AGENT_V2_SPECIALIST_WORKER_COUNT", "6")
+    monkeypatch.setenv("AGENT_V2_FLOW_LEASE_SECONDS", "180")
+    configured = Settings.from_environment().agent_v2
+    assert configured.enabled is False
+    assert configured.scheduler_enabled is False
+    assert configured.scheduler_poll_seconds == 0.5
+    assert configured.worker_count == 3
+    assert configured.specialist_worker_count == 6
+    assert configured.flow_lease_seconds == 180
+
+    monkeypatch.setenv("AGENT_V2_WORKER_COUNT", "99")
+    with pytest.raises(ValueError, match="AGENT_V2_WORKER_COUNT"):
+        Settings.from_environment()

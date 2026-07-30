@@ -141,6 +141,9 @@ function createScenario(principal) {
     if (url.pathname === "/api/v1/drafts/draft-simple-1" && method === "GET") {
       return jsonResponse({ draft: draftDetail });
     }
+    if (url.pathname === "/api/v1/drafts/draft-simple-1" && method === "DELETE") {
+      return jsonResponse({ deleted: true });
+    }
     if (
       url.pathname === "/api/v1/drafts/draft-simple-1/reviews" &&
       method === "GET"
@@ -243,6 +246,43 @@ async function openSuggestedDraft(scenario) {
   }
 }
 
+async function testAutofillShortcutOpensSourceStep() {
+  const scenario = createScenario({
+    actor_id: "autofill-operator",
+    name: "自动填报测试用户",
+    role: "企业经办",
+    permissions: ["read", "write"],
+    authentication_method: "password_session",
+    must_change_password: false,
+    temporary_demo: false,
+  });
+  const { dom, document, runtimeErrors } = scenario;
+  try {
+    await waitFor(
+      () =>
+        document.getElementById("welcomeAutofillButton").textContent.includes(
+          "补全这份草稿",
+        ),
+      "autofill shortcut",
+    );
+    document.getElementById("welcomeAutofillButton").click();
+    await waitFor(
+      () =>
+        document.getElementById("editor").hidden === false &&
+        document.querySelector('.step-panel[data-panel="2"]').hidden === false,
+      "autofill shortcut source step",
+    );
+    assert.equal(document.activeElement.id, "chooseFileButton");
+    assert.match(
+      document.getElementById("toastRegion").textContent,
+      /Agent 会自动写入可验证字段/,
+    );
+    assert.equal(runtimeErrors.length, 0, String(runtimeErrors[0] || ""));
+  } finally {
+    dom.window.close();
+  }
+}
+
 async function testOperatorModeSwitchAndSteps() {
   const scenario = createScenario({
     actor_id: "operator-1",
@@ -264,6 +304,7 @@ async function testOperatorModeSwitchAndSteps() {
     );
     assert.equal(document.getElementById("editorMoreActions").open, false);
     assert.equal(document.getElementById("welcomeNewDraftButton").hidden, false);
+    assert.equal(document.getElementById("simpleDeleteDraftButton").disabled, false);
     assert.equal(document.getElementById("simpleTaskButton").dataset.actionAllowed, "true");
 
     const requestCount = requests.length;
@@ -302,6 +343,20 @@ async function testOperatorModeSwitchAndSteps() {
       );
       assert.equal(document.getElementById("nextStepButton").hidden, step === 6);
     }
+
+    document.getElementById("simpleDeleteDraftButton").click();
+    assert.equal(document.getElementById("deleteDialog").open, true);
+    const deleteConfirmation = document.getElementById("deleteConfirmation");
+    deleteConfirmation.value = "移除";
+    deleteConfirmation.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    assert.equal(document.getElementById("confirmDeleteButton").disabled, false);
+    document.getElementById("confirmDeleteButton").click();
+    await waitFor(
+      () =>
+        requests.includes("DELETE /api/v1/drafts/draft-simple-1") &&
+        document.getElementById("editor").hidden === true,
+      "visible shortcut draft deletion",
+    );
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(runtimeErrors.length, 0, String(runtimeErrors[0] || ""));
   } finally {
@@ -324,6 +379,7 @@ async function testReadOnlyModeCannotUpgradePermissions() {
     await openSuggestedDraft(scenario);
     assert.equal(document.getElementById("newDraftButton").disabled, true);
     assert.equal(document.getElementById("welcomeNewDraftButton").hidden, true);
+    assert.equal(document.getElementById("simpleDeleteDraftButton").disabled, true);
     assert.equal(document.getElementById("simpleTaskButton").dataset.actionAllowed, "false");
     assert.match(document.getElementById("simpleTaskTitle").textContent, /等待经办人/);
     const writeRequestsBefore = requests.filter((item) =>
@@ -346,6 +402,7 @@ async function testReadOnlyModeCannotUpgradePermissions() {
 }
 
 async function main() {
+  await testAutofillShortcutOpensSourceStep();
   await testOperatorModeSwitchAndSteps();
   await testReadOnlyModeCannotUpgradePermissions();
   console.log("JSDOM enterprise mode checks passed");
