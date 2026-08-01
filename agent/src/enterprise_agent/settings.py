@@ -6,12 +6,15 @@ serialised into drafts or logs.
 
 from __future__ import annotations
 
+import hmac
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from .auth import UserAccount, parse_users_json
 from .client import PlatformClientConfig
+from .five_quantity_exchange import FiveQuantityPlatformConfig, MineIdentity
 from .llm import LLMConfig
 from .skills import CoalNewsConfig
 
@@ -73,13 +76,9 @@ class AgentV2Config:
         if not 1 <= self.worker_count <= 8:
             raise ValueError("AGENT_V2_WORKER_COUNT must be between 1 and 8")
         if not 1 <= self.specialist_worker_count <= 8:
-            raise ValueError(
-                "AGENT_V2_SPECIALIST_WORKER_COUNT must be between 1 and 8"
-            )
+            raise ValueError("AGENT_V2_SPECIALIST_WORKER_COUNT must be between 1 and 8")
         if not 30 <= self.flow_lease_seconds <= 600:
-            raise ValueError(
-                "AGENT_V2_FLOW_LEASE_SECONDS must be between 30 and 600"
-            )
+            raise ValueError("AGENT_V2_FLOW_LEASE_SECONDS must be between 30 and 600")
 
 
 @dataclass(frozen=True)
@@ -96,6 +95,13 @@ class Settings:
     llm: LLMConfig | None
     coal_news: CoalNewsConfig
     agent_v2: AgentV2Config
+    five_quantity_identity: MineIdentity
+    five_quantity_platform: FiveQuantityPlatformConfig | None
+    five_quantity_watch_directories: tuple[str, ...]
+    five_quantity_quarantine_directory: str
+    five_quantity_poll_seconds: float
+    five_quantity_stable_seconds: float
+    five_quantity_demo_secret: bool
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -190,6 +196,126 @@ class Settings:
                 transport_hmac_secret=platform_hmac_secret,
                 timeout_seconds=_float("PLATFORM_TIMEOUT_SECONDS", 20.0, 1.0, 120.0),
             )
+
+        # V1 and V2 are independent products/contracts.  A legacy V1 endpoint
+        # must never silently enable the V2 exchange client.
+        v2_base = os.environ.get("PLATFORM_V2_BASE_URL", "").strip()
+        v2_sender_id = (
+            os.environ.get("PLATFORM_V2_SENDER_ID", "").strip()
+            or os.environ.get("ENTERPRISE_SYSTEM_ID", "agent-demo-mine-001").strip()
+        )
+        v2_transport_secret = os.environ.get("PLATFORM_V2_TRANSPORT_HMAC_SECRET", "")
+        explicit_message_secret = os.environ.get("ENTERPRISE_EXCHANGE_HMAC_SECRET", "")
+        demo_message_secret = (
+            "DEMO_ONLY_five_quantity_exchange_secret_change_before_production"
+        )
+        message_secret = explicit_message_secret or demo_message_secret
+        five_quantity_demo_secret = not bool(explicit_message_secret)
+        five_quantity_identity = MineIdentity(
+            mine_id=os.environ.get("ENTERPRISE_MINE_ID", "demo-mine-001").strip(),
+            mine_name=os.environ.get("ENTERPRISE_MINE_NAME", "演示煤矿").strip(),
+            operator_id=os.environ.get(
+                "ENTERPRISE_OPERATOR_ID", "demo-operator-001"
+            ).strip(),
+            operator_name=os.environ.get(
+                "ENTERPRISE_OPERATOR_NAME", "演示煤矿经营主体"
+            ).strip(),
+            system_id=os.environ.get(
+                "ENTERPRISE_SYSTEM_ID", "agent-demo-mine-001"
+            ).strip(),
+            regulator_system_id=os.environ.get(
+                "REGULATORY_SYSTEM_ID", "mineguard-qinyuan"
+            ).strip(),
+            regulator_party_id=os.environ.get(
+                "REGULATORY_PARTY_ID", "regulator-qinyuan"
+            ).strip(),
+            key_id=os.environ.get(
+                "ENTERPRISE_EXCHANGE_KEY_ID", "demo-exchange-key"
+            ).strip(),
+            regulator_key_id=os.environ.get(
+                "REGULATORY_EXCHANGE_KEY_ID", "regulator-key-v2"
+            ).strip(),
+            message_hmac_secret=message_secret,
+            previous_regulator_key_id=(
+                os.environ.get("REGULATORY_PREVIOUS_EXCHANGE_KEY_ID", "").strip()
+                or None
+            ),
+            previous_message_hmac_secret=(
+                os.environ.get("REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET", "") or None
+            ),
+            timezone=os.environ.get(
+                "ENTERPRISE_REPORTING_TIMEZONE", "Asia/Shanghai"
+            ).strip(),
+            capacity_band=os.environ.get(
+                "ENTERPRISE_CAPACITY_BAND", "unclassified"
+            ).strip(),
+            mining_method=os.environ.get(
+                "ENTERPRISE_MINING_METHOD", "unclassified"
+            ).strip(),
+            shift_system=os.environ.get(
+                "ENTERPRISE_SHIFT_SYSTEM", "three-shift-eight-hour"
+            ).strip(),
+            coal_type=os.environ.get("ENTERPRISE_COAL_TYPE", "unclassified").strip(),
+            operating_regime=os.environ.get(
+                "ENTERPRISE_OPERATING_REGIME", "normal-production"
+            ).strip(),
+        )
+        five_quantity_platform = None
+        if v2_base:
+            if (
+                not v2_sender_id
+                or not v2_transport_secret
+                or not explicit_message_secret
+            ):
+                raise ValueError(
+                    "配置 V2 监管地址时必须显式配置 PLATFORM_V2_SENDER_ID、"
+                    "ENTERPRISE_EXCHANGE_HMAC_SECRET 和 "
+                    "PLATFORM_V2_TRANSPORT_HMAC_SECRET"
+                )
+            if hmac.compare_digest(
+                explicit_message_secret.encode("utf-8"),
+                v2_transport_secret.encode("utf-8"),
+            ):
+                raise ValueError("V2 应用消息 HMAC 密钥与运输 HMAC 密钥不得相同")
+            if v2_sender_id != five_quantity_identity.system_id:
+                raise ValueError(
+                    "PLATFORM_V2_SENDER_ID 必须与 ENTERPRISE_SYSTEM_ID 相同；"
+                    "一个智能体实例只能绑定一个已登记发送系统"
+                )
+            five_quantity_platform = FiveQuantityPlatformConfig(
+                base_url=v2_base,
+                sender_id=v2_sender_id,
+                transport_hmac_secret=v2_transport_secret,
+                timeout_seconds=_float(
+                    "PLATFORM_V2_TIMEOUT_SECONDS",
+                    20.0,
+                    1.0,
+                    120.0,
+                ),
+                submission_path=os.environ.get(
+                    "PLATFORM_V2_SUBMISSION_PATH",
+                    "/v2/five-quantity-submissions",
+                ).strip(),
+                next_report_path=os.environ.get(
+                    "PLATFORM_V2_NEXT_REPORT_PATH",
+                    "/v2/analysis-reports/next",
+                ).strip(),
+                ca_bundle_path=(
+                    os.environ.get("PLATFORM_V2_CA_BUNDLE", "").strip() or None
+                ),
+            )
+        watched_raw = os.environ.get("ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS", "")
+        five_quantity_watch_directories = tuple(
+            part.strip() for part in watched_raw.split(os.pathsep) if part.strip()
+        )
+        database_state_directory = (
+            Path("./data").resolve()
+            if database_path == ":memory:"
+            else Path(database_path).expanduser().resolve().parent
+        )
+        five_quantity_quarantine_directory = str(
+            database_state_directory / "five-quantity-quarantine"
+        )
 
         api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
         llm = None
@@ -310,4 +436,15 @@ class Settings:
                     600,
                 ),
             ),
+            five_quantity_identity=five_quantity_identity,
+            five_quantity_platform=five_quantity_platform,
+            five_quantity_watch_directories=five_quantity_watch_directories,
+            five_quantity_quarantine_directory=five_quantity_quarantine_directory,
+            five_quantity_poll_seconds=_float(
+                "ENTERPRISE_FIVE_QUANTITY_POLL_SECONDS", 5.0, 0.5, 60.0
+            ),
+            five_quantity_stable_seconds=_float(
+                "ENTERPRISE_FIVE_QUANTITY_STABLE_SECONDS", 2.0, 0.5, 60.0
+            ),
+            five_quantity_demo_secret=five_quantity_demo_secret,
         )

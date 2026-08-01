@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "LicenseRef-Proprietary"
 authors = [{name = "Enterprise Reporting Agent"}]
-dependencies = []
+dependencies = [
+  "openpyxl>=3.1,<4",
+  "xlrd>=2,<3",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
@@ -28,6 +31,7 @@ version = {attr = "enterprise_agent.__version__"}
 "share/enterprise-reporting-agent/web" = [
   "web/index.html",
   "web/app.js",
+  "web/v2-app.js",
   "web/styles.css",
   "web/README.md",
 ]

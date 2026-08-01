@@ -1,0 +1,79 @@
+{
+  "contract_version": "enterprise-risk-response-v2",
+  "message_type": "enterprise_risk_response",
+  "message_id": "55555555-5555-4555-8555-555555555555",
+  "correlation_id": "11111111-1111-4111-8111-111111111111",
+  "causation_id": "33333333-3333-4333-8333-333333333334",
+  "idempotency_key": "risk-response.33333333.r1",
+  "revision": 1,
+  "predecessor": null,
+  "created_at": "2026-08-01T03:20:00Z",
+  "sender": {
+    "system_id": "agent-mine-qy-001",
+    "party_id": "operator-qy-001",
+    "role": "enterprise_agent"
+  },
+  "recipient": {
+    "system_id": "mineguard-qinyuan",
+    "party_id": "regulator-qinyuan",
+    "role": "regulatory_platform"
+  },
+  "mine_id": "MINE-QY-001",
+  "payload": {
+    "response_id": "55555555-5555-4555-8555-555555555551",
+    "report_id": "33333333-3333-4333-8333-333333333331",
+    "analysis_report_message_id": "33333333-3333-4333-8333-333333333334",
+    "responded_at": "2026-08-01T03:19:30Z",
+    "finding_responses": [
+      {
+        "finding_id": "33333333-3333-4333-8333-333333333332",
+        "response_kind": "explanation",
+        "reason_code": "equipment_maintenance",
+        "facts": "当日第二班主运输系统计划检修期间保持通风及辅助设备运行，生产中断约两小时。企业已核对值班记录和检修工单，当前回复仅解释工况，不申请自动消除风险。",
+        "evidence_refs": [
+          "EVIDENCE-WORKORDER-01"
+        ],
+        "actions": [
+          {
+            "action_type": "investigation",
+            "description": "复核第二班电表区间、产量台账与检修起止时间。",
+            "status": "completed"
+          }
+        ],
+        "corrected_submission_message_id": null
+      }
+    ],
+    "attachments": [
+      {
+        "evidence_id": "EVIDENCE-WORKORDER-01",
+        "title": "2026年7月31日主运输系统检修工单",
+        "media_type": "application/pdf",
+        "size_bytes": 248193,
+        "sha256": "1818181818181818181818181818181818181818181818181818181818181818",
+        "retention_location": "enterprise_local"
+      }
+    ],
+    "agent_assistance": {
+      "used": true,
+      "conversation_id": "RISK-CHAT-00042",
+      "assistance_record_sha256": "1919191919191919191919191919191919191919191919191919191919191919"
+    },
+    "human_confirmation": {
+      "confirmed": true,
+      "confirmer_id": "responder-001",
+      "confirmer_name": "示例负责人",
+      "role": "煤矿授权风险回复人",
+      "confirmed_at": "2026-08-01T03:19:30Z",
+      "content_sha256": "2020202020202020202020202020202020202020202020202020202020202020"
+    }
+  },
+  "signature_envelope": {
+    "algorithm": "hmac-sha256-v2",
+    "canonicalization": "rfc8785-jcs",
+    "key_id": "enterprise-key-2026-01",
+    "signed_at": "2026-08-01T03:20:00Z",
+    "nonce": "BQYHCAkKCwwNDg8QERITFA",
+    "payload_sha256": "1785cf19e5a29ef8fb774a37138e6516e2d9d68f8a8ed21af01546dccfbff185",
+    "signature": "775d61e71d21d4da6b1b35277c795d56c2e23bc8b6c4abb14d30ffc27cc52a4b"
+  }
+}

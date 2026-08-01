@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:intake-receipt:v2",
+  "title": "Five-Quantity Intake Receipt V2",
+  "description": "Government-signed immutable receipt. Acceptance only proves durable intake and never means normal, legal, compliant, or risk-free.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "message_type",
+    "message_id",
+    "correlation_id",
+    "causation_id",
+    "idempotency_key",
+    "revision",
+    "predecessor",
+    "created_at",
+    "sender",
+    "recipient",
+    "mine_id",
+    "payload",
+    "signature_envelope"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "intake-receipt-v2"
+    },
+    "message_type": {
+      "const": "intake_receipt"
+    },
+    "message_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "correlation_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "causation_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "revision": {
+      "const": 1
+    },
+    "predecessor": {
+      "type": "null"
+    },
+    "created_at": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+    },
+    "sender": {
+      "allOf": [
+        {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/participant"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "regulatory_platform"
+            }
+          }
+        }
+      ]
+    },
+    "recipient": {
+      "allOf": [
+        {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/participant"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "enterprise_agent"
+            }
+          }
+        }
+      ]
+    },
+    "mine_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/identifier"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_id",
+        "submission_message_id",
+        "submission_revision",
+        "received_payload_sha256",
+        "received_at",
+        "intake_status",
+        "analysis_state",
+        "regulatory_outcome",
+        "analysis_run_id"
+      ],
+      "properties": {
+        "receipt_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "submission_message_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "submission_revision": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/safePositiveInteger"
+        },
+        "received_payload_sha256": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/sha256"
+        },
+        "received_at": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+        },
+        "intake_status": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "duplicate"
+          ]
+        },
+        "analysis_state": {
+          "const": "queued"
+        },
+        "regulatory_outcome": {
+          "const": "not_determined_at_intake"
+        },
+        "analysis_run_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        }
+      }
+    },
+    "signature_envelope": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/signatureEnvelope"
+    }
+  }
+}

@@ -19,6 +19,33 @@
 
 修改其中一个，不自动修改其他版本。
 
+目标架构另外发布一组相互关联但仍各自显式标识的 V2 消息：
+
+- `five-quantity-submission-v2`
+- `intake-receipt-v2`
+- `analysis-report-v2`
+- `risk-delivery-ack-v2`
+- `enterprise-risk-response-v2`
+- `response-receipt-v2`
+- 应用消息与 HTTP 认证：`hmac-sha256-v2`
+
+V2 从 V1 迁移的是产品边界，不是把 V1 原地改名。V2 固定为一个煤矿一个企业
+智能体、一份月报包含逐日及三班五量、政府唯一五量引擎和双向风险闭环；V1 继续
+保留用于历史解析。V2 六类消息中的任一结构或语义发生不兼容变化，都必须单独升
+新版本并同步发布工作流兼容矩阵，不能只修改 OpenAPI 而不更新 schema 和向量。
+
+### 建设期 V2 口径校正（2026-08-01）
+
+V2 尚未作为生产契约发布时，建设基线曾把入井人员量误写成通用“用工量”
+`labor_persons`。本次在首个生产发布前一次性校正为 `mine_entry_persons`，并把五个
+业务组固定为 `airflow`、`electricity`、`blasting_materials`、
+`mine_entry_personnel` 和 `production`。火工品组继续用 `detonators_count` 与
+`explosives_kg` 两个不同单位的原子字段表达，不定义二者相加的总量。
+
+旧建设期样例、演示数据库和固定签名向量不构成生产兼容面，应随本次校正重新生成；
+不得改写或冒充成新报文。首个生产发布完成后，任何同类字段改名或语义变化都必须按
+本文件规则发布新契约版本，不能再次原地修改 V2。
+
 ## 2. 何时必须升主版本
 
 发布后的 V1 schema 不原地改变语义。出现以下任一变化必须新建 V2 schema、

@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:response-receipt:v2",
+  "title": "Enterprise Risk Response Receipt V2",
+  "description": "Government-signed immutable receipt for an enterprise response. It records the response and may queue reanalysis, but never clears risk by itself.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "message_type",
+    "message_id",
+    "correlation_id",
+    "causation_id",
+    "idempotency_key",
+    "revision",
+    "predecessor",
+    "created_at",
+    "sender",
+    "recipient",
+    "mine_id",
+    "payload",
+    "signature_envelope"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "response-receipt-v2"
+    },
+    "message_type": {
+      "const": "response_receipt"
+    },
+    "message_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "correlation_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "causation_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "revision": {
+      "const": 1
+    },
+    "predecessor": {
+      "type": "null"
+    },
+    "created_at": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+    },
+    "sender": {
+      "allOf": [
+        {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/participant"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "regulatory_platform"
+            }
+          }
+        }
+      ]
+    },
+    "recipient": {
+      "allOf": [
+        {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/participant"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "enterprise_agent"
+            }
+          }
+        }
+      ]
+    },
+    "mine_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/identifier"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_id",
+        "enterprise_response_message_id",
+        "response_id",
+        "report_id",
+        "recorded_at",
+        "receipt_status",
+        "disposition",
+        "risk_status",
+        "accepted_finding_ids",
+        "reanalysis_run_id"
+      ],
+      "properties": {
+        "receipt_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "enterprise_response_message_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "response_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "report_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "recorded_at": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+        },
+        "receipt_status": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "duplicate"
+          ]
+        },
+        "disposition": {
+          "type": "string",
+          "enum": [
+            "explanation_recorded",
+            "reanalysis_queued",
+            "reanalysis_completed",
+            "clarification_recorded"
+          ]
+        },
+        "risk_status": {
+          "const": "not_cleared_by_receipt"
+        },
+        "accepted_finding_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+          }
+        },
+        "reanalysis_run_id": {
+          "anyOf": [
+            {
+              "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "enum": [
+                  "reanalysis_queued",
+                  "reanalysis_completed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reanalysis_run_id": {
+                "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reanalysis_run_id": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "signature_envelope": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/signatureEnvelope"
+    }
+  }
+}

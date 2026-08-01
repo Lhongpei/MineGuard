@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from mineguard.casework import LocalRepository
 from mineguard.monitoring import (
     TEMPORAL_DETECTOR_VERSION,
+    active_temporal_parameters,
     refresh_temporal_audit,
 )
 
@@ -14,7 +15,7 @@ def _persist_score(
     *,
     index: int,
     score: float,
-) -> None:
+) -> str:
     end = datetime(2026, 7, 1, tzinfo=UTC) + timedelta(days=index)
     repository.save_portfolio_batch(
         {
@@ -57,15 +58,33 @@ def _persist_score(
             "observation_envelopes": [],
         },
     )
+    runs = repository.list_runs(f"B-{index:02d}")
+    assert len(runs) == 1
+    return str(runs[0]["run_id"])
 
 
 def test_refresh_persists_model_findings_and_episodes_idempotently() -> None:
     repository = LocalRepository()
     try:
+        baseline_run_ids = []
         for index, score in enumerate(
             [0.1, -0.1, 0.0, 0.2, -0.2, 0.1, 0.0, -0.1, 5.0]
         ):
-            _persist_score(repository, index=index, score=score)
+            run_id = _persist_score(
+                repository,
+                index=index,
+                score=score,
+            )
+            if index < 8:
+                baseline_run_ids.append(run_id)
+        for run_id in baseline_run_ids:
+            repository.append_run_reference_label(
+                run_id,
+                label="verified_normal",
+                actor="supervisor",
+                note="原始凭证与现场记录复核一致",
+                expected_sequence=0,
+            )
 
         first = refresh_temporal_audit(
             repository,
@@ -78,6 +97,8 @@ def test_refresh_persists_model_findings_and_episodes_idempotently() -> None:
         assert first["inserted_findings"] == first["finding_count"]
         assert first["inserted_episodes"] == 1
         assert first["inserted_model_snapshots"] == 1
+        assert first["baseline_eligible_observation_count"] == 8
+        assert first["baseline_ineligible_observation_count"] == 1
 
         findings = repository.list_detector_findings(
             mine_ids={"M001"}
@@ -87,12 +108,34 @@ def test_refresh_persists_model_findings_and_episodes_idempotently() -> None:
             detector_code="temporal_ensemble"
         )
         assert findings and all(item["hash_valid"] for item in findings)
+        assert all(
+            item["baseline_eligible"] is False
+            and item["accepted_into_baseline"] is False
+            and item["reset_seed_sample_count"] == 0
+            for item in findings
+        )
         assert episodes and all(item["hash_valid"] for item in episodes)
         assert len(snapshots) == 1
         assert snapshots[0]["hash_valid"] is True
         assert snapshots[0]["detector_version"] == (
             TEMPORAL_DETECTOR_VERSION
         )
+        assert snapshots[0]["parameters"]["minimum_relative_scale"] == 0.0
+        assert (
+            snapshots[0]["parameters"][
+                "baseline_reset_confirmation_points"
+            ]
+            is None
+        )
+        assert snapshots[0]["parameters"][
+            "baseline_reset_candidate_max_gap_seconds"
+        ] == 172_800.0
+        assert snapshots[0]["parameters"][
+            "episode_max_gap_seconds"
+        ] == 172_800.0
+        assert snapshots[0]["parameters"][
+            "baseline_admission_policy"
+        ] == "current_verified_normal_and_reference_eligible"
 
         second = refresh_temporal_audit(
             repository,
@@ -105,6 +148,40 @@ def test_refresh_persists_model_findings_and_episodes_idempotently() -> None:
         assert second["inserted_model_snapshots"] == 0
     finally:
         repository.close()
+
+
+def test_unreviewed_history_remains_cold_start_and_is_not_normal() -> None:
+    repository = LocalRepository()
+    try:
+        for index, score in enumerate(
+            [0.1, -0.1, 0.0, 0.2, -0.2, 0.1, 0.0, -0.1, 0.1]
+        ):
+            _persist_score(repository, index=index, score=score)
+
+        summary = refresh_temporal_audit(
+            repository,
+            mine_ids={"M001"},
+        )
+
+        assert summary["status"] == "insufficient_history"
+        assert summary["finding_count"] == 0
+        assert summary["episode_count"] == 0
+        assert summary["baseline_eligible_observation_count"] == 0
+        assert summary["baseline_ineligible_observation_count"] == 9
+    finally:
+        repository.close()
+
+
+def test_active_policy_disables_self_learning_and_bounds_time_gaps() -> None:
+    parameters = active_temporal_parameters()
+
+    assert parameters.minimum_relative_scale == 0.0
+    assert parameters.baseline_reset_confirmation_points is None
+    assert (
+        parameters.baseline_reset_candidate_max_gap_seconds
+        == 172_800.0
+    )
+    assert parameters.episode_max_gap_seconds == 172_800.0
 
 
 def test_refresh_cold_start_still_records_detector_configuration() -> None:

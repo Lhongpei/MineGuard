@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
 import json
 import mimetypes
@@ -30,16 +32,13 @@ from .errors import AgentError, RequestTooLargeError
 from .service import EnterpriseAgentService
 
 _MAX_BODY = 2 * 1024 * 1024
+_MAX_IMPORT_BODY = 30 * 1024 * 1024
 _DRAFT_ROUTE = re.compile(
     r"^/api/v1/drafts/([^/]+)(?:/(import|event-snapshot|assist|questions|validate|reviews|confirm|submit|audit|submissions))?$"
 )
 _AGENT_RUN_ROUTE = re.compile(r"^/api/v1/agent/runs/([^/]+)(?:/(approve|cancel))?$")
-_AGENT_FLOW_ROUTE = re.compile(
-    r"^/api/v1/agent/flows/([^/]+)(?:/(cancel|retry))?$"
-)
-_AGENT_JOB_ROUTE = re.compile(
-    r"^/api/v1/agent/jobs/([^/]+)(?:/(run))?$"
-)
+_AGENT_FLOW_ROUTE = re.compile(r"^/api/v1/agent/flows/([^/]+)(?:/(cancel|retry))?$")
+_AGENT_JOB_ROUTE = re.compile(r"^/api/v1/agent/jobs/([^/]+)(?:/(run))?$")
 _MEMORY_PROPOSAL_ROUTE = re.compile(
     r"^/api/v1/agent/memory/proposals/([^/]+)(?:/(decision))?$"
 )
@@ -47,10 +46,11 @@ _MEMORY_ROUTE = re.compile(r"^/api/v1/agent/memories/([^/]+)$")
 _SKILL_PROPOSAL_ROUTE = re.compile(
     r"^/api/v1/agent/skill-proposals/([^/]+)(?:/(decision))?$"
 )
-_SKILL_VERSION_ROUTE = re.compile(
-    r"^/api/v1/agent/skill-versions/([^/]+)$"
-)
+_SKILL_VERSION_ROUTE = re.compile(r"^/api/v1/agent/skill-versions/([^/]+)$")
 _CHAT_SESSION_ROUTE = re.compile(r"^/api/v1/chat/sessions/([^/]+)(?:/(messages))?$")
+_FQ_DRAFT_ROUTE = re.compile(r"^/api/v2/drafts/([^/]+)(?:/(confirm|send-now))?$")
+_FQ_RISK_ROUTE = re.compile(r"^/api/v2/risks/([^/]+)(?:/(chat|response))?$")
+_FQ_RESPONSE_ROUTE = re.compile(r"^/api/v2/responses/([^/]+)(?:/(confirm))?$")
 _AGENT_V2_PREFIXES = (
     "/api/v1/agent/workflows",
     "/api/v1/agent/flows",
@@ -65,8 +65,7 @@ _AGENT_V2_PREFIXES = (
 
 def _is_agent_v2_path(path: str) -> bool:
     return any(
-        path == prefix or path.startswith(prefix + "/")
-        for prefix in _AGENT_V2_PREFIXES
+        path == prefix or path.startswith(prefix + "/") for prefix in _AGENT_V2_PREFIXES
     )
 
 
@@ -374,7 +373,12 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _body(self, *, optional: bool = False) -> dict[str, Any]:
+    def _body(
+        self,
+        *,
+        optional: bool = False,
+        maximum: int = _MAX_BODY,
+    ) -> dict[str, Any]:
         transfer_encoding = self.headers.get("Transfer-Encoding")
         if transfer_encoding:
             raise ValueError("不支持 Transfer-Encoding，请发送 Content-Length")
@@ -390,8 +394,8 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             length = int(raw_length)
         except ValueError as error:
             raise ValueError("Content-Length 非法") from error
-        if length < 0 or length > _MAX_BODY:
-            raise RequestTooLargeError("请求体不能超过 2 MiB")
+        if length < 0 or length > maximum:
+            raise RequestTooLargeError(f"请求体不能超过 {maximum // (1024 * 1024)} MiB")
         if length == 0:
             if optional:
                 return {}
@@ -463,6 +467,21 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             raise ValueError("limit 必须大于 0")
         offset = integer("offset", 0, 1_000_000) if allow_offset else 0
         return limit, offset
+
+    def _boolean_query(self, name: str, *, default: bool = False) -> bool:
+        query = parse_qs(
+            urlsplit(self.path).query,
+            keep_blank_values=True,
+        )
+        unknown = set(query) - {name}
+        if unknown:
+            raise ValueError("不支持的查询参数：" + ", ".join(sorted(unknown)))
+        if any(len(values) != 1 for values in query.values()):
+            raise ValueError("查询参数不能重复")
+        raw = query.get(name, [str(default).lower()])[0].lower()
+        if raw not in {"true", "false"}:
+            raise ValueError(f"{name} 必须是 true 或 false")
+        return raw == "true"
 
     @staticmethod
     def _reject_unknown_fields(
@@ -542,9 +561,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                         "limit": limit,
                         "offset": offset,
                         "has_more": next_offset < total,
-                        "next_offset": (
-                            next_offset if next_offset < total else None
-                        ),
+                        "next_offset": (next_offset if next_offset < total else None),
                     },
                 )
                 return True
@@ -605,9 +622,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                     body,
                     frozenset({"expected_revision"}),
                 )
-                operation = (
-                    runtime.cancel if action == "cancel" else runtime.retry
-                )
+                operation = runtime.cancel if action == "cancel" else runtime.retry
                 flow = operation(
                     flow_id,
                     actor_id=context.principal.actor_id,
@@ -618,9 +633,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                     {"flow": flow},
                 )
                 return True
-            self._method_not_allowed(
-                ("GET",) if action is None else ("POST",)
-            )
+            self._method_not_allowed(("GET",) if action is None else ("POST",))
             return True
 
         if path == "/api/v1/agent/jobs":
@@ -649,9 +662,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                         "limit": limit,
                         "offset": offset,
                         "has_more": next_offset < total,
-                        "next_offset": (
-                            next_offset if next_offset < total else None
-                        ),
+                        "next_offset": (next_offset if next_offset < total else None),
                     },
                 )
                 return True
@@ -773,9 +784,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 )
                 return True
             self._method_not_allowed(
-                ("GET", "PATCH", "DELETE")
-                if action is None
-                else ("POST",)
+                ("GET", "PATCH", "DELETE") if action is None else ("POST",)
             )
             return True
 
@@ -833,9 +842,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 if not self._require(context, "read"):
                     return True
                 limit, offset = self._pagination(
-                    allowed=frozenset(
-                        {"limit", "offset", "status", "scope_type"}
-                    ),
+                    allowed=frozenset({"limit", "offset", "status", "scope_type"}),
                     default_limit=100,
                     maximum_limit=200,
                     allow_offset=True,
@@ -887,9 +894,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                     refs = [
                         {
                             "source_type": (
-                                "draft"
-                                if scope_type == "draft"
-                                else "user_input"
+                                "draft" if scope_type == "draft" else "user_input"
                             ),
                             "source_id": (
                                 scope_id
@@ -939,9 +944,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 body = self._body()
                 self._reject_unknown_fields(
                     body,
-                    frozenset(
-                        {"decision", "expected_revision", "reason"}
-                    ),
+                    frozenset({"decision", "expected_revision", "reason"}),
                 )
                 result = governance.decide_memory_proposal(
                     access,
@@ -952,9 +955,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 )
                 self._json(HTTPStatus.OK, result)
                 return True
-            self._method_not_allowed(
-                ("GET",) if action is None else ("POST",)
-            )
+            self._method_not_allowed(("GET",) if action is None else ("POST",))
             return True
 
         if path == "/api/v1/agent/memories":
@@ -964,9 +965,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             if not self._require(context, "read"):
                 return True
             limit, offset = self._pagination(
-                allowed=frozenset(
-                    {"limit", "offset", "status", "scope_type"}
-                ),
+                allowed=frozenset({"limit", "offset", "status", "scope_type"}),
                 default_limit=100,
                 maximum_limit=200,
                 allow_offset=True,
@@ -1067,9 +1066,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 procedure = body.get("procedure")
                 if isinstance(procedure, str):
                     procedure = [
-                        line.strip()
-                        for line in procedure.splitlines()
-                        if line.strip()
+                        line.strip() for line in procedure.splitlines() if line.strip()
                     ]
                 refs = body.get("source_refs")
                 if not refs:
@@ -1088,8 +1085,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                     allowed_tools=body.get("allowed_tools")
                     or ["draft_summary", "deterministic_preflight"],
                     source_refs=refs,
-                    reason=body.get("reason")
-                    or "由企业人员提议，待另一名复核人员审批",
+                    reason=body.get("reason") or "由企业人员提议，待另一名复核人员审批",
                 )
                 self._json(
                     HTTPStatus.CREATED,
@@ -1122,9 +1118,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 body = self._body()
                 self._reject_unknown_fields(
                     body,
-                    frozenset(
-                        {"decision", "expected_revision", "reason"}
-                    ),
+                    frozenset({"decision", "expected_revision", "reason"}),
                 )
                 result = governance.decide_skill_proposal(
                     access,
@@ -1135,9 +1129,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 )
                 self._json(HTTPStatus.OK, result)
                 return True
-            self._method_not_allowed(
-                ("GET",) if action is None else ("POST",)
-            )
+            self._method_not_allowed(("GET",) if action is None else ("POST",))
             return True
 
         if path == "/api/v1/agent/skill-versions":
@@ -1147,9 +1139,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             if not self._require(context, "read"):
                 return True
             limit, offset = self._pagination(
-                allowed=frozenset(
-                    {"limit", "offset", "status", "skill_name"}
-                ),
+                allowed=frozenset({"limit", "offset", "status", "skill_name"}),
                 default_limit=100,
                 maximum_limit=200,
                 allow_offset=True,
@@ -1216,6 +1206,350 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
 
         return False
 
+    def _five_quantity_route(
+        self,
+        method: str,
+        path: str,
+        context: AuthContext,
+    ) -> bool:
+        """Narrow enterprise UI/API for the one-mine V2 workflow."""
+
+        runtime = getattr(self.server.service, "_five_quantity", None)
+        if runtime is None:
+            self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "five_quantity_v2_unavailable",
+                "当前实例未配置五量 V2 运行时",
+            )
+            return True
+        actor = context.principal.actor_id
+        if path == "/api/v2/status":
+            if method != "GET":
+                self._method_not_allowed(("GET",))
+                return True
+            if not self._require(context, "read"):
+                return True
+            self._json(HTTPStatus.OK, runtime.status())
+            return True
+        if path == "/api/v2/imports":
+            if method == "GET":
+                if not self._require(context, "read"):
+                    return True
+                include_discarded = self._boolean_query("include_discarded")
+                items = runtime.store.list_imports(include_discarded=include_discarded)
+                self._json(
+                    HTTPStatus.OK,
+                    {"items": items, "imports": items, "count": len(items)},
+                )
+                return True
+            if method == "POST":
+                if not self._require(context, "write"):
+                    return True
+                body = self._body(maximum=_MAX_IMPORT_BODY)
+                self._reject_unknown_fields(
+                    body,
+                    frozenset({"filename", "content_base64"}),
+                )
+                encoded = body.get("content_base64")
+                if not isinstance(encoded, str):
+                    raise ValueError("content_base64 必须是字符串")
+                try:
+                    content = base64.b64decode(encoded, validate=True)
+                except (binascii.Error, ValueError) as error:
+                    raise ValueError("content_base64 非法") from error
+                result = runtime.ingest_bytes(
+                    filename=body.get("filename"),
+                    content=content,
+                    acquisition_mode="manual_import",
+                    actor=actor,
+                )
+                self._json(
+                    HTTPStatus.OK if result.get("duplicate") else HTTPStatus.CREATED,
+                    result,
+                )
+                return True
+            self._method_not_allowed(("GET", "POST"))
+            return True
+        if path == "/api/v2/direct-ingest":
+            if method != "POST":
+                self._method_not_allowed(("POST",))
+                return True
+            if not self._require(context, "write"):
+                return True
+            body = self._body(maximum=_MAX_IMPORT_BODY)
+            self._reject_unknown_fields(
+                body,
+                frozenset({"filename", "content_base64"}),
+            )
+            encoded = body.get("content_base64")
+            if not isinstance(encoded, str):
+                raise ValueError("content_base64 必须是字符串")
+            try:
+                content = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as error:
+                raise ValueError("content_base64 非法") from error
+            result = runtime.ingest_bytes(
+                filename=body.get("filename"),
+                content=content,
+                acquisition_mode="direct_collection",
+                actor=actor,
+            )
+            self._json(
+                HTTPStatus.OK if result.get("duplicate") else HTTPStatus.CREATED,
+                result,
+            )
+            return True
+        if path == "/api/v2/watch/scan":
+            if method != "POST":
+                self._method_not_allowed(("POST",))
+                return True
+            if not self._require(context, "write"):
+                return True
+            self._body(optional=True)
+            items = runtime.scan_watched_directories()
+            self._json(HTTPStatus.OK, {"items": items, "count": len(items)})
+            return True
+        if path == "/api/v2/drafts":
+            if method != "GET":
+                self._method_not_allowed(("GET",))
+                return True
+            if not self._require(context, "read"):
+                return True
+            include_discarded = self._boolean_query("include_discarded")
+            items = runtime.store.list_drafts(include_discarded=include_discarded)
+            self._json(
+                HTTPStatus.OK,
+                {"items": items, "drafts": items, "count": len(items)},
+            )
+            return True
+        draft_match = _FQ_DRAFT_ROUTE.fullmatch(path)
+        if draft_match:
+            draft_id = unquote(draft_match.group(1))
+            action = draft_match.group(2)
+            if action is None and method == "GET":
+                if not self._require(context, "read"):
+                    return True
+                self._json(HTTPStatus.OK, runtime.store.get_draft(draft_id))
+                return True
+            if action is None and method == "PATCH":
+                if not self._require(context, "write"):
+                    return True
+                body = self._body(maximum=_MAX_IMPORT_BODY)
+                self._reject_unknown_fields(
+                    body,
+                    frozenset({"expected_revision", "payload"}),
+                )
+                result = runtime.save_draft(
+                    draft_id,
+                    expected_revision=body.get("expected_revision"),
+                    payload=body.get("payload"),
+                    actor=actor,
+                )
+                self._json(HTTPStatus.OK, result)
+                return True
+            if action is None and method == "DELETE":
+                if not self._require(context, "write"):
+                    return True
+                body = self._body()
+                self._reject_unknown_fields(
+                    body,
+                    frozenset({"expected_revision", "reason"}),
+                )
+                result = runtime.discard_draft(
+                    draft_id,
+                    expected_revision=body.get("expected_revision"),
+                    actor=actor,
+                    reason=body.get("reason"),
+                )
+                self._json(
+                    HTTPStatus.OK,
+                    {"draft": result, "discarded": True},
+                )
+                return True
+            if action == "confirm" and method == "POST":
+                if not self._require(context, "confirm"):
+                    return True
+                if not self._require(context, "submit"):
+                    return True
+                body = self._body()
+                self._reject_unknown_fields(
+                    body,
+                    frozenset(
+                        {
+                            "expected_revision",
+                            "confirmer_name",
+                            "confirmer_role",
+                            "attestation",
+                            "accepted",
+                        }
+                    ),
+                )
+                result = runtime.confirm_draft(
+                    draft_id,
+                    expected_revision=body.get("expected_revision"),
+                    actor_id=actor,
+                    confirmer_name=body.get("confirmer_name"),
+                    confirmer_role=body.get("confirmer_role"),
+                    attestation=body.get("attestation"),
+                    accepted=body.get("accepted") is True,
+                )
+                self._json(HTTPStatus.ACCEPTED, result)
+                return True
+            if action == "send-now" and method == "POST":
+                if not self._require(context, "submit"):
+                    return True
+                self._body(optional=True)
+                result = runtime.process_outbox_once()
+                self._json(HTTPStatus.OK, {"items": result, "count": len(result)})
+                return True
+            self._method_not_allowed(
+                ("GET", "PATCH", "DELETE") if action is None else ("POST",)
+            )
+            return True
+        if path == "/api/v2/risks":
+            if method != "GET":
+                self._method_not_allowed(("GET",))
+                return True
+            if not self._require(context, "read"):
+                return True
+            items = runtime.store.list_reports()
+            self._json(
+                HTTPStatus.OK,
+                {"items": items, "risks": items, "count": len(items)},
+            )
+            return True
+        if path == "/api/v2/risks/poll":
+            if method != "POST":
+                self._method_not_allowed(("POST",))
+                return True
+            if not self._require(context, "read"):
+                return True
+            self._body(optional=True)
+            result = runtime.poll_analysis_once()
+            self._json(HTTPStatus.OK, {"result": result})
+            return True
+        risk_match = _FQ_RISK_ROUTE.fullmatch(path)
+        if risk_match:
+            report_id = unquote(risk_match.group(1))
+            action = risk_match.group(2)
+            if action is None and method == "GET":
+                if not self._require(context, "read"):
+                    return True
+                self._json(HTTPStatus.OK, runtime.store.get_report(report_id))
+                return True
+            if action == "chat" and method == "GET":
+                if not self._require(context, "read"):
+                    return True
+                items = runtime.store.chat_messages(report_id)
+                self._json(
+                    HTTPStatus.OK,
+                    {"items": items, "messages": items, "count": len(items)},
+                )
+                return True
+            if action == "chat" and method == "POST":
+                if not self._require(context, "read"):
+                    return True
+                body = self._body()
+                self._reject_unknown_fields(body, frozenset({"question"}))
+                self._json(
+                    HTTPStatus.OK,
+                    runtime.risk_explanation(
+                        report_id, body.get("question"), actor=actor
+                    ),
+                )
+                return True
+            if action == "response" and method == "POST":
+                if not self._require(context, "write"):
+                    return True
+                self._body(optional=True)
+                self._json(
+                    HTTPStatus.CREATED,
+                    runtime.store.create_response(report_id, actor=actor),
+                )
+                return True
+            self._method_not_allowed(("GET",) if action is None else ("GET", "POST"))
+            return True
+        response_match = _FQ_RESPONSE_ROUTE.fullmatch(path)
+        if response_match:
+            response_id = unquote(response_match.group(1))
+            action = response_match.group(2)
+            if action is None and method == "GET":
+                if not self._require(context, "read"):
+                    return True
+                self._json(HTTPStatus.OK, runtime.store.get_response(response_id))
+                return True
+            if action is None and method == "PATCH":
+                if not self._require(context, "write"):
+                    return True
+                body = self._body()
+                self._reject_unknown_fields(
+                    body,
+                    frozenset({"expected_revision", "document"}),
+                )
+                self._json(
+                    HTTPStatus.OK,
+                    runtime.save_response(
+                        response_id,
+                        expected_revision=body.get("expected_revision"),
+                        document=body.get("document"),
+                        actor=actor,
+                    ),
+                )
+                return True
+            if action == "confirm" and method == "POST":
+                if not self._require(context, "confirm"):
+                    return True
+                if not self._require(context, "submit"):
+                    return True
+                body = self._body()
+                self._reject_unknown_fields(
+                    body,
+                    frozenset(
+                        {
+                            "expected_revision",
+                            "confirmer_name",
+                            "confirmer_role",
+                            "attestation",
+                            "accepted",
+                        }
+                    ),
+                )
+                self._json(
+                    HTTPStatus.ACCEPTED,
+                    runtime.confirm_response(
+                        response_id,
+                        expected_revision=body.get("expected_revision"),
+                        actor_id=actor,
+                        confirmer_name=body.get("confirmer_name"),
+                        confirmer_role=body.get("confirmer_role"),
+                        attestation=body.get("attestation"),
+                        accepted=body.get("accepted") is True,
+                    ),
+                )
+                return True
+            self._method_not_allowed(("GET", "PATCH") if action is None else ("POST",))
+            return True
+        if path == "/api/v2/exchange/run":
+            if method != "POST":
+                self._method_not_allowed(("POST",))
+                return True
+            if not self._require(context, "submit"):
+                return True
+            self._body(optional=True)
+            delivered = runtime.process_outbox_once()
+            pulled = runtime.poll_analysis_once()
+            self._json(HTTPStatus.OK, {"delivered": delivered, "pulled": pulled})
+            return True
+        if path == "/api/v2/audit":
+            if method != "GET":
+                self._method_not_allowed(("GET",))
+                return True
+            if not self._require(context, "read"):
+                return True
+            self._json(HTTPStatus.OK, runtime.store.audit())
+            return True
+        return False
+
     def _dispatch(self, method: str) -> None:
         path = urlsplit(self.path).path.rstrip("/") or "/"
         if path == "/api/v1/health" and method == "GET":
@@ -1273,13 +1607,30 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                     ),
                     "news_ai_summary_configured": llm_configured,
                     "news_ai_summary_status": (
-                        "configured_unverified"
-                        if llm_configured
-                        else "not_configured"
+                        "configured_unverified" if llm_configured else "not_configured"
                     ),
                     "news_ai_summary_grounding": "search_title_and_snippet",
                     "platform_configured": (
                         self.server.service.platform_client is not None
+                        or getattr(self.server.service, "_five_quantity", None)
+                        is not None
+                        and getattr(
+                            self.server.service._five_quantity,
+                            "platform_client",
+                            None,
+                        )
+                        is not None
+                    ),
+                    "primary_contract_version": "five-quantity-submission-v2",
+                    "five_quantity_v2_available": getattr(
+                        self.server.service, "_five_quantity", None
+                    )
+                    is not None,
+                    "five_quantity_v2_status": (
+                        self.server.service._five_quantity.status()
+                        if getattr(self.server.service, "_five_quantity", None)
+                        is not None
+                        else None
                     ),
                     "authentication_mode": (
                         "anonymous_loopback"
@@ -1391,6 +1742,12 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 return
         else:
             context = None
+        if path.startswith("/api/v2/"):
+            assert context is not None
+            if self._five_quantity_route(method, path, context):
+                return
+            self._error(HTTPStatus.NOT_FOUND, "not_found", "V2 接口不存在")
+            return
         if path == "/api/v1/platform-status":
             if method != "GET":
                 self._method_not_allowed(("GET",))

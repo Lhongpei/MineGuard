@@ -2008,6 +2008,17 @@
               >
                 人员通行核验
               </button>
+              <button
+                id="five-quantity-tab"
+                class="mode-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="five-quantity-panel"
+                data-mode="operational-five-quantity"
+              >
+                生产运行五量月报
+              </button>
             </div>
           </div>
 
@@ -2089,12 +2100,221 @@
               </button>
             </div>
           </div>
+
+          <div
+            id="five-quantity-panel"
+            class="five-quantity-panel"
+            role="tabpanel"
+            aria-labelledby="five-quantity-tab"
+            hidden
+          >
+            <div class="five-quantity-boundary" role="note">
+              <strong>临时研判边界：不保存、不建案、非正式历史。</strong>
+              <span>文件不会进入历史基线；结果只用于安排人工核查，不能作为监管认定。</span>
+            </div>
+
+            <form id="five-quantity-form" class="five-quantity-form">
+              <div class="five-quantity-form-grid">
+                <label>
+                  <span>矿井编号 <small>必须与当前账号授权范围一致</small></span>
+                  <input
+                    id="five-quantity-mine-id"
+                    type="text"
+                    maxlength="200"
+                    autocomplete="off"
+                    placeholder="例如：M001"
+                    required
+                  >
+                </label>
+                <label>
+                  <span>报表月份 <small>用于判断月初至闭账日是否缺整日</small></span>
+                  <input id="five-quantity-report-month" type="month" required>
+                </label>
+                <label>
+                  <span>已闭账到日期 <small>此日期后的行按未闭账处理</small></span>
+                  <input id="five-quantity-closed-through" type="date" required>
+                </label>
+                <label class="five-quantity-file-field">
+                  <span>五量月报文件 <small>仅支持 .et / .xls，最大 5 MB</small></span>
+                  <input
+                    id="five-quantity-file"
+                    type="file"
+                    accept=".et,.xls,application/vnd.ms-excel"
+                    required
+                  >
+                </label>
+              </div>
+
+              <div class="five-quantity-definition">
+                <strong>本工具分析的是生产运行“五量”</strong>
+                <span>风量、用工量、用电量、火工品量、产量；不是“产、运、洗、销、存”物料平衡。</span>
+              </div>
+              <div class="five-quantity-ratio-warning">
+                <strong>总电量/产量比不是生产吨煤电耗。</strong>
+                <span>总电量可能包含通风、排水、压风、提升、洗选等固定或非生产负荷。</span>
+              </div>
+
+              <div class="run-bar five-quantity-run-bar">
+                <div
+                  id="five-quantity-status"
+                  class="request-status"
+                  role="status"
+                  aria-live="polite"
+                >
+                  填写矿井编号、报表月份、闭账日期并选择月报后即可分析
+                </div>
+                <button id="five-quantity-submit" class="button primary" type="submit" disabled>
+                  <span id="five-quantity-submit-text">开始月报研判</span>
+                  <span class="button-arrow" aria-hidden="true">→</span>
+                </button>
+              </div>
+            </form>
+          </div>
         </section>
 
         <section id="empty-state" class="empty-state" aria-labelledby="empty-title">
           <span class="empty-mark" aria-hidden="true">析</span>
           <h2 id="empty-title">研判结果将在这里呈现</h2>
           <p>不会只给算法分数，而是说明“是否异常、异常在哪里、下一步做什么”。</p>
+        </section>
+
+        <section
+          id="five-quantity-empty"
+          class="empty-state"
+          aria-labelledby="five-quantity-empty-title"
+          hidden
+        >
+          <span class="empty-mark" aria-hidden="true">月</span>
+          <h2 id="five-quantity-empty-title">五量月报结果将在这里呈现</h2>
+          <p>系统会先区分未闭账、停产候选、复产爬坡和生产状态，再合并同类核查线索。</p>
+        </section>
+
+        <section
+          id="five-quantity-result"
+          class="result-section five-quantity-result"
+          aria-labelledby="five-quantity-result-title"
+          hidden
+        >
+          <div class="result-heading">
+            <div>
+              <span class="step-number" aria-hidden="true">2</span>
+              <div>
+                <p class="section-kicker">生产运行五量月报 / 临时研判</p>
+                <h2 id="five-quantity-result-title">月报分析结果</h2>
+                <p id="five-quantity-result-meta" class="result-time"></p>
+              </div>
+            </div>
+            <div>
+              <div class="five-quantity-trust-tags" aria-label="结果使用边界">
+                <span>不保存</span>
+                <span>不建案</span>
+                <span>不进入正式历史</span>
+              </div>
+              <div class="result-actions">
+                <button id="five-quantity-print" class="button quiet" type="button">
+                  打印临时结果
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div id="five-quantity-overall" class="decision-banner" tabindex="-1">
+            <span id="five-quantity-overall-symbol" class="decision-symbol" aria-hidden="true">!</span>
+            <div>
+              <p id="five-quantity-overall-level" class="decision-level"></p>
+              <h3 id="five-quantity-overall-title"></h3>
+              <p id="five-quantity-overall-summary"></p>
+            </div>
+            <div class="decision-priority">
+              <span>合并事件</span>
+              <strong id="five-quantity-event-count">—</strong>
+            </div>
+          </div>
+
+          <section aria-labelledby="five-quantity-coverage-title">
+            <div class="five-quantity-section-heading">
+              <div>
+                <p class="section-kicker">数据覆盖</p>
+                <h3 id="five-quantity-coverage-title">先确认哪些日期真正参与分析</h3>
+              </div>
+              <p id="five-quantity-period"></p>
+            </div>
+            <div id="five-quantity-coverage-grid" class="kpi-grid"></div>
+          </section>
+
+          <section aria-labelledby="five-quantity-kpi-title">
+            <div class="five-quantity-section-heading">
+              <div>
+                <p class="section-kicker">月度指标</p>
+                <h3 id="five-quantity-kpi-title">关键统计</h3>
+              </div>
+            </div>
+            <div id="five-quantity-kpi-grid" class="five-quantity-kpi-grid"></div>
+            <p class="five-quantity-inline-warning">
+              总电量/产量比不是生产吨煤电耗；单位未声明时只展示原表数值口径，禁止直接跨矿比较。
+            </p>
+          </section>
+
+          <section aria-labelledby="five-quantity-regime-title">
+            <div class="five-quantity-section-heading">
+              <div>
+                <p class="section-kicker">状态感知基线</p>
+                <h3 id="five-quantity-regime-title">本月运行状态分段</h3>
+              </div>
+            </div>
+            <div id="five-quantity-regime-list" class="five-quantity-regime-list"></div>
+          </section>
+
+          <section aria-labelledby="five-quantity-events-title">
+            <div class="five-quantity-section-heading">
+              <div>
+                <p class="section-kicker">已合并的技术线索</p>
+                <h3 id="five-quantity-events-title">领导优先看这些事件</h3>
+              </div>
+              <p>同一时段的连续异常合并展示，避免逐日重复报警。</p>
+            </div>
+            <div id="five-quantity-event-list" class="five-quantity-event-list"></div>
+          </section>
+
+          <details class="technical-details five-quantity-day-details">
+            <summary>
+              <span>
+                <strong>查看逐日分析明细</strong>
+                <small>闭账状态、运行状态、产量、用电量及关联事件</small>
+              </span>
+            </summary>
+            <div class="technical-content">
+              <div class="table-scroll" tabindex="0" aria-label="逐日五量分析明细，可横向滚动">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">日期</th>
+                      <th scope="col">数据状态</th>
+                      <th scope="col">运行状态</th>
+                      <th scope="col">产量</th>
+                      <th scope="col">总电量</th>
+                      <th scope="col">总电量/产量比</th>
+                      <th scope="col">关联事件</th>
+                    </tr>
+                  </thead>
+                  <tbody id="five-quantity-day-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+
+          <section class="five-quantity-limitations" aria-labelledby="five-quantity-limitations-title">
+            <div>
+              <p class="section-kicker">口径与限制</p>
+              <h3 id="five-quantity-limitations-title">使用结果前必须知道</h3>
+            </div>
+            <ul id="five-quantity-limitation-list" class="plain-list"></ul>
+          </section>
+
+          <div class="legal-note">
+            <strong>本结果只形成技术核查线索。</strong>
+            上传文件不保存、不建案，也不进入受治理历史基线；运行状态、候选原因和处置建议均须结合原始凭证及现场情况人工复核。
+          </div>
         </section>
 
         <section id="result-section" class="result-section" aria-labelledby="result-title" hidden>

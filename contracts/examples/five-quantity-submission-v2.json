@@ -1,0 +1,484 @@
+{
+  "contract_version": "five-quantity-submission-v2",
+  "message_type": "five_quantity_submission",
+  "message_id": "11111111-1111-4111-8111-111111111111",
+  "correlation_id": "11111111-1111-4111-8111-111111111111",
+  "causation_id": null,
+  "idempotency_key": "mine-qy-001.2026-07-31.r1",
+  "revision": 1,
+  "predecessor": null,
+  "created_at": "2026-08-01T00:05:00Z",
+  "sender": {
+    "system_id": "agent-mine-qy-001",
+    "party_id": "operator-qy-001",
+    "role": "enterprise_agent"
+  },
+  "recipient": {
+    "system_id": "mineguard-qinyuan",
+    "party_id": "regulator-qinyuan",
+    "role": "regulatory_platform"
+  },
+  "mine_id": "MINE-QY-001",
+  "payload": {
+    "mine": {
+      "mine_id": "MINE-QY-001",
+      "mine_name": "示例一号煤矿",
+      "operator_id": "operator-qy-001",
+      "operator_name": "示例一号煤业有限公司"
+    },
+    "reporting_month": "2026-07",
+    "timezone": "Asia/Shanghai",
+    "period_start": "2026-07-29",
+    "period_end": "2026-07-31",
+    "closed_at": "2026-08-01T00:00:00Z",
+    "comparison_context": {
+      "capacity_band": "large",
+      "mining_method": "underground-longwall",
+      "shift_system": "three-shift-eight-hour",
+      "coal_type": "bituminous",
+      "operating_regime": "normal-production"
+    },
+    "days": [
+    {
+    "date": "2026-07-29",
+    "operating_state": "producing",
+    "reported_quantity": {
+      "daily_total": {
+      "ventilation_m3_min": {
+        "metric_code": "ventilation_m3_min",
+        "value": 8120.5,
+        "unit": "m3/min",
+        "aggregation": "time_weighted_average",
+        "quality_flags": [
+          "reported"
+        ],
+        "source_refs": [
+          "SRC-DIRECT-01"
+        ]
+      },
+      "mine_entry_persons": {
+        "metric_code": "mine_entry_persons",
+        "value": 159,
+        "unit": "person",
+        "aggregation": "sum",
+        "quality_flags": [
+          "reported"
+        ],
+        "source_refs": [
+          "SRC-FILE-01"
+        ]
+      },
+      "electricity_kwh": {
+        "metric_code": "electricity_kwh",
+        "value": 125400,
+        "unit": "kWh",
+        "aggregation": "sum",
+        "quality_flags": [
+          "reported"
+        ],
+        "source_refs": [
+          "SRC-DIRECT-01"
+        ]
+      },
+      "detonators_count": {
+        "metric_code": "detonators_count",
+        "value": 48,
+        "unit": "count",
+        "aggregation": "sum",
+        "quality_flags": [
+          "reported"
+        ],
+        "source_refs": [
+          "SRC-FILE-01"
+        ]
+      },
+      "explosives_kg": {
+        "metric_code": "explosives_kg",
+        "value": 19.2,
+        "unit": "kg",
+        "aggregation": "sum",
+        "quality_flags": [
+          "reported"
+        ],
+        "source_refs": [
+          "SRC-FILE-01"
+        ]
+      },
+      "production_t": {
+        "metric_code": "production_t",
+        "value": 3280.5,
+        "unit": "t",
+        "aggregation": "sum",
+        "quality_flags": [
+          "reported"
+        ],
+        "source_refs": [
+          "SRC-FILE-01"
+        ]
+      }
+      },
+      "shifts": {
+      "zero_shift": {
+        "shift_code": "SHIFT-1",
+        "start_at": "2026-07-28T16:00:00Z",
+        "end_at": "2026-07-29T00:00:00Z",
+        "measurements": {
+          "ventilation_m3_min": {
+            "metric_code": "ventilation_m3_min",
+            "value": 8050,
+            "unit": "m3/min",
+            "aggregation": "time_weighted_average",
+            "quality_flags": [
+              "reported"
+            ],
+            "source_refs": [
+              "SRC-DIRECT-01"
+            ]
+          },
+          "mine_entry_persons": {
+            "metric_code": "mine_entry_persons",
+            "value": 80,
+            "unit": "person",
+            "aggregation": "sum",
+            "quality_flags": [
+              "reported"
+            ],
+            "source_refs": [
+              "SRC-FILE-01"
+            ]
+          },
+          "electricity_kwh": {
+            "metric_code": "electricity_kwh",
+            "value": 62000,
+            "unit": "kWh",
+            "aggregation": "sum",
+            "quality_flags": [
+              "reported"
+            ],
+            "source_refs": [
+              "SRC-DIRECT-01"
+            ]
+          },
+          "detonators_count": {
+            "metric_code": "detonators_count",
+            "value": 24,
+            "unit": "count",
+            "aggregation": "sum",
+            "quality_flags": [
+              "reported"
+            ],
+            "source_refs": [
+              "SRC-FILE-01"
+            ]
+          },
+          "explosives_kg": {
+            "metric_code": "explosives_kg",
+            "value": 9.6,
+            "unit": "kg",
+            "aggregation": "sum",
+            "quality_flags": [
+              "reported"
+            ],
+            "source_refs": [
+              "SRC-FILE-01"
+            ]
+          },
+          "production_t": {
+            "metric_code": "production_t",
+            "value": 1600,
+            "unit": "t",
+            "aggregation": "sum",
+            "quality_flags": [
+              "reported"
+            ],
+            "source_refs": [
+              "SRC-FILE-01"
+            ]
+          }
+        }
+      },
+      "eight_shift": {
+        "shift_code": "SHIFT-2",
+        "start_at": "2026-07-29T00:00:00Z",
+        "end_at": "2026-07-29T08:00:00Z",
+        "measurements": {
+          "ventilation_m3_min": {
+            "metric_code": "ventilation_m3_min",
+            "value": 8191,
+            "unit": "m3/min",
+            "aggregation": "time_weighted_average",
+            "quality_flags": [
+              "reported"
+            ],
+            "source_refs": [
+              "SRC-DIRECT-01"
+            ]
+          },
+          "mine_entry_persons": {
+            "metric_code": "mine_entry_persons",
+            "value": 79,
+            "unit": "person",
+            "aggregation": "sum",
+            "quality_flags": [
+              "reported"
+            ],
+            "source_refs": [
+              "SRC-FILE-01"
+            ]
+          },
+          "electricity_kwh": {
+            "metric_code": "electricity_kwh",
+            "value": 63400,
+            "unit": "kWh",
+            "aggregation": "sum",
+            "quality_flags": [
+              "reported"
+            ],
+            "source_refs": [
+              "SRC-DIRECT-01"
+            ]
+          },
+          "detonators_count": {
+            "metric_code": "detonators_count",
+            "value": 24,
+            "unit": "count",
+            "aggregation": "sum",
+            "quality_flags": [
+              "reported"
+            ],
+            "source_refs": [
+              "SRC-FILE-01"
+            ]
+          },
+          "explosives_kg": {
+            "metric_code": "explosives_kg",
+            "value": null,
+            "unit": "kg",
+            "aggregation": "sum",
+            "quality_flags": [
+              "missing",
+              "source_format_warning"
+            ],
+            "source_refs": [
+              "SRC-FILE-01"
+            ]
+          },
+          "production_t": {
+            "metric_code": "production_t",
+            "value": 1680.5,
+            "unit": "t",
+            "aggregation": "sum",
+            "quality_flags": [
+              "reported"
+            ],
+            "source_refs": [
+              "SRC-FILE-01"
+            ]
+          }
+        }
+      },
+      "four_shift": {
+        "shift_code": "SHIFT-3",
+        "start_at": "2026-07-29T08:00:00Z",
+        "end_at": "2026-07-29T16:00:00Z",
+        "measurements": {
+          "ventilation_m3_min": {
+            "metric_code": "ventilation_m3_min",
+            "value": null,
+            "unit": "m3/min",
+            "aggregation": "time_weighted_average",
+            "quality_flags": ["missing"],
+            "source_refs": ["SRC-DIRECT-01"]
+          },
+          "mine_entry_persons": {
+            "metric_code": "mine_entry_persons",
+            "value": null,
+            "unit": "person",
+            "aggregation": "sum",
+            "quality_flags": ["missing"],
+            "source_refs": ["SRC-FILE-01"]
+          },
+          "electricity_kwh": {
+            "metric_code": "electricity_kwh",
+            "value": null,
+            "unit": "kWh",
+            "aggregation": "sum",
+            "quality_flags": ["missing"],
+            "source_refs": ["SRC-DIRECT-01"]
+          },
+          "detonators_count": {
+            "metric_code": "detonators_count",
+            "value": null,
+            "unit": "count",
+            "aggregation": "sum",
+            "quality_flags": ["missing"],
+            "source_refs": ["SRC-FILE-01"]
+          },
+          "explosives_kg": {
+            "metric_code": "explosives_kg",
+            "value": null,
+            "unit": "kg",
+            "aggregation": "sum",
+            "quality_flags": ["missing"],
+            "source_refs": ["SRC-FILE-01"]
+          },
+          "production_t": {
+            "metric_code": "production_t",
+            "value": null,
+            "unit": "t",
+            "aggregation": "sum",
+            "quality_flags": ["missing"],
+            "source_refs": ["SRC-FILE-01"]
+          }
+        }
+      }
+      }
+    }
+    },
+    {
+      "date": "2026-07-30",
+      "operating_state": "maintenance",
+      "reported_quantity": {
+        "daily_total": {
+          "ventilation_m3_min": {"metric_code": "ventilation_m3_min", "value": 7900, "unit": "m3/min", "aggregation": "time_weighted_average", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+          "mine_entry_persons": {"metric_code": "mine_entry_persons", "value": 120, "unit": "person", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+          "electricity_kwh": {"metric_code": "electricity_kwh", "value": 89400, "unit": "kWh", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+          "detonators_count": {"metric_code": "detonators_count", "value": 16, "unit": "count", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+          "explosives_kg": {"metric_code": "explosives_kg", "value": 6.4, "unit": "kg", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+          "production_t": {"metric_code": "production_t", "value": 2100, "unit": "t", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]}
+        },
+        "shifts": {
+          "zero_shift": {
+            "shift_code": "SHIFT-1", "start_at": "2026-07-29T16:00:00Z", "end_at": "2026-07-30T00:00:00Z",
+            "measurements": {
+              "ventilation_m3_min": {"metric_code": "ventilation_m3_min", "value": 7920, "unit": "m3/min", "aggregation": "time_weighted_average", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+              "mine_entry_persons": {"metric_code": "mine_entry_persons", "value": 60, "unit": "person", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "electricity_kwh": {"metric_code": "electricity_kwh", "value": 44700, "unit": "kWh", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+              "detonators_count": {"metric_code": "detonators_count", "value": 8, "unit": "count", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "explosives_kg": {"metric_code": "explosives_kg", "value": 3.2, "unit": "kg", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "production_t": {"metric_code": "production_t", "value": 1050, "unit": "t", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]}
+            }
+          },
+          "eight_shift": {
+            "shift_code": "SHIFT-2", "start_at": "2026-07-30T00:00:00Z", "end_at": "2026-07-30T08:00:00Z",
+            "measurements": {
+              "ventilation_m3_min": {"metric_code": "ventilation_m3_min", "value": 7880, "unit": "m3/min", "aggregation": "time_weighted_average", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+              "mine_entry_persons": {"metric_code": "mine_entry_persons", "value": 60, "unit": "person", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "electricity_kwh": {"metric_code": "electricity_kwh", "value": 44700, "unit": "kWh", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+              "detonators_count": {"metric_code": "detonators_count", "value": 8, "unit": "count", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "explosives_kg": {"metric_code": "explosives_kg", "value": 3.2, "unit": "kg", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "production_t": {"metric_code": "production_t", "value": 1050, "unit": "t", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]}
+            }
+          },
+          "four_shift": {
+            "shift_code": "SHIFT-3", "start_at": "2026-07-30T08:00:00Z", "end_at": "2026-07-30T16:00:00Z",
+            "measurements": {
+              "ventilation_m3_min": {"metric_code": "ventilation_m3_min", "value": null, "unit": "m3/min", "aggregation": "time_weighted_average", "quality_flags": ["not_applicable"], "source_refs": ["SRC-DIRECT-01"]},
+              "mine_entry_persons": {"metric_code": "mine_entry_persons", "value": null, "unit": "person", "aggregation": "sum", "quality_flags": ["not_applicable"], "source_refs": ["SRC-FILE-01"]},
+              "electricity_kwh": {"metric_code": "electricity_kwh", "value": null, "unit": "kWh", "aggregation": "sum", "quality_flags": ["not_applicable"], "source_refs": ["SRC-DIRECT-01"]},
+              "detonators_count": {"metric_code": "detonators_count", "value": null, "unit": "count", "aggregation": "sum", "quality_flags": ["not_applicable"], "source_refs": ["SRC-FILE-01"]},
+              "explosives_kg": {"metric_code": "explosives_kg", "value": null, "unit": "kg", "aggregation": "sum", "quality_flags": ["not_applicable"], "source_refs": ["SRC-FILE-01"]},
+              "production_t": {"metric_code": "production_t", "value": null, "unit": "t", "aggregation": "sum", "quality_flags": ["not_applicable"], "source_refs": ["SRC-FILE-01"]}
+            }
+          }
+        }
+      }
+    },
+    {
+      "date": "2026-07-31",
+      "operating_state": "producing",
+      "reported_quantity": {
+        "daily_total": {
+          "ventilation_m3_min": {"metric_code": "ventilation_m3_min", "value": 8250, "unit": "m3/min", "aggregation": "time_weighted_average", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+          "mine_entry_persons": {"metric_code": "mine_entry_persons", "value": 240, "unit": "person", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+          "electricity_kwh": {"metric_code": "electricity_kwh", "value": 188100, "unit": "kWh", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+          "detonators_count": {"metric_code": "detonators_count", "value": 72, "unit": "count", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+          "explosives_kg": {"metric_code": "explosives_kg", "value": 28.8, "unit": "kg", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+          "production_t": {"metric_code": "production_t", "value": 4920, "unit": "t", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]}
+        },
+        "shifts": {
+          "zero_shift": {
+            "shift_code": "SHIFT-1", "start_at": "2026-07-30T16:00:00Z", "end_at": "2026-07-31T00:00:00Z",
+            "measurements": {
+              "ventilation_m3_min": {"metric_code": "ventilation_m3_min", "value": 8200, "unit": "m3/min", "aggregation": "time_weighted_average", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+              "mine_entry_persons": {"metric_code": "mine_entry_persons", "value": 80, "unit": "person", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "electricity_kwh": {"metric_code": "electricity_kwh", "value": 62000, "unit": "kWh", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+              "detonators_count": {"metric_code": "detonators_count", "value": 24, "unit": "count", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "explosives_kg": {"metric_code": "explosives_kg", "value": 9.6, "unit": "kg", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "production_t": {"metric_code": "production_t", "value": 1600, "unit": "t", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]}
+            }
+          },
+          "eight_shift": {
+            "shift_code": "SHIFT-2", "start_at": "2026-07-31T00:00:00Z", "end_at": "2026-07-31T08:00:00Z",
+            "measurements": {
+              "ventilation_m3_min": {"metric_code": "ventilation_m3_min", "value": 8250, "unit": "m3/min", "aggregation": "time_weighted_average", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+              "mine_entry_persons": {"metric_code": "mine_entry_persons", "value": 80, "unit": "person", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "electricity_kwh": {"metric_code": "electricity_kwh", "value": 63000, "unit": "kWh", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+              "detonators_count": {"metric_code": "detonators_count", "value": 24, "unit": "count", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "explosives_kg": {"metric_code": "explosives_kg", "value": 9.6, "unit": "kg", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "production_t": {"metric_code": "production_t", "value": 1640, "unit": "t", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]}
+            }
+          },
+          "four_shift": {
+            "shift_code": "SHIFT-3", "start_at": "2026-07-31T08:00:00Z", "end_at": "2026-07-31T16:00:00Z",
+            "measurements": {
+              "ventilation_m3_min": {"metric_code": "ventilation_m3_min", "value": 8300, "unit": "m3/min", "aggregation": "time_weighted_average", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+              "mine_entry_persons": {"metric_code": "mine_entry_persons", "value": 80, "unit": "person", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "electricity_kwh": {"metric_code": "electricity_kwh", "value": 63100, "unit": "kWh", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-DIRECT-01"]},
+              "detonators_count": {"metric_code": "detonators_count", "value": 24, "unit": "count", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "explosives_kg": {"metric_code": "explosives_kg", "value": 9.6, "unit": "kg", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]},
+              "production_t": {"metric_code": "production_t", "value": 1680, "unit": "t", "aggregation": "sum", "quality_flags": ["reported"], "source_refs": ["SRC-FILE-01"]}
+            }
+          }
+        }
+      }
+    }
+    ],
+    "sources": [
+      {
+        "source_id": "SRC-DIRECT-01",
+        "acquisition_mode": "direct_collection",
+        "source_system": "mine-energy-gateway",
+        "source_record_id": "20260731-0001",
+        "source_location": "channel/production-electricity-and-wind",
+        "captured_at": "2026-08-01T00:00:00Z",
+        "media_type": "application/json",
+        "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "source_id": "SRC-FILE-01",
+        "acquisition_mode": "manual_import",
+        "source_system": "enterprise-five-quantity-ledger",
+        "source_record_id": "five-quantity-20260731.xlsx",
+        "source_location": "日报!A1:Z40",
+        "captured_at": "2026-08-01T00:01:00Z",
+        "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "evidence_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "normalization": "Columns mapped to fixed V2 units; no value was estimated or imputed."
+      }
+    ],
+    "agent_processing": {
+      "normalization_performed": true,
+      "model_assistance_used": true,
+      "processing_record_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "model_output_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "human_confirmation": {
+      "confirmed": true,
+      "confirmer_id": "reporter-001",
+      "confirmer_name": "示例填报员",
+      "role": "煤矿授权填报员",
+      "confirmed_at": "2026-08-01T00:04:00Z",
+      "content_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  },
+  "signature_envelope": {
+    "algorithm": "hmac-sha256-v2",
+    "canonicalization": "rfc8785-jcs",
+    "key_id": "enterprise-key-2026-01",
+    "signed_at": "2026-08-01T00:05:00Z",
+    "nonce": "AQIDBAUGBwgJCgsMDQ4PEA",
+    "payload_sha256": "cf22a046f2899e4f11dd91f76ef37e2040da6e20f541bf16943946b1300aff35",
+    "signature": "39cea3887d4897dc3a76d4a2e3cf0399cc8d20d9d0e7547debe44411396ff5ab"
+  }
+}

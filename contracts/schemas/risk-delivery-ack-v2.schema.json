@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:risk-delivery-ack:v2",
+  "title": "Risk Delivery Acknowledgement V2",
+  "description": "Enterprise-signed proof that an analysis report was durably stored in the one-mine agent inbox. It is not a substantive risk response.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "message_type",
+    "message_id",
+    "correlation_id",
+    "causation_id",
+    "idempotency_key",
+    "revision",
+    "predecessor",
+    "created_at",
+    "sender",
+    "recipient",
+    "mine_id",
+    "payload",
+    "signature_envelope"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "risk-delivery-ack-v2"
+    },
+    "message_type": {
+      "const": "risk_delivery_ack"
+    },
+    "message_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "correlation_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "causation_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "revision": {
+      "const": 1
+    },
+    "predecessor": {
+      "type": "null"
+    },
+    "created_at": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+    },
+    "sender": {
+      "allOf": [
+        {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/participant"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "enterprise_agent"
+            }
+          }
+        }
+      ]
+    },
+    "recipient": {
+      "allOf": [
+        {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/participant"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "regulatory_platform"
+            }
+          }
+        }
+      ]
+    },
+    "mine_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/identifier"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report_id",
+        "analysis_report_message_id",
+        "delivery_cursor",
+        "received_at",
+        "local_inbox_record_id",
+        "delivery_status"
+      ],
+      "properties": {
+        "report_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "analysis_report_message_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "delivery_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "received_at": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+        },
+        "local_inbox_record_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/identifier"
+        },
+        "delivery_status": {
+          "type": "string",
+          "enum": [
+            "stored",
+            "duplicate"
+          ]
+        }
+      }
+    },
+    "signature_envelope": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/signatureEnvelope"
+    }
+  }
+}

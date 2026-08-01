@@ -8,18 +8,18 @@
       name="description"
       content="企业可信数据智能填报助手。自动提取、逐项溯源、人工确认后提交监管平台。"
     >
-    <title>企业可信数据填报助手</title>
+    <title>煤矿五量报送智能体</title>
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body class="is-simple-mode">
-    <a class="skip-link" href="#workspace">跳到填报区</a>
+    <a class="skip-link" href="#fiveQuantityWorkspace">跳到五量工作区</a>
 
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark" aria-hidden="true">企</span>
+        <span class="brand-mark" aria-hidden="true">矿</span>
         <div>
-          <p class="eyebrow">企业报送侧 · 与监管平台独立运行</p>
-          <h1>可信数据填报助手</h1>
+          <p class="eyebrow">一矿一智能体 · 与政府监管平台独立运行</p>
+          <h1>煤矿五量报送智能体</h1>
         </div>
       </div>
       <div class="topbar-actions">
@@ -38,22 +38,22 @@
             退出
           </button>
         </div>
-        <button class="button button-secondary" id="newDraftButton" type="button" disabled>
+        <button class="button button-secondary" id="newDraftButton" type="button" disabled hidden>
           新建填报
         </button>
-        <button class="button button-agent-center" id="agentCenterButton" type="button" disabled>
+        <button class="button button-agent-center" id="agentCenterButton" type="button" disabled hidden>
           智能体任务中心
         </button>
-        <button class="button button-secondary" id="agentTaskButton" type="button" disabled>
+        <button class="button button-secondary" id="agentTaskButton" type="button" disabled hidden>
           单次分析工具
         </button>
-        <button class="button button-secondary" id="coalChatButton" type="button" disabled>
+        <button class="button button-secondary" id="coalChatButton" type="button" disabled hidden>
           煤炭业务对话
         </button>
       </div>
     </header>
 
-    <section class="enterprise-mode-bar" aria-label="界面模式">
+    <section class="enterprise-mode-bar" aria-label="界面模式" hidden>
       <div class="enterprise-mode-switch" role="group" aria-label="切换界面模式">
         <button
           class="enterprise-mode-button is-active"
@@ -92,11 +92,11 @@
         <span class="status-indicator" aria-hidden="true"></span>
         <span><small>企业填报服务</small><strong id="agentStatusText">正在检查</strong></span>
       </div>
-      <div class="system-status-item is-checking" id="platformStatusItem">
+      <div class="system-status-item is-checking" id="platformStatusItem" hidden>
         <span class="status-indicator" aria-hidden="true"></span>
         <span><small>监管接口</small><strong id="platformStatusText">登录后检查</strong></span>
       </div>
-      <div class="system-status-item is-checking" id="assistantStatusItem">
+      <div class="system-status-item is-checking" id="assistantStatusItem" hidden>
         <span class="status-indicator" aria-hidden="true"></span>
         <span><small>智能辅助</small><strong id="assistantStatusText">正在检查</strong></span>
       </div>
@@ -104,11 +104,141 @@
         刷新状态
       </button>
       <p class="system-status-help" id="systemStatusHelp">
-        本页打开且显示“已连接”，说明服务正在正常运行；启动服务的终端保持占用是正常现象。
+        本页打开且显示“已连接”，说明企业智能体正在运行；启动服务的终端持续占用是正常现象。
       </p>
     </section>
 
-    <div class="app-shell">
+    <main class="fq-shell" id="fiveQuantityWorkspace">
+      <nav class="fq-nav" aria-label="五量报送工作区">
+        <button class="fq-nav-button is-active" type="button" data-fq-tab="inbox" aria-pressed="true">
+          <span>1</span> 数据收件箱
+        </button>
+        <button class="fq-nav-button" type="button" data-fq-tab="review" aria-pressed="false">
+          <span>2</span> 规范化复核与报送
+        </button>
+        <button class="fq-nav-button" type="button" data-fq-tab="risk" aria-pressed="false">
+          <span>3</span> 风险解读与回复
+          <em id="fqRiskCount" hidden>0</em>
+        </button>
+        <button class="fq-nav-button" type="button" data-fq-tab="audit" aria-pressed="false">
+          <span>4</span> 留痕与设置
+        </button>
+      </nav>
+
+      <p class="fq-global-message" id="fqGlobalMessage" role="status" aria-live="polite">
+        登录后即可查看本矿数据。
+      </p>
+
+      <section class="fq-panel is-active" id="fqPanelInbox" data-fq-panel="inbox">
+        <div class="fq-page-head">
+          <div>
+            <p class="eyebrow">第一步 · 获取五量</p>
+            <h2>数据收件箱</h2>
+            <p>五量包括风量、电量、火工品量、入井人员量和产量；火工品量按雷管、炸药子项填写。</p>
+          </div>
+          <button class="button button-secondary" id="fqRefreshInbox" type="button">刷新</button>
+        </div>
+
+        <div class="fq-card-grid fq-card-grid-two">
+          <form class="fq-card" id="fqUploadForm">
+            <span class="fq-card-icon" aria-hidden="true">↑</span>
+            <h3>人工导入文件</h3>
+            <p>支持 ET、XLS、XLSX、CSV、JSON、JSONL，系统会先规范化，不会直接报送。</p>
+            <label class="field">
+              <span>选择五量文件（最大 20 MiB）</span>
+              <input id="fqUploadFile" type="file" accept=".et,.xls,.xlsx,.csv,.json,.jsonl" required>
+            </label>
+            <button class="button button-primary" id="fqUploadButton" type="submit">导入并生成复核稿</button>
+          </form>
+          <article class="fq-card">
+            <span class="fq-card-icon" aria-hidden="true">↻</span>
+            <h3>固定目录 / 设备直采</h3>
+            <p id="fqWatchSummary">正在读取已配置目录…</p>
+            <button class="button button-secondary" id="fqScanWatch" type="button">立即扫描一次</button>
+            <small>系统会等待文件写入稳定、按内容去重；异常文件复制到隔离区，原件不删除。</small>
+          </article>
+        </div>
+
+        <div class="fq-section-head">
+          <div><h3>最近接收记录</h3><p>人工导入和直采的数据均进入同一复核与报送流程。</p></div>
+          <label class="fq-show-discarded" for="fqShowDiscarded">
+            <input id="fqShowDiscarded" type="checkbox">
+            <span>查看已放弃记录</span>
+          </label>
+        </div>
+        <div class="fq-table-wrap">
+          <table class="fq-table">
+            <thead><tr><th>接收时间</th><th>文件</th><th>方式</th><th>状态</th><th>内容摘要</th><th>下一步</th></tr></thead>
+            <tbody id="fqImportRows"><tr><td colspan="6" class="fq-empty">暂无记录</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="fq-panel" id="fqPanelReview" data-fq-panel="review" hidden>
+        <div class="fq-page-head">
+          <div>
+            <p class="eyebrow">第二步 · 人工把关</p>
+            <h2>规范化复核与报送</h2>
+            <p>智能体只做结构识别和规范化建议；缺失值保持为空，必须由企业人员确认后才会发送。</p>
+          </div>
+          <button class="button button-secondary" id="fqRefreshDrafts" type="button">刷新草稿</button>
+        </div>
+        <div class="fq-split">
+          <aside class="fq-list-card">
+            <h3>月报草稿</h3>
+            <div id="fqDraftList" class="fq-item-list"><p class="fq-empty">暂无草稿</p></div>
+          </aside>
+          <div class="fq-detail-card" id="fqDraftDetail">
+            <div class="fq-empty-state">
+              <strong>请选择一份草稿</strong>
+              <span>先从收件箱导入文件，再逐日核对五类业务量；火工品量需核对雷管、炸药子项。</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="fq-panel" id="fqPanelRisk" data-fq-panel="risk" hidden>
+        <div class="fq-page-head">
+          <div>
+            <p class="eyebrow">第三步 · 收到政府算法结果后</p>
+            <h2>风险解读与回复</h2>
+            <p>这里只解释本矿收到的风险报告。企业说明不会自动消除风险，更正数据需由政府算法重新分析。</p>
+          </div>
+          <div class="fq-head-actions">
+            <button class="button button-secondary" id="fqPollRisks" type="button">拉取新报告</button>
+            <button class="button button-secondary" id="fqRefreshRisks" type="button">刷新</button>
+          </div>
+        </div>
+        <div class="fq-split">
+          <aside class="fq-list-card">
+            <h3>待处理风险</h3>
+            <div id="fqRiskList" class="fq-item-list"><p class="fq-empty">暂无风险报告</p></div>
+          </aside>
+          <div class="fq-detail-card" id="fqRiskDetail">
+            <div class="fq-empty-state"><strong>请选择一份风险报告</strong><span>可查看算法依据、对话解读并形成结构化回执。</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="fq-panel" id="fqPanelAudit" data-fq-panel="audit" hidden>
+        <div class="fq-page-head">
+          <div>
+            <p class="eyebrow">第四步 · 可追溯运行</p>
+            <h2>留痕与设置</h2>
+            <p>本实例启动时固定绑定一个煤矿、经营主体和系统身份；页面不能切换到其他煤矿。</p>
+          </div>
+          <button class="button button-secondary" id="fqRefreshAudit" type="button">刷新</button>
+        </div>
+        <div class="fq-card-grid fq-card-grid-two">
+          <article class="fq-card" id="fqIdentityCard"><h3>本实例身份</h3><p>登录后读取。</p></article>
+          <article class="fq-card" id="fqExchangeCard"><h3>政府接口</h3><p>登录后读取。</p></article>
+        </div>
+        <div class="fq-section-head"><div><h3>不可改写操作链</h3><p id="fqAuditIntegrity">正在检查完整性…</p></div></div>
+        <div class="fq-timeline" id="fqAuditEvents"><p class="fq-empty">暂无留痕</p></div>
+      </section>
+    </main>
+
+    <div class="app-shell legacy-workspace" hidden aria-hidden="true">
       <aside class="draft-panel" aria-label="填报草稿">
         <div class="panel-heading">
           <div>
@@ -1876,5 +2006,6 @@
     </dialog>
 
     <script src="./app.js" defer></script>
+    <script src="./v2-app.js" defer></script>
   </body>
 </html>

@@ -12,6 +12,11 @@ from .flow import (
 )
 from .models import ProductionAnalysisRequest, ProductionAnalysisResult
 from .optimization import analyze_production
+from .operational_five_quantity import (
+    OperationalFiveQuantityFileRequest,
+    OperationalFiveQuantityResult,
+    analyze_operational_five_quantity_file,
+)
 from .portfolio import (
     PortfolioAnalysisRequest,
     PortfolioAnalysisResult,
@@ -28,6 +33,8 @@ __all__ = [
     "AggregationResult",
     "FlowAnalysisRequest",
     "FlowAnalysisResult",
+    "OperationalFiveQuantityFileRequest",
+    "OperationalFiveQuantityResult",
     "PortfolioAnalysisRequest",
     "PortfolioAnalysisResult",
     "ProductionAnalysisRequest",
@@ -36,6 +43,7 @@ __all__ = [
     "TemporalDetectionResult",
     "aggregate_measurements",
     "analyze_material_flow",
+    "analyze_operational_five_quantity_file",
     "analyze_production",
     "analyze_production_portfolio",
     "detect_temporal_anomalies",

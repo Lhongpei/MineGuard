@@ -551,3 +551,68 @@ def test_verify_evidence_works_offline_and_detects_tampering(
         == 1
     )
     assert json.loads(capsys.readouterr().out)["status"] == "invalid"
+
+
+def test_operational_monthly_cli_analyzes_et_without_persisting(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workbook = (
+        Path(__file__).resolve().parents[2]
+        / "local _test"
+        / "五量基础数据测试（沁源梗阳）.et"
+    )
+    if not workbook.is_file():
+        pytest.skip("local five-quantity workbook is unavailable")
+
+    assert (
+        cli.main(
+            [
+                "operational-monthly",
+                str(workbook),
+                "--mine-id",
+                "M-GENGYANG",
+                "--report-month",
+                "2026-07",
+                "--closed-through",
+                "2026-07-30",
+            ]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["mine_id"] == "M-GENGYANG"
+    assert result["report_month"] == "2026-07"
+    assert len(result["configuration"]["sha256"]) == 64
+    assert result["trust"]["persisted"] is False
+    assert result["trust"]["audit_metadata_persisted"] is False
+    assert result["overall"]["priority_event_count"] == 2
+    assert any(
+        event["event_code"] == "shift_total_mismatch:electricity"
+        and event["period_start"] == "2026-07-13"
+        for event in result["events"]
+    )
+
+
+def test_operational_monthly_cli_returns_stable_invalid_file_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workbook = tmp_path / "invalid.et"
+    workbook.write_bytes(b"not-an-ole-file")
+
+    assert (
+        cli.main(
+            [
+                "operational-monthly",
+                str(workbook),
+                "--mine-id",
+                "M001",
+                "--closed-through",
+                "2026-07-30",
+            ]
+        )
+        == 2
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert error["error"]["code"] == "not_ole2"
+    assert str(tmp_path) not in json.dumps(error)

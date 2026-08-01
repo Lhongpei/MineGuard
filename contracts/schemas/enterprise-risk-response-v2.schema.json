@@ -1,0 +1,405 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:enterprise-risk-response:v2",
+  "title": "Enterprise Risk Response V2",
+  "description": "One mine's human-confirmed response to a government analysis report. An explanation is recorded but cannot clear algorithmic risk; only a referenced corrected submission can trigger reanalysis.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "message_type",
+    "message_id",
+    "correlation_id",
+    "causation_id",
+    "idempotency_key",
+    "revision",
+    "predecessor",
+    "created_at",
+    "sender",
+    "recipient",
+    "mine_id",
+    "payload",
+    "signature_envelope"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "enterprise-risk-response-v2"
+    },
+    "message_type": {
+      "const": "enterprise_risk_response"
+    },
+    "message_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "correlation_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "causation_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "revision": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/safePositiveInteger"
+    },
+    "predecessor": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/predecessor"
+    },
+    "created_at": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+    },
+    "sender": {
+      "allOf": [
+        {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/participant"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "enterprise_agent"
+            }
+          }
+        }
+      ]
+    },
+    "recipient": {
+      "allOf": [
+        {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/participant"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "regulatory_platform"
+            }
+          }
+        }
+      ]
+    },
+    "mine_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/identifier"
+    },
+    "payload": {
+      "$ref": "#/$defs/payload"
+    },
+    "signature_envelope": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/signatureEnvelope"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "revision": {
+            "const": 1
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "predecessor": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "predecessor": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "title",
+        "media_type",
+        "size_bytes",
+        "sha256",
+        "retention_location"
+      ],
+      "properties": {
+        "evidence_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/identifier"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "sha256": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/sha256"
+        },
+        "retention_location": {
+          "const": "enterprise_local"
+        }
+      },
+      "description": "Content-addressed evidence metadata only; binary material remains at the mine unless a separate governed evidence-transfer process is used."
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_type",
+        "description",
+        "status"
+      ],
+      "properties": {
+        "action_type": {
+          "type": "string",
+          "enum": [
+            "investigation",
+            "data_correction",
+            "corrective",
+            "preventive"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "planned",
+            "in_progress",
+            "completed",
+            "not_applicable"
+          ]
+        }
+      }
+    },
+    "findingResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding_id",
+        "response_kind",
+        "reason_code",
+        "facts",
+        "evidence_refs",
+        "actions",
+        "corrected_submission_message_id"
+      ],
+      "properties": {
+        "finding_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "response_kind": {
+          "type": "string",
+          "enum": [
+            "explanation",
+            "correction_submitted",
+            "clarification_request",
+            "unable_to_determine"
+          ]
+        },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "equipment_maintenance",
+            "power_outage",
+            "planned_shutdown",
+            "restart_transition",
+            "geology_change",
+            "production_plan_change",
+            "shift_arrangement",
+            "ventilation_adjustment",
+            "blasting_plan_change",
+            "meter_or_source_error",
+            "transcription_or_mapping_error",
+            "other",
+            "unknown_under_investigation"
+          ]
+        },
+        "facts": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "evidence_refs": {
+          "type": "array",
+          "maxItems": 50,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/identifier"
+          }
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/$defs/action"
+          }
+        },
+        "corrected_submission_message_id": {
+          "anyOf": [
+            {
+              "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "response_kind": {
+                "const": "correction_submitted"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "corrected_submission_message_id": {
+                "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "corrected_submission_message_id": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "agentAssistance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "used",
+        "conversation_id",
+        "assistance_record_sha256"
+      ],
+      "properties": {
+        "used": {
+          "type": "boolean"
+        },
+        "conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "assistance_record_sha256": {
+          "anyOf": [
+            {
+              "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "used": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "conversation_id": {
+                "type": "string"
+              },
+              "assistance_record_sha256": {
+                "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/sha256"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "conversation_id": {
+                "type": "null"
+              },
+              "assistance_record_sha256": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "response_id",
+        "report_id",
+        "analysis_report_message_id",
+        "responded_at",
+        "finding_responses",
+        "attachments",
+        "agent_assistance",
+        "human_confirmation"
+      ],
+      "properties": {
+        "response_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "report_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "analysis_report_message_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "responded_at": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+        },
+        "finding_responses": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/findingResponse"
+          }
+        },
+        "attachments": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/attachment"
+          }
+        },
+        "agent_assistance": {
+          "$ref": "#/$defs/agentAssistance"
+        },
+        "human_confirmation": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/humanConfirmation"
+        }
+      }
+    }
+  }
+}

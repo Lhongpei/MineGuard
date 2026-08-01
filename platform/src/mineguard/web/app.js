@@ -3,7 +3,14 @@
 const API_PATHS = {
   production: "/v1/analyze/production",
   personnel: "/v1/analyze/personnel",
+  "operational-five-quantity":
+    "/v1/analyze/operational-five-quantity-monthly-file",
 };
+
+const OPERATIONAL_FIVE_QUANTITY_MODE = "operational-five-quantity";
+const FIVE_QUANTITY_MAX_FILE_BYTES = 5 * 1024 * 1024;
+// Every non-final chunk is divisible by three so concatenated base64 stays valid.
+const FIVE_QUANTITY_BASE64_CHUNK_BYTES = 24 * 1024;
 
 const SUPERVISION_API_PATHS = {
   csrf: "/v1/auth/csrf",
@@ -341,6 +348,8 @@ const state = {
   lastResult: null,
   lastResultMode: null,
   isRunning: false,
+  fiveQuantityResult: null,
+  fiveQuantityRunning: false,
   overviewLoading: false,
   overviewLoaded: false,
   overview: null,
@@ -839,7 +848,9 @@ function cacheElements() {
     "action-confirm-submit",
     "production-tab",
     "personnel-tab",
+    "five-quantity-tab",
     "input-panel",
+    "five-quantity-panel",
     "mode-description",
     "load-risk-sample",
     "load-normal-sample",
@@ -855,6 +866,32 @@ function cacheElements() {
     "analyze-button",
     "analyze-button-text",
     "empty-state",
+    "five-quantity-form",
+    "five-quantity-mine-id",
+    "five-quantity-report-month",
+    "five-quantity-closed-through",
+    "five-quantity-file",
+    "five-quantity-status",
+    "five-quantity-submit",
+    "five-quantity-submit-text",
+    "five-quantity-empty",
+    "five-quantity-result",
+    "five-quantity-result-title",
+    "five-quantity-result-meta",
+    "five-quantity-print",
+    "five-quantity-overall",
+    "five-quantity-overall-symbol",
+    "five-quantity-overall-level",
+    "five-quantity-overall-title",
+    "five-quantity-overall-summary",
+    "five-quantity-event-count",
+    "five-quantity-period",
+    "five-quantity-coverage-grid",
+    "five-quantity-kpi-grid",
+    "five-quantity-regime-list",
+    "five-quantity-event-list",
+    "five-quantity-day-body",
+    "five-quantity-limitation-list",
     "result-section",
     "result-title",
     "result-time",
@@ -1153,7 +1190,14 @@ function bindEvents() {
 
   elements["production-tab"].addEventListener("click", () => setMode("production"));
   elements["personnel-tab"].addEventListener("click", () => setMode("personnel"));
-  [elements["production-tab"], elements["personnel-tab"]].forEach((tab) => {
+  elements["five-quantity-tab"].addEventListener("click", () =>
+    setMode(OPERATIONAL_FIVE_QUANTITY_MODE),
+  );
+  [
+    elements["production-tab"],
+    elements["personnel-tab"],
+    elements["five-quantity-tab"],
+  ].forEach((tab) => {
     tab.addEventListener("keydown", handleTabKeydown);
   });
 
@@ -1203,6 +1247,24 @@ function bindEvents() {
   elements["analyze-button"].addEventListener("click", runAnalysis);
   elements["download-button"].addEventListener("click", downloadResult);
   elements["print-button"].addEventListener("click", () => printView("analysis"));
+  elements["five-quantity-form"].addEventListener(
+    "submit",
+    submitFiveQuantityAnalysis,
+  );
+  elements["five-quantity-print"].addEventListener("click", () =>
+    printView("analysis"),
+  );
+  [
+    elements["five-quantity-mine-id"],
+    elements["five-quantity-report-month"],
+    elements["five-quantity-closed-through"],
+  ].forEach((input) => {
+    input.addEventListener("input", handleFiveQuantityParameterChange);
+  });
+  elements["five-quantity-file"].addEventListener(
+    "change",
+    handleFiveQuantityFileChange,
+  );
 }
 
 function requestActionConfirmation({
@@ -1430,6 +1492,8 @@ async function logout() {
 function resetProtectedState() {
   state.principal = null;
   state.csrfToken = null;
+  state.fiveQuantityResult = null;
+  state.fiveQuantityRunning = false;
   state.overviewLoaded = false;
   state.overview = null;
   state.overviewItems = [];
@@ -1517,6 +1581,7 @@ function resetProtectedState() {
   elements["regulatory-report-status"].textContent =
     "请选择报告期并生成。";
   elements["print-regulatory-report"].disabled = true;
+  resetFiveQuantityAnalysis();
   clearRegulatoryReportPrintMode();
   renderDemoDatasetBanner();
   resetUserForm();
@@ -1569,6 +1634,14 @@ function updatePermissionControls() {
     !userCan("safetyRules");
   elements["edge-evaluation-admin"].hidden =
     !userCan("safetyRecalculate");
+  const canAnalyzeFiveQuantity = userCan("operationalFiveQuantity");
+  elements["five-quantity-tab"].hidden = !canAnalyzeFiveQuantity;
+  if (
+    !canAnalyzeFiveQuantity &&
+    state.mode === OPERATIONAL_FIVE_QUANTITY_MODE
+  ) {
+    setMode("production");
+  }
   if (state.safetyLoaded) {
     renderSafetyAlerts();
   }
@@ -1594,6 +1667,7 @@ function userCan(capability) {
     safetyProfile: ["admin"],
     safetyRules: ["admin"],
     safetyRecalculate: ["admin", "supervisor"],
+    operationalFiveQuantity: ["admin", "supervisor"],
     scenarios: ["admin"],
     verificationReferences: ["admin"],
     users: ["admin"],
@@ -6082,6 +6156,9 @@ function normalizeTemporalDashboard(rawResponse) {
       status: nullableText(health.status),
       pointCount: firstNumber(health.point_count),
       acceptedCount: firstNumber(health.baseline_accepted_count),
+      baselineIneligibleCount: firstNumber(
+        health.baseline_ineligible_count,
+      ),
       missingCount: firstNumber(health.missing_count),
       lateCount: firstNumber(health.late_count),
       revisedCount: firstNumber(health.revised_count),
@@ -6238,7 +6315,7 @@ function renderTemporalDashboard(dashboard) {
   } else if (isColdStart) {
     setTemporalStatusBadge("历史不足", "warning");
     elements["temporal-summary"].textContent =
-      "历史数据不足，尚不能形成稳定基线；这不代表正常，也不代表异常。请继续积累同口径数据后再观察。";
+      "已人工核验正常且参考资格有效的历史不足，尚不能形成稳定基线；这不代表正常，也不代表异常，未核验数据不会被系统自动学成正常。";
   } else {
     setTemporalStatusBadge(
       dataQualityNeedsAttention
@@ -6257,7 +6334,15 @@ function renderTemporalDashboard(dashboard) {
     {
       label: "纳入观察的序列",
       value: formatCount(dashboard.seriesCount),
-      note: "按矿山、数据源和指标分别建立基线",
+      note: "按矿山、数据源和指标分组，只用已核验正常历史建立基线",
+    },
+    {
+      label: "已核验基线点",
+      value: formatCount(dashboard.health.acceptedCount),
+      note:
+        dashboard.health.baselineIneligibleCount > 0
+          ? `${formatCount(dashboard.health.baselineIneligibleCount)} 个观察点因未核验或参考资格无效未进入基线`
+          : "只统计当前标签链和运行完整性均有效的正常样本",
     },
     {
       label: "时序预警事件",
@@ -6802,6 +6887,7 @@ function temporalDetectorLabel(code) {
     ewma: "持续偏移",
     cusum: "累积漂移",
     page_hinkley: "结构突变",
+    regime_change: "未核实统计状态适配",
     source_missing: "缺测标记",
     source_latency: "延迟标记",
     source_revision: "频繁修订",
@@ -12598,49 +12684,79 @@ function handleTabKeydown(event) {
     return;
   }
   event.preventDefault();
-  const nextMode =
-    event.key === "ArrowLeft" || event.key === "Home"
-      ? "production"
-      : "personnel";
+  const tabs = [
+    elements["production-tab"],
+    elements["personnel-tab"],
+    elements["five-quantity-tab"],
+  ].filter((tab) => !tab.hidden && !tab.disabled);
+  if (!tabs.length) {
+    return;
+  }
+  const currentIndex = Math.max(0, tabs.indexOf(event.currentTarget));
+  let nextIndex;
+  if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = tabs.length - 1;
+  } else if (event.key === "ArrowLeft") {
+    nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+  } else {
+    nextIndex = (currentIndex + 1) % tabs.length;
+  }
+  const target = tabs[nextIndex];
+  const nextMode = target.dataset.mode;
   setMode(nextMode);
-  const target =
-    nextMode === "production"
-      ? elements["production-tab"]
-      : elements["personnel-tab"];
   target.focus();
 }
 
 function setMode(mode) {
-  if (!API_PATHS[mode] || state.isRunning) {
+  if (
+    !API_PATHS[mode] ||
+    state.isRunning ||
+    state.fiveQuantityRunning
+  ) {
     return;
   }
   state.mode = mode;
 
   const isProduction = mode === "production";
+  const isPersonnel = mode === "personnel";
+  const isFiveQuantity = mode === OPERATIONAL_FIVE_QUANTITY_MODE;
   elements["production-tab"].classList.toggle("is-active", isProduction);
   elements["production-tab"].setAttribute("aria-selected", String(isProduction));
-  elements["personnel-tab"].classList.toggle("is-active", !isProduction);
-  elements["personnel-tab"].setAttribute("aria-selected", String(!isProduction));
+  elements["personnel-tab"].classList.toggle("is-active", isPersonnel);
+  elements["personnel-tab"].setAttribute("aria-selected", String(isPersonnel));
+  elements["five-quantity-tab"].classList.toggle("is-active", isFiveQuantity);
+  elements["five-quantity-tab"].setAttribute(
+    "aria-selected",
+    String(isFiveQuantity),
+  );
+  elements["input-panel"].hidden = isFiveQuantity;
+  elements["five-quantity-panel"].hidden = !isFiveQuantity;
   elements["input-panel"].setAttribute(
     "aria-labelledby",
     isProduction ? "production-tab" : "personnel-tab",
   );
 
-  elements["mode-description"].textContent = isProduction
-    ? "比对上报产量与皮带、入洗、销售、库存数据，定位相互矛盾的数据来源。"
-    : "比对井口人脸与定位卡通行记录，发现人卡不符、有脸无卡或有卡无人。";
-  elements["load-risk-sample"].textContent = isProduction
-    ? "载入异常示例"
-    : "载入人卡异常示例";
-  elements["load-normal-sample"].textContent = isProduction
-    ? "载入正常示例"
-    : "载入通行正常示例";
-  elements["analyze-button-text"].textContent = isProduction
-    ? "开始交叉核验"
-    : "开始人员核验";
+  if (!isFiveQuantity) {
+    elements["mode-description"].textContent = isProduction
+      ? "比对上报产量与皮带、入洗、销售、库存数据，定位相互矛盾的数据来源。"
+      : "比对井口人脸与定位卡通行记录，发现人卡不符、有脸无卡或有卡无人。";
+    elements["load-risk-sample"].textContent = isProduction
+      ? "载入异常示例"
+      : "载入人卡异常示例";
+    elements["load-normal-sample"].textContent = isProduction
+      ? "载入正常示例"
+      : "载入通行正常示例";
+    elements["analyze-button-text"].textContent = isProduction
+      ? "开始交叉核验"
+      : "开始人员核验";
+  }
 
   clearDataset();
   hideResult();
+  resetFiveQuantityAnalysis();
+  elements["five-quantity-empty"].hidden = !isFiveQuantity;
 }
 
 function clearDataset() {
@@ -12696,6 +12812,713 @@ function describeDataset(data) {
   const faceCount = Array.isArray(data.faces) ? data.faces.length : 0;
   const cardCount = Array.isArray(data.cards) ? data.cards.length : 0;
   return `${data.session_id || "场次编号待校验"} · ${faceCount} 条人脸 · ${cardCount} 条定位卡`;
+}
+
+function resetFiveQuantityAnalysis() {
+  state.fiveQuantityResult = null;
+  elements["five-quantity-form"].reset();
+  const principal = state.principal;
+  const scopes = arrayOrNull(principal && principal.mine_scopes) || [];
+  if (
+    principal &&
+    principal.role === "supervisor" &&
+    scopes.length === 1
+  ) {
+    elements["five-quantity-mine-id"].value = String(scopes[0]);
+  }
+  elements["five-quantity-result"].hidden = true;
+  elements["five-quantity-empty"].hidden =
+    state.mode !== OPERATIONAL_FIVE_QUANTITY_MODE;
+  setFiveQuantityStatus(
+    "填写矿井编号、报表月份、闭账日期并选择月报后即可分析",
+  );
+  [
+    elements["five-quantity-coverage-grid"],
+    elements["five-quantity-kpi-grid"],
+    elements["five-quantity-regime-list"],
+    elements["five-quantity-event-list"],
+    elements["five-quantity-day-body"],
+    elements["five-quantity-limitation-list"],
+  ].forEach(clearNode);
+  updateFiveQuantitySubmitAvailability();
+}
+
+function setFiveQuantityStatus(message, tone = "") {
+  elements["five-quantity-status"].textContent = message;
+  elements["five-quantity-status"].className =
+    `request-status${tone ? ` is-${tone}` : ""}`;
+}
+
+function fiveQuantityFileError(file) {
+  if (!file) {
+    return "请选择 .et 或 .xls 五量月报文件。";
+  }
+  const lowerName = String(file.name || "").toLowerCase();
+  if (!lowerName.endsWith(".et") && !lowerName.endsWith(".xls")) {
+    return "文件类型不支持，请选择 .et 或 .xls 月报。";
+  }
+  if (file.size <= 0) {
+    return "文件内容为空，请重新导出月报后再试。";
+  }
+  if (file.size > FIVE_QUANTITY_MAX_FILE_BYTES) {
+    return "文件超过 5 MB，请缩小数据范围或重新导出后再试。";
+  }
+  return null;
+}
+
+function updateFiveQuantitySubmitAvailability() {
+  const file =
+    elements["five-quantity-file"].files &&
+    elements["five-quantity-file"].files[0];
+  const complete = Boolean(
+    elements["five-quantity-mine-id"].value.trim() &&
+    elements["five-quantity-report-month"].value &&
+    elements["five-quantity-closed-through"].value &&
+    file &&
+    !fiveQuantityFileError(file),
+  );
+  elements["five-quantity-submit"].disabled =
+    state.fiveQuantityRunning || !complete;
+}
+
+function handleFiveQuantityParameterChange(event) {
+  if (
+    event &&
+    event.target === elements["five-quantity-closed-through"] &&
+    !elements["five-quantity-report-month"].value &&
+    /^\d{4}-\d{2}-\d{2}$/.test(event.target.value)
+  ) {
+    elements["five-quantity-report-month"].value =
+      event.target.value.slice(0, 7);
+  }
+  if (state.fiveQuantityResult) {
+    state.fiveQuantityResult = null;
+    elements["five-quantity-result"].hidden = true;
+    elements["five-quantity-empty"].hidden = false;
+    setFiveQuantityStatus(
+      "矿井编号、报表月份或闭账日期已修改，请重新选择月报后分析。",
+    );
+  }
+  updateFiveQuantitySubmitAvailability();
+}
+
+function handleFiveQuantityFileChange(event) {
+  const file = event.target.files && event.target.files[0];
+  const error = fiveQuantityFileError(file);
+  state.fiveQuantityResult = null;
+  elements["five-quantity-result"].hidden = true;
+  elements["five-quantity-empty"].hidden = false;
+  if (error) {
+    event.target.value = "";
+    setFiveQuantityStatus(error, "error");
+    updateFiveQuantitySubmitAvailability();
+    return;
+  }
+  const sizeMb = file.size / (1024 * 1024);
+  setFiveQuantityStatus(
+    `已选择 ${file.name}（${formatNumber(sizeMb, 2)} MB）；文件仅在本次请求内存中读取。`,
+  );
+  updateFiveQuantitySubmitAvailability();
+}
+
+function arrayBufferToChunkedBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const parts = [];
+  for (
+    let offset = 0;
+    offset < bytes.length;
+    offset += FIVE_QUANTITY_BASE64_CHUNK_BYTES
+  ) {
+    const end = Math.min(
+      offset + FIVE_QUANTITY_BASE64_CHUNK_BYTES,
+      bytes.length,
+    );
+    const characters = [];
+    for (let index = offset; index < end; index += 1) {
+      characters.push(String.fromCharCode(bytes[index]));
+    }
+    parts.push(window.btoa(characters.join("")));
+  }
+  return parts.join("");
+}
+
+async function submitFiveQuantityAnalysis(event) {
+  event.preventDefault();
+  const mineId = elements["five-quantity-mine-id"].value.trim();
+  const reportMonth = elements["five-quantity-report-month"].value;
+  const closedThrough = elements["five-quantity-closed-through"].value;
+  const file =
+    elements["five-quantity-file"].files &&
+    elements["five-quantity-file"].files[0];
+  const fileError = fiveQuantityFileError(file);
+
+  if (!mineId || !reportMonth || !closedThrough || fileError) {
+    setFiveQuantityStatus(
+      fileError || "请填写矿井编号、报表月份和已闭账到日期。",
+      "error",
+    );
+    updateFiveQuantitySubmitAvailability();
+    return;
+  }
+
+  setFiveQuantityRunning(true);
+  elements["five-quantity-result"].hidden = true;
+  elements["five-quantity-empty"].hidden = false;
+  setFiveQuantityStatus(
+    "正在校验工作簿、识别运行状态并合并核查事件，请稍候…",
+    "running",
+  );
+
+  let contentBase64 = "";
+  let payload = null;
+  try {
+    const buffer = await file.arrayBuffer();
+    if (buffer.byteLength > FIVE_QUANTITY_MAX_FILE_BYTES) {
+      throw new Error("文件读取后超过 5 MB 上限");
+    }
+    contentBase64 = arrayBufferToChunkedBase64(buffer);
+    payload = {
+      mine_id: mineId,
+      source: {
+        source_id: "regulator-browser-temporary-upload",
+        filename: file.name,
+        received_at: new Date().toISOString(),
+      },
+      report_month: reportMonth,
+      closed_through: closedThrough,
+      units: {},
+      content_base64: contentBase64,
+    };
+    const body = await requestJson(
+      API_PATHS[OPERATIONAL_FIVE_QUANTITY_MODE],
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+    assertFiveQuantityResult(body);
+    state.fiveQuantityResult = body;
+    renderFiveQuantityResult(body);
+    setFiveQuantityStatus(
+      "临时分析完成；上传文件已从浏览器选择中清除，结果未保存、未建案。",
+    );
+  } catch (error) {
+    state.fiveQuantityResult = null;
+    elements["five-quantity-result"].hidden = true;
+    elements["five-quantity-empty"].hidden = false;
+    setFiveQuantityStatus(
+      `${explainSupervisionError(error, "五量月报分析")} 文件已从浏览器选择中清除，请重新选择后重试。`,
+      "error",
+    );
+  } finally {
+    contentBase64 = "";
+    if (payload) {
+      payload.content_base64 = "";
+      payload = null;
+    }
+    elements["five-quantity-file"].value = "";
+    setFiveQuantityRunning(false);
+  }
+}
+
+function setFiveQuantityRunning(isRunning) {
+  state.fiveQuantityRunning = isRunning;
+  [
+    elements["production-tab"],
+    elements["personnel-tab"],
+    elements["five-quantity-tab"],
+    elements["five-quantity-mine-id"],
+    elements["five-quantity-report-month"],
+    elements["five-quantity-closed-through"],
+    elements["five-quantity-file"],
+  ].forEach((control) => {
+    control.disabled = isRunning;
+  });
+  elements["five-quantity-submit-text"].textContent = isRunning
+    ? "正在分析…"
+    : "开始月报研判";
+  elements["five-quantity-submit"].setAttribute(
+    "aria-busy",
+    String(isRunning),
+  );
+  updateFiveQuantitySubmitAvailability();
+}
+
+function assertFiveQuantityResult(result) {
+  if (
+    !result ||
+    result.schema_version !==
+      "mineguard.operational-five-quantity-monthly.v1"
+  ) {
+    throw new Error("服务返回的五量月报结果版本无法识别");
+  }
+  const trust = objectOrNull(result.trust);
+  const configuration = objectOrNull(result.configuration);
+  if (
+    !trust ||
+    trust.input_class !== "operator_uploaded_untrusted" ||
+    trust.persisted !== false ||
+    trust.audit_metadata_persisted !== true ||
+    trust.audit_metadata_scope !==
+      "metadata_only_no_file_or_daily_payload" ||
+    trust.eligible_for_history !== false ||
+    trust.creates_case !== false ||
+    trust.regulatory_effect !== "none"
+  ) {
+    throw new Error("服务未确认本次分析的临时、非监管效力边界");
+  }
+  if (
+    !/^\d{4}-(?:0[1-9]|1[0-2])$/.test(String(result.report_month || "")) ||
+    !configuration ||
+    !/^[0-9a-f]{64}$/.test(String(configuration.sha256 || ""))
+  ) {
+    throw new Error("服务未返回受治理的报表月份或算法配置指纹");
+  }
+}
+
+function fiveQuantityOverallMeta(status) {
+  const metadata = {
+    needs_priority_review: {
+      label: "需优先组织核查",
+      tone: "danger",
+      symbol: "!",
+    },
+    needs_data: {
+      label: "先补齐或修正数据",
+      tone: "warning",
+      symbol: "数",
+    },
+    observation_only: {
+      label: "形成观察线索",
+      tone: "review",
+      symbol: "察",
+    },
+    no_unexplained_lead: {
+      label: "本月未形成未解释线索",
+      tone: "success",
+      symbol: "✓",
+    },
+    insufficient_data: {
+      label: "数据不足，暂不能判断",
+      tone: "",
+      symbol: "?",
+    },
+  };
+  return metadata[status] || {
+    label: "结果状态待确认",
+    tone: "",
+    symbol: "?",
+  };
+}
+
+function renderFiveQuantityResult(result) {
+  const overall = objectOrNull(result.overall) || {};
+  const coverage = objectOrNull(result.coverage) || {};
+  const events = arrayOrNull(result.events) || [];
+  const configuration = objectOrNull(result.configuration) || {};
+  const metadata = fiveQuantityOverallMeta(overall.status);
+
+  elements["five-quantity-empty"].hidden = true;
+  elements["five-quantity-result"].hidden = false;
+  elements["five-quantity-result-title"].textContent =
+    `${displayText(result.mine_id, "矿井")}生产运行五量月报`;
+  elements["five-quantity-result-meta"].textContent =
+    `${displayText(result.report_month, "月份未返回")} · ${displayText(result.source_title, "月报标题未返回")} · 文档指纹 ${shortHash(result.source_sha256)} · 配置指纹 ${shortHash(configuration.sha256)} · 分析时间 ${formatDateTime(new Date().toISOString())}`;
+
+  elements["five-quantity-overall"].className =
+    `decision-banner${metadata.tone ? ` is-${metadata.tone}` : ""}`;
+  elements["five-quantity-overall-symbol"].textContent = metadata.symbol;
+  elements["five-quantity-overall-level"].textContent =
+    `技术状态 · ${metadata.label}`;
+  elements["five-quantity-overall-title"].textContent =
+    displayText(overall.title, metadata.label);
+  elements["five-quantity-overall-summary"].textContent =
+    displayText(
+      overall.summary,
+      "请结合原始凭证和现场情况人工复核。",
+    );
+  elements["five-quantity-event-count"].textContent =
+    `${events.length} 个`;
+  elements["five-quantity-period"].textContent =
+    `${formatPeriod(coverage.period_start, coverage.period_end)} · 闭账至 ${formatDateOnly(coverage.closed_through) || "未返回"}`;
+
+  renderFiveQuantityCoverage(coverage);
+  renderFiveQuantityKpis(arrayOrNull(result.kpis) || []);
+  renderFiveQuantityRegimes(arrayOrNull(result.regimes) || []);
+  renderFiveQuantityEvents(events);
+  renderFiveQuantityDays(arrayOrNull(result.days) || []);
+  renderFiveQuantityLimitations(
+    arrayOrNull(result.limitations) || [],
+  );
+
+  requestAnimationFrame(() => {
+    elements["five-quantity-overall"].focus({ preventScroll: true });
+    elements["five-quantity-result"].scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "start",
+    });
+  });
+}
+
+function appendFiveQuantityKpi(container, label, value, note) {
+  const card = document.createElement("article");
+  card.className = "kpi-card";
+  const labelNode = document.createElement("p");
+  labelNode.className = "kpi-label";
+  labelNode.textContent = label;
+  const valueNode = document.createElement("strong");
+  valueNode.className = "kpi-value";
+  valueNode.textContent = value;
+  const noteNode = document.createElement("span");
+  noteNode.className = "kpi-note";
+  noteNode.textContent = note;
+  card.append(labelNode, valueNode, noteNode);
+  container.appendChild(card);
+}
+
+function renderFiveQuantityCoverage(coverage) {
+  const container = elements["five-quantity-coverage-grid"];
+  clearNode(container);
+  const items = [
+    [
+      "月报行数",
+      formatNumber(firstNumber(coverage.row_count)),
+      "工作簿中识别出的日期行",
+    ],
+    [
+      "应有闭账自然日",
+      formatNumber(
+        firstNumber(coverage.expected_closed_calendar_day_count),
+      ),
+      "从报表月初到闭账日的日历口径",
+    ],
+    [
+      "实际闭账日",
+      formatNumber(firstNumber(coverage.closed_day_count)),
+      "工作簿中实际存在且已闭账的日期行",
+    ],
+    [
+      "缺整日",
+      formatNumber(
+        firstNumber(coverage.missing_closed_calendar_day_count),
+      ),
+      "整日缺行不能按零值处理",
+    ],
+    [
+      "核心日值完整",
+      formatNumber(
+        firstNumber(
+          coverage.core_daily_complete_closed_day_count,
+          coverage.complete_closed_day_count,
+        ),
+      ),
+      "风量、用工、电量、产量核心日值齐全",
+    ],
+    [
+      "全部必填完整",
+      formatNumber(
+        firstNumber(
+          coverage.all_required_fields_complete_closed_day_count,
+        ),
+      ),
+      "包括三班明细和火工品字段",
+    ],
+    [
+      "全部班次已对账",
+      formatNumber(
+        firstNumber(
+          coverage.all_shift_totals_reconciled_closed_day_count,
+        ),
+      ),
+      "日报总值与三班重新求和均一致",
+    ],
+    [
+      "未闭账日",
+      formatNumber(firstNumber(coverage.open_day_count)),
+      "不按缺报，也不进入异常基线",
+    ],
+  ];
+  items.forEach(([label, value, note]) =>
+    appendFiveQuantityKpi(container, label, value, note),
+  );
+}
+
+function renderFiveQuantityKpis(kpis) {
+  const container = elements["five-quantity-kpi-grid"];
+  clearNode(container);
+  if (!kpis.length) {
+    const note = document.createElement("p");
+    note.className = "five-quantity-empty-note";
+    note.textContent = "本次未形成可展示的月度指标。";
+    container.appendChild(note);
+    return;
+  }
+  kpis.forEach((kpi) => {
+    const card = document.createElement("article");
+    card.className = "five-quantity-kpi-card";
+    const label = document.createElement("span");
+    label.textContent = displayText(kpi.label, kpi.code);
+    const value = document.createElement("strong");
+    const numeric = firstNumber(kpi.value);
+    value.textContent =
+      numeric === null
+        ? "未形成"
+        : `${formatNumber(numeric, 3)}${kpi.unit ? ` ${kpi.unit}` : ""}`;
+    const coverage = document.createElement("small");
+    const mismatchDays = firstNumber(kpi.excluded_mismatch_day_count) || 0;
+    const incompleteDays =
+      firstNumber(kpi.excluded_incomplete_reconciliation_day_count) || 0;
+    const exclusions =
+      mismatchDays || incompleteDays
+        ? ` · 排除对账争议 ${formatNumber(mismatchDays)} 天、无法对账 ${formatNumber(incompleteDays)} 天`
+        : "";
+    coverage.textContent =
+      `使用 ${formatNumber(firstNumber(kpi.contributing_day_count))}/${formatNumber(firstNumber(kpi.expected_day_count))} 天${exclusions}${kpi.is_partial ? " · 部分覆盖" : ""} · ${displayText(kpi.note, "统计口径未返回")}`;
+    card.append(label, value, coverage);
+    container.appendChild(card);
+  });
+}
+
+function fiveQuantityStateMeta(stateCode) {
+  const metadata = {
+    open_period: ["未闭账", "open"],
+    unknown: ["状态未知", "unknown"],
+    non_production_candidate: ["零产/停产候选", "non-production"],
+    restart_ramp_candidate: ["复产爬坡候选", "restart"],
+    production: ["生产候选", "production"],
+  };
+  return metadata[stateCode] || ["状态待确认", "unknown"];
+}
+
+function renderFiveQuantityRegimes(regimes) {
+  const container = elements["five-quantity-regime-list"];
+  clearNode(container);
+  if (!regimes.length) {
+    const note = document.createElement("p");
+    note.className = "five-quantity-empty-note";
+    note.textContent = "本次未形成运行状态分段。";
+    container.appendChild(note);
+    return;
+  }
+  regimes.forEach((regime) => {
+    const [label, tone] = fiveQuantityStateMeta(regime.state);
+    const card = document.createElement("article");
+    card.className = `five-quantity-regime is-${tone}`;
+    const marker = document.createElement("span");
+    marker.className = "five-quantity-regime-marker";
+    marker.setAttribute("aria-hidden", "true");
+    const content = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent =
+      `${label} · ${formatPeriod(regime.start, regime.end)}`;
+    const explanation = document.createElement("p");
+    explanation.textContent = displayText(
+      regime.explanation,
+      "状态解释未返回。",
+    );
+    const days = document.createElement("small");
+    days.textContent = `${formatNumber(firstNumber(regime.day_count))} 天`;
+    content.append(title, explanation);
+    card.append(marker, content, days);
+    container.appendChild(card);
+  });
+}
+
+function fiveQuantityAttentionMeta(level) {
+  const metadata = {
+    priority_check: ["优先核查", "priority"],
+    check: ["安排核查", "check"],
+    observe: ["持续观察", "observe"],
+    information: ["背景信息", "information"],
+  };
+  return metadata[level] || ["级别待确认", "information"];
+}
+
+function fiveQuantityCategoryLabel(category) {
+  return (
+    {
+      data_quality: "数据质量",
+      operating_state: "运行状态",
+      cross_metric: "指标关系",
+      shift_structure: "班次结构",
+      context_required: "需补业务背景",
+    }[category] || "技术线索"
+  );
+}
+
+function renderFiveQuantityEvents(events) {
+  const container = elements["five-quantity-event-list"];
+  clearNode(container);
+  if (!events.length) {
+    const note = document.createElement("article");
+    note.className = "five-quantity-event is-empty";
+    const title = document.createElement("strong");
+    title.textContent = "本次未形成需要展示的合并事件";
+    const detail = document.createElement("p");
+    detail.textContent =
+      "这只表示当前文件和当前方法未发现未解释线索，不证明矿井安全或合规。";
+    note.append(title, detail);
+    container.appendChild(note);
+    return;
+  }
+
+  events.forEach((event, index) => {
+    const [attentionLabel, tone] = fiveQuantityAttentionMeta(
+      event.attention_level,
+    );
+    const card = document.createElement("article");
+    card.className = `five-quantity-event is-${tone}`;
+
+    const header = document.createElement("div");
+    header.className = "five-quantity-event-header";
+    const order = document.createElement("span");
+    order.className = "five-quantity-event-order";
+    order.textContent = String(index + 1);
+    const heading = document.createElement("div");
+    const eyebrow = document.createElement("p");
+    eyebrow.textContent =
+      `${fiveQuantityCategoryLabel(event.category)} · ${formatPeriod(event.period_start, event.period_end)}`;
+    const title = document.createElement("h4");
+    title.textContent = displayText(event.title, "技术线索");
+    heading.append(eyebrow, title);
+    const badge = document.createElement("span");
+    badge.className = `five-quantity-attention is-${tone}`;
+    badge.textContent = attentionLabel;
+    header.append(order, heading, badge);
+
+    const summary = document.createElement("p");
+    summary.className = "five-quantity-event-summary";
+    summary.textContent = displayText(
+      event.summary,
+      "事件摘要未返回，请查看原始凭证。",
+    );
+
+    const merged = document.createElement("p");
+    merged.className = "five-quantity-event-meta";
+    merged.textContent =
+      `已合并 ${formatNumber(firstNumber(event.merged_point_count))} 个关联点 · 置信说明：${fiveQuantityConfidenceLabel(event.confidence)} · 必须人工复核`;
+
+    const checks = document.createElement("div");
+    checks.className = "five-quantity-checks";
+    const checksTitle = document.createElement("strong");
+    checksTitle.textContent = "建议怎么核查";
+    const list = document.createElement("ol");
+    const recommended = arrayOrNull(event.recommended_checks) || [];
+    (recommended.length
+      ? recommended
+      : ["调取该时段原始记录并由业务人员核对。"]
+    ).forEach((check) => {
+      const item = document.createElement("li");
+      item.textContent = displayText(check);
+      list.appendChild(item);
+    });
+    checks.append(checksTitle, list);
+    card.append(header, summary, merged, checks);
+
+    const facts = arrayOrNull(event.facts) || [];
+    const explanations =
+      arrayOrNull(event.candidate_explanations) || [];
+    if (facts.length || explanations.length) {
+      const details = document.createElement("details");
+      details.className = "five-quantity-event-details";
+      const detailsSummary = document.createElement("summary");
+      detailsSummary.textContent = "查看数据事实和候选解释";
+      details.appendChild(detailsSummary);
+      if (facts.length) {
+        const factList = document.createElement("ul");
+        facts.forEach((fact) => {
+          const item = document.createElement("li");
+          const dateText = formatDateOnly(fact.date);
+          const observed =
+            fact.observed === null || typeof fact.observed === "undefined"
+              ? ""
+              : `；观察值 ${String(fact.observed)}`;
+          const expected =
+            fact.expected === null || typeof fact.expected === "undefined"
+              ? ""
+              : `；参考值 ${String(fact.expected)}`;
+          item.textContent =
+            `${dateText ? `${dateText} · ` : ""}${displayText(fact.description)}${observed}${expected}`;
+          factList.appendChild(item);
+        });
+        details.appendChild(factList);
+      }
+      if (explanations.length) {
+        const label = document.createElement("strong");
+        label.textContent = "候选解释（不是事实认定）";
+        const explanationList = document.createElement("ul");
+        explanations.forEach((explanation) => {
+          const item = document.createElement("li");
+          item.textContent = displayText(explanation);
+          explanationList.appendChild(item);
+        });
+        details.append(label, explanationList);
+      }
+      card.appendChild(details);
+    }
+    container.appendChild(card);
+  });
+}
+
+function fiveQuantityConfidenceLabel(confidence) {
+  return (
+    {
+      high: "数据事实明确",
+      medium: "模式线索中等",
+      context_required: "需业务背景确认",
+    }[confidence] || "待确认"
+  );
+}
+
+function fiveQuantityCompletenessLabel(completeness) {
+  return (
+    {
+      open_period: "未闭账，不判缺失",
+      complete: "核心日值完整",
+      incomplete: "闭账数据不完整",
+    }[completeness] || "完整性待确认"
+  );
+}
+
+function renderFiveQuantityDays(days) {
+  const body = elements["five-quantity-day-body"];
+  clearNode(body);
+  if (!days.length) {
+    appendEmptyRow(body, 7, "本次未返回逐日分析明细");
+    return;
+  }
+  days.forEach((day) => {
+    const row = document.createElement("tr");
+    const [stateLabel] = fiveQuantityStateMeta(day.operational_state);
+    addCell(row, formatDateOnly(day.date) || displayText(day.date));
+    addCell(row, fiveQuantityCompletenessLabel(day.completeness));
+    addCell(row, stateLabel);
+    addCell(row, formatNumber(firstNumber(day.production), 2));
+    addCell(row, formatNumber(firstNumber(day.electricity), 2));
+    addCell(
+      row,
+      formatNumber(
+        firstNumber(day.total_electricity_to_production_ratio),
+        3,
+      ),
+    );
+    const eventCount = (arrayOrNull(day.event_ids) || []).length;
+    addCell(row, eventCount ? `${eventCount} 个` : "无");
+    body.appendChild(row);
+  });
+}
+
+function renderFiveQuantityLimitations(limitations) {
+  const list = elements["five-quantity-limitation-list"];
+  clearNode(list);
+  const values = limitations.length
+    ? limitations
+    : ["本结果仅用于临时辅助研判，仍需人工复核。"];
+  values.forEach((limitation) => {
+    const item = document.createElement("li");
+    item.textContent = displayText(limitation);
+    list.appendChild(item);
+  });
 }
 
 async function handleFile(event) {
@@ -12795,6 +13618,7 @@ function setRunning(isRunning) {
   elements["analyze-button"].disabled = isRunning;
   elements["production-tab"].disabled = isRunning;
   elements["personnel-tab"].disabled = isRunning;
+  elements["five-quantity-tab"].disabled = isRunning;
   elements["load-risk-sample"].disabled = isRunning;
   elements["load-normal-sample"].disabled = isRunning;
   elements["upload-button"].disabled = isRunning;
@@ -12811,7 +13635,8 @@ function setRunning(isRunning) {
 
 function hideResult() {
   elements["result-section"].hidden = true;
-  elements["empty-state"].hidden = false;
+  elements["empty-state"].hidden =
+    state.mode === OPERATIONAL_FIVE_QUANTITY_MODE;
 }
 
 function renderResult(result, mode) {

@@ -39,6 +39,7 @@ class TemporalDetectorCode(StrEnum):
     EWMA = "ewma"
     CUSUM = "cusum"
     PAGE_HINKLEY = "page_hinkley"
+    REGIME_CHANGE = "regime_change"
     SOURCE_MISSING = "source_missing"
     SOURCE_LATENCY = "source_latency"
     SOURCE_REVISION = "source_revision"
@@ -71,6 +72,7 @@ class TemporalObservation(TemporalModel):
         Field(ge=0.0, le=MAX_TEMPORAL_DURATION_SECONDS),
     ] = 0.0
     revision_count: Annotated[int, Field(ge=0)] = 0
+    baseline_eligible: bool = True
 
     @model_validator(mode="after")
     def validate_measurement(self) -> "TemporalObservation":
@@ -112,6 +114,10 @@ class TemporalDetectionParameters(TemporalModel):
         float,
         Field(ge=MIN_TEMPORAL_SCALE, le=MAX_ABSOLUTE_TEMPORAL_VALUE),
     ] = 1e-6
+    minimum_relative_scale: Annotated[
+        float,
+        Field(ge=0.0, le=1.0),
+    ] = 0.0
     mad_z_threshold: Annotated[
         float,
         Field(ge=MIN_TEMPORAL_SCALE, le=MAX_TEMPORAL_PARAMETER),
@@ -146,6 +152,17 @@ class TemporalDetectionParameters(TemporalModel):
     ] = 900.0
     max_revision_count: Annotated[int, Field(ge=0)] = 1
     exclude_detected_anomalies_from_baseline: bool = True
+    baseline_reset_confirmation_points: Annotated[
+        int | None,
+        Field(ge=2, le=1_000),
+    ] = None
+    baseline_reset_candidate_max_gap_seconds: Annotated[
+        float | None,
+        Field(
+            ge=MIN_TEMPORAL_SCALE,
+            le=MAX_TEMPORAL_DURATION_SECONDS,
+        ),
+    ] = None
     episode_max_normal_points: Annotated[int, Field(ge=0, le=100)] = 0
     episode_max_gap_seconds: Annotated[
         float | None,
@@ -169,6 +186,15 @@ class DetectorThresholds(TemporalModel):
     rolling_upper: float | None = None
     ewma_lower: float | None = None
     ewma_upper: float | None = None
+    minimum_scale: Annotated[float, Field(gt=0.0)] = 1e-6
+    minimum_relative_scale: Annotated[
+        float,
+        Field(ge=0.0, le=1.0),
+    ] = 0.0
+    effective_scale_floor: Annotated[
+        float | None,
+        Field(gt=0.0),
+    ] = None
     cusum: float
     page_hinkley: float
     minimum_quality: Annotated[float, Field(ge=0.0, le=1.0)]
@@ -191,6 +217,11 @@ class TemporalPointResult(TemporalModel):
     quality: Annotated[float, Field(ge=0.0, le=1.0)]
     missing: bool
     baseline_sample_count: Annotated[int, Field(ge=0)]
+    baseline_sample_count_after_update: Annotated[
+        int | None,
+        Field(ge=0),
+    ] = None
+    baseline_epoch: Annotated[int, Field(ge=0)] = 0
     baseline_median: float | None = None
     baseline_mad: Annotated[float | None, Field(ge=0.0)] = None
     robust_scale: Annotated[float | None, Field(gt=0.0)] = None
@@ -210,7 +241,12 @@ class TemporalPointResult(TemporalModel):
     source_health_anomaly: bool
     anomalous: bool
     insufficient_history: bool
+    baseline_eligible: bool = True
     accepted_into_baseline: bool
+    reset_seed_sample_count: Annotated[int, Field(ge=0)] = 0
+    change_direction: Literal["high", "low"] | None = None
+    change_run_length: Annotated[int, Field(ge=0)] = 0
+    baseline_reset_confirmed: bool = False
 
 
 class TemporalEpisode(TemporalModel):
@@ -224,6 +260,23 @@ class TemporalEpisode(TemporalModel):
     detectors: list[TemporalDetectorCode]
     directions: list[Literal["high", "low", "none"]]
     maximum_contribution: Annotated[float, Field(gt=0.0)]
+    baseline_reset_count: Annotated[int, Field(ge=0)] = 0
+    explanation: Annotated[str, Field(min_length=1)]
+
+
+class TemporalBaselineReset(TemporalModel):
+    """Auditable, unverified statistical adaptation without future data."""
+
+    reset_number: Annotated[int, Field(ge=1)]
+    change_started_at: AwareDatetime
+    confirmed_at: AwareDatetime
+    direction: Literal["high", "low"]
+    confirmation_point_count: Annotated[int, Field(ge=2)]
+    previous_baseline_sample_count: Annotated[int, Field(ge=0)]
+    previous_baseline_median: float
+    reset_seed_sample_count: Annotated[int, Field(ge=1)]
+    reset_baseline_median: float
+    new_baseline_epoch: Annotated[int, Field(ge=1)]
     explanation: Annotated[str, Field(min_length=1)]
 
 
@@ -233,7 +286,9 @@ class SourceHealthSummary(TemporalModel):
     late_count: Annotated[int, Field(ge=0)]
     revised_count: Annotated[int, Field(ge=0)]
     low_quality_count: Annotated[int, Field(ge=0)]
+    baseline_ineligible_count: Annotated[int, Field(ge=0)] = 0
     baseline_accepted_count: Annotated[int, Field(ge=0)]
+    reset_seed_sample_count: Annotated[int, Field(ge=0)] = 0
     missing_rate: Annotated[float, Field(ge=0.0, le=1.0)]
     late_rate: Annotated[float, Field(ge=0.0, le=1.0)]
     revision_rate: Annotated[float, Field(ge=0.0, le=1.0)]
@@ -253,6 +308,7 @@ class TemporalSeriesResult(TemporalModel):
     source_health: SourceHealthSummary
     points: list[TemporalPointResult]
     episodes: list[TemporalEpisode]
+    baseline_resets: list[TemporalBaselineReset] = Field(default_factory=list)
 
 
 class TemporalDetectionRequest(TemporalModel):
@@ -328,11 +384,21 @@ class TemporalDetectionResult(TemporalModel):
 def _median_and_scale(
     values: Sequence[float],
     minimum_scale: float,
-) -> tuple[float, float, float]:
+    minimum_relative_scale: float = 0.0,
+) -> tuple[float, float, float, float]:
     array = np.asarray(values, dtype=float)
     median = float(np.median(array))
     mad = float(np.median(np.abs(array - median)))
-    return median, mad, max(1.4826 * mad, minimum_scale)
+    effective_floor = max(
+        minimum_scale,
+        abs(median) * minimum_relative_scale,
+    )
+    return (
+        median,
+        mad,
+        max(1.4826 * mad, effective_floor),
+        effective_floor,
+    )
 
 
 def _contribution(statistic: float, threshold: float) -> float:
@@ -453,7 +519,16 @@ def _episodes(
             key=("high", "low", "none").index,
         )
         maximum = max(signal.contribution for signal in signals)
+        baseline_reset_count = sum(
+            signal.detector is TemporalDetectorCode.REGIME_CHANGE
+            for signal in signals
+        )
         detector_text = "、".join(detector.value for detector in detectors)
+        reset_text = (
+            f"其中 {baseline_reset_count} 个时点触发未核实统计基线适配；"
+            if baseline_reset_count
+            else ""
+        )
         episodes.append(
             TemporalEpisode(
                 episode_number=episode_number,
@@ -466,9 +541,10 @@ def _episodes(
                 detectors=detectors,
                 directions=directions,
                 maximum_contribution=maximum,
+                baseline_reset_count=baseline_reset_count,
                 explanation=(
                     f"连续异常片段，共 {len(anomaly_indices)} 个异常时点；"
-                    f"触发检测器：{detector_text}。"
+                    f"{reset_text}触发检测器：{detector_text}。"
                 ),
             )
         )
@@ -501,6 +577,10 @@ def _detect_series(
     page_cumulative_negative = 0.0
     page_minimum_negative = 0.0
     points: list[TemporalPointResult] = []
+    baseline_epoch = 0
+    baseline_resets: list[TemporalBaselineReset] = []
+    change_candidate_direction: Literal["high", "low"] | None = None
+    change_candidates: list[tuple[datetime, float]] = []
 
     for observation in ordered:
         numeric_value = observation.numeric_value()
@@ -515,6 +595,7 @@ def _detect_series(
         rolling_upper: float | None = None
         ewma_lower: float | None = None
         ewma_upper: float | None = None
+        effective_scale_floor: float | None = None
         value_signals: list[TemporalSignal] = []
 
         usable = (
@@ -524,9 +605,10 @@ def _detect_series(
         )
 
         if sufficient:
-            median, mad, scale = _median_and_scale(
+            median, mad, scale, effective_scale_floor = _median_and_scale(
                 history,
                 parameters.minimum_scale,
+                parameters.minimum_relative_scale,
             )
             rolling_lower = median - parameters.mad_z_threshold * scale
             rolling_upper = median + parameters.mad_z_threshold * scale
@@ -681,12 +763,96 @@ def _detect_series(
                 page_count += 1
                 page_mean += (numeric_value - page_mean) / page_count
 
+        change_direction: Literal["high", "low"] | None = None
+        change_run_length = 0
+        reset_event: TemporalBaselineReset | None = None
+        reset_seed: list[float] | None = None
+        confirmation_points = parameters.baseline_reset_confirmation_points
+        if (
+            confirmation_points is not None
+            and usable
+            and observation.baseline_eligible
+            and sufficient
+            and value_signals
+            and numeric_value is not None
+            and median is not None
+        ):
+            deviation = numeric_value - median
+            if deviation != 0.0:
+                change_direction = "high" if deviation > 0.0 else "low"
+                candidate_max_gap = (
+                    parameters.baseline_reset_candidate_max_gap_seconds
+                )
+                if (
+                    change_candidates
+                    and candidate_max_gap is not None
+                    and (
+                        observation.timestamp
+                        - change_candidates[-1][0]
+                    ).total_seconds()
+                    > candidate_max_gap
+                ):
+                    change_candidate_direction = None
+                    change_candidates = []
+                if change_candidate_direction != change_direction:
+                    change_candidate_direction = change_direction
+                    change_candidates = []
+                change_candidates.append(
+                    (observation.timestamp, numeric_value)
+                )
+                change_run_length = len(change_candidates)
+                if change_run_length >= confirmation_points:
+                    reset_seed = [
+                        value for _, value in change_candidates
+                    ][-parameters.baseline_window :]
+                    reset_median = float(np.median(reset_seed))
+                    value_signals.append(
+                        _signal(
+                            TemporalDetectorCode.REGIME_CHANGE,
+                            change_direction,
+                            float(change_run_length),
+                            float(confirmation_points),
+                            (
+                                "连续同方向异常达到确认门槛；当前时点仅使用"
+                                "截至本时点的候选值触发未核实统计适配，并将"
+                                "在本时点之后重置数值基线；这不是业务状态"
+                                "认定。"
+                            ),
+                        )
+                    )
+                    reset_event = TemporalBaselineReset(
+                        reset_number=len(baseline_resets) + 1,
+                        change_started_at=change_candidates[0][0],
+                        confirmed_at=observation.timestamp,
+                        direction=change_direction,
+                        confirmation_point_count=change_run_length,
+                        previous_baseline_sample_count=baseline_count,
+                        previous_baseline_median=median,
+                        reset_seed_sample_count=len(reset_seed),
+                        reset_baseline_median=reset_median,
+                        new_baseline_epoch=baseline_epoch + 1,
+                        explanation=(
+                            f"连续 {change_run_length} 个"
+                            f"{'正向' if change_direction == 'high' else '负向'}"
+                            "异常触发未核实统计基线适配；旧基线保留在此前"
+                            "时点的审计结果中，后续检测从候选片段建立的新"
+                            "基线继续。该适配不能证明业务状态正常或稳定。"
+                        ),
+                    )
+            else:
+                change_candidate_direction = None
+                change_candidates = []
+        elif confirmation_points is not None:
+            change_candidate_direction = None
+            change_candidates = []
+
         source_signals = _source_health_signals(observation, parameters)
         signals = value_signals + source_signals
         value_anomaly = bool(value_signals)
         source_health_anomaly = bool(source_signals)
         accepted = bool(
             usable
+            and observation.baseline_eligible
             and (
                 not parameters.exclude_detected_anomalies_from_baseline
                 or not value_anomaly
@@ -699,6 +865,10 @@ def _detect_series(
 
         if usable:
             ewma_state = ewma_candidate
+
+        baseline_count_after_update = len(history)
+        if reset_seed is not None:
+            baseline_count_after_update = len(reset_seed)
 
         contributions: dict[str, float] = {}
         for signal in signals:
@@ -721,6 +891,10 @@ def _detect_series(
                 quality=observation.quality,
                 missing=observation.missing,
                 baseline_sample_count=baseline_count,
+                baseline_sample_count_after_update=(
+                    baseline_count_after_update
+                ),
+                baseline_epoch=baseline_epoch,
                 baseline_median=median,
                 baseline_mad=mad,
                 robust_scale=scale,
@@ -736,6 +910,11 @@ def _detect_series(
                     rolling_upper=rolling_upper,
                     ewma_lower=ewma_lower,
                     ewma_upper=ewma_upper,
+                    minimum_scale=parameters.minimum_scale,
+                    minimum_relative_scale=(
+                        parameters.minimum_relative_scale
+                    ),
+                    effective_scale_floor=effective_scale_floor,
                     cusum=parameters.cusum_threshold,
                     page_hinkley=parameters.page_hinkley_threshold,
                     minimum_quality=parameters.min_baseline_quality,
@@ -752,9 +931,37 @@ def _detect_series(
                 source_health_anomaly=source_health_anomaly,
                 anomalous=value_anomaly or source_health_anomaly,
                 insufficient_history=not sufficient,
+                baseline_eligible=observation.baseline_eligible,
                 accepted_into_baseline=accepted,
+                reset_seed_sample_count=(
+                    len(reset_seed) if reset_seed is not None else 0
+                ),
+                change_direction=change_direction,
+                change_run_length=change_run_length,
+                baseline_reset_confirmed=reset_event is not None,
             )
         )
+
+        if reset_event is not None and reset_seed is not None:
+            history = list(reset_seed)
+            ewma_state = reset_seed[0]
+            for seed_value in reset_seed[1:]:
+                ewma_state = (
+                    parameters.ewma_alpha * seed_value
+                    + (1.0 - parameters.ewma_alpha) * ewma_state
+                )
+            cusum_positive = 0.0
+            cusum_negative = 0.0
+            page_mean = float(np.mean(reset_seed))
+            page_count = len(reset_seed)
+            page_cumulative_positive = 0.0
+            page_minimum_positive = 0.0
+            page_cumulative_negative = 0.0
+            page_minimum_negative = 0.0
+            baseline_epoch += 1
+            baseline_resets.append(reset_event)
+            change_candidate_direction = None
+            change_candidates = []
 
     episodes = _episodes(points, parameters)
     insufficient_history = len(history) < parameters.min_history
@@ -810,8 +1017,14 @@ def _detect_series(
             late_count=late_count,
             revised_count=revised_count,
             low_quality_count=low_quality_count,
+            baseline_ineligible_count=sum(
+                not point.baseline_eligible for point in points
+            ),
             baseline_accepted_count=sum(
                 point.accepted_into_baseline for point in points
+            ),
+            reset_seed_sample_count=sum(
+                point.reset_seed_sample_count for point in points
             ),
             missing_rate=round(missing_count / point_count, 6),
             late_rate=round(late_count / point_count, 6),
@@ -823,6 +1036,7 @@ def _detect_series(
         ),
         points=points,
         episodes=episodes,
+        baseline_resets=baseline_resets,
     )
 
 
@@ -927,11 +1141,13 @@ def _slice_series(
         for point in points
     )
     point_count = len(points)
-    final_baseline_count = min(
-        parameters.baseline_window,
-        points[-1].baseline_sample_count
-        + int(points[-1].accepted_into_baseline),
-    )
+    final_baseline_count = points[-1].baseline_sample_count_after_update
+    if final_baseline_count is None:
+        final_baseline_count = min(
+            parameters.baseline_window,
+            points[-1].baseline_sample_count
+            + int(points[-1].accepted_into_baseline),
+        )
     return TemporalSeriesResult(
         mine_id=series.mine_id,
         source_id=series.source_id,
@@ -950,8 +1166,14 @@ def _slice_series(
             late_count=late_count,
             revised_count=revised_count,
             low_quality_count=low_quality_count,
+            baseline_ineligible_count=sum(
+                not point.baseline_eligible for point in points
+            ),
             baseline_accepted_count=sum(
                 point.accepted_into_baseline for point in points
+            ),
+            reset_seed_sample_count=sum(
+                point.reset_seed_sample_count for point in points
             ),
             missing_rate=round(missing_count / point_count, 6),
             late_rate=round(late_count / point_count, 6),
@@ -963,4 +1185,9 @@ def _slice_series(
         ),
         points=points,
         episodes=_episodes(points, parameters),
+        baseline_resets=[
+            reset
+            for reset in series.baseline_resets
+            if start <= reset.confirmed_at < end
+        ],
     )

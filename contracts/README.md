@@ -5,11 +5,51 @@
 物理关系、历史证据和时序证据，并独立作出监管判断。两边不得互相 import 代码，
 也不得共享数据库模型。
 
+## 当前目标契约：五量双向交换 V2
+
+V2 是“两套运行软件、一个煤矿一个智能体、政府唯一算法”的目标边界：企业智能体
+发送整月逐日/班次五量，政府返回签名回执和唯一算法报告；企业主动拉取风险，智能体
+辅助解释后由企业人员确认回复，政府再返回只表示“已记录”的签名回执。
+
+V2 六类消息分别为：
+
+- `five-quantity-submission-v2`
+- `intake-receipt-v2`
+- `analysis-report-v2`
+- `risk-delivery-ack-v2`
+- `enterprise-risk-response-v2`
+- `response-receipt-v2`
+
+五个业务组固定为风量 `airflow`、电量 `electricity`、火工品量
+`blasting_materials`、入井人员量 `mine_entry_personnel` 和产量 `production`。
+它们由六个规范原子字段表达：`ventilation_m3_min`、`electricity_kwh`、
+`detonators_count`、`explosives_kg`、`mine_entry_persons` 和 `production_t`。
+火工品是一个业务量，但雷管数量与炸药质量单位不同，必须分别保存且不得求和成
+无单位“火工品总量”。`mine_entry_persons` 是统计窗口内的非负整数并按班次求和，
+不是企业用工总人数，也不是某时点井下人数快照。
+
+设备直采与人工导入是并列合法来源，`acquisition_mode` 只用于追溯，不能形成信任
+等级或算法权重。一个月报包含 `days[]`，每天同时保留 `daily_total` 和零点、八点、
+四点三个班次；缺失值使用 `null + quality_flags`，不得填零。
+
+V2 的完整跨字段、签名、幂等、修订、求解器/时序模块和风险闭环规则见
+[`specs/five-quantity-exchange-v2.md`](specs/five-quantity-exchange-v2.md)，HTTP 路径见
+[`openapi/five-quantity-exchange-v2.openapi.json`](openapi/five-quantity-exchange-v2.openapi.json)。
+旧 V1 和 edge telemetry 文件仅作为迁移期历史兼容材料保留，不定义新的目标运行
+软件，也不得让独立 edge 服务绕过企业智能体直接进入 V2 主线。
+
 ## 文件
 
 ```text
 contracts/
 ├── schemas/
+│   ├── exchange-common-v2.schema.json
+│   ├── five-quantity-submission-v2.schema.json
+│   ├── intake-receipt-v2.schema.json
+│   ├── analysis-report-v2.schema.json
+│   ├── risk-delivery-ack-v2.schema.json
+│   ├── enterprise-risk-response-v2.schema.json
+│   ├── response-receipt-v2.schema.json
 │   ├── enterprise-submission-v1.schema.json
 │   ├── submission-receipt-v1.schema.json
 │   ├── error-v1.schema.json
@@ -18,9 +58,11 @@ contracts/
 │   ├── edge-telemetry-receipt-v1.schema.json
 │   └── edge-telemetry-capabilities-v1.schema.json
 ├── openapi/
+│   ├── five-quantity-exchange-v2.openapi.json
 │   ├── enterprise-submission-v1.openapi.json
 │   └── edge-telemetry-v1.openapi.json
 ├── specs/
+│   ├── five-quantity-exchange-v2.md
 │   ├── hmac-transport-auth-v1.md
 │   ├── edge-telemetry-hmac-v1.md
 │   └── governed-observation-signature-v1.md

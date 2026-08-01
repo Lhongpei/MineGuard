@@ -109,6 +109,38 @@ def test_short_platform_transport_secret_fails_during_settings_load(
         Settings.from_environment()
 
 
+def test_v2_requires_explicit_distinct_application_and_transport_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PLATFORM_V2_BASE_URL", "https://regulator.example")
+    monkeypatch.setenv("PLATFORM_V2_SENDER_ID", "agent-demo-mine-001")
+    monkeypatch.setenv(
+        "PLATFORM_V2_TRANSPORT_HMAC_SECRET",
+        "transport-secret-at-least-thirty-two-bytes",
+    )
+    monkeypatch.delenv("ENTERPRISE_EXCHANGE_HMAC_SECRET", raising=False)
+    with pytest.raises(ValueError, match="显式配置"):
+        Settings.from_environment()
+
+    shared = "shared-secret-is-long-enough-but-forbidden"
+    monkeypatch.setenv("ENTERPRISE_EXCHANGE_HMAC_SECRET", shared)
+    monkeypatch.setenv("PLATFORM_V2_TRANSPORT_HMAC_SECRET", shared)
+    with pytest.raises(ValueError, match="不得相同"):
+        Settings.from_environment()
+
+    monkeypatch.setenv(
+        "ENTERPRISE_EXCHANGE_HMAC_SECRET",
+        "application-secret-at-least-thirty-two-bytes",
+    )
+    monkeypatch.setenv(
+        "PLATFORM_V2_TRANSPORT_HMAC_SECRET",
+        "different-transport-secret-at-least-32-bytes",
+    )
+    settings = Settings.from_environment()
+    assert settings.five_quantity_platform is not None
+    assert settings.five_quantity_demo_secret is False
+
+
 def test_public_origin_is_strictly_validated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

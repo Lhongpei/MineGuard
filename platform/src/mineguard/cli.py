@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, date, datetime
 import json
 import os
-import secrets
 import shutil
 import sys
 from dataclasses import dataclass
@@ -16,7 +16,7 @@ from pydantic import BaseModel, ValidationError
 
 from . import __version__
 from .aggregation import AggregationRequest, aggregate_measurements
-from .api import _load_or_create_secret, serve
+from .api import _load_or_create_secret
 from .auth import LocalAuthStore
 from .casework import LocalRepository
 from .demo_seed import (
@@ -30,9 +30,18 @@ from .demo_seed import (
 from .edge_store import EdgeTelemetryRepository
 from .evidence import EvidenceBundleService
 from .flow import FlowAnalysisRequest, analyze_material_flow
+from .five_quantity import (
+    MAX_ET_FILE_BYTES,
+    FiveQuantityImportFailure,
+)
 from .models import PersonnelMatchRequest, ProductionAnalysisRequest
 from .operations import BackupManager, OperationsError
 from .optimization import analyze_production
+from .operational_five_quantity import (
+    OperationalFiveQuantityFileRequest,
+    analyze_operational_five_quantity_file,
+)
+from .regulatory_v2_http import serve
 from .personnel import match_personnel
 from .source_keys import SourceKeyStore
 from .safety import SafetyEvaluationRequest, evaluate_safety
@@ -234,6 +243,52 @@ def _build_parser() -> argparse.ArgumentParser:
         help=_JSON_ARGUMENT_HELP,
     )
 
+    operational_monthly = subparsers.add_parser(
+        "operational-monthly",
+        help="分析风量、用工、总电量、火工品和产量 ET 月报",
+    )
+    operational_monthly.add_argument(
+        "file",
+        metavar="ET_FILE",
+        help="WPS/BIFF8 .et 月报文件路径",
+    )
+    operational_monthly.add_argument(
+        "--mine-id",
+        required=True,
+        help="监管侧显式绑定的矿井编号",
+    )
+    operational_monthly.add_argument(
+        "--report-month",
+        type=_calendar_month,
+        help=(
+            "报表月份（YYYY-MM）；省略时采用 --closed-through 所在月"
+        ),
+    )
+    operational_monthly.add_argument(
+        "--closed-through",
+        required=True,
+        type=_calendar_date,
+        help="最后一个已闭账日期（YYYY-MM-DD）",
+    )
+    operational_monthly.add_argument(
+        "--source-id",
+        default="operator-cli-upload",
+        help="本次临时来源编号",
+    )
+    for unit_name in (
+        "ventilation",
+        "labor",
+        "electricity",
+        "detonators",
+        "explosives",
+        "production",
+    ):
+        operational_monthly.add_argument(
+            f"--{unit_name.replace('_', '-')}-unit",
+            default=None,
+            help=f"{unit_name} 单位；留空表示未知",
+        )
+
     server = subparsers.add_parser("serve", help="启动 JSON HTTP API")
     server.add_argument("--host", default="127.0.0.1", help="监听地址")
     server.add_argument(
@@ -293,7 +348,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     backup = subparsers.add_parser(
         "backup",
-        help="一致性备份全部六个 SQLite 数据库",
+        help="一致性备份状态目录内全部现有 SQLite 数据库",
     )
     backup.add_argument("backup_id", help="不可重复的备份标识")
     _add_backup_location_arguments(backup)
@@ -403,6 +458,34 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_product_parser() -> argparse.ArgumentParser:
+    """Return the deployable V2 surface without legacy analysis commands."""
+
+    parser = _build_parser()
+    parser.description = "政府五量监管平台 V2（唯一算法、只读业务前端）"
+    allowed = {
+        "serve",
+        "backup",
+        "verify-backup",
+        "restore-backup",
+    }
+    subparsers = next(
+        action
+        for action in parser._actions  # noqa: SLF001 - argparse has no public API
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    for command in tuple(subparsers.choices):
+        if command not in allowed:
+            del subparsers.choices[command]
+    subparsers._choices_actions = [  # noqa: SLF001
+        action
+        for action in subparsers._choices_actions  # noqa: SLF001
+        if action.dest in allowed
+    ]
+    subparsers.metavar = "{" + ",".join(sorted(allowed)) + "}"
+    return parser
+
+
 def _add_backup_location_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--state-directory",
@@ -465,6 +548,8 @@ def _resolved_optional_path(
 def _initialise_first_admin(
     auth_database: Path,
     username: str,
+    *,
+    allow_local_default: bool = True,
 ) -> tuple[str, str | None] | None:
     """Create the first admin and return its password display policy.
 
@@ -476,14 +561,22 @@ def _initialise_first_admin(
         if auth_store.list_users():
             return None
         configured_password = os.environ.get("MINEGUARD_ADMIN_PASSWORD")
-        generated = not configured_password
-        password = configured_password or secrets.token_urlsafe(24)
+        if configured_password:
+            password = configured_password
+            display_password = None
+        elif allow_local_default:
+            password = "123123123"
+            display_password = password
+        else:
+            raise _CliInputError(
+                "非本机监听首次启动必须设置 MINEGUARD_ADMIN_PASSWORD"
+            )
         if len(password) < 8:
             raise _CliInputError(
                 "MINEGUARD_ADMIN_PASSWORD 至少需要 8 个字符"
             )
         user = auth_store.bootstrap_admin(username, password)
-    return user.username, password if generated else None
+    return user.username, display_password
 
 
 def _report_first_admin(
@@ -501,7 +594,8 @@ def _report_first_admin(
         print(f"管理员账号: {username}", file=sys.stderr)
         return
     print(
-        "首次管理员已创建。以下随机密码只显示这一次，请立即安全保存：",
+        "首次管理员已创建。以下初始密码只显示这一次；正式部署应在首次启动前"
+        "通过 MINEGUARD_ADMIN_PASSWORD 设置独立强口令：",
         file=sys.stderr,
     )
     print(f"管理员账号: {username}", file=sys.stderr)
@@ -547,8 +641,10 @@ def _backup_runtime(
     )
 
 
-def _state_databases(layout: _StateLayout) -> dict[str, Path]:
-    return {
+def _state_databases(
+    layout: _StateLayout, *, existing_only: bool = False
+) -> dict[str, Path]:
+    databases = {
         "mineguard.db": layout.database,
         "auth.db": layout.auth_database,
         "jobs.db": layout.job_database,
@@ -556,6 +652,9 @@ def _state_databases(layout: _StateLayout) -> dict[str, Path]:
         "governance.db": layout.governance_database,
         "source-keys.db": layout.source_key_database,
     }
+    if existing_only:
+        return {name: path for name, path in databases.items() if path.is_file()}
+    return databases
 
 
 def _run_backup(args: argparse.Namespace) -> None:
@@ -563,10 +662,10 @@ def _run_backup(args: argparse.Namespace) -> None:
         args,
         create_key=True,
     )
-    manifest = manager.create_backup(
-        args.backup_id,
-        _state_databases(layout),
-    )
+    databases = _state_databases(layout, existing_only=True)
+    if not databases:
+        raise _CliInputError("状态目录中没有可备份的 SQLite 数据库")
+    manifest = manager.create_backup(args.backup_id, databases)
     _output(
         {
             "status": "created",
@@ -624,10 +723,9 @@ def _prepare_restored_layout(
 ) -> _StateLayout:
     layout = _state_layout(restored_root)
     flat_source_key_database = restored_root / "source-keys.db"
-    if not flat_source_key_database.is_file():
-        raise _CliInputError("备份缺少 source-keys.db")
-    layout.source_key_directory.mkdir(mode=0o700)
-    flat_source_key_database.replace(layout.source_key_database)
+    if flat_source_key_database.is_file():
+        layout.source_key_directory.mkdir(mode=0o700)
+        flat_source_key_database.replace(layout.source_key_database)
     layout.evidence_directory.mkdir(mode=0o700)
     layout.backup_directory.mkdir(mode=0o700)
     _copy_backup_key(external_key_file, layout.backup_key)
@@ -663,7 +761,7 @@ def _run_restore_backup(args: argparse.Namespace) -> None:
             "state_directory": str(layout.root),
             "databases": [
                 str(path.relative_to(layout.root))
-                for path in _state_databases(layout).values()
+                for path in _state_databases(layout, existing_only=True).values()
             ],
             "next_command": (
                 f"mineguard serve --state-directory {layout.root}"
@@ -732,6 +830,7 @@ def _run_server(args: argparse.Namespace) -> None:
         bootstrap = _initialise_first_admin(
             layout.auth_database,
             args.admin_username,
+            allow_local_default=args.host in {"127.0.0.1", "::1", "localhost"},
         )
     _report_first_admin(bootstrap)
     print(
@@ -816,6 +915,28 @@ def _port(value: str) -> int:
     return port
 
 
+def _calendar_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "日期必须使用 YYYY-MM-DD"
+        ) from error
+
+
+def _calendar_month(value: str) -> str:
+    try:
+        parsed = date.fromisoformat(f"{value}-01")
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "月份必须使用 YYYY-MM"
+        ) from error
+    normalized = parsed.strftime("%Y-%m")
+    if normalized != value:
+        raise argparse.ArgumentTypeError("月份必须使用 YYYY-MM")
+    return value
+
+
 def _load_json_argument(value: str) -> str:
     if value == "-":
         return sys.stdin.read()
@@ -879,6 +1000,53 @@ def _analyze_json(
     return operation(request)
 
 
+def _run_operational_monthly(args: argparse.Namespace) -> None:
+    path = Path(args.file)
+    if not path.is_file():
+        raise _CliInputError("五量月报文件不存在或不是普通文件")
+    try:
+        size = path.stat().st_size
+    except OSError as error:
+        raise _CliInputError("无法读取五量月报文件信息") from error
+    if size > MAX_ET_FILE_BYTES:
+        raise _CliInputError(
+            f"五量月报文件不得超过 {MAX_ET_FILE_BYTES} 字节"
+        )
+    try:
+        content = path.read_bytes()
+    except OSError as error:
+        raise _CliInputError("无法读取五量月报文件") from error
+    request = OperationalFiveQuantityFileRequest.model_validate(
+        {
+            "mine_id": args.mine_id,
+            "source": {
+                "source_id": args.source_id,
+                "filename": path.name,
+                "received_at": datetime.now(UTC),
+                "origin_system": "mineguard-cli",
+            },
+            "report_month": (
+                args.report_month
+                or args.closed_through.strftime("%Y-%m")
+            ),
+            "closed_through": args.closed_through,
+            "units": {
+                name: getattr(args, f"{name}_unit")
+                for name in (
+                    "ventilation",
+                    "labor",
+                    "electricity",
+                    "detonators",
+                    "explosives",
+                    "production",
+                )
+            },
+            "content_bytes": content,
+        }
+    )
+    _output(analyze_operational_five_quantity_file(request))
+
+
 def _main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
@@ -939,6 +1107,8 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     analyze_verification,
                 )
             )
+        elif args.command == "operational-monthly":
+            _run_operational_monthly(args)
         elif args.command == "serve":
             _run_server(args)
         elif args.command == "backup":
@@ -971,6 +1141,17 @@ def _main(argv: Sequence[str] | None = None) -> int:
         return 0
     except ValidationError as error:
         _report_validation_error(error)
+        return 2
+    except FiveQuantityImportFailure as error:
+        _output(
+            {
+                "error": {
+                    "code": error.code.value,
+                    "message": error.public_message,
+                }
+            },
+            stream=sys.stderr,
+        )
         return 2
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         _output(
@@ -1021,7 +1202,11 @@ def _main(argv: Sequence[str] | None = None) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI with private-by-default permissions for all new files."""
+    """Run the archived developer/legacy CLI.
+
+    No installed command points here.  The function remains only for
+    controlled source-level migration and historical replay tests.
+    """
 
     previous_umask = os.umask(0o077)
     try:
@@ -1030,5 +1215,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         os.umask(previous_umask)
 
 
+def product_main(argv: Sequence[str] | None = None) -> int:
+    """Run only the supported V2 product and operational commands."""
+
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    # Parse once with the reduced surface so legacy commands cannot execute
+    # through the production binary.  The existing dispatcher is then reused
+    # for the allowed implementations.
+    _build_product_parser().parse_args(arguments)
+    previous_umask = os.umask(0o077)
+    try:
+        return _main(arguments)
+    finally:
+        os.umask(previous_umask)
+
+
 if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
+    raise SystemExit(product_main())

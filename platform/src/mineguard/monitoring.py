@@ -29,8 +29,31 @@ from .temporal import (
 )
 
 
-TEMPORAL_DETECTOR_VERSION = "2.1.0"
+TEMPORAL_DETECTOR_VERSION = "2.3.0"
 _FEATURE_LIMIT = 100_000
+_ACTIVE_MAX_CONTIGUOUS_GAP_SECONDS = 172_800.0
+
+
+def active_temporal_parameters() -> TemporalDetectionParameters:
+    """Return the governed online configuration for this release."""
+
+    return TemporalDetectionParameters(
+        # A percentage of a residual median close to zero is not a useful
+        # scale floor.  Until feature-specific absolute floors are governed,
+        # the active policy reports and uses only the conservative generic
+        # absolute floor.
+        minimum_relative_scale=0.0,
+        # Unreviewed anomalies must never promote themselves into the formal
+        # online baseline.  Statistical reset remains an explicit opt-in in
+        # the reusable detector, not an active monitoring policy.
+        baseline_reset_confirmation_points=None,
+        baseline_reset_candidate_max_gap_seconds=(
+            _ACTIVE_MAX_CONTIGUOUS_GAP_SECONDS
+        ),
+        # Consecutive database rows separated by more than two days are not
+        # one operational alert episode.
+        episode_max_gap_seconds=_ACTIVE_MAX_CONTIGUOUS_GAP_SECONDS,
+    )
 
 
 def _instant(value: Any) -> datetime | None:
@@ -49,6 +72,8 @@ def _instant(value: Any) -> datetime | None:
 
 def _observations(
     features: list[dict[str, Any]],
+    *,
+    baseline_eligible_run_ids: set[str],
 ) -> tuple[list[TemporalObservation], int]:
     candidates: dict[
         tuple[str, str, str, datetime],
@@ -141,10 +166,41 @@ def _observations(
         )
         observations.append(
             selected.model_copy(
-                update={"revision_count": revision_count}
+                update={
+                    "revision_count": revision_count,
+                    "baseline_eligible": (
+                        str(selected_feature.get("run_id") or "")
+                        in baseline_eligible_run_ids
+                    ),
+                }
             )
         )
     return observations, rejected
+
+
+def verified_normal_run_ids(
+    repository: LocalRepository,
+    *,
+    mine_ids: set[str] | None,
+) -> set[str]:
+    """Fail closed to current, integrity-eligible verified-normal labels."""
+
+    labels = repository.list_run_reference_labels(
+        labels={"verified_normal"},
+        mine_ids=mine_ids,
+        include_ineligible=False,
+        limit=_FEATURE_LIMIT,
+    )
+    return {
+        str(label["run_id"])
+        for label in labels
+        if (
+            isinstance(label, dict)
+            and label.get("run_id")
+            and label.get("label") == "verified_normal"
+            and label.get("reference_eligible") is True
+        )
+    }
 
 
 def initialize_temporal_model_snapshot(
@@ -152,7 +208,13 @@ def initialize_temporal_model_snapshot(
 ) -> int:
     """Register the immutable detector configuration used by this release."""
 
-    parameters = TemporalDetectionParameters()
+    parameters = active_temporal_parameters()
+    snapshot_parameters = {
+        **parameters.model_dump(mode="json"),
+        "baseline_admission_policy": (
+            "current_verified_normal_and_reference_eligible"
+        ),
+    }
     return repository.save_algorithm_model_snapshots(
         [
             {
@@ -163,10 +225,13 @@ def initialize_temporal_model_snapshot(
                 "training_end": None,
                 "sample_count": 0,
                 "activation_status": "active",
-                "parameters": parameters.model_dump(mode="json"),
+                "parameters": snapshot_parameters,
                 "method": (
                     "past-only rolling MAD, EWMA, bidirectional CUSUM, "
-                    "Page-Hinkley and source-health rules"
+                    "Page-Hinkley, a generic absolute scale floor, "
+                    "verified-normal-only baseline admission, baseline "
+                    "reset disabled, bounded alert episodes and "
+                    "source-health rules"
                 ),
             }
         ]
@@ -199,6 +264,8 @@ def refresh_temporal_audit(
             "status": "skipped_feature_limit",
             "feature_count": len(features),
             "rejected_feature_count": 0,
+            "baseline_eligible_observation_count": 0,
+            "baseline_ineligible_observation_count": 0,
             "series_count": 0,
             "finding_count": 0,
             "episode_count": 0,
@@ -207,12 +274,27 @@ def refresh_temporal_audit(
             "inserted_model_snapshots": snapshot_inserted,
         }
 
-    observations, rejected = _observations(features)
+    eligible_run_ids = verified_normal_run_ids(
+        repository,
+        mine_ids=mine_ids,
+    )
+    observations, rejected = _observations(
+        features,
+        baseline_eligible_run_ids=eligible_run_ids,
+    )
+    baseline_eligible_count = sum(
+        observation.baseline_eligible for observation in observations
+    )
+    baseline_ineligible_count = (
+        len(observations) - baseline_eligible_count
+    )
     if not observations:
         return {
             "status": "insufficient_history",
             "feature_count": len(features),
             "rejected_feature_count": rejected,
+            "baseline_eligible_observation_count": 0,
+            "baseline_ineligible_observation_count": 0,
             "series_count": 0,
             "finding_count": 0,
             "episode_count": 0,
@@ -221,7 +303,7 @@ def refresh_temporal_audit(
             "inserted_model_snapshots": snapshot_inserted,
         }
 
-    parameters = TemporalDetectionParameters()
+    parameters = active_temporal_parameters()
     result = detect_temporal_anomalies(
         TemporalDetectionRequest(
             observations=observations,
@@ -242,6 +324,17 @@ def refresh_temporal_audit(
                     "status": "anomalous",
                     "score": signal.contribution,
                     "baseline_sample_count": point.baseline_sample_count,
+                    "baseline_epoch": point.baseline_epoch,
+                    "baseline_reset_confirmed": (
+                        point.baseline_reset_confirmed
+                    ),
+                    "baseline_eligible": point.baseline_eligible,
+                    "accepted_into_baseline": (
+                        point.accepted_into_baseline
+                    ),
+                    "reset_seed_sample_count": (
+                        point.reset_seed_sample_count
+                    ),
                     "direction": signal.direction,
                     "observed_statistic": signal.observed_statistic,
                     "threshold": signal.threshold,
@@ -284,10 +377,22 @@ def refresh_temporal_audit(
     inserted_episodes = repository.save_alert_episodes(episodes)
     return {
         "status": (
-            "anomalous" if findings or episodes else "no_signal"
+            "anomalous"
+            if findings or episodes
+            else (
+                "insufficient_history"
+                if result.insufficient_history_series_count
+                else "no_signal"
+            )
         ),
         "feature_count": len(features),
         "rejected_feature_count": rejected,
+        "baseline_eligible_observation_count": (
+            baseline_eligible_count
+        ),
+        "baseline_ineligible_observation_count": (
+            baseline_ineligible_count
+        ),
         "series_count": result.series_count,
         "finding_count": len(findings),
         "episode_count": len(episodes),
@@ -299,6 +404,8 @@ def refresh_temporal_audit(
 
 __all__ = [
     "TEMPORAL_DETECTOR_VERSION",
+    "active_temporal_parameters",
     "initialize_temporal_model_snapshot",
     "refresh_temporal_audit",
+    "verified_normal_run_ids",
 ]

@@ -1,6 +1,0 @@
-{"event_id":"coal-20260728-001","kind":"coal_output","metric":"raw_coal_output","value":128500,"unit":"kg","location_code":"main-belt","observed_at":"2026-07-28T08:00:00+08:00"}
-{"event_id":"power-20260728-001","kind":"electricity","metric":"active_energy","value":36.2,"unit":"MWh","location_code":"main-meter","observed_at":"2026-07-28T08:00:00+08:00"}
-{"event_id":"person-20260728-001","kind":"personnel","metric":"underground_count","value":181,"unit":"人","location_code":"underground","observed_at":"2026-07-28T08:00:00+08:00"}
-{"event_id":"gas-20260728-001","kind":"methane","metric":"methane_concentration","value":0.82,"unit":"%","location_code":"face-101","observed_at":"2026-07-28T08:00:00+08:00"}
-{"event_id":"explosive-20260728-001","kind":"explosives","metric":"explosive_consumed","value":24200,"unit":"g","location_code":"magazine-01","observed_at":"2026-07-28T08:00:00+08:00"}
-{"event_id":"air-20260728-001","kind":"ventilation","metric":"airflow","value":1050,"unit":"m3/min","location_code":"face-101","observed_at":"2026-07-28T08:00:00+08:00"}

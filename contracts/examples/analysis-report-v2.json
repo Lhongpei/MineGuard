@@ -1,0 +1,115 @@
+{
+  "contract_version": "analysis-report-v2",
+  "message_type": "analysis_report",
+  "message_id": "33333333-3333-4333-8333-333333333334",
+  "correlation_id": "11111111-1111-4111-8111-111111111111",
+  "causation_id": "11111111-1111-4111-8111-111111111111",
+  "idempotency_key": "analysis.33333333-3333-4333",
+  "revision": 1,
+  "predecessor": null,
+  "created_at": "2026-08-01T00:06:30Z",
+  "sender": {
+    "system_id": "mineguard-qinyuan",
+    "party_id": "regulator-qinyuan",
+    "role": "regulatory_platform"
+  },
+  "recipient": {
+    "system_id": "agent-mine-qy-001",
+    "party_id": "operator-qy-001",
+    "role": "enterprise_agent"
+  },
+  "mine_id": "MINE-QY-001",
+  "payload": {
+    "report_id": "33333333-3333-4333-8333-333333333331",
+    "submission_message_id": "11111111-1111-4111-8111-111111111111",
+    "submission_revision": 1,
+    "mine": {
+      "mine_id": "MINE-QY-001",
+      "mine_name": "示例一号煤矿",
+      "operator_id": "operator-qy-001",
+      "operator_name": "示例一号煤业有限公司"
+    },
+    "reporting_month": "2026-07",
+    "period_start": "2026-07-29",
+    "period_end": "2026-07-31",
+    "issued_at": "2026-08-01T00:06:30Z",
+    "algorithm": {
+      "engine_id": "mineguard-five-quantity-engine",
+      "engine_version": "2.0.0",
+      "algorithm_run_id": "33333333-3333-4333-8333-333333333333",
+      "config_sha256": "1212121212121212121212121212121212121212121212121212121212121212",
+      "input_snapshot_sha256": "1313131313131313131313131313131313131313131313131313131313131313",
+      "own_history_snapshot_sha256": "1414141414141414141414141414141414141414141414141414141414141414",
+      "peer_snapshot_sha256": "1515151515151515151515151515151515151515151515151515151515151515",
+      "started_at": "2026-08-01T00:05:05Z",
+      "completed_at": "2026-08-01T00:06:20Z",
+      "modules": [
+        "data_quality",
+        "daily_shift_reconciliation",
+        "l1_reconciliation",
+        "minimal_conflict_set",
+        "robust_temporal_baseline",
+        "temporal_drift",
+        "change_point",
+        "anonymous_peer_baseline",
+        "evidence_calibration"
+      ]
+    },
+    "outcome": "risk",
+    "summary": "联合一致性求解与本矿时序基线均提示用电量和产量关系发生异常变化，请企业核对来源和当日运行情况。",
+    "findings": [
+      {
+        "finding_id": "33333333-3333-4333-8333-333333333332",
+        "category": "combined_evidence",
+        "severity": "high",
+        "title": "用电量与产量联合关系异常",
+        "summary": "在保持确定性班次对账约束的前提下，加权 L1 最小调整仍超过治理阈值；该关系同时偏离本矿稳健历史区间。",
+        "affected_dates": [
+          "2026-07-31"
+        ],
+        "affected_shifts": [
+          "SHIFT-2"
+        ],
+        "affected_metrics": [
+          "electricity_kwh",
+          "production_t"
+        ],
+        "evidence": [
+          {
+            "evidence_id": "EV-L1-001",
+            "method": "l1_reconciliation",
+            "summary": "最小标准化调整量超过当前配置阈值。",
+            "observed_value": 38.41,
+            "expected_min": 24.2,
+            "expected_max": 34.8,
+            "score": 3.27,
+            "evidence_sha256": "1616161616161616161616161616161616161616161616161616161616161616"
+          },
+          {
+            "evidence_id": "EV-TIME-001",
+            "method": "robust_temporal_baseline",
+            "summary": "单位产量用电量超出本矿同工况稳健历史区间。",
+            "observed_value": 38.23,
+            "expected_min": 25.1,
+            "expected_max": 33.9,
+            "score": 3.08,
+            "evidence_sha256": "1717171717171717171717171717171717171717171717171717171717171717"
+          }
+        ],
+        "requires_response": true
+      }
+    ],
+    "response_required": true,
+    "response_due_at": "2026-08-04T16:00:00Z",
+    "delivery_cursor": "mine-qy-001.cursor.00000042"
+  },
+  "signature_envelope": {
+    "algorithm": "hmac-sha256-v2",
+    "canonicalization": "rfc8785-jcs",
+    "key_id": "regulator-key-2026-01",
+    "signed_at": "2026-08-01T00:06:30Z",
+    "nonce": "AwQFBgcICQoLDA0ODxAREg",
+    "payload_sha256": "689af99d8cafb5799fe7845b020e4b4022c121a8f9219ecdf4b7dbe89b43b1b9",
+    "signature": "ad317641229a6d9221b4284b2eaf3cd2778c98577b4b46ae6650cd3f7e8953bd"
+  }
+}

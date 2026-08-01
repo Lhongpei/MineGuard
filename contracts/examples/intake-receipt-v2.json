@@ -1,0 +1,42 @@
+{
+  "contract_version": "intake-receipt-v2",
+  "message_type": "intake_receipt",
+  "message_id": "22222222-2222-4222-8222-222222222222",
+  "correlation_id": "11111111-1111-4111-8111-111111111111",
+  "causation_id": "11111111-1111-4111-8111-111111111111",
+  "idempotency_key": "receipt.submission.11111111",
+  "revision": 1,
+  "predecessor": null,
+  "created_at": "2026-08-01T00:05:02Z",
+  "sender": {
+    "system_id": "mineguard-qinyuan",
+    "party_id": "regulator-qinyuan",
+    "role": "regulatory_platform"
+  },
+  "recipient": {
+    "system_id": "agent-mine-qy-001",
+    "party_id": "operator-qy-001",
+    "role": "enterprise_agent"
+  },
+  "mine_id": "MINE-QY-001",
+  "payload": {
+    "receipt_id": "22222222-2222-4222-8222-222222222221",
+    "submission_message_id": "11111111-1111-4111-8111-111111111111",
+    "submission_revision": 1,
+    "received_payload_sha256": "cf22a046f2899e4f11dd91f76ef37e2040da6e20f541bf16943946b1300aff35",
+    "received_at": "2026-08-01T00:05:01Z",
+    "intake_status": "accepted",
+    "analysis_state": "queued",
+    "regulatory_outcome": "not_determined_at_intake",
+    "analysis_run_id": "33333333-3333-4333-8333-333333333333"
+  },
+  "signature_envelope": {
+    "algorithm": "hmac-sha256-v2",
+    "canonicalization": "rfc8785-jcs",
+    "key_id": "regulator-key-2026-01",
+    "signed_at": "2026-08-01T00:05:02Z",
+    "nonce": "AgMEBQYHCAkKCwwNDg8QEQ",
+    "payload_sha256": "ce2c24c7a60b715a99e06b738539052eb5ca7b16c309b8188c4c9c8fab467f1e",
+    "signature": "5873ab8850fed8ac6821d9b75e47b6ffd3c471ec841ba45ea77f79d79b297339"
+  }
+}

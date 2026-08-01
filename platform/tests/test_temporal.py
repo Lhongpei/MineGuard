@@ -233,6 +233,50 @@ def test_zero_mad_uses_scale_floor_and_threshold_is_exclusive() -> None:
     assert TemporalDetectorCode.ROLLING_MAD in signal_codes(spike)
 
 
+def test_relative_scale_floor_is_opt_in_for_constant_level_series() -> None:
+    values = [100.0] * 5 + [100.01]
+    observations = [
+        observation(index, value) for index, value in enumerate(values)
+    ]
+    default_point = detect(
+        observations,
+        ewma_z_threshold=1e9,
+        cusum_threshold=1e9,
+        page_hinkley_threshold=1e9,
+    ).series[0].points[-1]
+    guarded_point = detect(
+        observations,
+        minimum_relative_scale=0.01,
+        ewma_z_threshold=1e9,
+        cusum_threshold=1e9,
+        page_hinkley_threshold=1e9,
+    ).series[0].points[-1]
+
+    assert TemporalDetectorCode.ROLLING_MAD in signal_codes(default_point)
+    assert guarded_point.value_anomaly is False
+    assert guarded_point.baseline_mad == 0.0
+    assert guarded_point.robust_scale == pytest.approx(1.0)
+    assert guarded_point.rolling_robust_z == pytest.approx(0.01)
+    assert guarded_point.thresholds.minimum_relative_scale == 0.01
+    assert guarded_point.thresholds.effective_scale_floor == pytest.approx(1.0)
+
+
+def test_relative_floor_near_zero_uses_only_the_absolute_floor() -> None:
+    values = [-0.001, 0.0, 0.001, -0.001, 0.001, 0.002]
+    point = detect(
+        [
+            observation(index, value, residual=True)
+            for index, value in enumerate(values)
+        ],
+        minimum_scale=0.01,
+        minimum_relative_scale=0.02,
+    ).series[0].points[-1]
+
+    assert point.baseline_median == pytest.approx(0.0)
+    assert point.robust_scale == pytest.approx(0.01)
+    assert point.thresholds.effective_scale_floor == pytest.approx(0.01)
+
+
 def test_missing_and_low_quality_points_are_not_imputed_or_learned() -> None:
     points = [
         observation(0, 10.0),
@@ -263,6 +307,30 @@ def test_missing_and_low_quality_points_are_not_imputed_or_learned() -> None:
     assert series.source_health.missing_rate == pytest.approx(0.2)
 
 
+def test_baseline_ineligible_point_is_detected_but_never_learned() -> None:
+    baseline = [observation(index, 10.0) for index in range(5)]
+    monitored = [
+        observation(index, 20.0).model_copy(
+            update={"baseline_eligible": False}
+        )
+        for index in range(5, 8)
+    ]
+    series = detect(
+        baseline + monitored,
+        baseline_reset_confirmation_points=3,
+    ).series[0]
+    point = series.points[-1]
+
+    assert point.value_anomaly is True
+    assert point.baseline_eligible is False
+    assert point.accepted_into_baseline is False
+    assert point.reset_seed_sample_count == 0
+    assert series.final_baseline_sample_count == 5
+    assert series.baseline_resets == []
+    assert series.source_health.baseline_ineligible_count == 3
+    assert series.source_health.baseline_accepted_count == 5
+
+
 def test_persistent_shift_triggers_cusum_ewma_and_page_hinkley() -> None:
     baseline = [10.0, 10.2, 9.8, 10.1, 9.9]
     shifted = [10.7] * 7
@@ -284,6 +352,102 @@ def test_persistent_shift_triggers_cusum_ewma_and_page_hinkley() -> None:
     assert shift_points[-1].page_hinkley_positive > 5.0
     assert shift_points[-1].contributions["cusum"] > 0
     assert series.status == "anomalous"
+
+
+def test_confirmed_stable_step_resets_baseline_once_and_then_adapts() -> None:
+    values = [0.0] * 5 + [1.0] * 10
+    series = detect(
+        [
+            observation(index, value)
+            for index, value in enumerate(values)
+        ],
+        baseline_reset_confirmation_points=3,
+    ).series[0]
+
+    assert series.anomaly_point_count == 3
+    assert len(series.episodes) == 1
+    episode = series.episodes[0]
+    assert (episode.start_point_index, episode.end_point_index) == (5, 7)
+    assert episode.baseline_reset_count == 1
+    assert TemporalDetectorCode.REGIME_CHANGE in episode.detectors
+
+    assert len(series.baseline_resets) == 1
+    reset = series.baseline_resets[0]
+    assert reset.change_started_at == START + timedelta(hours=5)
+    assert reset.confirmed_at == START + timedelta(hours=7)
+    assert reset.direction == "high"
+    assert reset.confirmation_point_count == 3
+    assert reset.previous_baseline_median == 0.0
+    assert reset.reset_baseline_median == 1.0
+    assert reset.reset_seed_sample_count == 3
+    assert reset.new_baseline_epoch == 1
+
+    confirmation = series.points[7]
+    assert confirmation.baseline_reset_confirmed is True
+    assert confirmation.change_run_length == 3
+    assert confirmation.baseline_sample_count_after_update == 3
+    assert confirmation.accepted_into_baseline is False
+    assert confirmation.reset_seed_sample_count == 3
+    assert series.source_health.baseline_accepted_count == 12
+    assert series.source_health.reset_seed_sample_count == 3
+    assert all(
+        not point.anomalous for point in series.points[8:]
+    )
+    assert all(point.baseline_epoch == 1 for point in series.points[8:])
+    assert series.points[10].baseline_median == 1.0
+    assert series.final_baseline_sample_count == 10
+
+
+def test_isolated_spike_does_not_seed_later_regime_reset() -> None:
+    values = [0.0] * 5 + [10.0, 0.0] + [1.0] * 8
+    series = detect(
+        [
+            observation(index, value)
+            for index, value in enumerate(values)
+        ],
+        baseline_reset_confirmation_points=3,
+        ewma_z_threshold=1e9,
+        cusum_threshold=1e9,
+        page_hinkley_threshold=1e9,
+    ).series[0]
+
+    assert len(series.baseline_resets) == 1
+    reset = series.baseline_resets[0]
+    assert reset.change_started_at == START + timedelta(hours=7)
+    assert reset.confirmed_at == START + timedelta(hours=9)
+    assert reset.reset_baseline_median == 1.0
+    assert series.points[5].baseline_reset_confirmed is False
+    assert series.points[6].change_run_length == 0
+    assert [(item.start_point_index, item.end_point_index) for item in series.episodes] == [
+        (5, 5),
+        (7, 9),
+    ]
+
+
+def test_sparse_same_direction_anomalies_do_not_confirm_a_reset() -> None:
+    baseline = [observation(index, 0.0) for index in range(5)]
+    sparse = [
+        observation(5 + index, 1.0).model_copy(
+            update={
+                "timestamp": START + timedelta(days=31 * (index + 1))
+            }
+        )
+        for index in range(3)
+    ]
+    series = detect(
+        baseline + sparse,
+        baseline_reset_confirmation_points=3,
+        baseline_reset_candidate_max_gap_seconds=86_400.0,
+        episode_max_gap_seconds=86_400.0,
+    ).series[0]
+
+    assert series.baseline_resets == []
+    assert [point.change_run_length for point in series.points[-3:]] == [
+        1,
+        1,
+        1,
+    ]
+    assert len(series.episodes) == 3
 
 
 def test_negative_signed_residual_shift_preserves_direction() -> None:
@@ -445,6 +609,38 @@ def test_prefix_results_are_unchanged_when_future_points_are_added() -> None:
         point.model_dump(mode="json") for point in prefix.points
     ] == [
         point.model_dump(mode="json") for point in complete.points[:7]
+    ]
+
+
+def test_regime_reset_is_past_only_when_future_points_are_added() -> None:
+    values = [0.0] * 5 + [1.0] * 10
+    observations = [
+        observation(index, value) for index, value in enumerate(values)
+    ]
+    parameter_overrides = {
+        "baseline_reset_confirmation_points": 3,
+    }
+    prefix = detect(
+        observations[:10],
+        **parameter_overrides,
+    ).series[0]
+    complete = detect(
+        observations,
+        **parameter_overrides,
+    ).series[0]
+
+    assert [
+        point.model_dump(mode="json") for point in prefix.points
+    ] == [
+        point.model_dump(mode="json")
+        for point in complete.points[: len(prefix.points)]
+    ]
+    assert [
+        item.model_dump(mode="json") for item in prefix.baseline_resets
+    ] == [
+        item.model_dump(mode="json")
+        for item in complete.baseline_resets
+        if item.confirmed_at <= prefix.points[-1].timestamp
     ]
 
 

@@ -1,0 +1,39 @@
+{
+  "contract_version": "risk-delivery-ack-v2",
+  "message_type": "risk_delivery_ack",
+  "message_id": "44444444-4444-4444-8444-444444444444",
+  "correlation_id": "11111111-1111-4111-8111-111111111111",
+  "causation_id": "33333333-3333-4333-8333-333333333334",
+  "idempotency_key": "delivery-ack.33333333-3333",
+  "revision": 1,
+  "predecessor": null,
+  "created_at": "2026-08-01T00:07:00Z",
+  "sender": {
+    "system_id": "agent-mine-qy-001",
+    "party_id": "operator-qy-001",
+    "role": "enterprise_agent"
+  },
+  "recipient": {
+    "system_id": "mineguard-qinyuan",
+    "party_id": "regulator-qinyuan",
+    "role": "regulatory_platform"
+  },
+  "mine_id": "MINE-QY-001",
+  "payload": {
+    "report_id": "33333333-3333-4333-8333-333333333331",
+    "analysis_report_message_id": "33333333-3333-4333-8333-333333333334",
+    "delivery_cursor": "mine-qy-001.cursor.00000042",
+    "received_at": "2026-08-01T00:06:59Z",
+    "local_inbox_record_id": "INBOX-0000042",
+    "delivery_status": "stored"
+  },
+  "signature_envelope": {
+    "algorithm": "hmac-sha256-v2",
+    "canonicalization": "rfc8785-jcs",
+    "key_id": "enterprise-key-2026-01",
+    "signed_at": "2026-08-01T00:07:00Z",
+    "nonce": "BAUGBwgJCgsMDQ4PEBESEw",
+    "payload_sha256": "7c9a80c12e96a2d216533af95b8c5172d86a0b4ad74a5d3a4cc91ecd3fb0430c",
+    "signature": "f6919b16c14be7801a242a7a88f88e4075ce91eb655b861c7f1b474f25d25b49"
+  }
+}

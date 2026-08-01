@@ -1,134 +1,189 @@
-# 煤矿数据监管平台与企业填报智能体
+# 煤矿五量监管平台与一矿一智能体
 
-本仓库包含三套职责分离、可分别部署的系统，以及一套中立接口规范：
+本仓库现在只有两个可部署软件：
 
 ```text
-企业填报 agent/ ── 企业确认报送 ─────────────┐
-矿端采集 edge-agent/ ── 只读遥测/断网续传 ──┼─> 监管 platform/
-          三方均只实现 contracts/，不互相 import ┘
+每座煤矿独立部署 agent/
+  原始五量 → 人工导入或固定目录/API 直采 → 规范化 → 企业确认
+                                      │ V2 HTTPS/JSON/HMAC
+                                      ▼
+政府集中部署 platform/
+  自动验签接收 → 唯一五量算法 → 风险报告 → 企业回复/修订重算 → 领导只读大屏
 ```
 
-- `platform/`：监管平台，独立登记矿井、分析配置和可信来源，执行物理交叉验证、
-  历史/时序证据分析、人工复核和监管审计。
-- `agent/`：企业填报智能体，独立完成材料导入、缺项追问、来源追溯、煤炭确定性
-  体检、受控工具规划、只读煤炭业务对话、企业人工确认和报送；煤炭 Agent V2
-  还提供四专家并行与反方核验、可恢复任务、每日/间隔/事件调度，以及受治理记忆
-  和技能提案；不作“正常”、“合法”或“合规”认定。
-- `edge-agent/`：矿端独立边缘服务，以只读方式采集出煤、用电、人员、甲烷、
-  火工品和通风，完成单位/时间归一、本地留存、预警提示和断网续传；没有设备
-  写入或生产控制能力。
-- `contracts/`：版本化 HTTP/JSON Schema、OpenAPI、签名规范和互操作样例。它是
-  三方唯一共享的边界规范，不是运行时依赖包。
+- `agent/`：一座煤矿一个独立智能体。不同煤矿不共享数据库、用户、文件、会话或
+  密钥；负责导入、规范化、缺项提示、人工确认、可靠报送、风险解读和回复草稿。
+- `platform/`：政府侧独立监管平台。自动分析各矿数据并追加留痕；领导端只查看、
+  筛选和钻取，不能代企业填报、改数据、改结论或删除风险。
+- `contracts/`：双方共同实现的中立 V2 Schema、OpenAPI、签名规范和测试向量；它
+  不是运行产品，也不是双方的 Python 运行时依赖。
 
-三套进程不互相 import 源码，不共享 Python 模型、数据库、文件目录或内部密钥。
-它们只通过契约规定的网络接口交互；任一方都可在保持契约兼容的前提下独立升级、
-替换或停机。
+原第三套 `edge-agent` 已退役。固定目录监听、稳定文件识别、哈希去重、持久 outbox
+和断网重试属于企业智能体内部连接器。人工导入和直采是并列合法采集方式，仅用于
+追溯，不形成信任等级，也不改变算法权重或阈值。
 
-## 本地快速启动
+## 唯一算法和求解器
 
-需要 Python 3.11+。先启动监管平台：
+政府端唯一业务算法分析正式“五量”：风量、电量、火工品量、入井人员量和产量。
+数据层以六个规范原子字段表达这五类业务量：火工品量拆为雷管数量（`count`）和炸药
+质量（`kg`）等带单位子项，不能跨单位相加；`mine_entry_persons` 表示统计范围内实际
+发生的入井人次，必须为整数并按 `sum` 聚合，不表示泛用工、在册人数或时点井下人数。
+因此“六个原子字段”不等于“六量”。完整管线依次执行：
+
+1. 契约、缺失、单位、非负、日报与三班算术核对；
+2. 停产、检修、复产和稳产工况识别；
+3. 本矿正式准入历史的 Median/MAD、Rolling MAD、EWMA、CUSUM、
+   Page-Hinkley、漂移和变化点；
+4. 至少三座可比矿、每矿等权且按截止日冻结的匿名同类矿区间；
+5. HiGHS 加权 L1 联合协调与最小冲突集 MCS；
+6. 证据校准后给出 `normal_candidate`、`risk` 或 `insufficient_data`。
+
+求解器只在第 5 步内部使用。规则层先按真实 `sum`、`time_weighted_average`、
+`snapshot` 语义完成确定性核对；主 HiGHS 求上报观测与本矿历史、匿名同类矿软区间
+联合相容所需的最小加权 L1 调整，MCS 再把观测容差和参考带硬化，定位最少需要放宽的
+日期、指标和证据组。它不预测所谓“真实产量”，也不把历史或同类矿经验当成物理定律。
+既有时序算法没有删除，而是并入这一个引擎，与 L1/MCS 共同形成证据。
+
+首期数据即使暂未发现风险，也只能进入隔离的“参考候选”，不能用本月整体分布证明
+自己后直接污染历史。只有完整、无复核/风险信号，并且已有正式本矿历史或冻结匿名
+同类矿作为独立锚点的正常候选，才进入正式历史基线。
+
+企业文字解释只会记为 `explanation_recorded`，不能消除数值风险。只有更高修订版数据
+沿完整签名血缘重新通过同一算法，风险才可成为 `cleared_by_reanalysis`。
+
+## 本机启动
+
+需要 Python 3.11+。先准备两把不同的演示密钥；生产必须改成密钥系统生成的随机值：
 
 ```bash
-cd platform
+export DEMO_MESSAGE_SECRET='DEMO_message_HMAC_secret_change_me_32_bytes'
+export DEMO_TRANSPORT_SECRET='DEMO_transport_HMAC_secret_change_me_32_bytes'
+```
+
+启动政府端：
+
+```bash
+# 如果当前已经激活 agent/.venv，先退出；仅 cd 不会切换虚拟环境
+deactivate 2>/dev/null || true
+cd /home/sevan/coral/platform
 python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install -c constraints.txt -e .
-export MINEGUARD_ADMIN_PASSWORD='123123123'
-export MINEGUARD_EXTERNAL_CLIENTS_JSON='[{"client_id":"enterprise-client-001","enterprise_id":"ENT-001","mine_ids":["M001"],"secrets":["DEMO_ONLY_change_transport_secret_32_chars"]}]'
-export MINEGUARD_EDGE_CLIENTS_JSON='[{"client_id":"mine-edge-M001","mine_ids":["M001"],"secrets":["REVNT19PTkxZX2NoYW5nZV9lZGdlX3RyYW5zcG9ydF9zZWNyZXRfMzJfYnl0ZXM="]}]'
-mineguard serve --host 127.0.0.1 --port 8080 --state-directory .mineguard
+command -v mineguard
+
+export MINEGUARD_V2_CLIENTS_JSON="$(python3 - <<'PY'
+import json, os
+print(json.dumps({"clients": [{
+  "sender_id": "agent-mine-qy-001",
+  "party_id": "operator-qy-001",
+  "mine_id": "MINE-QY-001",
+  "mine_name": "示例一号煤矿",
+  "comparison_context": {
+    "capacity_band": "0.9-1.2Mtpa",
+    "mining_method": "underground-longwall",
+    "shift_system": "three-shift-eight-hour",
+    "coal_type": "thermal-coal",
+    "operating_regime": "normal-production"
+  },
+  "active_message_key_id": "demo-exchange-key",
+  "message_keys": {
+    "demo-exchange-key": os.environ["DEMO_MESSAGE_SECRET"]
+  },
+  "transport_secrets": [os.environ["DEMO_TRANSPORT_SECRET"]]
+}]}))
+PY
+)"
+mineguard serve --host 127.0.0.1 --port 8080 \
+  --state-directory .mineguard-v2
 ```
 
-上述边缘密钥只是本机演示固定值；实际部署必须替换为 `openssl rand -base64 32`
-生成并由密钥系统保管的随机值。
+`command -v mineguard` 应显示
+`/home/sevan/coral/platform/.venv/bin/mineguard`。如仍找不到入口，可直接运行
+`/home/sevan/coral/platform/.venv/bin/mineguard`。若启动提示端口已占用，先用
+`ss -ltnp | grep ':8080'` 查明旧服务，再停止旧服务或为新服务改用其他端口。
 
-如果暂时没有现场数据，想先体验领导端的 30/90 日趋势、缺报、案件闭环和安全
-线索，请改用独立 `.mineguard-demo` 状态目录，并按
-[90 天演示数据使用说明](platform/docs/90天演示数据使用说明.md)生成 6 座
-虚构矿井的数据；不要把合成数据写入上面的 `.mineguard` 正式状态目录。
-
-在另一个终端启动企业智能体：
+新本机状态目录默认账号为 `admin / 123123123`。`serve` 是常驻进程，看到监听提示后
+终端不返回属于正常现象。打开 <http://127.0.0.1:8080/>，或另开终端检查：
 
 ```bash
-cd agent
+curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8080/readyz
+```
+
+再开一个终端启动这一座矿的企业智能体：
+
+```bash
+cd /home/sevan/coral/agent
 python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install -e .
-export PLATFORM_BASE_URL='http://127.0.0.1:8080'
-export PLATFORM_CLIENT_ID='enterprise-client-001'
-export PLATFORM_TRANSPORT_HMAC_SECRET='DEMO_ONLY_change_transport_secret_32_chars'
+
+export DEMO_MESSAGE_SECRET='DEMO_message_HMAC_secret_change_me_32_bytes'
+export DEMO_TRANSPORT_SECRET='DEMO_transport_HMAC_secret_change_me_32_bytes'
+export ENTERPRISE_MINE_ID='MINE-QY-001'
+export ENTERPRISE_MINE_NAME='示例一号煤矿'
+export ENTERPRISE_OPERATOR_ID='operator-qy-001'
+export ENTERPRISE_OPERATOR_NAME='示例煤矿经营主体'
+export ENTERPRISE_SYSTEM_ID='agent-mine-qy-001'
+export ENTERPRISE_CAPACITY_BAND='0.9-1.2Mtpa'
+export ENTERPRISE_MINING_METHOD='underground-longwall'
+export ENTERPRISE_SHIFT_SYSTEM='three-shift-eight-hour'
+export ENTERPRISE_COAL_TYPE='thermal-coal'
+export ENTERPRISE_OPERATING_REGIME='normal-production'
+export ENTERPRISE_EXCHANGE_HMAC_SECRET="$DEMO_MESSAGE_SECRET"
+export PLATFORM_V2_BASE_URL='http://127.0.0.1:8080'
+export PLATFORM_V2_SENDER_ID='agent-mine-qy-001'
+export PLATFORM_V2_TRANSPORT_HMAC_SECRET="$DEMO_TRANSPORT_SECRET"
 enterprise-agent serve --host 127.0.0.1 --port 8090
 ```
 
-两条 `serve` 命令都是常驻前台服务，成功后终端不会返回 shell 提示符。请保持
-它们运行，在另一个终端分别请求 `/ready` 和 `/api/v1/health`。如果是在远程
-服务器启动企业端，请从自己的电脑建立
-`ssh -N -L 8090:127.0.0.1:8090 用户名@服务器` 隧道，再访问本机地址；不要把
-远程服务器的 `127.0.0.1` 当作浏览器电脑的地址。
+打开 <http://127.0.0.1:8090/>。未配置逐用户账号时，本机演示账号为
+`demo / 123123123`；正式确认和提交应配置具名用户及权限。可选的 DeepSeek 模型只
+用于煤炭领域映射、解释和回复草稿，启动前或启动后通过受控配置注入均可；密钥不得写
+进仓库或前端。没有模型时，导入、校验、报送和确定性算法仍可工作。
 
-打开监管平台 <http://127.0.0.1:8080/> 和企业智能体
-<http://127.0.0.1:8090/>。监管端演示账号为 `admin / 123123123`；企业端未配置
-用户时会提供仅限回环地址的 `demo / 123123123` 临时账号。临时账号只能体验
-查看和编辑，不能代表企业确认或提交。新状态目录仅在首次初始化时读取监管端
-密码，既有账号不会被覆盖。正式使用必须配置企业逐用户账号、随机长口令、TLS
-和密钥管理服务。
+远程服务器上仍建议两个服务只监听 `127.0.0.1`，使用 SSH 隧道或 HTTPS 反向代理，
+不要直接暴露明文 HTTP。
 
-实际报送前，必须先在监管端注册智能体草稿引用的同一
-`profile_id + version`、全部 `source_id`、确认人和精确统计窗口的事件查询
-快照。来源 HMAC 密钥只存在于设备/采集网关与监管端；智能体只导入网关预签名的
-`payload_sha256 + signature`，不能持密钥给人工数据补签。完整配置和故障排查见
-[本地双系统运行](docs/本地双系统运行.md)；企业端长期常驻、systemd、安全环境
-文件及备份恢复见[企业端部署与运维](agent/docs/部署与运维.md)。
+### 一键生成多矿时序演示
 
-矿端服务单独启动，详细字段和 systemd 配置见
-[矿端边缘服务说明](edge-agent/README.md)。监管端与矿端必须配置同一随机密钥
-字节的 Base64；监管端仍按自己的规则独立复算，矿端本地预警不直接成为监管结论。
-
-企业端还必须单独导入与草稿矿井/窗口精确一致的监管事件查询快照；“查询结果为空”
-也需要权威空集及证据摘要。普通生产报告里的 `approved_event_codes: []` 不能替代
-监管快照，平台最终仍用自己登记的不可变快照独立比对。
-
-DeepSeek 是可选的候选字段提取和煤炭任务规划能力。未设置 `DEEPSEEK_API_KEY`
-时，一键体检会改用固定的本地确定性工具组合；导入、校验、追问、人工确认和提交
-也都可工作。任何模型密钥都只能通过企业端环境变量或密钥系统注入，不能写入仓库、
-浏览器或报送数据。第三方模型的数据出境范围和纯确定性运行方式见
-[企业端说明](agent/README.md#模型配置与数据出境)。
-
-企业领导、经办人、确认人、提交人和管理员的权限边界、标准步骤与交接方法见
-[企业端分级账号操作手册](agent/docs/分级账号操作手册.md)。网页登录后也会按
-服务端返回的实际权限自动显示“当前账号操作说明”；岗位名称只用于展示，不会扩大权限。
-
-Agent V2 的任务状态、重启恢复、调度与事件 API、治理四眼审批、环境变量、SQLite
-备份及自动抓数边界见
-[煤炭 Agent V2 耐久任务流与治理使用说明](agent/docs/煤炭Agent-V2任务流.md)。
-当前 V2 只对已经存在的企业草稿执行本地只读体检：不会自动建草稿、确认、提交或
-控制设备；`edge-agent/` 仍按独立合同直接向监管端发送遥测。
-
-## 验证
-
-三部分可分别测试：
+政府端安装完成后，可在独立状态目录生成 8 座合成煤矿、连续 3 个完整自然月的数据：
 
 ```bash
+cd /home/sevan/coral/platform
+mineguard seed-v2-demo \
+  --state-directory .mineguard-v2-demo \
+  --through-month 2026-07-31
+mineguard serve --host 127.0.0.1 --port 8080 \
+  --state-directory .mineguard-v2-demo
+```
+
+默认仍用 `admin / 123123123` 登录。演示覆盖人工导入、直采、正常基线、日报与班次
+不一致、时序漂移、变化点、匿名同类矿偏离、缺失值和停复产；所有矿名、来源和留痕
+均明确标注为合成数据。该命令拒绝写入未由它创建的非空目录，演示数据不得用于监管
+认定。只查看大屏无需配置企业客户端；要让 `/readyz` 通过并实际接收 Agent 报送，仍须
+配置 `MINEGUARD_V2_CLIENTS_JSON`。
+
+## 数据保存位置
+
+- 政府端：`platform/.mineguard-v2/mineguard.db` 及同目录认证/备份状态；集中保存多矿
+  规范报文、算法运行、风险、回复和审计链。
+- 企业端：每座矿自己的 `ENTERPRISE_AGENT_DB`（默认 `agent/data/enterprise-agent.db`）；
+  只保存本矿导入材料、确认、outbox/inbox、风险会话和审计。
+
+两端绝不能指向同一个数据库或共享状态目录。
+
+## 验证与文档
+
+```bash
+cd /home/sevan/coral
 python3 contracts/scripts/validate_contracts.py
-(cd platform && python3 -m pytest)
-(cd agent && python3 -m pytest)
-(cd edge-agent && python3 -m pytest)
+PYTHONPATH=platform/src python3 -m pytest -q platform/tests
+PYTHONPATH=agent/src python3 -m pytest -q agent/tests
 ```
 
-再运行一次完全黑盒的双进程与运维故障验收。它使用临时数据库、随机本机端口和
-一次性演示密钥，分别启动监管平台与企业智能体，只通过 HTTP/JSON/HMAC 完成
-profile、五个来源、确认人和事件快照登记，以及企业登录、导入、预检、确认、
-提交、回执与批次上下文核验；还会检查端口占用、非安全远程监听、演示账号权限、
-显式 HTTPS public origin 的代理边界、逐观测核对、监管配置缺失、错误运输密钥、
-重复提交、平台停机恢复、双端重启持久性和子进程清理。脚本不会导入任一系统的
-Python 包；同时会通过企业 HTTP API 验收煤炭工具目录、运行轨迹、预算、审计链、
-无模型确定性降级、煤炭对话领域拒绝、只读边界、会话完整性和删除，以及确认/提交
-能力隔离：
+进一步说明见 [V2 双系统目标架构](docs/V2双系统目标架构.md)、
+[V2 部署与运行](docs/V2部署与运行.md)、[V2 验收清单](docs/V2验收清单.md)、
+[政府平台说明](platform/README.md)和[企业智能体说明](agent/README.md)。
 
-```bash
-python3 scripts/verify_two_process.py
-python3 scripts/verify_edge_pipeline.py --verbose --timeout 45
-```
-
-监管端返回接收回执，只说明契约、签名和接入检查已通过并进入监管处理流程，不代表
-数据正常、合法、合规，也不替代后续算法研判和监管人员复核。
+旧 V1 契约仅保留用于历史记录审计重放，不属于新部署的默认启动拓扑。

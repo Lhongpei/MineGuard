@@ -1,0 +1,7 @@
+{
+  "schema_version": "mineguard-regulatory-v2-synthetic-demo-v1",
+  "synthetic_demo": true,
+  "through_month": "2026-07-31",
+  "database": "mineguard.db",
+  "disclaimer": "本数据集完全由程序合成，仅用于功能演示和培训；不是企业实际报送、不是设备实采记录，也不得作为监管认定或执法依据。"
+}

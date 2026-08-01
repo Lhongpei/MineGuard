@@ -1,525 +1,191 @@
-# 企业可信数据填报智能体
+# 煤矿五量企业智能体
 
-这是独立于监管平台运行的企业侧填报服务。两者不共享 Python 包、数据库或
-内部模型，只通过 `enterprise-submission-v1` JSON/HTTP 合同通信。
+这是企业侧软件。一个运行实例固定代表一个煤矿和独立经营主体，负责取得五量、
+规范化、人工复核、向政府报送、接收算法风险并形成企业回执。政府侧
+`platform/` 只监管和分析；两端不共享运行时代码、数据库或领域类，只对齐
+`contracts/` 发布的 V2 JSON/HTTP 合同。
 
-智能体负责“读取、代填、追问、预检和送达”，不负责认定数据真实。涉及企业数据
-的模型输出永远只是候选建议或工具规划；煤炭通识模型输出可以作为明确标注的解释
-展示，但不是企业事实或监管认定。只有企业经办人完成确定性预检并主动确认后，
-服务才会用监管接口的独立运输凭证提交。来源观测必须已经由数据采集网关签名，
-智能体不持有来源 HMAC 密钥，也不能给人工填写的数据补签。
+当前默认主线只有两个产品：
+
+```text
+煤矿 Agent                              政府 Platform
+人工上传 / 固定目录 / 设备 API            单矿及跨矿统一算法
+        ↓                                     ↓
+规范化建议 → 企业人工复核 → HMAC 报送 ───→ inbox / outbox / 算法报告
+        ↑                                     │
+风险解读 ← 验签拉取 ← delivery cursor ←───────┘
+        ↓
+原因 + 证据索引 + 措施 → 人工确认 → 风险回执 ─→ 政府留痕 / 必要时重算
+```
+
+固定目录和以后增加的受控连接器都属于本 Agent，不再部署第三个 `edge-agent`
+产品。旧 `enterprise-submission-v1`、通用任务中心和新闻对话代码只作 Legacy
+迁移兼容，不在默认界面、V2 配置或部署流程中使用。
 
 ## 已实现能力
 
-- SQLite 草稿、乐观修订号、软删除及 SHA-256 追加审计链；
-- JSON/CSV 确定性导入，每个字段记录原材料摘要、位置、方法和置信度；
-- 工况四轴、时间窗口、观测结构、数值范围、重复编号和来源记录预检；
-- 根据阻断项生成面向非技术人员的缺项问题；
-- 独立导入与草稿窗口精确对应的监管事件快照，权威空集也保留专用来源证明；
-- 按登录经办人持久记录逐观测核对，观测内容变化后自动撤销旧核对；
-- 企业自管账号、PBKDF2 密码摘要、服务端会话及细粒度读/写/确认/提交权限；
-- `HttpOnly`、`SameSite=Strict` Cookie，同源校验与 CSRF 令牌防护；
-- 人工确认绑定草稿修订号与内容摘要，任何修改都会使确认失效；
-- 保留并转发来源网关签发的观测摘要和 HMAC，编辑后自动作废；
-- 可选 `hmac-sha256-v1` HTTP 运输签名、Bearer 令牌和幂等键；
-- 本地保存提交请求摘要、成功回执或失败状态，成功提交可安全重放；
-- 可选 OpenAI-compatible 模型辅助，非法 JSON、空响应、超时均失败关闭；
-- 受控煤炭 Agent Harness：任务状态机、服务端预算、工具白名单、人工批准断点、
-  运行轨迹和 SHA-256 追加审计链；
-- 20 个煤炭确定性工具，覆盖煤流平衡、洗选产率、库存覆盖、煤质基准与配煤
-  场景试算、来源证据、观测连续性、多来源一致性、凭证血缘、时间对齐、历史稳健
-  基线、趋势、漂移、变化点和物理/历史/时序综合解释；
-- 每个模型工具显式声明业务类别、证据来源、是否联网、是否仅作场景试算和允许的
-  Harness profile；这些字段与 schema 一同进入工具定义摘要，运行中不能被模型改写；
-- 独立的煤炭业务多轮对话：服务端领域网关、近期新闻搜索、通识直答与企业数据
-  只读 Harness 三通道、本人会话隔离、幂等消息、会话审计链及越界请求拒绝；
-- 只读 `coal-news-search` Skill 使用百度新闻优先、DeepSeek 原生 Web Search
-  后备的国内可用检索链路，返回结构化来源与时间，不把离线知识冒充实时新闻；
-- 煤炭通识只向模型发送当前问题和至多一轮受控通识上下文，不发送草稿、工具结果
-  或企业历史；模型不可用、响应非法或并发受限时自动使用本地受控知识回答；
-- 无模型时“一键煤炭体检”仍执行固定确定性工具组合，不伪装为模型推理；
-- 煤炭 Agent V2 耐久任务流：来源、时序、物理和历史四专家并行核验，
-  确定性反方复核与负责人摘要，任务取消/重试、服务重启恢复、每日/间隔/事件
-  调度，以及带审计链的任务中心；
-- 受治理业务记忆和技能目录：先提案、后审批，共享记忆和全部技能强制由另一名
-  对应治理人员批准；记忆使用 `governance_review`，技能使用 `skill_admin`，
-  技能批准后保持 `approved_inactive`，不会热加载或立即执行；
-- 无模型密钥时 JSON/CSV、问答、校验、确认和提交能力仍然完整；
-- 标准库 HTTP API、CLI，以及同源静态前端托管。
+- 一矿一实例：启动时固定 `mine_id`、经营主体、企业系统和政府接收方；页面不能跨矿切换；
+- ET/XLS/XLSX/CSV/JSON/JSONL 安全导入，限制文件、压缩包、工作表、行列和单元格规模；
+- 人工上传与直采并列合法，`acquisition_mode` 只追溯来源，不产生可信度等级、权重或阈值差异；
+- 固定白名单目录监听、写入稳定等待、SHA-256 去重；异常文件复制到 Agent 状态目录隔离，原件不删除；
+- 确定性字段和单位规范化建议；缺失保持 `null`，不估算、不插补、不用 0 冒充；
+- 未确认草稿可带原因“放弃”；这是保留原文、修订号和审计事件的软放弃，不做物理删除；
+- 日报合计加零点、八点、四点三班，每组显式包含风量、电量、火工品量、入井人员量和产量；火工品量内分别记录雷管和炸药子项；
+- 人工复核后才形成不可变消息，SQLite outbox 重启恢复、指数退避和幂等重试；
+- 独立实现 RFC 8785 JCS、应用消息 HMAC 和 HTTP 运输 HMAC，不 import `platform/` 或 `contracts/` 运行时代码；
+- 完整支持 V2 七条交换路径、opaque cursor、禁止 HTTP 重定向和可选私有 CA；
+- 风险报告验签后事务落入 inbox，再发送 delivery ack；只有 ack 成功才推进 cursor；
+- 当前/上一把政府应用签名密钥轮换；
+- 只围绕当前风险报告的煤炭对话工具，以及逐 finding 的原因、证据索引、措施和更正引用；
+- 企业人员再次确认后发送回复；政府接收回执明确不等于风险消除；
+- append-only SHA-256 操作链；
+- 面向非技术人员的四页前端：数据收件箱、规范化复核与报送、风险解读与回复、留痕与设置。
 
-## 安装与启动
+## 本机安装与启动
 
-需要 Python 3.11 或更高版本：
+在仓库的 `agent/` 目录执行：
 
 ```bash
-cd agent
-python -m venv .venv
-. .venv/bin/activate
-pip install -e .
-enterprise-agent --version
-enterprise-agent serve
+cd /home/sevan/coral/agent
+python -m pip install -e .
+enterprise-agent serve --host 127.0.0.1 --port 8090
 ```
 
-打开 `http://127.0.0.1:8090`。默认只监听本机；监听非本机地址时，CLI 会强制
-要求配置逐用户账号、Secure Cookie，并部署在 HTTPS 反向代理后。
-
-`serve` 会先打印浏览器地址和配置状态，再一直占用当前终端等待请求；终端不返回
-提示符是正常运行状态。另开终端执行
-`curl -fsS http://127.0.0.1:8090/api/v1/health` 检查；不要因暂时没有日志就
-重复启动。按 `Ctrl+C` 会干净停止，不再输出 Python traceback。远程服务器上
-运行时，应保持回环监听并在浏览器所在电脑执行
-`ssh -N -L 8090:127.0.0.1:8090 用户名@服务器`，然后访问本机 URL。
-health 中的 `platform_configured:false` 表示当前只能编辑和预检，不能送达监管
-平台；补齐三项平台配置并重启后再提交。
-
-长期运行不要依赖某个 SSH 终端保持前台命令。低权限账号、绝对数据路径、
-systemd 沙箱、启停日志和备份恢复步骤见
-[部署与运维](docs/部署与运维.md)，可复制的模板位于 `deploy/`。
-
-领导查看、填报经办、复核确认、报送提交及职责分离的完整操作步骤见
-[分级账号操作手册](docs/分级账号操作手册.md)。前端会基于登录会话中的
-`read/write/confirm/submit/governance_review/skill_admin` 实际权限生成个性化
-指引；`role` 只用于岗位展示和审计，
-不能授予操作能力。
-
-网页默认采用“快捷填报”：合并运行状态、优先继续未完成草稿，并按当前权限只提示
-下一项可执行任务。“专业工具”保留煤炭智能任务、业务对话、详细状态与高级草稿操作。
-模式切换只改变显示，不改变服务端权限、草稿、当前步骤或确认/提交门禁，也不在浏览器
-持久化身份与模式。
-
-“智能体任务中心”在快捷模式优先展示领导可读结论，在专业模式中增加每日/间隔计划
-及记忆、技能治理。事件计划和事件发送已提供 HTTP API，当前网页不提供配置入口。
-完整架构、状态机、权限矩阵、调度 API、环境变量和恢复边界见
-[煤炭 Agent V2 耐久任务流与治理使用说明](docs/煤炭Agent-V2任务流.md)。
-
-通过回环地址前置 HTTPS 反向代理时，必须同时设置
-`ENTERPRISE_AGENT_SECURE_COOKIE=true` 和精确的
-`ENTERPRISE_AGENT_PUBLIC_ORIGIN=https://企业填报域名`，并让代理保留与该
-origin 一致的 `Host`。应用不信任 `X-Forwarded-*` 来替代 Host/Origin 校验。
-
-没有配置企业用户时，回环地址会启用临时演示账号 `demo`，默认密码为
-`123123123`。响应会明确标记 `temporary_demo=true`；它可以体验查看和编辑，
-但后端强制禁止确认、提交，不会在非回环地址创建。正式使用前，管理员必须
-生成新摘要，在密钥系统配置逐用户账号并重启服务。若确需跳过登录做本机接口
-调试，可设置 `ENTERPRISE_AGENT_ALLOW_ANONYMOUS_LOCAL=true`，该开关在非回环
-地址会直接导致启动失败。
-
-配置通过环境变量注入。复制 `.env.example` 仅作为字段清单，服务不会自动
-读取 `.env`，生产环境应由服务管理器或密钥系统注入：
+若 shell 仍提示 `enterprise-agent: command not found`，直接使用当前 Python：
 
 ```bash
-export ENTERPRISE_AGENT_DB=./data/enterprise-agent.db
-export PLATFORM_BASE_URL=http://127.0.0.1:8080
-export PLATFORM_CLIENT_ID=enterprise-client-001
-export PLATFORM_TRANSPORT_HMAC_SECRET=DEMO_ONLY_change_transport_secret_32_chars
-export PLATFORM_SUBMISSION_PATH=/v1/enterprise-submissions
-enterprise-agent serve
+cd /home/sevan/coral/agent
+PYTHONPATH=src python -m enterprise_agent serve --host 127.0.0.1 --port 8090
 ```
 
-上面的 `DEMO_ONLY_...` 只让本机示例满足最小长度并成功启动，必须和监管端登记值
-一致才能报送，不能用于共享环境或生产。真实值应由密钥系统注入，不要写入 shell
-历史或仓库。若当前只体验建草稿和预检，可完全不设置任何 `PLATFORM_*` 变量；
-三项核心配置不能只设置一部分。
+看到启动说明后终端持续占用、没有继续输出，是 HTTP 服务在正常等待请求，不是卡死。
+浏览器打开 <http://127.0.0.1:8090/>。按 `Ctrl+C` 可正常停止。
 
-生成用户密码摘要时不把密码写进命令参数：
+仅本机、未配置逐用户账号时会启用演示账号：
+
+```text
+账号：demo
+密码：123123123
+```
+
+演示账号被标记为必须换密，只能查看和编辑，不能确认或报送。正式测试完整流程必须
+配置带 `confirm`、`submit` 权限的逐用户账号。
+
+## 最小 V2 配置
+
+复制 [.env.example](.env.example) 的变量到启动环境。程序不会自动读取 `.env`；
+可以由 systemd `EnvironmentFile`、容器 Secret 或受控 shell 注入。
 
 ```bash
-enterprise-agent hash-password
-# 将输出的完整摘要放入企业密钥系统中的 ENTERPRISE_AGENT_USERS_JSON
+export ENTERPRISE_MINE_ID=MINE-QY-001
+export ENTERPRISE_MINE_NAME=示例一号煤矿
+export ENTERPRISE_OPERATOR_ID=operator-qy-001
+export ENTERPRISE_OPERATOR_NAME=示例一号煤业有限公司
+export ENTERPRISE_SYSTEM_ID=agent-mine-qy-001
+
+export PLATFORM_V2_BASE_URL=http://127.0.0.1:8080
+export PLATFORM_V2_SENDER_ID=agent-mine-qy-001
+export ENTERPRISE_EXCHANGE_KEY_ID=enterprise-key-v2
+export REGULATORY_EXCHANGE_KEY_ID=regulator-key-v2
+export ENTERPRISE_EXCHANGE_HMAC_SECRET='replace-message-secret-at-least-32-bytes'
+export PLATFORM_V2_TRANSPORT_HMAC_SECRET='replace-transport-secret-at-least-32-bytes'
+
+enterprise-agent serve --host 127.0.0.1 --port 8090
 ```
 
-用户配置示例（应由密钥系统注入为单行 JSON）：
+`PLATFORM_V2_SENDER_ID` 必须等于 `ENTERPRISE_SYSTEM_ID`，并与政府逐矿登记完全
+一致。只有显式配置 `PLATFORM_V2_BASE_URL` 才启用 V2；Legacy V1 的
+`PLATFORM_BASE_URL` 不会隐式启动 V2。
 
-```json
-[{
-  "actor_id": "operator-001",
-  "name": "张三",
-  "role": "企业管理员",
-  "password_hash": "pbkdf2_sha256$600000$...$...",
-  "permissions": ["read", "write", "confirm", "submit", "governance_review", "skill_admin"],
-  "must_change_password": false
-}]
-```
-
-不要把密码、真实 API Key 或运输 HMAC 密钥写入代码、草稿、CSV、命令历史或
-版本库。来源 HMAC 密钥更不能配置给本智能体，只能保存在来源网关和监管平台。
-
-## 数据与信任边界
-
-草稿核心结构：
-
-```json
-{
-  "schema_version": "enterprise-submission-draft/v1",
-  "enterprise_id": "ENT-001",
-  "enterprise_name": "示例能源有限公司",
-  "unified_social_credit_code": "91110000ABCDEFGH1X",
-  "mine_id": "M001",
-  "mine_name": "示例一号矿",
-  "window_start": "2026-07-26T00:00:00+08:00",
-  "window_end": "2026-07-27T00:00:00+08:00",
-  "profile_id": "production-default",
-  "profile_version": "1",
-  "operational_context": {
-    "regime_code": "normal",
-    "shift_code": "whole_day",
-    "season_code": "summer",
-    "maintenance": false,
-    "approved_event_codes": [],
-    "tags": []
-  },
-  "observations": [{
-    "source_id": "belt-01",
-    "observation_id": "belt-01-20260726",
-    "metric_code": "coal.main_transport_t",
-    "value": 7100,
-    "unit": "t",
-    "observed_at": "2026-07-27T00:00:00+08:00",
-    "received_at": "2026-07-27T00:01:00+08:00",
-    "interval_start": null,
-    "interval_end": null,
-    "reset_before": false,
-    "sequence_no": 1,
-    "revision": 0,
-    "payload_sha256": "81ae6e9bb82ff87f54fc0d72e9e2a3fcfaf3f8c2e99da0bf577d48688e704fa8",
-    "signature": "2e23984a3abecfa0de7a89d967bfc5cff896ae9e586deee6394639a9af1b48e4"
-  }]
-}
-```
-
-`metric_code` 供企业人员核对与展示，不进入来源签名；监管平台根据已注册的
-`source_id` 决定指标映射、容差和依赖域，企业端不能覆盖监管配置。
-
-智能体只检查摘要/签名格式，以及 `payload_sha256` 是否与规范化业务载荷一致；
-它没有来源密钥，因此不会在本地声称 HMAC 已通过认证。真正的 HMAC 验证由
-监管平台完成。JSON 和 CSV 都可携带网关给出的两个字段；含观测的 CSV 若缺少
-任一字段会被直接拒绝。修改已有观测的任一业务字段会删除这两个凭证，必须
-重新从来源网关导入，普通字段来源记录不能替代网关签名。
-
-最终信封严格采用共享合同的两层结构：
-
-- 顶层为版本、UUID 提交号、幂等键、发送时间、`payload` 和摘要；
-- `payload` 内含企业、矿井、窗口、配置、四轴工况、已签名观测、
-  `llm_assistance` 和 `human_confirmation`；
-- 每个业务对象把 `field_provenance` 放在对应字段旁边，包含事实来源、记录号、
-  获取时间、方法和证据摘要；
-- `payload_sha256` 只覆盖 `payload`，使用 RFC 8785 JCS 后求 SHA-256；
-- HTTP HMAC 另行覆盖实际发送的完整 body，不能与 `payload_sha256` 混用。
-
-顶层 `submitted_at` 是第一次实际发起监管运输的时间，不复用较早的人工确认
-时间。第一次请求会先按幂等键完整落库；网络失败后的重试读取并重新发送这份
-已落库请求，因此 `submitted_at`、提交号、摘要和传输字节不会在重试时漂移。
-
-提交前客户端会先读取
-`GET /v1/enterprise-submission-capabilities`，核对 V1、提交路径、HMAC 版本、
-完整性算法和请求体上限；报送包超限会在本地阻断。只有全部对齐后才发送至
-`POST /v1/enterprise-submissions`。运输 HMAC 密钥少于 32 字节会在启动时失败。
-成功回执还会核对提交号、幂等键和载荷摘要，接收回执绝不代表数据正常、合法
-或合规。
-
-## HTTP API
-
-前端先使用同源身份接口：
-
-- `GET /api/v1/health`
-- `POST /api/v1/auth/login`：提交 `actor_id` 和 `password`；
-- `GET /api/v1/auth/me`：恢复登录人、权限及本次会话的 CSRF 令牌；
-- `POST /api/v1/auth/logout`：注销服务端会话并清除 Cookie；
-- `GET /api/v1/drafts?limit=50&offset=0`：返回不含观测正文、签名和来源明细的
-  草稿摘要页，`limit` 最大 200；`POST /api/v1/drafts` 新建草稿；
-- `GET|PATCH|DELETE /api/v1/drafts/{draft_id}`
-- `POST /api/v1/drafts/{draft_id}/import`：来源系统、原文件名、真实性确认和内容摘要
-  会进入审计记录；草稿仅保留有界来源清单，不保存原文件正文；
-- `POST /api/v1/drafts/{draft_id}/assist`
-- `GET /api/v1/drafts/{draft_id}/questions`
-- `POST /api/v1/drafts/{draft_id}/validate`
-- `POST /api/v1/drafts/{draft_id}/event-snapshot`：导入独立监管事件查询快照；
-- `GET|POST /api/v1/drafts/{draft_id}/reviews`：查询或记录当前登录人的逐观测核对；
-- `POST /api/v1/drafts/{draft_id}/confirm`
-- `POST /api/v1/drafts/{draft_id}/submit`：返回状态、摘要、时间及回执，不向浏览器
-  回显服务端持久化的完整报送请求；
-- `GET /api/v1/drafts/{draft_id}/audit?limit=100`：默认仅返回最近 100 条、最多
-  500 条事件，但完整审计链仍全部验签；
-- `GET /api/v1/drafts/{draft_id}/submissions`：返回状态、摘要、回执和安全错误
-  信息，不返回已落库的完整提交报文；
-- `GET /api/v1/agent/tools`：返回可用工具、业务类别、证据来源、场景标记、联网标记、
-  允许的运行 profile、读写风险和批准要求，不返回执行代码；
-- `GET /api/v1/agent/skills`：返回已注册 Skill 的启用状态、只读属性、固定供应方、
-  支持的时间窗口和数据边界；
-- `GET|POST /api/v1/agent/runs`：分页读取本人任务，或用
-  `{task, draft_id, mode}` 发起 `auto`/`deterministic` 任务；
-- `GET /api/v1/agent/runs/{run_id}`：读取步骤、确定性工具证据、预算使用量、批准
-  状态和运行审计链完整性；
-- `POST /api/v1/agent/runs/{run_id}/cancel`：取消本人尚未结束且尚未开始批准写操作
-  的任务；
-- `POST /api/v1/agent/runs/{run_id}/approve`：提交
-  `{approval_id, decision:"approve"|"reject"}`，批准只对绑定了参数摘要和草稿
-  修订号的单个动作有效；
-- `GET /api/v1/agent/workflows`：列出 Agent V2 当前可执行的只读工作流；
-- `GET|POST /api/v1/agent/flows`、`GET /api/v1/agent/flows/{flow_id}`：
-  分页读取本人耐久任务、发起 `daily_coal_health` 和读取四专家、反方复核及
-  负责人摘要；
-- `POST /api/v1/agent/flows/{flow_id}/cancel|retry`：取消未结束任务，或重试本人
-  `blocked`/`failed` 任务；
-- `GET|POST /api/v1/agent/jobs`、`GET|PATCH|DELETE /api/v1/agent/jobs/{job_id}`、
-  `POST /api/v1/agent/jobs/{job_id}/run`：管理本人每日、间隔或事件计划；删除为
-  保留审计的软删除；
-- `GET|POST /api/v1/agent/events`：读取本人事件或发送带 `client_event_id`
-  幂等键的业务事件，触发同账号、同事件名和同草稿的已启用计划；
-- `GET|POST /api/v1/agent/memory/proposals` 和
-  `POST /api/v1/agent/memory/proposals/{proposal_id}/decision`：提出、查看和审批
-  受治理记忆；`GET|DELETE /api/v1/agent/memories/{memory_id}` 用于查看或撤销；
-- `GET|POST /api/v1/agent/skill-proposals` 和
-  `POST /api/v1/agent/skill-proposals/{proposal_id}/decision`：提出、查看和四眼
-  审批只读技能目录；`GET|DELETE /api/v1/agent/skill-versions/{version_id}`
-  用于查看或停用已批准但未热加载的目录版本；
-- `GET|POST /api/v1/chat/sessions`：分页读取本人会话，或用
-  `{title, draft_id, client_request_id}` 新建煤炭业务对话；
-- `GET|DELETE /api/v1/chat/sessions/{session_id}`：读取或软删除本人会话；
-- `POST /api/v1/chat/sessions/{session_id}/messages`：发送
-  `{content, draft_id, client_message_id}`；同一幂等编号不会重复创建任务；
-
-登录成功后，浏览器只保存服务端设置的 `HttpOnly; SameSite=Strict` Cookie。
-会话令牌不会出现在 JSON，也不得写入 `localStorage`。前端把登录或 `/me`
-响应中的 `csrf_token` 仅保存在页面内存，并在所有 `POST`、`PATCH`、`DELETE`
-请求中发送 `X-CSRF-Token`。服务同时拒绝异源 `Origin`/`Sec-Fetch-Site`。
-
-权限对应关系为：查看、预检和审计需要 `read`，创建、编辑、导入和模型辅助
-需要 `write`，人工确认需要 `confirm`，向监管端提交需要 `submit`；业务记忆治理
-需要 `governance_review`，只读技能目录治理需要 `skill_admin`。HTTP 层
-完全忽略请求体中的 `actor`、`actor_id`、姓名、岗位和 `X-Actor-ID`；审计
-经办人及确认人的 ID、姓名、岗位只能来自登录会话生成的 principal。
-任何 `must_change_password=true` 的账号即使配置了权限，也不能确认、提交或执行
-治理审批；
-管理员须在密钥系统换掉 `password_hash`、将该标志置为 `false` 并重启服务。
-
-煤炭任务的读取、发起、拒绝和取消需要 `read`，因此只读人员也能检查已保存草稿；
-只有具有 `write` 权限的任务创建者才会向模型暴露草稿补丁工具，最终点击
-`approve` 时还会再次检查当前账号的 `write` 权限。任何账号都不能通过 Harness
-调用人工确认或监管提交。任务列表只返回有界摘要，完整工具结果只在本人任务详情
-中返回。
-
-Agent V2 的手工体检同样只需 `read`，因为工作流不含草稿写能力。创建、修改、立即
-运行或软删除计划，以及提出记忆/技能，需要 `write`；记忆审批和撤销需要有效
-`governance_review`，技能审批和停用需要有效
-`skill_admin`，不再从 `confirm` 隐式继承。V2 任务、计划和触发事件按当前账号
-隔离。当前企业 HTTP
-服务按单企业安全域部署，共享记忆可在本实例内访问，个人记忆仍仅本人可见。
-
-### 煤炭 Agent V2 耐久任务流
-
-V2 当前只执行 `daily_coal_health/2.0`：先固定当前草稿的修订号和内容摘要，再
-并行运行来源凭证、时序质量、物理平衡、历史交叉四个只读专家，最后由本地确定性
-反方核验器生成关注级别、负责人摘要和人工复核建议。它不调用模型、外网或浏览器，
-不会修改草稿、人工确认、签名、监管提交或控制设备。
-
-单次体检按煤炭监管价值优先覆盖最多 64 个指标，历史交叉验证按 8 个指标分批执行；
-负责人摘要明确显示已分析/总数/未覆盖数量。覆盖不完整时结论自动降级为需关注并标记
-`limited`，不会把编码排序截断后的局部结果冒充全量结论。
-
-任务状态为 `queued / running / blocked / succeeded / failed / cancelled`。
-排队任务可立即取消，运行任务会在只读步骤边界响应取消；只有失败和受阻任务可
-重试。服务重启时，正在运行的只读步骤会记录为中断，未取消任务增加一次尝试并
-重新排队，已完成任务不会重放。每次尝试、步骤和状态变化都有持久化事件链。
-
-后台计划支持：
-
-- `daily`：指定 `HH:MM` 和 IANA 时区；
-- `interval`：300–2592000 秒；
-- `event`：由 `/api/v1/agent/events` 的受控业务事件触发。
-
-计划始终绑定一份已存在草稿，不会自动抓取企业系统数据、创建下一期草稿或改动统计
-窗口。`edge-agent/` 仍按独立合同直接向监管端发送只读遥测，不向企业 Agent 注入
-数据。若要实现“数据到齐即体检”，部署单位还需建设有来源签名、草稿导入、幂等和
-最小权限服务认证的上游适配器；当前仓库没有通用爬虫或机器账号适配器。
-
-业务记忆和技能的“学习”只保存提案、审批、版本及来源，不允许模型直接自我修改。
-共享记忆必须由另一名 `governance_review` 账号批准，技能必须由另一名
-`skill_admin` 账号批准；`confirm` 不授予治理权限。技能批准后只进入目录，返回
-`runtime_activation=approved_inactive`；仍需代码审查、测试、发布和显式注册后
-才可能执行。
-
-部署配置、可复制 API 例子、SQLite 表和故障处置详见
-[煤炭 Agent V2 耐久任务流与治理使用说明](docs/煤炭Agent-V2任务流.md)。
-
-煤炭业务对话先在本地完成“领域准入”，再做“新闻、通识或企业数据”意图路由：
-
-- “最近有什么煤炭新闻”“本周煤价政策”等时效性请求走
-  `coal-news-search`。该通道不创建 Harness 运行，不读取或发送会话绑定草稿；
-  它先把本地归一化后的煤炭主题发送到固定百度新闻搜索页，百度不可用时才把主题和
-  日期窗口交给现有 DeepSeek API 的原生 Web Search。取得来源后，AI 再根据标题、
-  搜索源标注的发布方、时间和搜索片段生成带 `S1/S2` 引用的摘要。总结接口不接收
-  原始问题、URL、企业数据、草稿或会话历史。
-- “煤炭的燃点是多少”“褐煤和无烟煤有什么区别”等概念性问题走通识直答，
-  不创建 Harness 运行、不调用工具，即使会话已经绑定草稿也不会读取或发送草稿。
-  配置模型时，只向供应方发送当前问题；只有“为什么”“再解释一下”等有界追问
-  才会附带最近一轮已完成且标记为通识的问答。拒绝消息、Harness 回答、任意会话
-  历史、草稿、工具结果和监管证据均不会进入该请求。
-- “核对当前草稿煤流平衡”“分析这批数据为何异常”等企业实际数据请求进入
-  `chat_read_only` Harness，由确定性只读工具形成证据。聊天工具配置不含
-  `draft_patch`，不能产生写操作批准断点，更不能确认、签名或提交。
-
-领域判断和意图路由均在模型调用前完成；非煤炭问题、混合越界问题、提示词攻击以及
-要求代为确认、签名或报送的请求会直接拒绝，不调用模型或工具。通识模型未配置、
-超时、报错、响应不符合 JSON 契约、答案校验失败或达到服务端并发上限时，系统自动
-使用本地受控煤炭知识完成该条回答，并明确标记为 `local_knowledge`；模型正常回答
-则标记为 `model_common_knowledge`。两者都只是通识说明，不是企业数据证据或监管
-认定。每个会话只允许一项处理中任务，最多保留 500 条消息；企业数据分析的多轮
-上下文只取最近 8 条且总计不超过 3200 字。会话和消息按登录账号隔离并使用追加
-哈希链；完整性失败时接口隐藏正文并禁止续聊。
-
-### 煤炭新闻搜索
-
-`coal-news-search` 默认启用，首先访问固定
-`https://www.baidu.com/s` 新闻搜索页；百度触发验证码、超时或无结果时，才使用
-已配置 DeepSeek API 的原生 Web Search。Bing RSS 默认关闭，可显式开启为最后后备。
-Skill 不接受用户 URL、不抓取新闻正文，也不会把草稿、企业标识、原始问题或会话历史
-发送给提供商。出站查询只从有限煤炭主题词表和本地日期窗口生成；返回链接必须是经
-校验的公共 HTTPS 地址。百度搜索卡片的 `summary` 会作为“可能截断、未核验正文”的
-搜索片段交给总结模型；模型只能输出引用现有来源编号的结构化归纳，不能生成来源或
-链接。新闻轮次不会进入后续企业数据 Harness 的模型上下文。
-
-可在启动前设置以下环境变量；修改后需要重启服务：
+生产远程地址必须使用 HTTPS。私有 CA 可配置：
 
 ```bash
-export COAL_NEWS_SEARCH_ENABLED=true
-export COAL_NEWS_SEARCH_TIMEOUT_SECONDS=25
-export COAL_NEWS_BAIDU_ENABLED=true
-export COAL_NEWS_BAIDU_TIMEOUT_SECONDS=3
-export COAL_NEWS_DEEPSEEK_WEB_SEARCH_ENABLED=true
-export COAL_NEWS_DEEPSEEK_TIMEOUT_SECONDS=24
-export COAL_NEWS_BING_FALLBACK_ENABLED=false
-export COAL_NEWS_SEARCH_CACHE_TTL_SECONDS=300
-export COAL_NEWS_SEARCH_MAX_RESULTS=8
-export COAL_NEWS_SEARCH_MAX_RESPONSE_BYTES=1048576
-export COAL_NEWS_SEARCH_MAX_CONCURRENCY=4
+export PLATFORM_V2_CA_BUNDLE=/etc/enterprise-agent/regulatory-ca.pem
 ```
 
-设置 `COAL_NEWS_SEARCH_ENABLED=false` 可完全关闭。总超时允许 3–60 秒，百度
-超时 1–10 秒，DeepSeek 搜索超时 3–60 秒，缓存 30–3600 秒，结果数 1–20，
-响应体 65536–2097152 字节，并发 1–8。`GET /api/v1/health` 分别报告模型配置与
-新闻运行状态；新闻在首次调用前为 `configured_unverified`，成功后为 `reachable`，
-后备成功或时间未核验为 `degraded`，所有提供商失败为 `unreachable`。
-
-每条引用包含编号、标题、搜索源标注的发布方、公共 HTTPS 链接、可空的发布时间、
-检索时间、检索渠道和可选搜索片段；
-包级另含 `provider_attempts`、回退标志和受控失败码。百度相对时间会明确标为估算，
-DeepSeek 未提供时间时显示“搜索源未提供”。失败时页面列出百度验证码、DNS/网络、
-鉴权或限流等可操作原因，不用模型记忆或本地知识拼凑“近期新闻”。检索成功但 AI
-总结未配置、繁忙、超时或引用校验失败时，仍展示确定性来源列表，并把总结状态与
-检索状态分开报告。
-
-人工确认还要求当前登录确认人已经逐条核对草稿中的全部观测。`POST reviews`
-提交 `observation_ids`、`reviewed` 和 `expected_revision`；核对记录绑定当前观测
-业务字段、来源摘要及网关签名。观测被编辑或重新导入后，旧核对不会自动沿用，
-确认人必须对变化后的内容重新核对。
-
-`POST event-snapshot` 接收 `{snapshot, expected_revision}`。snapshot 至少包含
-`snapshot_id`、`mine_id`、`window_start`、`window_end`、完整 `event_codes`、
-`evidence_sha256`、`source_system` 和 `record_id`；矿井和时间必须与当前草稿精确
-一致。该接口为 `approved_event_codes` 写入专用
-`regulator_event_snapshot_import` 来源证明。即使事件代码确认为空也必须导入；
-普通 JSON/CSV、手填空数组或模型建议都不能冒充监管事件查询结果。
-
-修改请求可带 `expected_revision`，用于避免两名经办人互相覆盖。确认请求示例：
-
-```json
-{
-  "accepted": true,
-  "attestation": "本人已对照原始生产台账逐项核对以上数据。",
-  "expected_revision": 3,
-  "confirmation_method": "authenticated_click"
-}
-```
-
-内置页面只能发送 `authenticated_click`（兼容别名 `account`）。它没有验证
-合格电子签名或企业章的能力，因此 `qualified_electronic_signature`、
-`enterprise_seal` 及其别名会被 HTTP API 拒绝；要支持这些方式，必须另接能够
-生成并验证证据的外部适配器，不能只增加一个下拉框。
-
-`confirmation_evidence_sha256` 覆盖企业端保存的完整不可变确认记录，包括登录
-账号、姓名、岗位、确认时间、声明文本、草稿修订号和确认时草稿摘要。它便于监管
-后续调取材料时核对记录是否被替换，但仍只是企业侧审计摘要，不冒充个人数字签名。
-
-模型 `/assist` 只返回建议，不写入业务字段；它会追加“模型曾参与”的审计声明
-并产生新修订号。用户采纳某项建议时仍须通过 `PATCH` 写入，系统将其记为人工
-编辑，最终必须重新预检和确认。
-
-## 模型配置与数据出境
-
-只有设置 `DEEPSEEK_API_KEY` 才启用模型：
+客户端不跟随 301/302/307/308 等任何重定向，防止把带签名的请求重放到另一来源。
+应用消息密钥与运输密钥都必须显式配置且内容不同，并使用两个固定签名域；配置相同
+内容会在启动时失败。政府换钥的过渡期可同时
+配置上一把入站验签密钥：
 
 ```bash
-export DEEPSEEK_API_KEY='从密钥系统注入'
-export DEEPSEEK_BASE_URL='https://api.deepseek.com'
-export DEEPSEEK_MODEL='deepseek-v4-flash'
+export REGULATORY_PREVIOUS_EXCHANGE_KEY_ID=regulator-key-previous
+export REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET='replace-previous-secret-at-least-32-bytes'
 ```
 
-模型有三条相互独立的使用路径：
+## 获取数据
 
-- `/assist` 候选字段提取使用 JSON mode。它只发送用户主动粘贴的材料和最小化
-  草稿业务摘要；摘要删除草稿编号、字段来源记录、历史模型元数据、来源载荷摘要
-  和来源签名。
-- 煤炭任务的 `auto` 模式使用原生 Tool Calls。它会发送任务文本、运行绑定信息、
-  工具 schema，以及已经脱敏和限长的工具结果；工具结果可能包含矿井业务标识、
-  指标汇总、观测编号及历史统计量。它不会发送 Cookie、API Key、来源签名、运输
-  密钥、平台令牌或完整监管提交报文。
-- 煤炭通识直答使用独立 JSON 契约，只发送当前问题，以及有界追问时最近一轮已治理
-  的通识问题和回答。该接口的窄参数不接受草稿、会话全文、工具结果、Harness 回答
-  或拒绝消息；即使会话绑定草稿，证据中也会记录
-  `enterprise_data_sent_to_provider=false`。通识回答会标明模型或本地知识来源，
-  不作为企业事实、确定性工具证据或监管认定。
-
-新闻搜索不属于 Harness。它先访问固定百度新闻页，失败时可复用 DeepSeek API 的
-服务端 Web Search，但只发送本地规范化主题和日期窗口，并只采信结构化搜索来源，
-丢弃模型总结。两条路径都不发送企业草稿、会话历史或监管数据。
-
-`/assist` 和 Tool Calls 任务为零温度；通识直答使用低温度并要求只返回
-`{"answer":"中文回答"}`。所有模型请求都有 20 秒单次请求超时和最多两次重试。
-模型返回的工具名与参数仍会由本地白名单、严格 schema、草稿作用域和权限重新校验。
-默认运行预算为 8 个步骤、12 次工具调用、60 秒活动时间、单结果 64 KiB、累计结果
-128 KiB；浏览器不能提高这些上限。工具或历史材料中的文字始终按不可信数据处理，
-不能改变系统策略。
-
-若本单位不允许上述业务摘要发送给第三方，不配置 `DEEPSEEK_API_KEY`，或在界面
-选择“仅确定性工具”。固定煤炭体检仍会执行草稿摘要、预检、来源证据、时间对齐、
-观测连续性、煤流平衡和综合交叉验证。凭证血缘等结果较大的专项工具仍由明确任务
-按需调用，避免在万条观测时挤占固定结果预算。模型无法确认、签名或提交，也接触不到
-来源密钥、运输密钥和平台令牌；模型服务故障时，企业数据自动任务会失败关闭并降级
-到这一确定性组合，通识问答则降级为本地受控知识直答。
-
-在煤炭任务中，模型只充当工具规划器。模型的自由文本和隐藏推理不会作为业务结论
-展示或持久化；最终说明由本地模板汇总已成功工具的名称、来源绑定等级和确定性摘要。
-绑定草稿的任务如果没有取得至少一项 `repository_grounded` 证据，会自动补跑固定
-确定性体检，不能用一段没有证据的模型回答结束任务。
-
-## CLI 示例
-
-CLI 是拥有数据库文件访问权的本机运维/自动化入口，不代表浏览器用户会话；
-生产环境应通过操作系统账号和文件权限限制它。面向经办人的日常操作使用上述
-登录 API 和同源页面。
+前端人工上传支持 `.et`、`.xls`、`.xlsx`、`.csv`、`.json`、`.jsonl`。固定目录
+直采在启动前配置，例如：
 
 ```bash
-enterprise-agent create --actor operator-001
-enterprise-agent import DRAFT_ID report.csv --format csv --actor operator-001
-enterprise-agent questions DRAFT_ID
-enterprise-agent validate DRAFT_ID
-enterprise-agent review DRAFT_ID \
-  --actor operator-001 --revision 1 --all
-enterprise-agent confirm DRAFT_ID \
-  --actor operator-001 --name 张三 --role 生产调度员 \
-  --attestation '本人已对照原始生产台账逐项核对以上数据。' \
-  --yes-i-confirm
-enterprise-agent submit DRAFT_ID
-enterprise-agent audit DRAFT_ID
+export ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS=/srv/mine-readonly/five-quantity-inbox
 ```
+
+多个目录使用操作系统路径分隔符连接。监听器只读取普通文件，不跟随符号链接；同一
+大小和修改时间连续稳定后再读取，按内容摘要去重。解析失败文件会复制到数据库同级的
+`five-quantity-quarantine/`，不会写回来源目录，也不会删除来源原件。
+
+目前没有开放“任意 URL 定时 GET”连接器。通用 GET 容易形成 SSRF、越权取数和来源
+混淆；确有设备接口时，应增加逐来源 allowlist、固定 HTTPS origin、自定义 CA、响应
+上限、超时、内容类型、身份密钥、健康状态和隔离队列后再启用，而不是让用户填写任意
+URL。
+
+## 企业 HTTP API
+
+浏览器会话使用 `HttpOnly; SameSite=Strict` Cookie；修改请求必须携带
+`/api/v1/auth/me` 返回、只保存在页面内存的 `X-CSRF-Token`。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/v2/status` | 固定矿井、接口、监听目录和 cursor 状态 |
+| `GET/POST` | `/api/v2/imports` | 收件记录 / 人工导入 base64 文件；`include_discarded=true` 可追溯已放弃项 |
+| `POST` | `/api/v2/direct-ingest` | 受控设备/API 直采入口 |
+| `POST` | `/api/v2/watch/scan` | 立即扫描固定目录 |
+| `GET` | `/api/v2/drafts` | 月报复核稿列表；`include_discarded=true` 可追溯已放弃项 |
+| `GET/PATCH/DELETE` | `/api/v2/drafts/{id}` | 读取 / 保存 / 带修订号和原因软放弃未确认稿 |
+| `POST` | `/api/v2/drafts/{id}/confirm` | 人工确认并可靠入队；同时需要 `confirm` 和 `submit` |
+| `POST` | `/api/v2/drafts/{id}/send-now` | 手工触发一次 outbox 重试 |
+| `GET` | `/api/v2/risks`、`/{id}` | 风险收件箱 / 已验签报告 |
+| `POST` | `/api/v2/risks/poll` | 立即拉取一份新报告 |
+| `GET/POST` | `/api/v2/risks/{id}/chat` | 当前报告范围内的只读解释 |
+| `POST` | `/api/v2/risks/{id}/response` | 创建或取得结构化回复草稿 |
+| `GET/PATCH` | `/api/v2/responses/{id}` | 读取 / 保存回复 |
+| `POST` | `/api/v2/responses/{id}/confirm` | 人工确认回复并可靠入队 |
+| `POST` | `/api/v2/exchange/run` | 立即执行一次发送与拉取 |
+| `GET` | `/api/v2/audit` | 校验并查看 V2 操作链 |
+
+## 权限
+
+- `read`：查看本矿数据、风险、对话和留痕；
+- `write`：导入、直采、保存复核稿和回复草稿；
+- `confirm` + `submit`：两者同时具备且账号不是临时/待换密，才可确认报送或回复。
+
+角色名称只是展示文字，真正授权只取决于服务器端 permissions。各矿属于不同经营主体，
+应使用各自数据库、系统账号、HMAC 密钥和 Agent 实例，不能共用一个企业端实例切换矿井。
+软放弃也需要 `write`；仅 `ready_review` 且从未确认、从未进入 outbox 的草稿允许放弃。
+已确认、排队、送达、风险报告、企业回复和回执均无删除接口。
 
 ## 测试
 
 ```bash
-pip install -e '.[dev]'
-pytest
+cd /home/sevan/coral/agent
+python -m compileall -q src
 ruff check src tests
+pytest -q
 ```
 
-测试使用注入的假 HTTP 响应，不访问公网。
+专项测试覆盖安全导入、JSONL、ET/XLSX、无插补、来源无信任分层、七条 V2 路径、
+opaque cursor、双 HMAC、重定向拒绝、CA 配置、当前/上一把验签密钥、重启恢复、
+目录去重与隔离、完整报送—风险—回复流程、HTTP API 和四页前端。
+
+部署步骤、systemd、Nginx、备份和故障处置见
+[部署与运维](docs/部署与运维.md)，账号说明见
+[分级账号操作手册](docs/分级账号操作手册.md)。
+
+## Legacy 兼容说明
+
+仓库仍暂存 `/api/v1/drafts`、通用 Harness、任务/新闻等接口，以便旧数据库和旧调用方
+迁移。它们不是当前五量 V2 主界面或默认部署合同。不得用 V1
+`enterprise-submission-v1` 代替本页的月度五量 V2，也不得重新把独立 `edge-agent`
+作为第三个默认产品接入。待历史调用方完成迁移后可单独安排代码退役。

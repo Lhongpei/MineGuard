@@ -182,7 +182,7 @@ def persist_feature(
     mine_id: str,
     observed_at: datetime,
     value: float,
-) -> None:
+) -> str:
     request_payload = {
         "batch_id": batch_id,
         "portfolio_name": "时序接口测试",
@@ -226,6 +226,9 @@ def persist_feature(
             "observation_envelopes": [],
         },
     )
+    runs = server.repository.list_runs(batch_id)
+    assert len(runs) == 1
+    return str(runs[0]["run_id"])
 
 
 def test_temporal_direct_analysis_requires_admin_auth_and_csrf(
@@ -458,6 +461,22 @@ def test_temporal_dashboard_cold_start_and_empty_history_are_structured(
         assert empty["detector_thresholds"]["baseline"][
             "minimum_history"
         ] == 8
+        assert empty["detector_thresholds"]["baseline"][
+            "minimum_relative_scale"
+        ] == 0.0
+        assert empty["detector_thresholds"]["baseline"][
+            "reset_confirmation_points"
+        ] is None
+        assert empty["detector_thresholds"]["baseline"][
+            "reset_candidate_max_gap_seconds"
+        ] == 172800.0
+        assert empty["detector_thresholds"]["episode"] == {
+            "maximum_gap_seconds": 172800.0,
+            "maximum_normal_points": 0,
+        }
+        assert empty["baseline_admission_policy"] == (
+            "current_verified_normal_and_reference_eligible"
+        )
 
         cold_cookie, _ = login(
             host,
@@ -582,13 +601,21 @@ def test_temporal_dashboard_is_event_time_ordered_and_mine_scoped(
             observed_at = now - timedelta(
                 hours=len(visible_values) - index
             )
-            persist_feature(
+            visible_run_id = persist_feature(
                 server,
                 batch_id=f"visible-{index}",
                 mine_id="M001",
                 observed_at=observed_at,
                 value=visible_values[index],
             )
+            if index < 8:
+                server.repository.append_run_reference_label(
+                    visible_run_id,
+                    label="verified_normal",
+                    actor="test-supervisor",
+                    note="测试中已核验的正常历史",
+                    expected_sequence=0,
+                )
             persist_feature(
                 server,
                 batch_id=f"hidden-{index}",
@@ -617,6 +644,12 @@ def test_temporal_dashboard_is_event_time_ordered_and_mine_scoped(
         assert payload["series_count"] == 1
         assert payload["health"]["feature_row_count"] == 9
         assert payload["health"]["observation_count"] == 9
+        assert payload["health"][
+            "baseline_eligible_feature_row_count"
+        ] == 8
+        assert payload["health"][
+            "baseline_ineligible_feature_row_count"
+        ] == 1
         assert {item["mine_id"] for item in payload["series"]} == {
             "M001"
         }
@@ -666,12 +699,19 @@ def test_temporal_dashboard_uses_warmup_but_reports_only_visible_window(
         )
         now = datetime.now(UTC)
         for index in range(8):
-            persist_feature(
+            warmup_run_id = persist_feature(
                 server,
                 batch_id=f"warmup-{index}",
                 mine_id="M-WARM",
                 observed_at=now - timedelta(days=2, hours=8 - index),
                 value=10.0 + index / 100,
+            )
+            server.repository.append_run_reference_label(
+                warmup_run_id,
+                label="verified_normal",
+                actor="test-supervisor",
+                note="测试中已核验的正常历史",
+                expected_sequence=0,
             )
         for index in range(3):
             persist_feature(
@@ -693,6 +733,9 @@ def test_temporal_dashboard_uses_warmup_but_reports_only_visible_window(
         assert status == 200
         assert payload["status"] == "normal"
         assert payload["health"]["warmup_feature_row_count"] == 8
+        assert payload["health"][
+            "baseline_ineligible_feature_row_count"
+        ] == 3
         assert payload["health"]["point_count"] == 3
         series = next(
             item for item in payload["series"] if item["mine_id"] == "M-WARM"

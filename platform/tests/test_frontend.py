@@ -66,6 +66,110 @@ def test_leader_view_keeps_technical_detail_secondary() -> None:
     assert parser.details_count >= 3
 
 
+def test_operational_five_quantity_monthly_tool_is_ephemeral_and_safe() -> None:
+    html, _ = parse_frontend()
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    for text in (
+        "生产运行五量月报",
+        "不保存、不建案、非正式历史",
+        "总电量/产量比不是生产吨煤电耗",
+        "同一时段的连续异常合并展示",
+        "查看逐日分析明细",
+    ):
+        assert text in html
+    for identifier in (
+        'id="five-quantity-tab"',
+        'id="five-quantity-panel"',
+        'id="five-quantity-form"',
+        'id="five-quantity-mine-id"',
+        'id="five-quantity-report-month"',
+        'id="five-quantity-closed-through"',
+        'id="five-quantity-file"',
+        'id="five-quantity-result"',
+        'id="five-quantity-print"',
+        'id="five-quantity-coverage-grid"',
+        'id="five-quantity-kpi-grid"',
+        'id="five-quantity-regime-list"',
+        'id="five-quantity-event-list"',
+        'id="five-quantity-day-body"',
+        'id="five-quantity-limitation-list"',
+    ):
+        assert identifier in html
+    assert 'accept=".et,.xls,application/vnd.ms-excel"' in html
+    assert "/v1/analyze/operational-five-quantity-monthly-file" in script
+    assert "FIVE_QUANTITY_MAX_FILE_BYTES = 5 * 1024 * 1024" in script
+    assert "file.arrayBuffer()" in script
+    assert "arrayBufferToChunkedBase64" in script
+    assert "FIVE_QUANTITY_BASE64_CHUNK_BYTES = 24 * 1024" in script
+    assert 'mine_id: mineId' in script
+    assert 'source_id: "regulator-browser-temporary-upload"' in script
+    assert "report_month: reportMonth" in script
+    assert "closed_through: closedThrough" in script
+    assert "units: {}" in script
+    assert "content_base64: contentBase64" in script
+    assert 'operationalFiveQuantity: ["admin", "supervisor"]' in script
+    assert 'principal.role === "supervisor"' in script
+    assert 'printView("analysis")' in script
+    assert ".five-quantity-event-list" in styles
+    assert ".result-section[hidden]" in styles
+
+    submitter = script.split(
+        "async function submitFiveQuantityAnalysis", maxsplit=1
+    )[1].split("function setFiveQuantityRunning", maxsplit=1)[0]
+    for forbidden in (
+        "state.currentInput",
+        'elements["json-editor"]',
+        "downloadJson",
+        "URL.createObjectURL",
+    ):
+        assert forbidden not in submitter
+    assert 'payload.content_base64 = ""' in submitter
+    assert 'elements["five-quantity-file"].value = ""' in submitter
+
+
+def test_operational_five_quantity_result_is_leader_friendly_and_dom_safe() -> None:
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    renderer = script.split(
+        "function renderFiveQuantityResult", maxsplit=1
+    )[1].split("async function handleFile", maxsplit=1)[0]
+
+    assert "innerHTML" not in renderer
+    assert "insertAdjacentHTML" not in renderer
+    assert "document.createElement" in renderer
+    assert ".textContent" in renderer
+    for field in (
+        "overall",
+        "coverage",
+        "kpis",
+        "regimes",
+        "events",
+        "days",
+        "limitations",
+    ):
+        assert f"result.{field}" in renderer
+    for label in (
+        "需优先组织核查",
+        "先补齐或修正数据",
+        "复产爬坡候选",
+        "建议怎么核查",
+        "候选解释（不是事实认定）",
+        "未闭账，不判缺失",
+        "应有闭账自然日",
+        "全部班次已对账",
+        "部分覆盖",
+    ):
+        assert label in script
+    assert "mineguard.operational-five-quantity-monthly.v1" in script
+    assert "trust.persisted !== false" in script
+    assert "trust.audit_metadata_persisted !== true" in script
+    assert "trust.eligible_for_history !== false" in script
+    assert "trust.creates_case !== false" in script
+    assert 'trust.regulatory_effect !== "none"' in script
+    assert "configuration.sha256" in script
+
+
 def test_frontend_uses_safe_text_rendering_and_all_statuses() -> None:
     script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
 
@@ -343,7 +447,10 @@ def test_temporal_dashboard_is_plain_language_and_never_overstates() -> None:
     assert "未出现提示不能证明原始数据源完整或及时" in html
     assert "算法预警只是核查线索，不是定案" in html
     assert "/v1/dashboard/temporal?days=90" in script
-    assert "历史数据不足，尚不能形成稳定基线" in script
+    assert "已人工核验正常且参考资格有效的历史不足" in script
+    assert "未核验数据不会被系统自动学成正常" in script
+    assert "只用已核验正常历史建立基线" in script
+    assert "未核实统计状态适配" in script
     assert "开始 ${formatDateTime(episode.start)}" in script
     assert "结束 ${formatDateTime(episode.end)}" in script
     assert "贡献源：" in script

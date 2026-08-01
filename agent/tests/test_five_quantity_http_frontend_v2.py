@@ -1,0 +1,337 @@
+from __future__ import annotations
+
+import base64
+import http.client
+import json
+import threading
+from pathlib import Path
+from typing import Any
+
+from enterprise_agent.auth import AuthManager, UserAccount, hash_password
+from enterprise_agent.five_quantity_exchange import MineIdentity
+from enterprise_agent.five_quantity_runtime import FiveQuantityRuntime
+from enterprise_agent.http_api import EnterpriseAgentHTTPServer
+from enterprise_agent.service import EnterpriseAgentService
+from enterprise_agent.storage import Repository
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def identity() -> MineIdentity:
+    return MineIdentity(
+        mine_id="MINE-HTTP-001",
+        mine_name="HTTP 测试煤矿",
+        operator_id="operator-http-001",
+        operator_name="HTTP 测试煤业有限公司",
+        system_id="agent-mine-http-001",
+        regulator_system_id="mineguard-qinyuan",
+        regulator_party_id="regulator-qinyuan",
+        key_id="enterprise-key-http",
+        regulator_key_id="regulator-key-v2",
+        message_hmac_secret="http-message-secret-abcdefghijklmnopqrstuvwxyz",
+    )
+
+
+def request_json(
+    connection: http.client.HTTPConnection,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    encoded = json.dumps(body).encode() if body is not None else None
+    request_headers = {"Content-Type": "application/json"} if encoded else {}
+    request_headers.update(headers or {})
+    connection.request(method, path, body=encoded, headers=request_headers)
+    response = connection.getresponse()
+    raw = response.read()
+    return response.status, json.loads(raw) if raw else {}
+
+
+def test_enterprise_v2_http_import_review_confirm_and_audit(tmp_path: Path) -> None:
+    repository = Repository(tmp_path / "agent.db")
+    runtime = FiveQuantityRuntime(
+        repository,
+        identity=identity(),
+        quarantine_directory=tmp_path / "quarantine",
+    )
+    service = EnterpriseAgentService(repository, five_quantity_runtime=runtime)
+    server = EnterpriseAgentHTTPServer(
+        ("127.0.0.1", 0),
+        service,
+        web_root=ROOT / "web",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", server.server_address[1], timeout=5
+    )
+    try:
+        status, runtime_status = request_json(connection, "GET", "/api/v2/status")
+        assert status == 200
+        assert runtime_status["mine_id"] == "MINE-HTTP-001"
+        assert runtime_status["acquisition_trust_tiering"] is False
+
+        csv = (
+            b"date,ventilation_m3_min,mine_entry_persons,electricity_kwh,"
+            b"detonators_count,explosives_kg,production_t\n"
+            b"2026-07-01,4800,320,96000,120,240,2600\n"
+        )
+        status, imported = request_json(
+            connection,
+            "POST",
+            "/api/v2/imports",
+            {
+                "filename": "july.csv",
+                "content_base64": base64.b64encode(csv).decode(),
+            },
+        )
+        assert status == 201
+        draft_id = imported["draft_id"]
+        assert imported["draft"]["payload"]["sources"][0]["acquisition_mode"] == (
+            "manual_import"
+        )
+
+        status, drafts = request_json(connection, "GET", "/api/v2/drafts")
+        assert status == 200
+        draft = drafts["items"][0]
+        assert draft["draft_id"] == draft_id
+        status, confirmed = request_json(
+            connection,
+            "POST",
+            f"/api/v2/drafts/{draft_id}/confirm",
+            {
+                "expected_revision": draft["revision"],
+                "confirmer_name": "本机测试员",
+                "confirmer_role": "企业填报员",
+                "attestation": "本人已逐项核对原始日报与三个班次记录。",
+                "accepted": True,
+            },
+        )
+        assert status == 202
+        assert confirmed["status"] == "queued"
+
+        status, error = request_json(
+            connection,
+            "DELETE",
+            f"/api/v2/drafts/{draft_id}",
+            {
+                "expected_revision": confirmed["revision"],
+                "reason": "不能放弃已确认草稿",
+            },
+        )
+        assert status == 409
+        assert "不能放弃" in error["error"]["message"]
+
+        status, audit = request_json(connection, "GET", "/api/v2/audit")
+        assert status == 200
+        assert audit["valid"] is True
+        assert [event["event_type"] for event in audit["events"]] == [
+            "five_quantity_imported",
+            "five_quantity_confirmed_and_queued",
+        ]
+
+        second_csv = csv.replace(b"2026-07-01", b"2026-07-02")
+        status, second_import = request_json(
+            connection,
+            "POST",
+            "/api/v2/imports",
+            {
+                "filename": "july-correction.csv",
+                "content_base64": base64.b64encode(second_csv).decode(),
+            },
+        )
+        assert status == 201
+        second_draft = second_import["draft"]
+        status, discarded = request_json(
+            connection,
+            "DELETE",
+            f"/api/v2/drafts/{second_draft['draft_id']}",
+            {
+                "expected_revision": second_draft["revision"],
+                "reason": "重复导入，保留原始记录供审计",
+            },
+        )
+        assert status == 200
+        assert discarded["discarded"] is True
+        assert discarded["draft"]["status"] == "discarded"
+
+        status, imports = request_json(connection, "GET", "/api/v2/imports")
+        assert status == 200
+        assert all(item["status"] != "discarded" for item in imports["items"])
+        status, all_imports = request_json(
+            connection,
+            "GET",
+            "/api/v2/imports?include_discarded=true",
+        )
+        assert status == 200
+        assert any(item["status"] == "discarded" for item in all_imports["items"])
+
+        status, drafts = request_json(connection, "GET", "/api/v2/drafts")
+        assert status == 200
+        assert all(item["status"] != "discarded" for item in drafts["items"])
+        status, all_drafts = request_json(
+            connection,
+            "GET",
+            "/api/v2/drafts?include_discarded=true",
+        )
+        assert status == 200
+        discarded_draft = next(
+            item for item in all_drafts["items"] if item["status"] == "discarded"
+        )
+        assert discarded_draft["payload"] == second_draft["payload"]
+
+        status, _ = request_json(
+            connection,
+            "PATCH",
+            f"/api/v2/drafts/{second_draft['draft_id']}",
+            {
+                "expected_revision": discarded_draft["revision"],
+                "payload": discarded_draft["payload"],
+            },
+        )
+        assert status == 409
+        status, _ = request_json(
+            connection,
+            "POST",
+            f"/api/v2/drafts/{second_draft['draft_id']}/confirm",
+            {
+                "expected_revision": discarded_draft["revision"],
+                "confirmer_name": "本机测试员",
+                "confirmer_role": "企业填报员",
+                "attestation": "不得重新确认已放弃草稿。",
+                "accepted": True,
+            },
+        )
+        assert status == 409
+
+        status, audit = request_json(connection, "GET", "/api/v2/audit")
+        assert status == 200
+        assert audit["valid"] is True
+        assert audit["events"][-1]["event_type"] == "five_quantity_draft_discarded"
+        assert audit["events"][-1]["details"]["reason"] == (
+            "重复导入，保留原始记录供审计"
+        )
+
+        status, _ = request_json(
+            connection,
+            "GET",
+            "/api/v2/imports?include_discarded=invalid",
+        )
+        assert status == 400
+        status, _ = request_json(connection, "DELETE", "/api/v2/risks/report-1", {})
+        assert status == 405
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_enterprise_v2_discard_requires_write_permission(tmp_path: Path) -> None:
+    repository = Repository(tmp_path / "agent.db")
+    runtime = FiveQuantityRuntime(
+        repository,
+        identity=identity(),
+        quarantine_directory=tmp_path / "quarantine",
+    )
+    imported = runtime.ingest_bytes(
+        filename="permission.csv",
+        content=(
+            b"date,ventilation_m3_min,mine_entry_persons,electricity_kwh,"
+            b"detonators_count,explosives_kg,production_t\n"
+            b"2026-07-03,4800,320,96000,120,240,2600\n"
+        ),
+        acquisition_mode="manual_import",
+        actor="system-test",
+    )
+    account = UserAccount(
+        actor_id="auditor-1",
+        name="只读审计员",
+        role="审计员",
+        password_hash=hash_password(
+            "read-only-password",
+            iterations=100_000,
+            salt=b"auditor-1-000000",
+        ),
+        permissions=frozenset({"read"}),
+    )
+    service = EnterpriseAgentService(repository, five_quantity_runtime=runtime)
+    server = EnterpriseAgentHTTPServer(
+        ("127.0.0.1", 0),
+        service,
+        auth_manager=AuthManager((account,), session_ttl_seconds=300),
+        web_root=ROOT / "web",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", server.server_address[1], timeout=5
+    )
+    try:
+        login_body = json.dumps(
+            {"actor_id": "auditor-1", "password": "read-only-password"}
+        ).encode()
+        connection.request(
+            "POST",
+            "/api/v1/auth/login",
+            body=login_body,
+            headers={"Content-Type": "application/json"},
+        )
+        login_response = connection.getresponse()
+        login_payload = json.loads(login_response.read())
+        assert login_response.status == 200
+        cookie = login_response.getheader("Set-Cookie").split(";", 1)[0]
+
+        draft = imported["draft"]
+        status, error = request_json(
+            connection,
+            "DELETE",
+            f"/api/v2/drafts/{draft['draft_id']}",
+            {
+                "expected_revision": draft["revision"],
+                "reason": "只读账号无权放弃",
+            },
+            headers={
+                "Cookie": cookie,
+                "X-CSRF-Token": login_payload["csrf_token"],
+            },
+        )
+        assert status == 403
+        assert error["error"]["code"] == "permission_denied"
+        assert runtime.store.get_draft(draft["draft_id"])["status"] == ("ready_review")
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
+    html = (ROOT / "web" / "index.html").read_text()
+    script = (ROOT / "web" / "v2-app.js").read_text()
+    for label in (
+        "数据收件箱",
+        "规范化复核与报送",
+        "风险解读与回复",
+        "留痕与设置",
+    ):
+        assert label in html
+    assert 'class="app-shell legacy-workspace" hidden' in html
+    assert 'id="agentTaskButton" type="button" disabled hidden' in html
+    assert 'id="coalChatButton" type="button" disabled hidden' in html
+    assert "/api/v2/imports" in script
+    assert "/api/v2/drafts/" in script
+    assert "/api/v2/risks/" in script
+    assert "/api/v2/audit" in script
+    assert "include_discarded=true" in script
+    assert "放弃草稿" in script
+    assert "人工导入和直采均进入同一复核与报送流程" in script
+    assert "可信度分层" not in script
+    assert "入井人员量" in html
+    assert "入井人员量" in script
+    assert "火工品量" in script
+    assert "mine_entry_persons" in script
+    assert "逐日核对六项" not in html
+    assert '["labor_persons", "用工量"' not in script

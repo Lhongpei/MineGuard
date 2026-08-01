@@ -32,6 +32,12 @@ EXAMPLES = {
     "edge-telemetry-capabilities-v1.json": (
         "edge-telemetry-capabilities-v1.schema.json"
     ),
+    "five-quantity-submission-v2.json": "five-quantity-submission-v2.schema.json",
+    "intake-receipt-v2.json": "intake-receipt-v2.schema.json",
+    "analysis-report-v2.json": "analysis-report-v2.schema.json",
+    "risk-delivery-ack-v2.json": "risk-delivery-ack-v2.schema.json",
+    "enterprise-risk-response-v2.json": "enterprise-risk-response-v2.schema.json",
+    "response-receipt-v2.json": "response-receipt-v2.schema.json",
 }
 EXPECTED_PAYLOAD_SHA256 = (
     "f730ae0a8c047c6d094f81eac048f94e46f287bf9cabe7c5b5732f84230b7ac1"
@@ -54,6 +60,40 @@ EXPECTED_EDGE_BODY_SHA256 = (
 EXPECTED_EDGE_TRANSPORT_SIGNATURE = (
     "8d56b417514d8f78c9d0e5c431880aa5eb5df49b15cbaea1ec59efe1ac0b6001"
 )
+EXPECTED_V2_VECTORS = {
+    "five-quantity-submission-v2.json": (
+        "cf22a046f2899e4f11dd91f76ef37e2040da6e20f541bf16943946b1300aff35",
+        "39cea3887d4897dc3a76d4a2e3cf0399cc8d20d9d0e7547debe44411396ff5ab",
+    ),
+    "intake-receipt-v2.json": (
+        "ce2c24c7a60b715a99e06b738539052eb5ca7b16c309b8188c4c9c8fab467f1e",
+        "5873ab8850fed8ac6821d9b75e47b6ffd3c471ec841ba45ea77f79d79b297339",
+    ),
+    "analysis-report-v2.json": (
+        "689af99d8cafb5799fe7845b020e4b4022c121a8f9219ecdf4b7dbe89b43b1b9",
+        "ad317641229a6d9221b4284b2eaf3cd2778c98577b4b46ae6650cd3f7e8953bd",
+    ),
+    "risk-delivery-ack-v2.json": (
+        "7c9a80c12e96a2d216533af95b8c5172d86a0b4ad74a5d3a4cc91ecd3fb0430c",
+        "f6919b16c14be7801a242a7a88f88e4075ce91eb655b861c7f1b474f25d25b49",
+    ),
+    "enterprise-risk-response-v2.json": (
+        "1785cf19e5a29ef8fb774a37138e6516e2d9d68f8a8ed21af01546dccfbff185",
+        "775d61e71d21d4da6b1b35277c795d56c2e23bc8b6c4abb14d30ffc27cc52a4b",
+    ),
+    "response-receipt-v2.json": (
+        "8a7a585a0bbeffc62f8e866cb590cd6dbb7b84a0594c241a6b75406ec9fba4d8",
+        "0ebde843d41519864c2054bb0a15466e94eda602fbd465a80c79b6a1ff0c8eaa",
+    ),
+}
+V2_EXAMPLE_SECRET = b"example-v2-exchange-secret-not-for-production"
+V2_FIVE_QUANTITY_GROUPS = {
+    "airflow": ["ventilation_m3_min"],
+    "electricity": ["electricity_kwh"],
+    "blasting_materials": ["detonators_count", "explosives_kg"],
+    "mine_entry_personnel": ["mine_entry_persons"],
+    "production": ["production_t"],
+}
 
 
 class ContractValidationError(RuntimeError):
@@ -137,9 +177,7 @@ def _jcs_example(value: Any) -> str:
                 "fixed example checker expects ASCII object keys"
             )
         members = (
-            json.dumps(key, ensure_ascii=False)
-            + ":"
-            + _jcs_example(value[key])
+            json.dumps(key, ensure_ascii=False) + ":" + _jcs_example(value[key])
             for key in sorted(value)
         )
         return "{" + ",".join(members) + "}"
@@ -186,10 +224,7 @@ def _check_fixed_vectors(submission_path: Path, submission: dict[str, Any]) -> N
         "payload": business_payload,
         "payload_sha256": observation_hash,
     }
-    material = (
-        b"MINEGUARD-GOVERNED-OBSERVATION-V1\x00"
-        + _compact_sorted_json(envelope)
-    )
+    material = b"MINEGUARD-GOVERNED-OBSERVATION-V1\x00" + _compact_sorted_json(envelope)
     observation_signature = hmac.new(
         b"example-device-secret-not-for-production",
         material,
@@ -255,9 +290,7 @@ def _check_edge_fixed_vectors(
         hashlib.sha256,
     ).hexdigest()
     if transport_signature != EXPECTED_EDGE_TRANSPORT_SIGNATURE:
-        raise ContractValidationError(
-            "edge transport signature vector changed"
-        )
+        raise ContractValidationError("edge transport signature vector changed")
     client_id = edge_batch.get("client_id")
     batch_id = edge_batch.get("batch_id")
     if (
@@ -301,9 +334,7 @@ def _check_edge_fixed_vectors(
         "source.missing_state",
     }
     example_metrics = {
-        item.get("metric_code")
-        for item in observations
-        if isinstance(item, dict)
+        item.get("metric_code") for item in observations if isinstance(item, dict)
     }
     if not required_extension_metrics.issubset(example_metrics):
         raise ContractValidationError(
@@ -311,9 +342,7 @@ def _check_edge_fixed_vectors(
         )
     for index, observation in enumerate(observations):
         if not isinstance(observation, dict):
-            raise ContractValidationError(
-                f"edge observation {index} must be an object"
-            )
+            raise ContractValidationError(f"edge observation {index} must be an object")
         observed_at = _aware_datetime(
             observation.get("observed_at"),
             f"observations[{index}].observed_at",
@@ -345,12 +374,9 @@ def _check_edge_fixed_vectors(
                     f"observations[{index}] has an invalid interval window"
                 )
             timezone_name = interval.get("timezone")
-            if (
-                isinstance(timezone_name, str)
-                and not re.fullmatch(
-                    r"[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]",
-                    timezone_name,
-                )
+            if isinstance(timezone_name, str) and not re.fullmatch(
+                r"[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]",
+                timezone_name,
             ):
                 try:
                     ZoneInfo(timezone_name)
@@ -358,13 +384,342 @@ def _check_edge_fixed_vectors(
                     raise ContractValidationError(
                         f"observations[{index}] has an unknown timezone"
                     ) from exc
-        if (
-            str(observation.get("metric_code", "")).startswith("source.")
-            and observation.get("location_code") != observation.get("source_id")
-        ):
+        if str(observation.get("metric_code", "")).startswith(
+            "source."
+        ) and observation.get("location_code") != observation.get("source_id"):
             raise ContractValidationError(
                 f"observations[{index}] source health location is ambiguous"
             )
+
+
+def _v2_signature_material(message: dict[str, Any], payload_hash: str) -> bytes:
+    signature = message["signature_envelope"]
+    predecessor = message.get("predecessor") or {}
+    lines = [
+        "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2",
+        message["contract_version"],
+        message["message_type"],
+        message["message_id"],
+        message["correlation_id"],
+        message.get("causation_id") or "",
+        message["idempotency_key"],
+        str(message["revision"]),
+        predecessor.get("message_id", ""),
+        predecessor.get("payload_sha256", ""),
+        message["created_at"],
+        message["sender"]["system_id"],
+        message["sender"]["party_id"],
+        message["sender"]["role"],
+        message["recipient"]["system_id"],
+        message["recipient"]["party_id"],
+        message["recipient"]["role"],
+        message["mine_id"],
+        signature["algorithm"],
+        signature["canonicalization"],
+        signature["key_id"],
+        signature["signed_at"],
+        signature["nonce"],
+        payload_hash,
+    ]
+    return "\n".join(lines).encode("utf-8")
+
+
+def _check_v2_fixed_vectors(messages: dict[str, dict[str, Any]]) -> None:
+    for filename, (
+        expected_payload_hash,
+        expected_signature,
+    ) in EXPECTED_V2_VECTORS.items():
+        message = messages[filename]
+        payload_hash = hashlib.sha256(
+            _jcs_example(message["payload"]).encode("utf-8")
+        ).hexdigest()
+        if payload_hash != expected_payload_hash:
+            raise ContractValidationError(
+                f"{filename}: V2 payload vector changed; expected "
+                f"{expected_payload_hash}, got {payload_hash}"
+            )
+        envelope = message["signature_envelope"]
+        if envelope["payload_sha256"] != payload_hash:
+            raise ContractValidationError(
+                f"{filename}: declared V2 payload_sha256 is incorrect"
+            )
+        calculated_signature = hmac.new(
+            V2_EXAMPLE_SECRET,
+            _v2_signature_material(message, payload_hash),
+            hashlib.sha256,
+        ).hexdigest()
+        if calculated_signature != expected_signature:
+            raise ContractValidationError(f"{filename}: V2 signature vector changed")
+        if envelope["signature"] != calculated_signature:
+            raise ContractValidationError(
+                f"{filename}: declared V2 signature is incorrect"
+            )
+
+
+def _parse_date(value: Any, field: str):
+    if not isinstance(value, str):
+        raise ContractValidationError(f"{field} must be an ISO date")
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ContractValidationError(f"{field} must be an ISO date") from exc
+
+
+def _check_v2_submission_semantics(submission: dict[str, Any]) -> None:
+    payload = submission["payload"]
+    if submission["mine_id"] != payload["mine"]["mine_id"]:
+        raise ContractValidationError(
+            "V2 submission envelope and payload mine_id differ"
+        )
+    if submission["correlation_id"] != submission["message_id"]:
+        raise ContractValidationError(
+            "initial V2 submission correlation_id must equal message_id"
+        )
+    if submission["causation_id"] is not None:
+        raise ContractValidationError("initial V2 submission causation_id must be null")
+
+    period_start = _parse_date(payload["period_start"], "period_start")
+    period_end = _parse_date(payload["period_end"], "period_end")
+    if period_end < period_start:
+        raise ContractValidationError("V2 reporting period ends before it starts")
+    days = payload["days"]
+    day_values = [_parse_date(day["date"], "days[].date") for day in days]
+    if len(day_values) != len(set(day_values)):
+        raise ContractValidationError("V2 submission contains duplicate days")
+    if day_values != sorted(day_values):
+        raise ContractValidationError("V2 submission days must be chronological")
+    if any(day < period_start or day > period_end for day in day_values):
+        raise ContractValidationError("V2 day falls outside reporting period")
+    if any(day.strftime("%Y-%m") != payload["reporting_month"] for day in day_values):
+        raise ContractValidationError("V2 day does not match reporting_month")
+
+    sources = payload["sources"]
+    source_ids = [source["source_id"] for source in sources]
+    if len(source_ids) != len(set(source_ids)):
+        raise ContractValidationError("V2 source_id values must be unique")
+    source_id_set = set(source_ids)
+    modes = {source["acquisition_mode"] for source in sources}
+    if modes != {"direct_collection", "manual_import"}:
+        raise ContractValidationError(
+            "V2 example must exercise equal direct and manual acquisition modes"
+        )
+
+    metric_codes = {
+        metric_code
+        for group_metrics in V2_FIVE_QUANTITY_GROUPS.values()
+        for metric_code in group_metrics
+    }
+    shift_keys = ("zero_shift", "eight_shift", "four_shift")
+    for day_index, day in enumerate(days):
+        quantity = day["reported_quantity"]
+        measurement_sets = [("daily_total", quantity["daily_total"])]
+        for shift_key in shift_keys:
+            shift = quantity["shifts"][shift_key]
+            start = _aware_datetime(
+                shift["start_at"], f"days[{day_index}].{shift_key}.start_at"
+            )
+            end = _aware_datetime(
+                shift["end_at"], f"days[{day_index}].{shift_key}.end_at"
+            )
+            if end <= start:
+                raise ContractValidationError(
+                    f"days[{day_index}].{shift_key} has a non-positive interval"
+                )
+            measurement_sets.append((shift_key, shift["measurements"]))
+        for set_name, measurements in measurement_sets:
+            if set(measurements) != metric_codes:
+                raise ContractValidationError(
+                    f"days[{day_index}].{set_name} does not contain exact V2 metrics"
+                )
+            for metric_code, measurement in measurements.items():
+                if measurement["metric_code"] != metric_code:
+                    raise ContractValidationError(
+                        f"days[{day_index}].{set_name}.{metric_code} code mismatch"
+                    )
+                if not set(measurement["source_refs"]).issubset(source_id_set):
+                    raise ContractValidationError(
+                        f"days[{day_index}].{set_name}.{metric_code} has unknown source"
+                    )
+                flags = set(measurement["quality_flags"])
+                missing_flags = {"missing", "unavailable", "not_applicable"}
+                if measurement["value"] is None and not flags & missing_flags:
+                    raise ContractValidationError(
+                        f"days[{day_index}].{set_name}.{metric_code} null lacks flag"
+                    )
+                if measurement["value"] is not None and flags & missing_flags:
+                    raise ContractValidationError(
+                        f"days[{day_index}].{set_name}.{metric_code} conflicts with flag"
+                    )
+                if (
+                    metric_code
+                    in {
+                        "detonators_count",
+                        "mine_entry_persons",
+                    }
+                    and measurement["value"] is not None
+                ):
+                    if isinstance(measurement["value"], bool) or not isinstance(
+                        measurement["value"], int
+                    ):
+                        raise ContractValidationError(
+                            f"{metric_code} must be an integer when present"
+                        )
+
+
+def _check_v2_metric_catalog(common_schema: dict[str, Any]) -> None:
+    groups = common_schema.get("x-five-quantity-groups")
+    if groups != V2_FIVE_QUANTITY_GROUPS:
+        raise ContractValidationError(
+            "V2 schema must define the exact five business quantity groups"
+        )
+    blasting_metrics = groups["blasting_materials"]
+    if blasting_metrics != ["detonators_count", "explosives_kg"]:
+        raise ContractValidationError(
+            "V2 blasting-material quantity must retain detonator count and "
+            "explosive mass as separate atomic measurements"
+        )
+    atomic_metrics = [
+        metric_code
+        for group_metrics in groups.values()
+        for metric_code in group_metrics
+    ]
+    definitions = common_schema.get("$defs", {})
+    metric_enum = definitions.get("metricCode", {}).get("enum", [])
+    if len(metric_enum) != len(atomic_metrics) or set(metric_enum) != set(
+        atomic_metrics
+    ):
+        raise ContractValidationError(
+            "V2 metricCode enum must exactly match the five-group catalog"
+        )
+    measurement_set = definitions.get("measurementSet", {})
+    required_metrics = measurement_set.get("required", [])
+    if len(required_metrics) != len(atomic_metrics) or set(required_metrics) != set(
+        atomic_metrics
+    ):
+        raise ContractValidationError(
+            "V2 measurementSet must require every catalog atomic metric"
+        )
+    properties = measurement_set.get("properties", {})
+    if set(properties) != set(atomic_metrics):
+        raise ContractValidationError(
+            "V2 measurementSet must not add an ungoverned metric or a "
+            "unitless blasting-material total"
+        )
+    entry_constraints = properties["mine_entry_persons"]["allOf"][1]["properties"]
+    if (
+        entry_constraints.get("metric_code", {}).get("const") != "mine_entry_persons"
+        or entry_constraints.get("unit", {}).get("const") != "person"
+        or entry_constraints.get("aggregation", {}).get("const") != "sum"
+        or entry_constraints.get("value", {}).get("type") != ["integer", "null"]
+    ):
+        raise ContractValidationError(
+            "mine_entry_persons must be integer|null, person and sum"
+        )
+
+
+def _check_v2_workflow_semantics(messages: dict[str, dict[str, Any]]) -> None:
+    submission = messages["five-quantity-submission-v2.json"]
+    intake = messages["intake-receipt-v2.json"]
+    report = messages["analysis-report-v2.json"]
+    ack = messages["risk-delivery-ack-v2.json"]
+    response = messages["enterprise-risk-response-v2.json"]
+    receipt = messages["response-receipt-v2.json"]
+    workflow = [submission, intake, report, ack, response, receipt]
+
+    _check_v2_submission_semantics(submission)
+    mine_ids = {message["mine_id"] for message in workflow}
+    correlations = {message["correlation_id"] for message in workflow}
+    if len(mine_ids) != 1 or len(correlations) != 1:
+        raise ContractValidationError(
+            "V2 example workflow must remain bound to one mine and correlation"
+        )
+    agent_systems = {
+        participant["system_id"]
+        for message in workflow
+        for participant in (message["sender"], message["recipient"])
+        if participant["role"] == "enterprise_agent"
+    }
+    if len(agent_systems) != 1:
+        raise ContractValidationError(
+            "V2 workflow must use exactly one enterprise agent for the mine"
+        )
+
+    submission_hash = submission["signature_envelope"]["payload_sha256"]
+    if (
+        intake["causation_id"] != submission["message_id"]
+        or intake["payload"]["submission_message_id"] != submission["message_id"]
+        or intake["payload"]["received_payload_sha256"] != submission_hash
+    ):
+        raise ContractValidationError("V2 intake receipt is not bound to submission")
+    if (
+        report["causation_id"] != submission["message_id"]
+        or report["payload"]["submission_message_id"] != submission["message_id"]
+    ):
+        raise ContractValidationError("V2 analysis report is not bound to submission")
+    report_payload = report["payload"]
+    if report["mine_id"] != report_payload["mine"]["mine_id"]:
+        raise ContractValidationError("V2 analysis report mine binding differs")
+    required_modules = {
+        "l1_reconciliation",
+        "minimal_conflict_set",
+        "robust_temporal_baseline",
+        "change_point",
+    }
+    if not required_modules.issubset(report_payload["algorithm"]["modules"]):
+        raise ContractValidationError(
+            "V2 analysis example must exercise solver and retained temporal modules"
+        )
+    if (
+        ack["causation_id"] != report["message_id"]
+        or ack["payload"]["analysis_report_message_id"] != report["message_id"]
+        or ack["payload"]["report_id"] != report_payload["report_id"]
+        or ack["payload"]["delivery_cursor"] != report_payload["delivery_cursor"]
+    ):
+        raise ContractValidationError("V2 delivery acknowledgement is misbound")
+    if (
+        response["causation_id"] != report["message_id"]
+        or response["payload"]["analysis_report_message_id"] != report["message_id"]
+        or response["payload"]["report_id"] != report_payload["report_id"]
+    ):
+        raise ContractValidationError("V2 enterprise response is misbound")
+    finding_ids = {item["finding_id"] for item in report_payload["findings"]}
+    response_finding_ids = {
+        item["finding_id"] for item in response["payload"]["finding_responses"]
+    }
+    if not response_finding_ids.issubset(finding_ids):
+        raise ContractValidationError("V2 response references an unknown finding")
+    evidence_ids = {item["evidence_id"] for item in response["payload"]["attachments"]}
+    referenced_evidence = {
+        evidence_id
+        for item in response["payload"]["finding_responses"]
+        for evidence_id in item["evidence_refs"]
+    }
+    if not referenced_evidence.issubset(evidence_ids):
+        raise ContractValidationError("V2 response references unknown evidence")
+    if (
+        receipt["causation_id"] != response["message_id"]
+        or receipt["payload"]["enterprise_response_message_id"]
+        != response["message_id"]
+        or receipt["payload"]["response_id"] != response["payload"]["response_id"]
+        or receipt["payload"]["report_id"] != report_payload["report_id"]
+        or receipt["payload"]["risk_status"] != "not_cleared_by_receipt"
+    ):
+        raise ContractValidationError("V2 response receipt semantics are invalid")
+
+    forbidden_provenance_keys = {
+        "trust_level",
+        "trust_score",
+        "reliability_weight",
+        "acquisition_confidence",
+    }
+    for filename, message in messages.items():
+        for node in _walk(message):
+            if forbidden_provenance_keys & set(node):
+                raise ContractValidationError(
+                    f"{filename}: acquisition must not carry a trust tier"
+                )
+
+    _check_v2_fixed_vectors(messages)
 
 
 def _aware_datetime(value: Any, field: str) -> datetime:
@@ -383,8 +738,20 @@ def _aware_datetime(value: Any, field: str) -> datetime:
 def _optional_jsonschema_validation(documents: dict[Path, Any]) -> str:
     try:
         from jsonschema import Draft202012Validator, FormatChecker
+        from referencing import Registry, Resource
     except ImportError:
         return "jsonschema 未安装，已跳过完整 schema 实例校验"
+
+    registry = Registry().with_resources(
+        (
+            schema["$id"],
+            Resource.from_contents(schema),
+        )
+        for path, schema in documents.items()
+        if path.parent == CONTRACT_ROOT / "schemas"
+        and isinstance(schema, dict)
+        and isinstance(schema.get("$id"), str)
+    )
 
     for example_name, schema_name in EXAMPLES.items():
         example_path = CONTRACT_ROOT / "examples" / example_name
@@ -393,6 +760,7 @@ def _optional_jsonschema_validation(documents: dict[Path, Any]) -> str:
         Draft202012Validator.check_schema(schema)
         validator = Draft202012Validator(
             schema,
+            registry=registry,
             format_checker=FormatChecker(),
         )
         errors = sorted(
@@ -430,42 +798,45 @@ def main() -> int:
             )
         ids[schema_id] = path
 
-    openapi_path = (
-        CONTRACT_ROOT / "openapi" / "enterprise-submission-v1.openapi.json"
-    )
-    openapi = documents[openapi_path]
-    if openapi.get("openapi") != "3.1.0":
-        raise ContractValidationError("OpenAPI document must use version 3.1.0")
+    for openapi_path in (CONTRACT_ROOT / "openapi").glob("*.json"):
+        openapi = documents[openapi_path]
+        if openapi.get("openapi") != "3.1.0":
+            raise ContractValidationError(
+                f"{openapi_path}: OpenAPI document must use version 3.1.0"
+            )
 
     submission_schema = documents[
         CONTRACT_ROOT / "schemas" / "enterprise-submission-v1.schema.json"
     ]
-    observation_properties = submission_schema["$defs"][
-        "governedObservation"
-    ]["properties"]
+    observation_properties = submission_schema["$defs"]["governedObservation"][
+        "properties"
+    ]
     for integer_field in ("sequence_no", "revision"):
         integer_schema = observation_properties[integer_field]
-        if integer_schema.get("minimum") != 0 or integer_schema.get(
-            "maximum"
-        ) != 9_007_199_254_740_991:
+        if (
+            integer_schema.get("minimum") != 0
+            or integer_schema.get("maximum") != 9_007_199_254_740_991
+        ):
             raise ContractValidationError(
                 f"{integer_field} must use the cross-language safe integer range"
             )
 
-    submission_path = (
-        CONTRACT_ROOT / "examples" / "enterprise-submission-v1.json"
-    )
+    submission_path = CONTRACT_ROOT / "examples" / "enterprise-submission-v1.json"
     _check_fixed_vectors(submission_path, documents[submission_path])
-    edge_batch_path = (
-        CONTRACT_ROOT / "examples" / "edge-telemetry-batch-v1.json"
-    )
+    edge_batch_path = CONTRACT_ROOT / "examples" / "edge-telemetry-batch-v1.json"
     _check_edge_fixed_vectors(
         edge_batch_path,
         documents[edge_batch_path],
-        documents[
-            CONTRACT_ROOT / "examples" / "edge-telemetry-receipt-v1.json"
-        ],
+        documents[CONTRACT_ROOT / "examples" / "edge-telemetry-receipt-v1.json"],
     )
+    v2_messages = {
+        filename: documents[CONTRACT_ROOT / "examples" / filename]
+        for filename in EXPECTED_V2_VECTORS
+    }
+    _check_v2_metric_catalog(
+        documents[CONTRACT_ROOT / "schemas" / "exchange-common-v2.schema.json"]
+    )
+    _check_v2_workflow_semantics(v2_messages)
 
     text_suffixes = {".json", ".md", ".py", ".txt", ".yaml", ".yml"}
     all_text = "\n".join(
@@ -483,7 +854,8 @@ def main() -> int:
     schema_result = _optional_jsonschema_validation(documents)
     print(
         f"OK: {len(json_paths)} 个 JSON 文件可解析；"
-        f"{len(ids)} 个 schema ID 唯一；本地引用、三层摘要/签名向量通过。"
+        f"{len(ids)} 个 schema ID 唯一；本地引用、V1 三层完整性和 "
+        "V2 双向消息签名/状态绑定向量通过。"
     )
     print(f"OK: {schema_result}。")
     return 0

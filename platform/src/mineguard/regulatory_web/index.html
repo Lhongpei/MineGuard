@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#07111f">
+  <title>五量智能监管驾驶舱</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=2.3.2">
+</head>
+<body>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
+  <main id="app" class="app-shell" aria-busy="true">
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="emblem" aria-hidden="true"><span></span></div>
+        <div>
+          <p class="eyebrow">QINYUAN · FIVE QUANTITY SUPERVISION</p>
+          <h1>五量智能监管驾驶舱</h1>
+          <p class="subtitle">政府只读监管平台 · 单矿研判 · 辖区综合 · 全程留痕</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="as-of">
+          <span class="pulse-dot"></span>
+          <span>数据截至</span>
+          <strong id="asOf">尚未加载</strong>
+        </div>
+        <button id="refreshButton" class="quiet-button" type="button">刷新</button>
+        <button id="fullscreenButton" class="quiet-button" type="button">全屏</button>
+        <button id="logoutButton" class="quiet-button hidden" type="button">退出</button>
+      </div>
+    </header>
+
+    <nav class="view-tabs" aria-label="监管视图">
+      <button class="view-tab active" data-view="overview" type="button">辖区总览</button>
+      <button class="view-tab" data-view="mine" type="button">单矿研判</button>
+      <button class="view-tab" data-view="findings" type="button">风险台账</button>
+      <button class="view-tab" data-view="trace" type="button">交换留痕</button>
+    </nav>
+
+    <section id="notice" class="notice hidden" role="status"></section>
+
+    <section id="overviewView" class="view active" data-view-panel="overview">
+      <div class="metric-grid" aria-label="辖区核心指标">
+        <article class="metric-card tone-blue">
+          <span>监管煤矿</span><strong id="metricExpected">—</strong><small>一矿一智能体</small>
+        </article>
+        <article class="metric-card tone-cyan">
+          <span>本期已报</span><strong id="metricReported">—</strong><small id="metricCoverage">覆盖率 —</small>
+        </article>
+        <article class="metric-card tone-green">
+          <span>正常候选</span><strong id="metricNormal">—</strong><small>通过唯一监管引擎</small>
+        </article>
+        <article class="metric-card tone-red">
+          <span>风险煤矿</span><strong id="metricRisk">—</strong><small id="metricHighest">最高风险 —</small>
+        </article>
+        <article class="metric-card tone-amber">
+          <span>数据不足</span><strong id="metricInsufficient">—</strong><small>不能形成确定判断</small>
+        </article>
+        <article class="metric-card tone-violet">
+          <span>待企业回复</span><strong id="metricAwaiting">—</strong><small id="metricOverdue">超时 —</small>
+        </article>
+      </div>
+
+      <div class="dashboard-grid">
+        <article class="panel jurisdiction-panel">
+          <header class="panel-header">
+            <div><p class="panel-kicker">JURISDICTION</p><h2>辖区态势</h2></div>
+            <span class="read-only-tag">只读</span>
+          </header>
+          <div class="jurisdiction-body">
+            <div class="radar-ring" aria-hidden="true">
+              <div class="radar-sweep"></div><div class="radar-core">五量<br>监管</div>
+              <span class="radar-point point-a"></span><span class="radar-point point-b"></span>
+              <span class="radar-point point-c"></span><span class="radar-point point-d"></span>
+            </div>
+            <div id="statusLegend" class="status-legend"></div>
+          </div>
+        </article>
+
+        <article class="panel risk-panel">
+          <header class="panel-header">
+            <div><p class="panel-kicker">RISK DISTRIBUTION</p><h2>风险等级分布</h2></div>
+          </header>
+          <div id="severityBars" class="severity-bars"></div>
+          <div class="explain-card">
+            <strong>结论口径</strong>
+            <p>企业说明只作追加留痕；只有修订数据经同一算法重算通过，风险才会解除。</p>
+          </div>
+        </article>
+
+        <article class="panel activity-panel">
+          <header class="panel-header">
+            <div><p class="panel-kicker">LIVE EXCHANGE</p><h2>最新状态变化</h2></div>
+            <span class="refresh-hint">10 秒自动刷新</span>
+          </header>
+          <ol id="activityList" class="activity-list"></ol>
+        </article>
+      </div>
+
+      <article class="panel mine-table-panel">
+        <header class="panel-header table-header">
+          <div><p class="panel-kicker">MINE MATRIX</p><h2>煤矿监管矩阵</h2></div>
+          <label class="search-box">搜索煤矿<input id="mineSearch" type="search" autocomplete="off" placeholder="名称或编号"></label>
+        </header>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>煤矿</th><th>最新报表期</th><th>数据完整率</th><th>算法状态</th><th>风险</th><th>企业回复</th><th>数据新鲜度</th><th>趋势</th></tr></thead>
+            <tbody id="mineTableBody"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section id="mineView" class="view" data-view-panel="mine">
+      <div class="section-toolbar panel">
+        <div><p class="panel-kicker">MINE DRILLDOWN</p><h2>单矿五量研判</h2></div>
+        <label>选择煤矿<select id="mineSelector"><option value="">请选择</option></select></label>
+      </div>
+      <div id="mineEmpty" class="empty-state panel">从监管矩阵或上方选择一座煤矿查看。</div>
+      <div id="mineDetail" class="hidden">
+        <div class="mine-summary-grid">
+          <article class="panel mine-identity"><p class="panel-kicker">MINE PROFILE</p><h2 id="mineName">—</h2><p id="mineMeta">—</p><div id="mineStatus"></div></article>
+          <article class="panel algorithm-card"><p class="panel-kicker">UNIFIED ENGINE</p><h2>唯一五量监管引擎</h2><dl id="algorithmMeta"></dl></article>
+          <article class="panel response-card"><p class="panel-kicker">RESPONSE LOOP</p><h2>风险回执</h2><dl id="responseMeta"></dl></article>
+        </div>
+        <article class="panel chart-panel">
+          <header class="panel-header chart-panel-header"><div><p class="panel-kicker">TIME SERIES</p><h2>五量时序（火工品分项）</h2></div></header>
+          <div id="seriesLegend" class="series-legend" role="list" aria-label="五量时序图例"></div>
+          <div id="seriesChart" class="series-chart" role="img" aria-label="五量标准化时序图"></div>
+          <p class="chart-note">为便于同图比较，各指标按当前窗口内自身尺度标准化；悬停可查看原始单位数值。</p>
+        </article>
+        <div class="detail-grid">
+          <article class="panel"><header class="panel-header"><div><p class="panel-kicker">FINDINGS</p><h2>风险与算法依据</h2></div></header><div id="mineFindings" class="finding-list"></div></article>
+          <article class="panel"><header class="panel-header"><div><p class="panel-kicker">TIMELINE</p><h2>报送与回复时间线</h2></div></header><ol id="mineTimeline" class="timeline"></ol></article>
+        </div>
+      </div>
+    </section>
+
+    <section id="findingsView" class="view" data-view-panel="findings">
+      <article class="panel">
+        <header class="panel-header table-header">
+          <div><p class="panel-kicker">FINDING LEDGER</p><h2>不可变风险台账</h2></div>
+          <div class="filters"><select id="findingSeverity"><option value="">全部等级</option><option value="critical">重大</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select><select id="findingState"><option value="">全部状态</option><option value="open">待回复</option><option value="explanation_recorded">已解释</option><option value="risk_persists">风险持续</option><option value="cleared_by_reanalysis">重算解除</option></select></div>
+        </header>
+        <div id="findingLedger" class="finding-ledger"></div>
+      </article>
+    </section>
+
+    <section id="traceView" class="view" data-view-panel="trace">
+      <article class="panel">
+        <header class="panel-header"><div><p class="panel-kicker">IMMUTABLE TRACE</p><h2>双系统交换留痕</h2></div><span class="read-only-tag">追加式记录</span></header>
+        <div class="trace-explainer"><span>企业报送</span><i></i><span>政府分析</span><i></i><span>风险送达</span><i></i><span>企业回复</span><i></i><span>必要时重算</span></div>
+        <div class="table-wrap"><table><thead><tr><th>时间</th><th>煤矿</th><th>事件</th><th>关联编号</th><th>摘要</th><th>链校验</th></tr></thead><tbody id="traceTableBody"></tbody></table></div>
+      </article>
+    </section>
+  </main>
+
+  <dialog id="loginDialog" class="login-dialog">
+    <form id="loginForm" method="dialog">
+      <div class="login-mark"><span></span></div>
+      <p class="eyebrow">REGULATORY READ-ONLY ACCESS</p>
+      <h2>进入监管驾驶舱</h2>
+      <p>政府业务端仅查看算法结果、风险回执和留痕，不修改企业数据或算法结论。</p>
+      <label>账号<input id="username" name="username" autocomplete="username" required value="admin"></label>
+      <label>密码<input id="password" name="password" autocomplete="current-password" type="password" required></label>
+      <button class="primary-button" type="submit">登录</button>
+      <p id="loginError" class="form-error" role="alert"></p>
+    </form>
+  </dialog>
+
+  <script src="/assets/app.js?v=2.3.2" defer></script>
+</body>
+</html>

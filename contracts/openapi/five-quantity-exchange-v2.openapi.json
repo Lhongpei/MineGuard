@@ -1,0 +1,765 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MineGuard Neutral Five-Quantity Exchange API",
+    "version": "2.0.0",
+    "description": "The only HTTP/JSON boundary between one mine's enterprise agent and the government regulatory platform. Both products implement this document independently and must not import each other's code or database models."
+  },
+  "servers": [
+    {
+      "url": "https://regulator.example.invalid"
+    }
+  ],
+  "tags": [
+    {
+      "name": "five-quantity-submissions"
+    },
+    {
+      "name": "analysis-delivery"
+    },
+    {
+      "name": "risk-responses"
+    }
+  ],
+  "paths": {
+    "/v2/five-quantity-submissions": {
+      "post": {
+        "operationId": "submitFiveQuantityReportV2",
+        "tags": [
+          "five-quantity-submissions"
+        ],
+        "summary": "Submit one mine's human-confirmed daily and shift report",
+        "description": "At-least-once transport with exactly-once business effect. A successful receipt means durable intake only; the sole government algorithm runs afterward.",
+        "security": [
+          {
+            "ExchangeHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SenderId"
+          },
+          {
+            "$ref": "#/components/parameters/Timestamp"
+          },
+          {
+            "$ref": "#/components/parameters/Nonce"
+          },
+          {
+            "$ref": "#/components/parameters/ContentSha256"
+          },
+          {
+            "$ref": "#/components/parameters/ContractVersion"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureVersion"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/five-quantity-submission-v2.schema.json"
+              },
+              "examples": {
+                "dailyAndShiftReport": {
+                  "externalValue": "../examples/five-quantity-submission-v2.json"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Durably accepted and queued for analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/intake-receipt-v2.schema.json"
+                },
+                "examples": {
+                  "accepted": {
+                    "externalValue": "../examples/intake-receipt-v2.json"
+                  }
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Exact idempotent retry; returns the original signed receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/intake-receipt-v2.schema.json"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-message-signing-spec": "../specs/five-quantity-exchange-v2.md"
+      }
+    },
+    "/v2/five-quantity-submissions/{message_id}/receipt": {
+      "get": {
+        "operationId": "getIntakeReceiptV2",
+        "tags": [
+          "five-quantity-submissions"
+        ],
+        "summary": "Read the immutable signed intake receipt",
+        "security": [
+          {
+            "ExchangeHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/MessageId"
+          },
+          {
+            "$ref": "#/components/parameters/SenderId"
+          },
+          {
+            "$ref": "#/components/parameters/Timestamp"
+          },
+          {
+            "$ref": "#/components/parameters/Nonce"
+          },
+          {
+            "$ref": "#/components/parameters/ContentSha256"
+          },
+          {
+            "$ref": "#/components/parameters/ContractVersion"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureVersion"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original signed receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/intake-receipt-v2.schema.json"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v2/analysis-reports/next": {
+      "get": {
+        "operationId": "pullNextAnalysisReportV2",
+        "tags": [
+          "analysis-delivery"
+        ],
+        "summary": "Pull the next signed response-required analysis report for the authenticated mine",
+        "description": "The authenticated one-mine agent may read only its own outbox stream. The report is not acknowledged until the delivery acknowledgement is durably accepted.",
+        "security": [
+          {
+            "ExchangeHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "after_cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          {
+            "$ref": "#/components/parameters/SenderId"
+          },
+          {
+            "$ref": "#/components/parameters/Timestamp"
+          },
+          {
+            "$ref": "#/components/parameters/Nonce"
+          },
+          {
+            "$ref": "#/components/parameters/ContentSha256"
+          },
+          {
+            "$ref": "#/components/parameters/ContractVersion"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureVersion"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Next immutable signed report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/analysis-report-v2.schema.json"
+                },
+                "examples": {
+                  "risk": {
+                    "externalValue": "../examples/analysis-report-v2.json"
+                  }
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No later response-required report is currently available"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v2/analysis-reports/{report_id}": {
+      "get": {
+        "operationId": "getAnalysisReportV2",
+        "tags": [
+          "analysis-delivery"
+        ],
+        "summary": "Read one immutable signed report belonging to the authenticated mine",
+        "security": [
+          {
+            "ExchangeHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ReportId"
+          },
+          {
+            "$ref": "#/components/parameters/SenderId"
+          },
+          {
+            "$ref": "#/components/parameters/Timestamp"
+          },
+          {
+            "$ref": "#/components/parameters/Nonce"
+          },
+          {
+            "$ref": "#/components/parameters/ContentSha256"
+          },
+          {
+            "$ref": "#/components/parameters/ContractVersion"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureVersion"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Immutable signed report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/analysis-report-v2.schema.json"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v2/analysis-reports/{report_id}/delivery-ack": {
+      "post": {
+        "operationId": "acknowledgeAnalysisReportDeliveryV2",
+        "tags": [
+          "analysis-delivery"
+        ],
+        "summary": "Acknowledge durable local inbox storage",
+        "security": [
+          {
+            "ExchangeHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ReportId"
+          },
+          {
+            "$ref": "#/components/parameters/SenderId"
+          },
+          {
+            "$ref": "#/components/parameters/Timestamp"
+          },
+          {
+            "$ref": "#/components/parameters/Nonce"
+          },
+          {
+            "$ref": "#/components/parameters/ContentSha256"
+          },
+          {
+            "$ref": "#/components/parameters/ContractVersion"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureVersion"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/risk-delivery-ack-v2.schema.json"
+              },
+              "examples": {
+                "stored": {
+                  "externalValue": "../examples/risk-delivery-ack-v2.json"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Acknowledgement durably recorded; an exact retry has the same effect"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v2/analysis-reports/{report_id}/responses": {
+      "post": {
+        "operationId": "submitEnterpriseRiskResponseV2",
+        "tags": [
+          "risk-responses"
+        ],
+        "summary": "Submit one human-confirmed enterprise response",
+        "description": "An explanation is appended to the audit trail and cannot clear risk. A corrected submission reference may queue a new run of the same governed engine.",
+        "security": [
+          {
+            "ExchangeHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ReportId"
+          },
+          {
+            "$ref": "#/components/parameters/SenderId"
+          },
+          {
+            "$ref": "#/components/parameters/Timestamp"
+          },
+          {
+            "$ref": "#/components/parameters/Nonce"
+          },
+          {
+            "$ref": "#/components/parameters/ContentSha256"
+          },
+          {
+            "$ref": "#/components/parameters/ContractVersion"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureVersion"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/enterprise-risk-response-v2.schema.json"
+              },
+              "examples": {
+                "explanation": {
+                  "externalValue": "../examples/enterprise-risk-response-v2.json"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Response durably recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/response-receipt-v2.schema.json"
+                },
+                "examples": {
+                  "recorded": {
+                    "externalValue": "../examples/response-receipt-v2.json"
+                  }
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Exact idempotent retry; returns the original signed receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/response-receipt-v2.schema.json"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v2/risk-responses/{response_id}/receipt": {
+      "get": {
+        "operationId": "getEnterpriseRiskResponseReceiptV2",
+        "tags": [
+          "risk-responses"
+        ],
+        "summary": "Read the immutable signed response receipt",
+        "security": [
+          {
+            "ExchangeHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResponseId"
+          },
+          {
+            "$ref": "#/components/parameters/SenderId"
+          },
+          {
+            "$ref": "#/components/parameters/Timestamp"
+          },
+          {
+            "$ref": "#/components/parameters/Nonce"
+          },
+          {
+            "$ref": "#/components/parameters/ContentSha256"
+          },
+          {
+            "$ref": "#/components/parameters/ContractVersion"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureVersion"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original immutable signed receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/response-receipt-v2.schema.json"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ExchangeHmac": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Exchange-Signature",
+        "description": "Composite request authentication; all X-Exchange-* headers are mandatory. Application messages also carry the required signature_envelope."
+      }
+    },
+    "parameters": {
+      "MessageId": {
+        "name": "message_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "ReportId": {
+        "name": "report_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "ResponseId": {
+        "name": "response_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "SenderId": {
+        "name": "X-Exchange-Sender-Id",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        }
+      },
+      "Timestamp": {
+        "name": "X-Exchange-Timestamp",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "Nonce": {
+        "name": "X-Exchange-Nonce",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 22,
+          "maxLength": 86,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      },
+      "ContentSha256": {
+        "name": "X-Exchange-Content-SHA256",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "description": "SHA-256 of exact request body bytes; for GET use SHA-256 of the empty byte string."
+      },
+      "ContractVersion": {
+        "name": "X-Exchange-Contract-Version",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*-v2$"
+        }
+      },
+      "SignatureVersion": {
+        "name": "X-Exchange-Signature-Version",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "const": "hmac-sha256-v2"
+        }
+      }
+    },
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code",
+          "detail",
+          "trace_id"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "format": "uri-reference"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 400,
+            "maximum": 599
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{2,127}$"
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "trace_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Malformed request",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Authentication, signature, replay, mine binding, or key validation failed",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Not found within the authenticated mine scope",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Idempotency key or immutable revision conflict",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "UnprocessableEntity": {
+        "description": "Schema-valid transport but invalid cross-field or state-machine semantics",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "Rate limited",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "Temporarily unavailable; retry with the same business message identity",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      }
+    }
+  }
+}

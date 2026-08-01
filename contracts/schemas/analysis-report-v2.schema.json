@@ -1,0 +1,486 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:analysis-report:v2",
+  "title": "Five-Quantity Analysis Report V2",
+  "description": "Government-signed output of the sole governed five-quantity engine. Internal solver, temporal and anonymous peer modules are evidence stages, not independently selectable algorithms.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "message_type",
+    "message_id",
+    "correlation_id",
+    "causation_id",
+    "idempotency_key",
+    "revision",
+    "predecessor",
+    "created_at",
+    "sender",
+    "recipient",
+    "mine_id",
+    "payload",
+    "signature_envelope"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "analysis-report-v2"
+    },
+    "message_type": {
+      "const": "analysis_report"
+    },
+    "message_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "correlation_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "causation_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "revision": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/safePositiveInteger"
+    },
+    "predecessor": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/predecessor"
+    },
+    "created_at": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+    },
+    "sender": {
+      "allOf": [
+        {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/participant"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "regulatory_platform"
+            }
+          }
+        }
+      ]
+    },
+    "recipient": {
+      "allOf": [
+        {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/participant"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "enterprise_agent"
+            }
+          }
+        }
+      ]
+    },
+    "mine_id": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/identifier"
+    },
+    "payload": {
+      "$ref": "#/$defs/payload"
+    },
+    "signature_envelope": {
+      "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/signatureEnvelope"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "revision": {
+            "const": 1
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "predecessor": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "predecessor": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "algorithm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine_id",
+        "engine_version",
+        "algorithm_run_id",
+        "config_sha256",
+        "input_snapshot_sha256",
+        "own_history_snapshot_sha256",
+        "peer_snapshot_sha256",
+        "started_at",
+        "completed_at",
+        "modules"
+      ],
+      "properties": {
+        "engine_id": {
+          "const": "mineguard-five-quantity-engine"
+        },
+        "engine_version": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*\\.[0-9]+\\.[0-9]+$"
+        },
+        "algorithm_run_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "config_sha256": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/sha256"
+        },
+        "input_snapshot_sha256": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/sha256"
+        },
+        "own_history_snapshot_sha256": {
+          "anyOf": [
+            {
+              "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "peer_snapshot_sha256": {
+          "anyOf": [
+            {
+              "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Digest of an anonymous comparable-mine snapshot; never contains another mine's identity in this message."
+        },
+        "started_at": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+        },
+        "completed_at": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+        },
+        "modules": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "data_quality",
+              "daily_shift_reconciliation",
+              "l1_reconciliation",
+              "minimal_conflict_set",
+              "robust_temporal_baseline",
+              "past_only_rolling_mad",
+              "past_only_ewma",
+              "past_only_cusum",
+              "past_only_page_hinkley",
+              "temporal_drift",
+              "change_point",
+              "operating_state_segmentation",
+              "anonymous_peer_baseline",
+              "evidence_calibration"
+            ]
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "method",
+        "summary",
+        "observed_value",
+        "expected_min",
+        "expected_max",
+        "score",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "evidence_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/identifier"
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "data_completeness",
+            "deterministic_reconciliation",
+            "l1_reconciliation",
+            "minimal_conflict_set",
+            "robust_temporal_baseline",
+            "temporal_drift",
+            "change_point",
+            "anonymous_peer_baseline",
+            "combined_calibration"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "observed_value": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "expected_min": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "expected_max": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "score": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "evidence_sha256": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/sha256"
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding_id",
+        "category",
+        "severity",
+        "title",
+        "summary",
+        "affected_dates",
+        "affected_shifts",
+        "affected_metrics",
+        "evidence",
+        "requires_response"
+      ],
+      "properties": {
+        "finding_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "data_quality",
+            "daily_shift_reconciliation",
+            "joint_consistency",
+            "temporal_anomaly",
+            "temporal_drift",
+            "change_point",
+            "peer_comparison",
+            "combined_evidence"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "notice",
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "affected_dates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 366,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "format": "date"
+          }
+        },
+        "affected_shifts": {
+          "type": "array",
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "affected_metrics": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/metricCodeList"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "requires_response": {
+          "const": true
+        }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report_id",
+        "submission_message_id",
+        "submission_revision",
+        "mine",
+        "reporting_month",
+        "period_start",
+        "period_end",
+        "issued_at",
+        "algorithm",
+        "outcome",
+        "summary",
+        "findings",
+        "response_required",
+        "response_due_at",
+        "delivery_cursor"
+      ],
+      "properties": {
+        "report_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "submission_message_id": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/uuid"
+        },
+        "submission_revision": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/safePositiveInteger"
+        },
+        "mine": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/mine"
+        },
+        "reporting_month": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])$"
+        },
+        "period_start": {
+          "type": "string",
+          "format": "date"
+        },
+        "period_end": {
+          "type": "string",
+          "format": "date"
+        },
+        "issued_at": {
+          "$ref": "urn:mineguard:contract:exchange-common:v2#/$defs/dateTime"
+        },
+        "algorithm": {
+          "$ref": "#/$defs/algorithm"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "normal_candidate",
+            "risk",
+            "data_insufficient"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/finding"
+          }
+        },
+        "response_required": {
+          "type": "boolean"
+        },
+        "response_due_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "delivery_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "normal_candidate"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "maxItems": 0
+              },
+              "response_required": {
+                "const": false
+              },
+              "response_due_at": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "findings": {
+                "minItems": 1
+              },
+              "response_required": {
+                "const": true
+              },
+              "response_due_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

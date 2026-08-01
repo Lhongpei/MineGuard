@@ -20,6 +20,7 @@ from .errors import (
     PlatformError,
     ValidationBlockedError,
 )
+from .five_quantity_runtime import FiveQuantityRuntime
 from .harness import HarnessRuntime
 from .importers import import_text, merge_import
 from .llm import OpenAICompatibleProvider
@@ -126,8 +127,7 @@ def _invalidate_changed_source_credentials(
         observation_id = row.get("observation_id")
         old_entry = (
             old_by_id.get(observation_id)
-            if isinstance(observation_id, str)
-            and observation_id in new_by_id
+            if isinstance(observation_id, str) and observation_id in new_by_id
             else None
         )
         if old_entry is None:
@@ -401,9 +401,7 @@ def _snapshot_text(
         or len(value.strip()) > maximum
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
-        raise ImportContentError(
-            f"事件快照 {field} 必须是 1-{maximum} 字符的安全文本"
-        )
+        raise ImportContentError(f"事件快照 {field} 必须是 1-{maximum} 字符的安全文本")
     return value.strip()
 
 
@@ -433,13 +431,9 @@ def _validate_event_snapshot(
     missing = required - set(snapshot)
     unknown = set(snapshot) - required - allowed_metadata
     if missing:
-        raise ImportContentError(
-            "事件快照缺少字段：" + ", ".join(sorted(missing))
-        )
+        raise ImportContentError("事件快照缺少字段：" + ", ".join(sorted(missing)))
     if unknown:
-        raise ImportContentError(
-            "事件快照包含未知字段：" + ", ".join(sorted(unknown))
-        )
+        raise ImportContentError("事件快照包含未知字段：" + ", ".join(sorted(unknown)))
     mine_id = _snapshot_text(snapshot, "mine_id", 128)
     if mine_id != document.get("mine_id"):
         raise ImportContentError("事件快照 mine_id 与当前草稿矿井不一致")
@@ -482,10 +476,7 @@ def _validate_event_snapshot(
             "事件快照 event_codes 必须是最多 32 个不重复安全短文本"
         )
     evidence = snapshot.get("evidence_sha256")
-    if (
-        not isinstance(evidence, str)
-        or re.fullmatch(r"[0-9a-f]{64}", evidence) is None
-    ):
+    if not isinstance(evidence, str) or re.fullmatch(r"[0-9a-f]{64}", evidence) is None:
         raise ImportContentError(
             "事件快照 evidence_sha256 必须是 64 位小写十六进制摘要"
         )
@@ -510,14 +501,13 @@ class EnterpriseAgentService:
         llm_provider: OpenAICompatibleProvider | None = None,
         skill_registry: SkillRegistry | None = None,
         agent_v2_config: AgentV2Config | None = None,
+        five_quantity_runtime: FiveQuantityRuntime | None = None,
     ):
         self.repository = repository
         self.platform_client = platform_client
         self.llm_provider = llm_provider
         self.skills = (
-            skill_registry
-            if skill_registry is not None
-            else build_skill_registry()
+            skill_registry if skill_registry is not None else build_skill_registry()
         )
         self.agent_v2_config = agent_v2_config or AgentV2Config()
         self.governance = GovernanceStore(repository)
@@ -530,11 +520,14 @@ class EnterpriseAgentService:
         self._chat: CoalChatRuntime | None = None
         self._agent_v2: AgentFlowRuntime | None = None
         self._agent_jobs: AgentJobScheduler | None = None
+        self._five_quantity = five_quantity_runtime
 
     def enable_harness(self) -> HarnessRuntime:
         """Start the long-lived harness only for the HTTP serve process."""
 
         with self._harness_lock:
+            if self._five_quantity is not None:
+                self._five_quantity.start()
             if self._harness is None:
                 self._harness = HarnessRuntime(
                     self,
@@ -553,20 +546,22 @@ class EnterpriseAgentService:
                         specialist_worker_count=(
                             self.agent_v2_config.specialist_worker_count
                         ),
-                        lease_seconds=(
-                            self.agent_v2_config.flow_lease_seconds
-                        ),
+                        lease_seconds=(self.agent_v2_config.flow_lease_seconds),
                     ),
                 )
                 self._agent_jobs = AgentJobScheduler(
                     self.repository,
                     self._agent_v2,
-                    poll_seconds=(
-                        self.agent_v2_config.scheduler_poll_seconds
-                    ),
+                    poll_seconds=(self.agent_v2_config.scheduler_poll_seconds),
                     auto_start=self.agent_v2_config.scheduler_enabled,
                 )
             return self._harness
+
+    @property
+    def five_quantity(self) -> FiveQuantityRuntime:
+        if self._five_quantity is None:
+            raise RuntimeError("五量 V2 运行时未配置")
+        return self._five_quantity
 
     @property
     def harness(self) -> HarnessRuntime:
@@ -594,6 +589,8 @@ class EnterpriseAgentService:
 
     def disable_harness(self) -> None:
         with self._harness_lock:
+            if self._five_quantity is not None:
+                self._five_quantity.close()
             if self._agent_jobs is not None:
                 self._agent_jobs.close()
                 self._agent_jobs = None
@@ -749,9 +746,7 @@ class EnterpriseAgentService:
             event_type="draft_updated",
             details={
                 "changed_fields": sorted(effective_patch),
-                "invalidated_source_credentials": sorted(
-                    invalidated_credentials
-                ),
+                "invalidated_source_credentials": sorted(invalidated_credentials),
                 **(audit_details or {}),
             },
             expected_revision=expected_revision,
@@ -835,15 +830,11 @@ class EnterpriseAgentService:
         previous_codes = previous_document.get("operational_context", {}).get(
             "approved_event_codes"
         )
-        merged_codes = merged.get("operational_context", {}).get(
-            "approved_event_codes"
-        )
-        previous_event_provenance = previous_document.get(
-            "field_provenance", {}
-        ).get(event_pointer)
-        imported_event_provenance = imported["field_provenance"].get(
+        merged_codes = merged.get("operational_context", {}).get("approved_event_codes")
+        previous_event_provenance = previous_document.get("field_provenance", {}).get(
             event_pointer
         )
+        imported_event_provenance = imported["field_provenance"].get(event_pointer)
         same_event_code_set = (
             isinstance(previous_codes, list)
             and isinstance(merged_codes, list)
@@ -853,15 +844,13 @@ class EnterpriseAgentService:
             and len(merged_codes) == len(set(merged_codes))
             and set(previous_codes) == set(merged_codes)
         )
-        has_authoritative_snapshot = (
-            isinstance(previous_event_provenance, list)
-            and any(
-                isinstance(record, dict)
-                and record.get("source_kind") == "approved_document"
-                and record.get("extraction_method")
-                == "regulator_event_snapshot_import"
-                for record in previous_event_provenance
-            )
+        has_authoritative_snapshot = isinstance(
+            previous_event_provenance, list
+        ) and any(
+            isinstance(record, dict)
+            and record.get("source_kind") == "approved_document"
+            and record.get("extraction_method") == "regulator_event_snapshot_import"
+            for record in previous_event_provenance
         )
         if scope_changed:
             merged["field_provenance"].pop(
@@ -959,17 +948,14 @@ class EnterpriseAgentService:
         document = _document(stored)
         validated = _validate_event_snapshot(snapshot, document)
         merged = deep_copy_json(document)
-        merged["operational_context"]["approved_event_codes"] = validated[
-            "event_codes"
-        ]
+        merged["operational_context"]["approved_event_codes"] = validated["event_codes"]
         pointer = "/operational_context/approved_event_codes"
         merged["field_provenance"][pointer] = [
             provenance_record(
                 source_kind="approved_document",
                 source_name=validated["source_system"],
                 locator=(
-                    f"{validated['record_id']}#snapshot="
-                    f"{validated['snapshot_id']}"
+                    f"{validated['record_id']}#snapshot={validated['snapshot_id']}"
                 )[:512],
                 content_sha256=validated["evidence_sha256"],
                 confidence=1.0,
@@ -1030,15 +1016,11 @@ class EnterpriseAgentService:
             or not observation_ids
             or len(observation_ids) > 10_000
             or any(
-                not isinstance(item, str)
-                or not item.strip()
-                or len(item.strip()) > 256
+                not isinstance(item, str) or not item.strip() or len(item.strip()) > 256
                 for item in observation_ids
             )
         ):
-            raise ValueError(
-                "observation_ids 必须是 1-10000 个非空观测编号"
-            )
+            raise ValueError("observation_ids 必须是 1-10000 个非空观测编号")
         cleaned = [item.strip() for item in observation_ids]
         if len(cleaned) != len(set(cleaned)):
             raise ValueError("observation_ids 不能重复")

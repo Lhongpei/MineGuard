@@ -87,6 +87,7 @@ from .external_submission import (
     to_governed_production_request,
     validate_enterprise_submission_json,
 )
+from .five_quantity import FiveQuantityImportFailure
 from .edge_ingest import (
     EDGE_AUTH_WINDOW_SECONDS,
     EDGE_BATCH_CONTRACT_VERSION,
@@ -163,8 +164,10 @@ from .models import (
     StrictModel,
 )
 from .monitoring import (
+    active_temporal_parameters,
     initialize_temporal_model_snapshot,
     refresh_temporal_audit,
+    verified_normal_run_ids,
 )
 from .notifications import (
     SafetyNotificationDispatcher,
@@ -184,6 +187,10 @@ from .operations import (
     OperationsError,
     ReadinessCheckResult,
     ReadinessChecker,
+)
+from .operational_five_quantity import (
+    OperationalFiveQuantityFileRequest,
+    analyze_operational_five_quantity_file,
 )
 from .personnel import match_personnel
 from .portfolio import (
@@ -220,6 +227,10 @@ from .verification import (
 
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
 WEB_ROOT = Path(__file__).resolve().with_name("web")
+OPERATIONAL_FIVE_QUANTITY_ANALYSIS_PATH = (
+    "/v1/analyze/operational-five-quantity-monthly-file"
+)
+_OPERATIONAL_FIVE_QUANTITY_ANALYSIS_SLOTS = threading.BoundedSemaphore(2)
 
 # Deliberately use an allowlist instead of translating arbitrary URL paths
 # into filesystem paths.  Besides keeping the public surface small, this
@@ -253,6 +264,7 @@ COMPUTE_ONLY_POST_ROUTES = frozenset(
         "/v1/analyze/flow",
         "/v1/analyze/aggregation",
         "/v1/analyze/temporal",
+        OPERATIONAL_FIVE_QUANTITY_ANALYSIS_PATH,
         "/v1/analyze/safety",
     }
 )
@@ -1345,7 +1357,10 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/analyze/production/batch":
             self._send_method_not_allowed("POST")
             return
-        if path in self._post_routes:
+        if (
+            path in self._post_routes
+            or path == OPERATIONAL_FIVE_QUANTITY_ANALYSIS_PATH
+        ):
             self._send_method_not_allowed("POST")
             return
         self._send_not_found()
@@ -1367,6 +1382,50 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
     def _dispatch_POST(self) -> None:
         parsed = urlsplit(self.path)
         path = parsed.path
+        if path == OPERATIONAL_FIVE_QUANTITY_ANALYSIS_PATH:
+            if parsed.query:
+                self._send_error(
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_query",
+                    "operational five-quantity analysis does not accept "
+                    "query parameters",
+                )
+                return
+            media_type = self.headers.get("Content-Type", "").partition(";")[
+                0
+            ].strip().lower()
+            if media_type != "application/json":
+                self._send_error(
+                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                    "unsupported_media_type",
+                    "Content-Type must be application/json",
+                )
+                return
+            principal = self._require_authenticated(require_csrf=True)
+            if principal is not None:
+                if not _OPERATIONAL_FIVE_QUANTITY_ANALYSIS_SLOTS.acquire(
+                    blocking=False
+                ):
+                    # The request body has deliberately not been read.  Close
+                    # this HTTP/1.1 connection so unread bytes cannot be
+                    # interpreted as a subsequent request on the same socket.
+                    self.close_connection = True
+                    self._send_error(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        "five_quantity_analysis_busy",
+                        "operational five-quantity analysis capacity is busy; "
+                        "retry later",
+                        headers={
+                            "Retry-After": "1",
+                            "Connection": "close",
+                        },
+                    )
+                    return
+                try:
+                    self._handle_operational_five_quantity_analysis(principal)
+                finally:
+                    _OPERATIONAL_FIVE_QUANTITY_ANALYSIS_SLOTS.release()
+            return
         if path == "/v1/enterprise-submissions":
             if parsed.query:
                 self._send_external_error(
@@ -2117,7 +2176,7 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
         principal: Principal,
         action: str,
         detail: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         try:
             self._auth_store.record_audit_event(
                 action,
@@ -2125,8 +2184,10 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                 client_id=str(self.client_address[0]),
                 detail=detail,
             )
+            return True
         except Exception:
             self.log_error("audit event could not be persisted")
+            return False
 
     @staticmethod
     def _principal_payload(principal: Principal) -> dict[str, Any]:
@@ -3687,6 +3748,142 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                 "requeued_delivery_count": changed,
             },
         )
+
+    def _handle_operational_five_quantity_analysis(
+        self,
+        principal: Principal,
+    ) -> None:
+        """Run a scoped, non-persistent operator-uploaded monthly analysis."""
+
+        if self._auth_required and principal.role not in {
+            Role.ADMIN,
+            Role.SUPERVISOR,
+        }:
+            self._send_error(
+                HTTPStatus.FORBIDDEN,
+                "permission_denied",
+                "operational five-quantity analysis requires an "
+                "administrator or scoped supervisor",
+            )
+            return
+        validated = self._read_model(OperationalFiveQuantityFileRequest)
+        if validated is None:
+            return
+        request = validated
+        assert isinstance(request, OperationalFiveQuantityFileRequest)
+        if (
+            "report_month" not in request.model_fields_set
+            or request.report_month is None
+        ):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "report_month_required",
+                "report_month is required for the production monthly "
+                "analysis route",
+            )
+            return
+        report_month_start = date.fromisoformat(
+            f"{request.report_month}-01"
+        )
+        if request.closed_through < report_month_start:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_report_period",
+                "closed_through cannot be earlier than report_month",
+            )
+            return
+        if not self._require_permission(
+            principal,
+            Permission.ANALYSIS_RUN,
+            mine_id=request.mine_id,
+        ):
+            return
+        caller_parameter_fields = {
+            "validation",
+            "analysis_parameters",
+        } & request.model_fields_set
+        if caller_parameter_fields:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "governed_parameters_required",
+                "this production analysis route uses server-governed "
+                "validation and analysis parameters; caller overrides are "
+                "not accepted",
+                [
+                    {
+                        "fields": sorted(caller_parameter_fields),
+                    }
+                ],
+            )
+            return
+        try:
+            result = analyze_operational_five_quantity_file(request)
+        except FiveQuantityImportFailure as error:
+            self._send_error(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "five_quantity_import_failed",
+                error.public_message,
+                [{"code": error.code.value}],
+            )
+            return
+        except ValueError:
+            self._send_error(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "five_quantity_analysis_failed",
+                "the operational five-quantity file could not be analyzed",
+            )
+            return
+        except Exception:
+            self.log_error("operational five-quantity analysis failed")
+            self._send_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal server error",
+            )
+            return
+        audit_persisted = self._record_audit(
+            principal,
+            "operational_five_quantity_analysis_completed",
+            {
+                "mine_id": result.mine_id,
+                "report_month": result.report_month,
+                "closed_through": (
+                    result.coverage.closed_through.isoformat()
+                ),
+                "source_sha256": result.source_sha256,
+                "method_version": result.method_version,
+                "configuration_sha256": result.configuration.sha256,
+                "overall_status": result.overall.status.value,
+                "event_count": len(result.events),
+                "priority_event_count": (
+                    result.overall.priority_event_count
+                ),
+                "check_event_count": result.overall.check_event_count,
+                "observation_event_count": (
+                    result.overall.observation_event_count
+                ),
+                "input_and_analysis_result_persisted": False,
+                "audit_metadata_scope": (
+                    "metadata_only_no_file_or_daily_payload"
+                ),
+            },
+        )
+        if not audit_persisted:
+            self._send_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "audit_persistence_failed",
+                "analysis completed but its required audit metadata could "
+                "not be persisted; no result was released",
+            )
+            return
+        result = result.model_copy(
+            update={
+                "trust": result.trust.model_copy(
+                    update={"audit_metadata_persisted": True}
+                )
+            }
+        )
+        self._send_json(HTTPStatus.OK, result)
 
     def _handle_verification_analysis(
         self,
@@ -6988,6 +7185,15 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                 "minimum_history": parameters.min_history,
                 "minimum_quality": parameters.min_baseline_quality,
                 "minimum_scale": parameters.minimum_scale,
+                "minimum_relative_scale": (
+                    parameters.minimum_relative_scale
+                ),
+                "reset_confirmation_points": (
+                    parameters.baseline_reset_confirmation_points
+                ),
+                "reset_candidate_max_gap_seconds": (
+                    parameters.baseline_reset_candidate_max_gap_seconds
+                ),
             },
             "rolling_mad": {
                 "robust_z": parameters.mad_z_threshold,
@@ -7010,6 +7216,12 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                 ),
                 "maximum_revision_count": (
                     parameters.max_revision_count
+                ),
+            },
+            "episode": {
+                "maximum_gap_seconds": parameters.episode_max_gap_seconds,
+                "maximum_normal_points": (
+                    parameters.episode_max_normal_points
                 ),
             },
         }
@@ -7037,6 +7249,7 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
         start_at: datetime,
         end_at: datetime,
         history_start_at: datetime | None = None,
+        baseline_eligible_run_ids: set[str] | None = None,
     ) -> tuple[list[TemporalObservation], dict[str, Any]]:
         scoped_mines = (
             None if visible_mines is None else set(visible_mines)
@@ -7051,6 +7264,9 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
         rejected_rows = 0
         warmup_rows = 0
         ambiguous_rows = 0
+        baseline_eligible_rows = 0
+        baseline_ineligible_rows = 0
+        eligible_run_ids = baseline_eligible_run_ids or set()
 
         for feature in features:
             if not isinstance(feature, dict):
@@ -7173,11 +7389,24 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             if visible:
                 accepted_rows += 1
                 revision_rows += revision_count
+                if (
+                    str(selected_feature_row.get("run_id") or "")
+                    in eligible_run_ids
+                ):
+                    baseline_eligible_rows += 1
+                else:
+                    baseline_ineligible_rows += 1
             observations.append(
                 TemporalObservation.model_validate(
                     {
                         **selected.model_dump(),
                         "revision_count": revision_count,
+                        "baseline_eligible": (
+                            str(
+                                selected_feature_row.get("run_id") or ""
+                            )
+                            in eligible_run_ids
+                        ),
                     }
                 )
             )
@@ -7190,6 +7419,12 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
             "rejected_feature_row_count": rejected_rows,
             "ambiguous_feature_row_count": ambiguous_rows,
             "warmup_feature_row_count": warmup_rows,
+            "baseline_eligible_feature_row_count": (
+                baseline_eligible_rows
+            ),
+            "baseline_ineligible_feature_row_count": (
+                baseline_ineligible_rows
+            ),
         }
 
     def _handle_temporal_dashboard(
@@ -7234,7 +7469,7 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
 
         end_at = datetime.now(UTC)
         start_at = end_at - timedelta(days=days)
-        parameters = TemporalDetectionParameters()
+        parameters = active_temporal_parameters()
         warmup_days = max(90, parameters.baseline_window * 2)
         history_start_at = start_at - timedelta(days=warmup_days)
         feature_limit = 100_000
@@ -7271,6 +7506,9 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                 self._temporal_detector_thresholds(parameters)
             ),
             "feature_version": ALGORITHM_FEATURE_VERSION,
+            "baseline_admission_policy": (
+                "current_verified_normal_and_reference_eligible"
+            ),
             "generated_at": end_at.isoformat(),
             "demo_dataset": self._active_demo_dataset(visible_mines),
         }
@@ -7294,6 +7532,8 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                         "rejected_feature_row_count": 0,
                         "ambiguous_feature_row_count": 0,
                         "warmup_feature_row_count": 0,
+                        "baseline_eligible_feature_row_count": 0,
+                        "baseline_ineligible_feature_row_count": 0,
                         "series_count": 0,
                         "point_count": 0,
                         "missing_count": 0,
@@ -7301,12 +7541,21 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                         "revised_count": 0,
                         "low_quality_count": 0,
                         "baseline_accepted_count": 0,
+                        "baseline_ineligible_count": 0,
                         "feature_limit_reached": True,
                         "status": "degraded",
                     },
                 },
             )
             return
+        eligible_run_ids = verified_normal_run_ids(
+            self._repository,
+            mine_ids=(
+                None
+                if visible_mines is None
+                else set(visible_mines)
+            ),
+        )
         observations, feature_health = (
             self._temporal_observations_from_features(
                 features,
@@ -7314,6 +7563,7 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                 start_at=start_at,
                 end_at=end_at,
                 history_start_at=history_start_at,
+                baseline_eligible_run_ids=eligible_run_ids,
             )
         )
 
@@ -7340,6 +7590,11 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                         "revised_count": 0,
                         "low_quality_count": 0,
                         "baseline_accepted_count": 0,
+                        "baseline_ineligible_count": (
+                            feature_health[
+                                "baseline_ineligible_feature_row_count"
+                            ]
+                        ),
                         "feature_limit_reached": (
                             feature_limit_reached
                         ),
@@ -7420,6 +7675,10 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
                     ),
                     "baseline_accepted_count": sum(
                         item.baseline_accepted_count
+                        for item in source_health
+                    ),
+                    "baseline_ineligible_count": sum(
+                        item.baseline_ineligible_count
                         for item in source_health
                     ),
                     "feature_limit_reached": feature_limit_reached,

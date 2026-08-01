@@ -692,6 +692,97 @@ def _seed_casework_history(
             )
             counters["waiting_data"] += 1
 
+    # The hash-based distribution above gives variety without hard-coding a
+    # particular case.  Calendar-dependent case identifiers can nevertheless
+    # make a small demo window land in buckets with no completed example.  A
+    # usable demo must deterministically contain at least one full two-person
+    # closure path, so promote the oldest still-pending historical case only
+    # when the distribution did not already create one.
+    if counters["closed"] == 0:
+        candidates_for_closure = [
+            item
+            for item in repository.list_cases(include_archived=True)
+            if item["mine_id"] in _demo_ids()
+            and str(item["batch_id"]).startswith(DEMO_BATCH_PREFIX)
+            and item["workflow_status"]
+            in {
+                "pending",
+                "assigned",
+                "reviewing",
+                "waiting_data",
+                "pending_approval",
+            }
+            and (
+                anchor_end
+                - datetime.fromisoformat(
+                    str(item["created_at"]).replace("Z", "+00:00")
+                ).astimezone(UTC)
+            ).days
+            >= 3
+        ]
+        if candidates_for_closure:
+            current = min(
+                candidates_for_closure,
+                key=lambda item: str(item["created_at"]),
+            )
+            created = datetime.fromisoformat(
+                str(current["created_at"]).replace("Z", "+00:00")
+            ).astimezone(UTC)
+            if current["workflow_status"] == "pending":
+                current = repository.apply_case_action(
+                    str(current["case_id"]),
+                    action="assign",
+                    expected_version=int(current["version"]),
+                    actor="demo-dispatcher",
+                    assignee=(
+                        "演示数据专员"
+                        if current["issue_code"] == "missing_report"
+                        else "演示核查员"
+                    ),
+                    occurred_at=created + timedelta(hours=1),
+                )
+            if current["workflow_status"] == "assigned":
+                if current["issue_code"] == "missing_report":
+                    current = repository.apply_case_action(
+                        str(current["case_id"]),
+                        action="request_data",
+                        expected_version=int(current["version"]),
+                        actor="demo-reviewer-a",
+                        note="演示流程：已向企业端发出补报请求。",
+                        occurred_at=created + timedelta(hours=8),
+                    )
+                else:
+                    current = repository.apply_case_action(
+                        str(current["case_id"]),
+                        action="start_review",
+                        expected_version=int(current["version"]),
+                        actor="demo-reviewer-a",
+                        occurred_at=created + timedelta(hours=6),
+                    )
+            if current["issue_code"] == "missing_report":
+                disposition = "data_insufficient"
+            else:
+                disposition = "confirmed_technical_issue"
+            if current["workflow_status"] != "pending_approval":
+                current = repository.apply_case_action(
+                    str(current["case_id"]),
+                    action="submit_conclusion",
+                    expected_version=int(current["version"]),
+                    actor="demo-reviewer-a",
+                    note="演示结论：保证至少展示一条完整双人闭环。",
+                    disposition=disposition,
+                    occurred_at=created + timedelta(hours=30),
+                )
+            repository.apply_case_action(
+                str(current["case_id"]),
+                action="approve",
+                expected_version=int(current["version"]),
+                actor="demo-approver-b",
+                note="演示审批：双人复核通过，仅用于功能展示。",
+                occurred_at=created + timedelta(hours=48),
+            )
+            counters["closed"] = 1
+
     refreshed = [
         item
         for item in repository.list_cases(include_archived=True)

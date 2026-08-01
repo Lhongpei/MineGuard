@@ -19,7 +19,8 @@ server {
     server_tokens off;
     access_log /var/log/nginx/enterprise-agent.access.log enterprise_agent_safe;
 
-    client_max_body_size 2m;
+    # A 20 MiB source file expands to roughly 27 MiB as base64 JSON.
+    client_max_body_size 32m;
     client_body_timeout 30s;
 
     add_header Strict-Transport-Security "max-age=31536000" always;

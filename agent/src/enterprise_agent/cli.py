@@ -15,6 +15,8 @@ from . import __version__
 from .auth import build_auth_manager, hash_password, is_loopback
 from .client import PlatformClient
 from .errors import AgentError
+from .five_quantity_exchange import FiveQuantityPlatformClient
+from .five_quantity_runtime import FiveQuantityRuntime
 from .http_api import serve
 from .llm import OpenAICompatibleProvider
 from .service import EnterpriseAgentService
@@ -34,8 +36,22 @@ def _json_object(text: str) -> dict[str, Any]:
 
 
 def _service(settings: Settings) -> EnterpriseAgentService:
+    repository = Repository(settings.database_path)
+    five_quantity_runtime = FiveQuantityRuntime(
+        repository,
+        identity=settings.five_quantity_identity,
+        platform_client=(
+            FiveQuantityPlatformClient(settings.five_quantity_platform)
+            if settings.five_quantity_platform is not None
+            else None
+        ),
+        watched_directories=settings.five_quantity_watch_directories,
+        quarantine_directory=settings.five_quantity_quarantine_directory,
+        poll_seconds=settings.five_quantity_poll_seconds,
+        stable_seconds=settings.five_quantity_stable_seconds,
+    )
     return EnterpriseAgentService(
-        Repository(settings.database_path),
+        repository,
         platform_client=(
             PlatformClient(settings.platform) if settings.platform is not None else None
         ),
@@ -47,6 +63,7 @@ def _service(settings: Settings) -> EnterpriseAgentService:
             llm_config=settings.llm,
         ),
         agent_v2_config=settings.agent_v2,
+        five_quantity_runtime=five_quantity_runtime,
     )
 
 
@@ -117,54 +134,40 @@ def _startup_banner(
         account_status = "匿名本机开发身份（仅限调试）"
     else:
         account_status = "演示账号 demo / 123123123（只能查看和编辑）"
+    watched_status = (
+        "；".join(settings.five_quantity_watch_directories)
+        if settings.five_quantity_watch_directories
+        else "未配置（仍可人工上传或调用受控直采 API）"
+    )
     print(
         "\n企业可信数据填报智能体已启动（前台运行）\n"
         f"{access}\n"
         f"账号状态：{account_status}\n"
         f"数据库：{service.repository.path}\n"
+        f"本实例煤矿：{settings.five_quantity_identity.mine_name} "
+        f"({settings.five_quantity_identity.mine_id})\n"
+        f"经营主体：{settings.five_quantity_identity.operator_name} "
+        f"({settings.five_quantity_identity.operator_id})\n"
+        f"企业智能体：{settings.five_quantity_identity.system_id}（一矿一实例）\n"
         f"前端资源：{web_root.resolve()}\n"
-        "监管平台："
+        "五量 V2 监管接口："
         + (
-            "已配置；登录后可在页面检查在线及合同兼容状态"
-            if service.platform_client is not None
-            else "未配置；当前可保存、导入和预检，不能提交"
+            "已配置；应用消息与运输使用显式、不同的 HMAC 密钥"
+            if settings.five_quantity_platform is not None
+            else "未配置；当前可导入、复核和可靠排队，不能送达政府"
         )
-        + "\n模型辅助："
-        + (
-            "已配置（启动时未探测接口连通性）"
-            if service.llm_provider is not None
-            else "未配置；使用确定性规则模式"
-        )
-        + "\n煤炭新闻搜索："
-        + (
-            "已启用百度优先、多源后备检索（启动时未探测网络连通性）"
-            if service.skills.available("coal-news-search")
-            else "已关闭（可设置 COAL_NEWS_SEARCH_ENABLED=true 启用）"
-        )
-        + "\n新闻 AI 总结："
-        + (
-            "已启用；仅总结公开搜索标题与片段并保留来源编号"
-            if service.llm_provider is not None
-            else "未配置模型；检索成功时仍展示确定性来源列表"
-        )
-        + "\n耐久任务流："
-        + (
-            "已启用（只读煤炭体检、可恢复步骤和人工治理）"
-            if settings.agent_v2.enabled
-            else "已关闭"
-        )
-        + "\n任务调度器："
-        + (
-            "已启用（仅触发白名单只读工作流）"
-            if settings.agent_v2.enabled
-            and settings.agent_v2.scheduler_enabled
-            else "未启用；仍可手动运行"
-            if settings.agent_v2.enabled
-            else "不可用"
-        )
+        + f"\n固定目录：{watched_status}"
+        + f"\n异常隔离：{settings.five_quantity_quarantine_directory}"
+        + "\n业务前端：收件箱 → 规范化复核报送 → 风险解读回复 → 留痕设置"
         + "\n保持此终端运行；按 Ctrl+C 可安全停止。\n",
         flush=True,
     )
+    if settings.five_quantity_demo_secret:
+        print(
+            "警告：五量 V2 当前使用本机演示消息密钥，只能离线体验；连接监管平台前"
+            "必须配置 ENTERPRISE_EXCHANGE_HMAC_SECRET。",
+            file=sys.stderr,
+        )
 
 
 def _print(value: Any) -> None:
@@ -289,10 +292,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         settings = Settings.from_environment()
         if args.db:
+            overridden_state = (
+                Path("./data").resolve()
+                if args.db == ":memory:"
+                else Path(args.db).expanduser().resolve().parent
+            )
             settings = Settings(
                 **{
                     **settings.__dict__,
                     "database_path": args.db,
+                    "five_quantity_quarantine_directory": str(
+                        overridden_state / "five-quantity-quarantine"
+                    ),
                 }
             )
         service = _service(settings)

@@ -1,0 +1,1887 @@
+"""HTTP boundary for the V2 two-product regulatory workflow.
+
+The leadership surface in this module is deliberately read-only.  Its only
+business mutations are authenticated machine-to-machine exchange messages
+sent by one mine's independently deployed enterprise agent.
+"""
+
+from __future__ import annotations
+
+import base64
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import mimetypes
+import os
+from pathlib import Path
+import re
+from threading import BoundedSemaphore
+from typing import Any, Callable, Mapping
+from urllib.parse import parse_qsl, urlsplit
+from uuid import NAMESPACE_URL, uuid4, uuid5
+from zoneinfo import ZoneInfo
+
+from pydantic import ValidationError
+
+from .auth import (
+    CsrfValidationError,
+    InvalidCredentialsError,
+    InvalidSessionError,
+    LocalAuthStore,
+    LoginRateLimitedError,
+    Principal,
+    Role,
+    clear_session_cookie_header,
+    session_cookie_header,
+)
+from .exchange_v2 import (
+    EXCHANGE_NONCE_RETENTION_SECONDS,
+    EnterpriseRiskResponseMessage,
+    ExchangeAuthenticationError,
+    ExchangeClient,
+    ExchangeLineageError,
+    FiveQuantitySubmissionMessage,
+    RiskDeliveryAckMessage,
+    authenticate_transport,
+    decode_inbound_message,
+    parse_exchange_clients,
+    sign_exchange_message,
+    validate_exchange_lineage,
+    verify_exchange_message_signature,
+)
+from .external_submission import jcs_canonical_json
+from .regulatory_v2 import DecisionStatus, METRICS
+from .regulatory_v2_store import (
+    AnalysisReport,
+    AuditProjection,
+    ExchangeMessageInput,
+    FindingProjection,
+    OutboxItem,
+    RegulatoryV2ConflictError,
+    RegulatoryV2NotFoundError,
+    RegulatoryV2Store,
+    ResponseBatchReceipt,
+)
+
+
+_SESSION_COOKIE = "mineguard_session"
+_MAX_JSON_BYTES = 32 * 1024 * 1024
+_UUID_PATH = r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+_SUBMISSION_RECEIPT = re.compile(
+    rf"^/v2/five-quantity-submissions/(?P<id>{_UUID_PATH})/receipt$"
+)
+_REPORT = re.compile(rf"^/v2/analysis-reports/(?P<id>{_UUID_PATH})$")
+_REPORT_ACK = re.compile(rf"^/v2/analysis-reports/(?P<id>{_UUID_PATH})/delivery-ack$")
+_REPORT_RESPONSE = re.compile(rf"^/v2/analysis-reports/(?P<id>{_UUID_PATH})/responses$")
+_RESPONSE_RECEIPT = re.compile(rf"^/v2/risk-responses/(?P<id>{_UUID_PATH})/receipt$")
+_MINE_DETAIL = re.compile(
+    r"^/v2/regulatory/mines/(?P<id>[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$"
+)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _iso(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("timestamp must include a timezone")
+    return (
+        value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    )
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _hash_json(value: Any) -> str:
+    return sha256(jcs_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _stable_uuid(label: str) -> str:
+    return str(uuid5(NAMESPACE_URL, f"mineguard:v2:{label}"))
+
+
+def _message_nonce(message_id: str) -> str:
+    raw = sha256(f"mineguard:v2:message-nonce:{message_id}".encode()).digest()[:16]
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _semantic_engine_version(method_version: str) -> str:
+    matched = re.search(r"v([1-9][0-9]*\.[0-9]+\.[0-9]+)$", method_version)
+    if matched is None:
+        raise ValueError("algorithm method_version lacks a semantic version suffix")
+    return matched.group(1)
+
+
+def _principal_json(principal: Principal) -> dict[str, Any]:
+    return {
+        "user_id": principal.user_id,
+        "username": principal.username,
+        "role": principal.role.value,
+        "mine_scopes": list(principal.mine_scopes),
+        "business_access": "read_only",
+    }
+
+
+class RegulatoryV2HTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        *,
+        store: RegulatoryV2Store,
+        auth_store: LocalAuthStore,
+        clients: Mapping[str, ExchangeClient],
+        auth_required: bool,
+        secure_cookie: bool,
+        platform_system_id: str,
+        platform_party_id: str,
+        platform_key_id: str,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self.store = store
+        self.auth_store = auth_store
+        self.clients = dict(clients)
+        self.auth_required = auth_required
+        self.secure_cookie = secure_cookie
+        self.platform_system_id = platform_system_id
+        self.platform_party_id = platform_party_id
+        self.platform_key_id = platform_key_id
+        self.clock = clock
+        self.integrity_valid = store.verify_integrity()
+        self.analysis_slots = {
+            sender_id: BoundedSemaphore(1) for sender_id in self.clients
+        }
+        self._resources_closed = False
+        super().__init__(address, RegulatoryV2RequestHandler)
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            if not self._resources_closed:
+                self._resources_closed = True
+                self.store.close()
+                self.auth_store.close()
+
+
+class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
+    server: RegulatoryV2HTTPServer
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format: str, *args: object) -> None:
+        super().log_message(format, *args)
+
+    def do_GET(self) -> None:  # noqa: N802
+        self._guard(self._dispatch_get)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        if path.startswith("/v2/analysis-reports") or path.startswith(
+            "/v2/five-quantity-submissions"
+        ) or path.startswith("/v2/risk-responses"):
+            self._send_empty(405, {"Allow": "GET, POST, OPTIONS"})
+            return
+        self._guard(lambda: self._dispatch_get(head_only=True))
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._guard(self._dispatch_post)
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self._send_empty(204, {"Allow": "GET, HEAD, POST, OPTIONS"})
+
+    def _guard(self, operation: Callable[[], None]) -> None:
+        try:
+            operation()
+        except ExchangeAuthenticationError:
+            self._send_error(401, "exchange_authentication_failed", "交换认证失败")
+        except LoginRateLimitedError as error:
+            self._send_error(
+                429,
+                "login_rate_limited",
+                "登录尝试过多，请稍后重试",
+                headers={"Retry-After": str(error.retry_after_seconds)},
+            )
+        except (InvalidCredentialsError, InvalidSessionError):
+            self._send_error(401, "authentication_required", "请先登录")
+        except CsrfValidationError:
+            self._send_error(403, "csrf_failed", "请求校验失败")
+        except RegulatoryV2ConflictError as error:
+            self._send_error(409, "immutable_conflict", str(error))
+        except ExchangeLineageError as error:
+            self._send_error(409, "lineage_conflict", str(error))
+        except RegulatoryV2NotFoundError:
+            self._send_error(404, "not_found", "未找到当前身份可访问的记录")
+        except ValidationError as error:
+            self._send_error(
+                422,
+                "contract_validation_failed",
+                "报文不符合 V2 契约",
+                detail=error.errors(include_url=False),
+            )
+        except (ValueError, json.JSONDecodeError) as error:
+            self._send_error(400, "invalid_request", str(error))
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception as error:  # pragma: no cover - defensive HTTP boundary
+            self.log_error("unhandled V2 request error: %r", error)
+            self._send_error(500, "internal_error", "服务暂时无法完成请求")
+
+    # ------------------------------------------------------------------
+    # Routing
+
+    def _dispatch_get(self, *, head_only: bool = False) -> None:
+        parsed = urlsplit(self.path)
+        path = parsed.path
+        if path == "/healthz":
+            self._send_json(
+                200, {"status": "ok", "service": "mineguard-v2"}, head_only=head_only
+            )
+            return
+        if path == "/readyz":
+            if not self.server.clients:
+                self._send_error(
+                    503,
+                    "not_ready",
+                    "尚未配置任何一矿一智能体交换身份",
+                )
+                return
+            self.server.store.list_mine_overviews()
+            self._send_json(
+                200,
+                {
+                    "status": "ready",
+                    "service": "mineguard-v2",
+                    "configured_mines": len(self.server.clients),
+                },
+                head_only=head_only,
+            )
+            return
+        if path in {"/", "/index.html", "/assets/app.js", "/assets/styles.css"}:
+            self._serve_static(path, head_only=head_only)
+            return
+        if path == "/v2/auth/me":
+            principal = self._government_principal()
+            self._send_json(
+                200, {"principal": _principal_json(principal)}, head_only=head_only
+            )
+            return
+        if path == "/v2/auth/csrf":
+            if not self.server.auth_required:
+                self._send_json(
+                    200, {"csrf_token": "local-no-auth"}, head_only=head_only
+                )
+                return
+            token = self._session_token()
+            principal, csrf_token = self.server.auth_store.issue_csrf(token)
+            self._send_json(
+                200,
+                {"principal": _principal_json(principal), "csrf_token": csrf_token},
+                head_only=head_only,
+            )
+            return
+        if path == "/v2/regulatory/overview":
+            principal = self._government_principal()
+            self._send_json(200, self._overview(principal), head_only=head_only)
+            return
+        if path == "/v2/regulatory/mines":
+            principal = self._government_principal()
+            self._send_json(
+                200, {"items": self._mine_rows(principal)}, head_only=head_only
+            )
+            return
+        mine_match = _MINE_DETAIL.fullmatch(path)
+        if mine_match:
+            principal = self._government_principal()
+            self._send_json(
+                200,
+                self._mine_detail(principal, mine_match.group("id")),
+                head_only=head_only,
+            )
+            return
+        if path == "/v2/regulatory/findings":
+            principal = self._government_principal()
+            limit = self._single_int_query(
+                parsed.query, "limit", default=100, maximum=1000
+            )
+            self._send_json(
+                200,
+                {"items": self._finding_rows(principal, limit=limit)},
+                head_only=head_only,
+            )
+            return
+        if path == "/v2/regulatory/exchanges":
+            principal = self._government_principal()
+            limit = self._single_int_query(
+                parsed.query, "limit", default=100, maximum=1000
+            )
+            self._send_json(
+                200,
+                {"items": self._trace_rows(principal, limit=limit)},
+                head_only=head_only,
+            )
+            return
+
+        if path == "/v2/analysis-reports/next":
+            client = self._machine_auth(
+                body=b"", expected_contract="five-quantity-exchange-v2"
+            )
+            after_cursor = self._single_query(parsed.query, "after_cursor")
+            after_sequence = self._cursor_sequence(client.mine_id, after_cursor)
+            item = self._next_response_required_report(client.mine_id, after_sequence)
+            if item is None:
+                self._send_empty(204)
+                return
+            message = self._analysis_report_message(client, item.aggregate_id, item)
+            self._send_json(200, message, head_only=head_only)
+            return
+        receipt_match = _SUBMISSION_RECEIPT.fullmatch(path)
+        if receipt_match:
+            self._reject_query(parsed.query)
+            client = self._machine_auth(
+                body=b"", expected_contract="five-quantity-exchange-v2"
+            )
+            submission_receipt = self.server.store.get_submission_receipt(
+                receipt_match.group("id"), mine_id=client.mine_id
+            )
+            inbound = self._exchange_message(
+                direction="inbound",
+                message_type="five_quantity_submission",
+                predicate=lambda item: (
+                    item.get("message_id") == submission_receipt.submission_id
+                ),
+                mine_id=client.mine_id,
+            )
+            assert inbound is not None
+            self._send_json(
+                200,
+                self._intake_receipt_message(client, inbound, submission_receipt),
+                head_only=head_only,
+            )
+            return
+        report_match = _REPORT.fullmatch(path)
+        if report_match:
+            self._reject_query(parsed.query)
+            client = self._machine_auth(
+                body=b"", expected_contract="five-quantity-exchange-v2"
+            )
+            self._send_json(
+                200,
+                self._analysis_report_message(client, report_match.group("id")),
+                head_only=head_only,
+            )
+            return
+        response_match = _RESPONSE_RECEIPT.fullmatch(path)
+        if response_match:
+            self._reject_query(parsed.query)
+            client = self._machine_auth(
+                body=b"", expected_contract="five-quantity-exchange-v2"
+            )
+            response_receipt = self.server.store.get_response_batch_receipt(
+                response_match.group("id"), mine_id=client.mine_id
+            )
+            self._send_json(
+                200,
+                self._response_receipt_message(client, response_receipt),
+                head_only=head_only,
+            )
+            return
+        self._send_error(404, "not_found", "接口不存在")
+
+    def _dispatch_post(self) -> None:
+        parsed = urlsplit(self.path)
+        path = parsed.path
+        if path == "/v2/auth/login":
+            self._reject_query(parsed.query)
+            payload = self._read_json(limit=64 * 1024)
+            if not self.server.auth_required:
+                self._send_json(
+                    200,
+                    {
+                        "principal": _principal_json(self._no_auth_principal()),
+                        "csrf_token": "local-no-auth",
+                    },
+                )
+                return
+            result = self.server.auth_store.login(
+                str(payload.get("username", "")),
+                str(payload.get("password", "")),
+                client_id=self.client_address[0],
+            )
+            max_age = max(
+                0,
+                int((result.absolute_expires_at - self.server.clock()).total_seconds()),
+            )
+            self._send_json(
+                200,
+                {
+                    "principal": _principal_json(result.principal),
+                    "csrf_token": result.csrf_token,
+                },
+                headers={
+                    "Set-Cookie": session_cookie_header(
+                        result.session_token,
+                        max_age_seconds=max_age,
+                        secure=self.server.secure_cookie,
+                        cookie_name=_SESSION_COOKIE,
+                    )
+                },
+            )
+            return
+        if path == "/v2/auth/logout":
+            self._reject_query(parsed.query)
+            self._read_body(limit=64 * 1024)
+            if self.server.auth_required:
+                token = self._session_token()
+                self.server.auth_store.validate_csrf(
+                    token, self.headers.get("X-CSRF-Token"), method="POST"
+                )
+                self.server.auth_store.logout(token)
+            self._send_empty(
+                204,
+                {
+                    "Set-Cookie": clear_session_cookie_header(
+                        secure=self.server.secure_cookie,
+                        cookie_name=_SESSION_COOKIE,
+                    )
+                },
+            )
+            return
+
+        body = self._read_body()
+        if path == "/v2/five-quantity-submissions":
+            self._reject_query(parsed.query)
+            client = self._machine_auth(body=body)
+            decoded = decode_inbound_message(body)
+            message = decoded.message
+            if not isinstance(message, FiveQuantitySubmissionMessage):
+                raise ValueError("this path requires five_quantity_submission")
+            self._assert_message_binding(message, client)
+            self._validate_governed_context(message, client)
+            payload_hash = verify_exchange_message_signature(
+                message, client, decoded.document
+            )
+            self._validate_submission_time(message)
+            self._validate_submission_lineage(message, client)
+            document = decoded.document
+            slot = self.server.analysis_slots[client.sender_id]
+            if not slot.acquire(blocking=False):
+                self._send_error(
+                    429,
+                    "analysis_concurrency_limited",
+                    "该煤矿已有分析任务正在执行，请稍后按同一幂等键重试",
+                    headers={"Retry-After": "2"},
+                )
+                return
+            try:
+                submission_receipt = self.server.store.submit_and_analyze(
+                    message.to_regulatory_submission(),
+                    agent_id=client.sender_id,
+                    idempotency_key=message.idempotency_key,
+                    exchange_message=ExchangeMessageInput(
+                        message_id=message.message_id,
+                        direction="inbound",
+                        message_type=message.message_type,
+                        mine_id=message.mine_id,
+                        agent_id=client.sender_id,
+                        body=document,
+                        exchanged_at=message.created_at,
+                    ),
+                )
+            finally:
+                slot.release()
+            outbound = self._intake_receipt_message(
+                client,
+                document,
+                submission_receipt,
+                received_payload_sha256=payload_hash,
+            )
+            self._send_json(
+                200 if submission_receipt.idempotent_replay else 202, outbound
+            )
+            return
+
+        ack_match = _REPORT_ACK.fullmatch(path)
+        if ack_match:
+            self._reject_query(parsed.query)
+            client = self._machine_auth(body=body)
+            decoded = decode_inbound_message(body)
+            message = decoded.message
+            if not isinstance(message, RiskDeliveryAckMessage):
+                raise ValueError("this path requires risk_delivery_ack")
+            self._assert_message_binding(message, client)
+            verify_exchange_message_signature(message, client, decoded.document)
+            if message.payload.report_id != ack_match.group("id"):
+                raise ValueError("path report_id differs from acknowledgement")
+            item = self._report_outbox_item(client.mine_id, message.payload.report_id)
+            if item.message_id != message.payload.analysis_report_message_id:
+                raise ValueError(
+                    "acknowledgement does not reference the issued report message"
+                )
+            issued = self.server.store.get_exchange_message(
+                item.message_id, mine_id=client.mine_id, direction="outbound"
+            ).body
+            validate_exchange_lineage(message, allowed_causes=(issued,))
+            self.server.store.record_delivery_ack(
+                message.to_store_ack(),
+                sender_id=client.sender_id,
+                idempotency_key=message.idempotency_key,
+                exchange_message=ExchangeMessageInput(
+                    message_id=message.message_id,
+                    direction="inbound",
+                    message_type=message.message_type,
+                    mine_id=message.mine_id,
+                    agent_id=client.sender_id,
+                    body=decoded.document,
+                    exchanged_at=message.created_at,
+                ),
+            )
+            self._send_empty(204)
+            return
+
+        response_match = _REPORT_RESPONSE.fullmatch(path)
+        if response_match:
+            self._reject_query(parsed.query)
+            client = self._machine_auth(body=body)
+            decoded = decode_inbound_message(body)
+            message = decoded.message
+            if not isinstance(message, EnterpriseRiskResponseMessage):
+                raise ValueError("this path requires enterprise_risk_response")
+            self._assert_message_binding(message, client)
+            verify_exchange_message_signature(message, client, decoded.document)
+            if message.payload.report_id != response_match.group("id"):
+                raise ValueError("path report_id differs from enterprise response")
+            item = self._report_outbox_item(client.mine_id, message.payload.report_id)
+            if item.message_id != message.payload.analysis_report_message_id:
+                raise ValueError(
+                    "response does not reference the issued report message"
+                )
+            issued = self.server.store.get_exchange_message(
+                item.message_id, mine_id=client.mine_id, direction="outbound"
+            ).body
+            self._validate_response_lineage(message, issued, client)
+            self._validate_corrected_submission_references(message, client)
+            response_receipt = self.server.store.record_enterprise_response_batch(
+                message.payload.response_id,
+                message.payload.report_id,
+                message.mine_id,
+                message.to_store_responses(),
+                sender_id=client.sender_id,
+                idempotency_key=message.idempotency_key,
+                exchange_message=ExchangeMessageInput(
+                    message_id=message.message_id,
+                    direction="inbound",
+                    message_type=message.message_type,
+                    mine_id=message.mine_id,
+                    agent_id=client.sender_id,
+                    body=decoded.document,
+                    exchanged_at=message.created_at,
+                ),
+            )
+            outbound = self._response_receipt_message(client, response_receipt)
+            self._send_json(
+                200 if response_receipt.idempotent_replay else 202, outbound
+            )
+            return
+        self._send_error(404, "not_found", "接口不存在")
+
+    # ------------------------------------------------------------------
+    # Authentication and contract binding
+
+    def _machine_auth(
+        self,
+        *,
+        body: bytes,
+        expected_contract: str | None = None,
+    ) -> ExchangeClient:
+        client, request_time, nonce, contract_version = authenticate_transport(
+            self.server.clients,
+            dict(self.headers.items()),
+            method=self.command,
+            request_target=self.path,
+            body=body,
+            now=self.server.clock(),
+        )
+        if expected_contract is not None and contract_version != expected_contract:
+            raise ExchangeAuthenticationError("exchange authentication failed")
+        if expected_contract is None:
+            try:
+                document = json.loads(body)
+                body_contract = document["contract_version"]
+            except (json.JSONDecodeError, KeyError, TypeError) as error:
+                raise ValueError("POST body lacks contract_version") from error
+            if contract_version != body_contract:
+                raise ExchangeAuthenticationError("exchange authentication failed")
+        expiry = self.server.clock().astimezone(UTC) + timedelta(
+            seconds=EXCHANGE_NONCE_RETENTION_SECONDS
+        )
+        if not self.server.store.claim_transport_nonce(
+            client.sender_id,
+            nonce,
+            request_time=request_time,
+            expires_at=expiry,
+        ):
+            raise ExchangeAuthenticationError("exchange authentication failed")
+        return client
+
+    def _assert_message_binding(self, message: Any, client: ExchangeClient) -> None:
+        if (
+            message.sender.system_id != client.sender_id
+            or message.sender.party_id != client.party_id
+            or message.sender.role != "enterprise_agent"
+            or message.recipient.system_id != self.server.platform_system_id
+            or message.recipient.party_id != self.server.platform_party_id
+            or message.recipient.role != "regulatory_platform"
+            or message.mine_id != client.mine_id
+        ):
+            raise ExchangeAuthenticationError("exchange authentication failed")
+
+    def _validate_governed_context(
+        self,
+        message: FiveQuantitySubmissionMessage,
+        client: ExchangeClient,
+    ) -> None:
+        if client.comparison_context is None:
+            raise ValueError(
+                "government client registry lacks the mine comparison_context"
+            )
+        if message.payload.comparison_context.model_dump() != dict(
+            client.comparison_context
+        ):
+            raise RegulatoryV2ConflictError(
+                "self-reported comparison context differs from government registry"
+            )
+        if (
+            client.mine_name is not None
+            and message.payload.mine.mine_name != client.mine_name
+        ):
+            raise RegulatoryV2ConflictError(
+                "self-reported mine name differs from government registry"
+            )
+
+    def _validate_submission_lineage(
+        self,
+        message: FiveQuantitySubmissionMessage,
+        client: ExchangeClient,
+    ) -> None:
+        if message.revision == 1:
+            if message.correlation_id != message.message_id:
+                raise ExchangeLineageError(
+                    "initial submission correlation_id must equal message_id"
+                )
+            validate_exchange_lineage(message)
+            return
+        assert message.predecessor is not None
+        try:
+            predecessor = self.server.store.get_exchange_message(
+                message.predecessor.message_id,
+                mine_id=client.mine_id,
+                direction="inbound",
+            ).body
+        except RegulatoryV2NotFoundError as error:
+            raise ExchangeLineageError(
+                "direct predecessor is not a verified submission in this mine"
+            ) from error
+        if predecessor.get("message_type") != "five_quantity_submission":
+            raise ExchangeLineageError(
+                "direct predecessor is not a five-quantity submission"
+            )
+        causes: list[Mapping[str, Any]] = []
+        if message.causation_id != message.predecessor.message_id:
+            try:
+                cause = self.server.store.get_exchange_message(
+                    str(message.causation_id), mine_id=client.mine_id
+                ).body
+            except RegulatoryV2NotFoundError as error:
+                raise ExchangeLineageError(
+                    "causation_id is not a verified message in this mine"
+                ) from error
+            if cause.get("message_type") not in {
+                "analysis_report",
+                "enterprise_risk_response",
+                "five_quantity_submission",
+            }:
+                raise ExchangeLineageError(
+                    "causation message type cannot trigger a correction"
+                )
+            causes.append(cause)
+        validate_exchange_lineage(
+            message,
+            predecessor=predecessor,
+            allowed_causes=causes,
+        )
+
+    def _validate_response_lineage(
+        self,
+        message: EnterpriseRiskResponseMessage,
+        issued_report: Mapping[str, Any],
+        client: ExchangeClient,
+    ) -> None:
+        if message.revision == 1:
+            validate_exchange_lineage(message, allowed_causes=(issued_report,))
+            return
+        assert message.predecessor is not None
+        try:
+            predecessor = self.server.store.get_exchange_message(
+                message.predecessor.message_id,
+                mine_id=client.mine_id,
+                direction="inbound",
+            ).body
+        except RegulatoryV2NotFoundError as error:
+            raise ExchangeLineageError(
+                "response predecessor is not a verified message in this mine"
+            ) from error
+        if (
+            predecessor.get("message_type") != "enterprise_risk_response"
+            or predecessor.get("payload", {}).get("report_id")
+            != message.payload.report_id
+        ):
+            raise ExchangeLineageError(
+                "response revision must directly continue the same report response"
+            )
+        validate_exchange_lineage(
+            message,
+            predecessor=predecessor,
+            allowed_causes=(issued_report,),
+        )
+
+    def _validate_submission_time(
+        self,
+        message: FiveQuantitySubmissionMessage,
+    ) -> None:
+        now = self.server.clock().astimezone(UTC)
+        maximum_future = now + timedelta(minutes=5)
+        if (
+            message.created_at > maximum_future
+            or message.signature_envelope.signed_at > maximum_future
+            or message.payload.closed_at > maximum_future
+        ):
+            raise ValueError("submission contains a future application timestamp")
+        local_today = now.astimezone(ZoneInfo(message.payload.timezone)).date()
+        if message.payload.period_end > local_today:
+            raise ValueError("future reporting periods cannot be analysed")
+        last_shift_end = max(
+            shift.end_at
+            for day in message.payload.days
+            for shift in (
+                day.reported_quantity.shifts.zero_shift,
+                day.reported_quantity.shifts.eight_shift,
+                day.reported_quantity.shifts.four_shift,
+            )
+        )
+        if message.payload.closed_at < last_shift_end:
+            raise ValueError("report cannot close before its final shift ends")
+
+    def _government_principal(self) -> Principal:
+        if not self.server.auth_required:
+            return self._no_auth_principal()
+        return self.server.auth_store.authenticate(self._session_token())
+
+    @staticmethod
+    def _no_auth_principal() -> Principal:
+        return Principal(
+            user_id="local-no-auth",
+            username="local-demo",
+            role=Role.ADMIN,
+            mine_scopes=(),
+            session_id="local-no-auth",
+        )
+
+    def _session_token(self) -> str:
+        cookie = SimpleCookie()
+        cookie.load(self.headers.get("Cookie", ""))
+        morsel = cookie.get(_SESSION_COOKIE)
+        if morsel is None or not morsel.value:
+            raise InvalidSessionError("session token is required")
+        return morsel.value
+
+    # ------------------------------------------------------------------
+    # Signed outbound messages
+
+    def _base_outbound_message(
+        self,
+        client: ExchangeClient,
+        *,
+        contract_version: str,
+        message_type: str,
+        message_id: str,
+        correlation_id: str,
+        causation_id: str,
+        idempotency_key: str,
+        created_at: datetime,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        timestamp = _iso(created_at)
+        message = {
+            "contract_version": contract_version,
+            "message_type": message_type,
+            "message_id": message_id,
+            "correlation_id": correlation_id,
+            "causation_id": causation_id,
+            "idempotency_key": idempotency_key,
+            "revision": 1,
+            "predecessor": None,
+            "created_at": timestamp,
+            "sender": {
+                "system_id": self.server.platform_system_id,
+                "party_id": self.server.platform_party_id,
+                "role": "regulatory_platform",
+            },
+            "recipient": {
+                "system_id": client.sender_id,
+                "party_id": client.party_id,
+                "role": "enterprise_agent",
+            },
+            "mine_id": client.mine_id,
+            "payload": payload,
+            "signature_envelope": {
+                "algorithm": "hmac-sha256-v2",
+                "canonicalization": "rfc8785-jcs",
+                "key_id": self.server.platform_key_id,
+                "signed_at": timestamp,
+                "nonce": _message_nonce(message_id),
+                "payload_sha256": "0" * 64,
+                "signature": "0" * 64,
+            },
+        }
+        return sign_exchange_message(message, client.secret)
+
+    def _intake_receipt_message(
+        self,
+        client: ExchangeClient,
+        inbound: Mapping[str, Any],
+        receipt: Any,
+        *,
+        received_payload_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        existing = self._exchange_message(
+            direction="outbound",
+            message_type="intake_receipt",
+            predicate=lambda item: (
+                item.get("payload", {}).get("submission_message_id")
+                == inbound["message_id"]
+            ),
+            mine_id=client.mine_id,
+            required=False,
+        )
+        if existing is not None:
+            return existing
+        message_id = _stable_uuid(f"intake-message:{inbound['message_id']}")
+        payload = {
+            "receipt_id": _stable_uuid(f"intake-receipt:{inbound['message_id']}"),
+            "submission_message_id": inbound["message_id"],
+            "submission_revision": inbound["revision"],
+            "received_payload_sha256": received_payload_sha256
+            or inbound["signature_envelope"]["payload_sha256"],
+            "received_at": _iso(receipt.received_at),
+            "intake_status": "accepted",
+            "analysis_state": "queued",
+            "regulatory_outcome": "not_determined_at_intake",
+            "analysis_run_id": receipt.run_id,
+        }
+        message = self._base_outbound_message(
+            client,
+            contract_version="intake-receipt-v2",
+            message_type="intake_receipt",
+            message_id=message_id,
+            correlation_id=inbound["correlation_id"],
+            causation_id=inbound["message_id"],
+            idempotency_key=f"intake.{inbound['message_id']}",
+            created_at=receipt.received_at,
+            payload=payload,
+        )
+        self._record_outbound(client, message, receipt.received_at)
+        return message
+
+    def _analysis_report_message(
+        self,
+        client: ExchangeClient,
+        report_id: str,
+        outbox_item: OutboxItem | None = None,
+    ) -> dict[str, Any]:
+        existing = self._exchange_message(
+            direction="outbound",
+            message_type="analysis_report",
+            predicate=lambda item: (
+                item.get("payload", {}).get("report_id") == report_id
+            ),
+            mine_id=client.mine_id,
+            required=False,
+        )
+        if existing is not None:
+            return existing
+        report = self.server.store.get_analysis_report(
+            report_id, mine_id=client.mine_id
+        )
+        item = outbox_item or self._report_outbox_item(client.mine_id, report_id)
+        inbound = self._exchange_message(
+            direction="inbound",
+            message_type="five_quantity_submission",
+            predicate=lambda value: value.get("message_id") == report.submission_id,
+            mine_id=client.mine_id,
+        )
+        assert inbound is not None
+        result = report.result
+        run_metadata = self.server.store.get_run_metadata(report.run_id)
+        history_bands = [
+            item.model_dump(mode="json")
+            for item in result.references.accepted_history_bands
+        ]
+        peer_bands = [
+            item.model_dump(mode="json")
+            for item in result.references.accepted_peer_bands
+        ]
+        payload = {
+            "report_id": report.report_id,
+            "submission_message_id": report.submission_id,
+            "submission_revision": inbound["revision"],
+            "mine": inbound["payload"]["mine"],
+            "reporting_month": inbound["payload"]["reporting_month"],
+            "period_start": inbound["payload"]["period_start"],
+            "period_end": inbound["payload"]["period_end"],
+            "issued_at": _iso(report.issued_at),
+            "algorithm": {
+                "engine_id": "mineguard-five-quantity-engine",
+                "engine_version": _semantic_engine_version(result.method_version),
+                "algorithm_run_id": report.run_id,
+                "config_sha256": result.configuration_sha256,
+                "input_snapshot_sha256": result.algorithm_input_sha256,
+                "own_history_snapshot_sha256": (
+                    _hash_json(history_bands) if history_bands else None
+                ),
+                "peer_snapshot_sha256": _hash_json(peer_bands) if peer_bands else None,
+                "started_at": _iso(
+                    datetime.fromisoformat(run_metadata["started_at"])
+                ),
+                "completed_at": _iso(
+                    datetime.fromisoformat(run_metadata["completed_at"])
+                ),
+                "modules": [
+                    "data_quality",
+                    "daily_shift_reconciliation",
+                    "l1_reconciliation",
+                    "minimal_conflict_set",
+                    "robust_temporal_baseline",
+                    "past_only_rolling_mad",
+                    "past_only_ewma",
+                    "past_only_cusum",
+                    "past_only_page_hinkley",
+                    "temporal_drift",
+                    "change_point",
+                    "operating_state_segmentation",
+                    "anonymous_peer_baseline",
+                    "evidence_calibration",
+                ],
+            },
+            "outcome": (
+                "data_insufficient"
+                if report.outcome is DecisionStatus.INSUFFICIENT_DATA
+                else report.outcome.value
+            ),
+            "summary": ("；".join(result.decision_reasons) or "分析完成")[:4000],
+            "findings": [
+                self._wire_finding(finding_id, report)
+                for finding_id in report.finding_ids
+            ],
+            "response_required": report.response_required,
+            "response_due_at": (
+                _iso(report.issued_at + timedelta(days=3))
+                if report.response_required
+                else None
+            ),
+            "delivery_cursor": report.delivery_cursor,
+        }
+        message = self._base_outbound_message(
+            client,
+            contract_version="analysis-report-v2",
+            message_type="analysis_report",
+            message_id=item.message_id,
+            correlation_id=inbound["correlation_id"],
+            causation_id=inbound["message_id"],
+            idempotency_key=f"analysis.{report.report_id}",
+            created_at=report.issued_at,
+            payload=payload,
+        )
+        self._record_outbound(client, message, report.issued_at)
+        return message
+
+    def _wire_finding(self, finding_id: str, report: AnalysisReport) -> dict[str, Any]:
+        projection = self.server.store.get_finding(finding_id, mine_id=report.mine_id)
+        finding = projection.finding
+        result = finding.result
+        if finding.category == "data_quality":
+            signals = list(result.data_quality_signals)
+            category = "data_quality"
+        elif finding.category == "relationship_consistency":
+            signals = list(result.relationship_signals)
+            category = "joint_consistency"
+        elif finding.category == "temporal_pattern":
+            signals = list(result.temporal_signals)
+            category = "temporal_anomaly"
+        else:
+            signals = list(result.data_quality_signals)
+            category = "data_quality"
+        evidence: list[dict[str, Any]] = []
+        for index, signal in enumerate(signals[:100], start=1):
+            core = {
+                "method": self._evidence_method(signal.code, signal.basis),
+                "summary": signal.message[:2000],
+                "observed_value": signal.observed,
+                "expected_min": signal.expected_lower,
+                "expected_max": signal.expected_upper,
+                "score": None,
+            }
+            evidence.append(
+                {
+                    "evidence_id": f"EV-{finding_id[:8]}-{index:03d}",
+                    **core,
+                    "evidence_sha256": _hash_json(core),
+                }
+            )
+        if not evidence:
+            for index, reason in enumerate(finding.decision_reasons[:100], start=1):
+                core = {
+                    "method": "data_completeness"
+                    if finding.finding_type == "data_insufficient"
+                    else "combined_calibration",
+                    "summary": reason[:2000],
+                    "observed_value": None,
+                    "expected_min": None,
+                    "expected_max": None,
+                    "score": None,
+                }
+                evidence.append(
+                    {
+                        "evidence_id": f"EV-{finding_id[:8]}-{index:03d}",
+                        **core,
+                        "evidence_sha256": _hash_json(core),
+                    }
+                )
+        dates = sorted(
+            {signal.date.isoformat() for signal in signals if signal.date is not None}
+        ) or [
+            self.server.store.get_submission(
+                report.submission_id
+            ).period_end.isoformat()
+        ]
+        metrics = sorted(
+            {signal.metric for signal in signals if signal.metric in METRICS}
+        ) or list(METRICS)
+        return {
+            "finding_id": finding.finding_id,
+            "category": category,
+            "severity": "medium"
+            if finding.finding_type == "data_insufficient"
+            else "high",
+            "title": finding.title[:256],
+            "summary": finding.summary[:4000] or "需要企业核对并回复",
+            "affected_dates": dates,
+            "affected_shifts": [],
+            "affected_metrics": metrics,
+            "evidence": evidence,
+            "requires_response": True,
+        }
+
+    @staticmethod
+    def _evidence_method(code: str, basis: str) -> str:
+        text = f"{code} {basis}".lower()
+        if "complet" in text or "missing" in text:
+            return "data_completeness"
+        if "shift" in text or "daily" in text:
+            return "deterministic_reconciliation"
+        if "rolling_mad" in text:
+            return "past_only_rolling_mad"
+        if "page_hinkley" in text:
+            return "past_only_page_hinkley"
+        if "cusum" in text:
+            return "past_only_cusum"
+        if "ewma" in text:
+            return "past_only_ewma"
+        if "change" in text:
+            return "change_point"
+        if "drift" in text:
+            return "temporal_drift"
+        if "peer" in text:
+            return "anonymous_peer_baseline"
+        if "history" in text or "temporal" in text:
+            return "robust_temporal_baseline"
+        return "l1_reconciliation"
+
+    def _response_receipt_message(
+        self,
+        client: ExchangeClient,
+        receipt: ResponseBatchReceipt,
+    ) -> dict[str, Any]:
+        existing = self._exchange_message(
+            direction="outbound",
+            message_type="response_receipt",
+            predicate=lambda item: (
+                item.get("payload", {}).get("response_id") == receipt.wire_response_id
+            ),
+            mine_id=client.mine_id,
+            required=False,
+        )
+        if existing is not None:
+            return existing
+        inbound = self._exchange_message(
+            direction="inbound",
+            message_type="enterprise_risk_response",
+            predicate=lambda item: (
+                item.get("payload", {}).get("response_id") == receipt.wire_response_id
+            ),
+            mine_id=client.mine_id,
+        )
+        assert inbound is not None
+        corrected = [
+            item.get("corrected_submission_message_id")
+            for item in inbound["payload"]["finding_responses"]
+            if item.get("corrected_submission_message_id") is not None
+        ]
+        reanalysis_run_id: str | None = None
+        if corrected:
+            reanalysis_run_id = self.server.store.get_submission_receipt(
+                corrected[0], mine_id=client.mine_id
+            ).run_id
+            disposition = "reanalysis_completed"
+        elif all(
+            item["response_kind"] == "clarification_request"
+            for item in inbound["payload"]["finding_responses"]
+        ):
+            disposition = "clarification_recorded"
+        else:
+            disposition = "explanation_recorded"
+        message_id = _stable_uuid(
+            f"response-receipt-message:{receipt.wire_response_id}"
+        )
+        payload = {
+            "receipt_id": _stable_uuid(f"response-receipt:{receipt.wire_response_id}"),
+            "enterprise_response_message_id": inbound["message_id"],
+            "response_id": receipt.wire_response_id,
+            "report_id": receipt.report_id,
+            "recorded_at": _iso(receipt.recorded_at),
+            "receipt_status": "accepted",
+            "disposition": disposition,
+            "risk_status": "not_cleared_by_receipt",
+            "accepted_finding_ids": receipt.finding_ids,
+            "reanalysis_run_id": reanalysis_run_id,
+        }
+        message = self._base_outbound_message(
+            client,
+            contract_version="response-receipt-v2",
+            message_type="response_receipt",
+            message_id=message_id,
+            correlation_id=inbound["correlation_id"],
+            causation_id=inbound["message_id"],
+            idempotency_key=f"response-receipt.{receipt.wire_response_id}",
+            created_at=receipt.recorded_at,
+            payload=payload,
+        )
+        self._record_outbound(client, message, receipt.recorded_at)
+        return message
+
+    def _record_outbound(
+        self,
+        client: ExchangeClient,
+        message: dict[str, Any],
+        exchanged_at: datetime,
+    ) -> None:
+        self.server.store.record_exchange_message(
+            ExchangeMessageInput(
+                message_id=message["message_id"],
+                direction="outbound",
+                message_type=message["message_type"],
+                mine_id=client.mine_id,
+                agent_id=client.sender_id,
+                body=message,
+                exchanged_at=exchanged_at,
+            )
+        )
+
+    def _validate_corrected_submission_references(
+        self,
+        response: EnterpriseRiskResponseMessage,
+        client: ExchangeClient,
+    ) -> None:
+        report = self.server.store.get_analysis_report(
+            response.payload.report_id, mine_id=client.mine_id
+        )
+        corrected_references = {
+            item.corrected_submission_message_id
+            for item in response.payload.finding_responses
+            if item.corrected_submission_message_id is not None
+        }
+        if len(corrected_references) > 1:
+            raise RegulatoryV2ConflictError(
+                "one enterprise response may reference only one corrected "
+                "submission; send separate response revisions otherwise"
+            )
+        for item in response.payload.finding_responses:
+            reference = item.corrected_submission_message_id
+            if reference is None:
+                continue
+            self.server.store.get_submission_receipt(reference, mine_id=client.mine_id)
+            corrected = self._exchange_message(
+                direction="inbound",
+                message_type="five_quantity_submission",
+                predicate=lambda message: message.get("message_id") == reference,
+                mine_id=client.mine_id,
+            )
+            assert corrected is not None
+            if corrected["correlation_id"] != response.correlation_id:
+                raise RegulatoryV2ConflictError(
+                    "corrected submission belongs to another workflow"
+                )
+            if not self.server.store.is_strict_submission_descendant(
+                reference,
+                report.submission_id,
+                mine_id=client.mine_id,
+            ):
+                raise RegulatoryV2ConflictError(
+                    "corrected submission must be a higher-revision descendant "
+                    "of the report submission"
+                )
+
+    # ------------------------------------------------------------------
+    # Store lookup helpers
+
+    def _exchange_message(
+        self,
+        *,
+        direction: str,
+        message_type: str,
+        predicate: Callable[[dict[str, Any]], bool],
+        mine_id: str,
+        required: bool = True,
+    ) -> dict[str, Any] | None:
+        cursor = 0
+        while True:
+            rows = self.server.store.list_exchange_messages(
+                mine_id=mine_id,
+                direction=direction,  # type: ignore[arg-type]
+                after_sequence=cursor,
+                limit=1000,
+            )
+            for row in rows:
+                if row.message_type == message_type and predicate(row.body):
+                    return row.body
+            if len(rows) < 1000:
+                break
+            cursor = rows[-1].sequence
+        if required:
+            raise RegulatoryV2NotFoundError("signed exchange message not found")
+        return None
+
+    def _report_outbox_item(self, mine_id: str, report_id: str) -> OutboxItem:
+        cursor = 0
+        while True:
+            page = self.server.store.poll_analysis_reports(
+                mine_id, after_sequence=cursor, limit=1000
+            )
+            for item in page.items:
+                if item.aggregate_id == report_id:
+                    return item
+            if not page.has_more:
+                break
+            cursor = page.next_cursor
+        raise RegulatoryV2NotFoundError("analysis report not found in outbox scope")
+
+    def _next_response_required_report(
+        self,
+        mine_id: str,
+        after_sequence: int,
+    ) -> OutboxItem | None:
+        cursor = after_sequence
+        while True:
+            page = self.server.store.poll_analysis_reports(
+                mine_id, after_sequence=cursor, limit=1000
+            )
+            for item in page.items:
+                if bool(item.payload.get("response_required")):
+                    return item
+            if not page.has_more:
+                return None
+            cursor = page.next_cursor
+
+    @staticmethod
+    def _cursor_sequence(mine_id: str, value: str | None) -> int:
+        if value is None:
+            return 0
+        prefix = f"v2.{sha256(mine_id.encode()).hexdigest()[:12]}."
+        suffix = value.removeprefix(prefix)
+        if not value.startswith(prefix) or len(suffix) != 20 or not suffix.isdigit():
+            raise ValueError("after_cursor is not valid for the authenticated mine")
+        return int(suffix)
+
+    # ------------------------------------------------------------------
+    # Government read-only projections
+
+    def _visible_mines(self, principal: Principal) -> set[str] | None:
+        return None if principal.role is Role.ADMIN else set(principal.mine_scopes)
+
+    def _mine_rows(self, principal: Principal) -> list[dict[str, Any]]:
+        visible = self._visible_mines(principal)
+        overview_by_id = {
+            item.mine_id: item for item in self.server.store.list_mine_overviews()
+        }
+        client_by_mine = {item.mine_id: item for item in self.server.clients.values()}
+        mine_ids = set(overview_by_id) | set(client_by_mine)
+        if visible is not None:
+            mine_ids &= visible
+        rows: list[dict[str, Any]] = []
+        for mine_id in sorted(mine_ids):
+            overview = overview_by_id.get(mine_id)
+            client = client_by_mine.get(mine_id)
+            if overview is None:
+                rows.append(
+                    {
+                        "mine_id": mine_id,
+                        "mine_name": (client.mine_name if client else None) or mine_id,
+                        "status": "not_reported",
+                        "completeness_rate": 0.0,
+                        "finding_count": 0,
+                        "response_status": "—",
+                        "trend": [],
+                        "data_as_of": None,
+                    }
+                )
+                continue
+            detail = self.server.store.mine_detail_projection(mine_id, limit=100)
+            latest_report = (
+                detail.analysis_reports[0] if detail.analysis_reports else None
+            )
+            coverage = (
+                latest_report.result.coverage if latest_report is not None else None
+            )
+            facts = sorted(detail.daily_facts, key=lambda item: item["date"])[-30:]
+            rows.append(
+                {
+                    "mine_id": mine_id,
+                    "mine_name": overview.mine_name,
+                    "report_month": (
+                        overview.latest_period_end.strftime("%Y-%m")
+                        if overview.latest_period_end
+                        else None
+                    ),
+                    "status": (
+                        overview.latest_decision.value
+                        if overview.latest_decision is not None
+                        else "not_reported"
+                    ),
+                    "completeness_rate": (
+                        coverage.completeness_ratio if coverage is not None else 0.0
+                    ),
+                    "finding_count": (
+                        overview.open_finding_count
+                        + overview.explanation_recorded_finding_count
+                    ),
+                    "open_finding_count": overview.open_finding_count,
+                    "response_status": (
+                        "open"
+                        if overview.open_finding_count
+                        else "explanation_recorded"
+                        if overview.explanation_recorded_finding_count
+                        else "—"
+                    ),
+                    "data_as_of": (
+                        overview.latest_period_end.isoformat()
+                        if overview.latest_period_end
+                        else None
+                    ),
+                    "updated_at": (
+                        _iso(overview.latest_audit_at)
+                        if overview.latest_audit_at is not None
+                        else None
+                    ),
+                    "trend": [item.get("production_t") for item in facts],
+                }
+            )
+        return rows
+
+    def _overview(self, principal: Principal) -> dict[str, Any]:
+        rows = self._mine_rows(principal)
+        visible = self._visible_mines(principal)
+        finding_counts = self.server.store.finding_summary_counts(
+            mine_ids=sorted(visible) if visible is not None else None
+        )
+        counts = {
+            "configured_mines": len(rows),
+            "reporting_mines": sum(item["status"] != "not_reported" for item in rows),
+            "normal_candidate": sum(
+                item["status"] == "normal_candidate" for item in rows
+            ),
+            "risk": sum(item["status"] == "risk" for item in rows),
+            "insufficient_data": sum(
+                item["status"] == "insufficient_data" for item in rows
+            ),
+            "awaiting_response": finding_counts["open"],
+            "overdue": 0,
+        }
+        severity_counts = {
+            "critical": 0,
+            "high": finding_counts["risk"],
+            "medium": finding_counts["data_insufficient"],
+            "low": 0,
+        }
+        events = self._trace_rows(principal, limit=8)
+        return {
+            "counts": counts,
+            "severity_counts": severity_counts,
+            "highest_severity": next(
+                (
+                    level
+                    for level in ("critical", "high", "medium", "low")
+                    if severity_counts[level]
+                ),
+                None,
+            ),
+            "as_of": _iso(self.server.clock()),
+            "latest_events": events,
+        }
+
+    def _mine_detail(self, principal: Principal, mine_id: str) -> dict[str, Any]:
+        visible = self._visible_mines(principal)
+        if visible is not None and mine_id not in visible:
+            raise RegulatoryV2NotFoundError("mine is outside principal scope")
+        detail = self.server.store.mine_detail_projection(mine_id, limit=200)
+        report = detail.analysis_reports[0] if detail.analysis_reports else None
+        latest_run = detail.runs[0] if detail.runs else {}
+        latest_submission = detail.submissions[0] if detail.submissions else {}
+        findings = [self._finding_projection(item) for item in detail.findings]
+        responses = [
+            response.model_dump(mode="json")
+            for item in detail.findings
+            for response in item.responses
+        ]
+        result = report.result if report is not None else None
+        return {
+            "mine": {
+                "mine_id": detail.overview.mine_id,
+                "mine_name": detail.overview.mine_name,
+                "status": (
+                    detail.overview.latest_decision.value
+                    if detail.overview.latest_decision is not None
+                    else "not_reported"
+                ),
+                "data_as_of": (
+                    detail.overview.latest_period_end.isoformat()
+                    if detail.overview.latest_period_end
+                    else None
+                ),
+            },
+            "latest_submission": {
+                **latest_submission,
+                "report_month": str(latest_submission.get("period_end", ""))[:7],
+                "data_as_of": latest_submission.get("period_end"),
+            },
+            "latest_analysis": {
+                "status": result.decision.value if result else None,
+                "algorithm_version": result.method_version if result else None,
+                "configuration_sha256": result.configuration_sha256 if result else None,
+                "solver_status": (
+                    f"{result.reconciliation.solver_status} · "
+                    f"{','.join(result.reconciliation.solver_methods_attempted)} · "
+                    f"MCS {len(result.reconciliation.minimal_conflict_sets)} 组"
+                    if result
+                    else None
+                ),
+                "temporal_status": (
+                    f"{len(result.temporal_signals)} 条时序信号" if result else None
+                ),
+                "peer_sample_count": (
+                    max(
+                        (
+                            item.mine_count or 0
+                            for item in result.references.accepted_peer_bands
+                        ),
+                        default=0,
+                    )
+                    if result
+                    else 0
+                ),
+                "baseline_eligible": (
+                    bool(latest_run.get("baseline_eligible"))
+                    if latest_run.get("baseline_eligible") is not None
+                    else None
+                ),
+                "baseline_reference_candidate": (
+                    bool(latest_run.get("baseline_reference_candidate"))
+                    if latest_run.get("baseline_reference_candidate") is not None
+                    else None
+                ),
+                "baseline_rule_version": latest_run.get("baseline_rule_version"),
+            },
+            "response_summary": {
+                "open": sum(item["state"] == "open" for item in findings),
+                "delivered": sum(
+                    event.event_type == "analysis_report_delivery_acknowledged"
+                    for event in detail.audit_events
+                ),
+                "replied": len(responses),
+                "last_response_at": next(
+                    (
+                        _iso(event.occurred_at)
+                        for event in reversed(detail.audit_events)
+                        if "response" in event.event_type
+                    ),
+                    None,
+                ),
+            },
+            "daily_series": [
+                {**item, "wind_m3_min": item.get("ventilation_m3_min")}
+                for item in sorted(detail.daily_facts, key=lambda value: value["date"])
+            ],
+            "findings": findings,
+            "responses": responses,
+            "timeline": [
+                self._audit_row(item) for item in reversed(detail.audit_events)
+            ],
+        }
+
+    def _finding_rows(
+        self, principal: Principal, *, limit: int
+    ) -> list[dict[str, Any]]:
+        visible = self._visible_mines(principal)
+        if visible is None:
+            projections = self.server.store.list_findings(limit=limit)
+        else:
+            projections = [
+                finding
+                for mine_id in visible
+                for finding in self.server.store.list_findings(
+                    mine_id=mine_id, limit=limit
+                )
+            ]
+            projections.sort(
+                key=lambda item: (
+                    item.finding.issued_at,
+                    item.finding.finding_id,
+                ),
+                reverse=True,
+            )
+            projections = projections[:limit]
+        rows = [self._finding_projection(item) for item in projections]
+        mine_names = {
+            item.mine_id: item.mine_name
+            for item in self.server.store.list_mine_overviews()
+        }
+        for item in rows:
+            item["mine_name"] = mine_names.get(item["mine_id"], item["mine_id"])
+        return rows
+
+    @staticmethod
+    def _finding_projection(item: FindingProjection) -> dict[str, Any]:
+        finding = item.finding
+        signals = [
+            *finding.result.data_quality_signals,
+            *finding.result.relationship_signals,
+            *finding.result.temporal_signals,
+        ]
+        return {
+            "finding_id": finding.finding_id,
+            "mine_id": finding.mine_id,
+            "severity": "medium"
+            if finding.finding_type == "data_insufficient"
+            else "high",
+            "category": finding.category,
+            "title": finding.title,
+            "summary": finding.summary,
+            "state": item.state,
+            "issued_at": _iso(finding.issued_at),
+            "evidence": [signal.message for signal in signals[:20]],
+            "response_count": len(item.responses),
+            "resolved_by_submission_id": item.resolved_by_submission_id,
+        }
+
+    def _trace_rows(self, principal: Principal, *, limit: int) -> list[dict[str, Any]]:
+        visible = self._visible_mines(principal)
+        if visible is None:
+            rows = self.server.store.list_audit_events(
+                limit=limit, newest_first=True
+            )
+        else:
+            rows = [
+                event
+                for mine_id in visible
+                for event in self.server.store.list_audit_events(
+                    mine_id=mine_id, limit=limit, newest_first=True
+                )
+            ]
+            rows.sort(key=lambda item: item.sequence, reverse=True)
+            rows = rows[:limit]
+        return [
+            {
+                **self._audit_row(item),
+                "integrity_valid": self.server.integrity_valid,
+            }
+            for item in rows
+        ]
+
+    @staticmethod
+    def _audit_row(item: AuditProjection) -> dict[str, Any]:
+        return {
+            "event_id": item.event_id,
+            "event_type": item.event_type,
+            "mine_id": item.mine_id,
+            "message_id": item.aggregate_id,
+            "correlation_id": item.payload.get("correlation_id")
+            or item.payload.get("submission_id")
+            or item.aggregate_id,
+            "summary": RegulatoryV2RequestHandler._audit_summary(item),
+            "occurred_at": _iso(item.occurred_at),
+        }
+
+    @staticmethod
+    def _audit_summary(item: AuditProjection) -> str:
+        decision = item.payload.get("decision") or item.payload.get("outcome")
+        if decision:
+            return f"状态：{decision}"
+        finding_ids = item.payload.get("finding_ids")
+        if finding_ids:
+            return f"涉及 {len(finding_ids)} 项风险"
+        return item.event_type.replace("_", " ")
+
+    # ------------------------------------------------------------------
+    # HTTP helpers
+
+    def _read_body(self, *, limit: int = _MAX_JSON_BYTES) -> bytes:
+        if self.headers.get("Transfer-Encoding"):
+            raise ValueError("chunked request bodies are not accepted")
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            raise ValueError("Content-Length is required")
+        try:
+            length = int(raw_length)
+        except ValueError as error:
+            raise ValueError("invalid Content-Length") from error
+        if length < 0 or length > limit:
+            raise ValueError("request body is too large")
+        return self.rfile.read(length)
+
+    def _read_json(self, *, limit: int = _MAX_JSON_BYTES) -> dict[str, Any]:
+        body = self._read_body(limit=limit)
+        try:
+            value = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("request body must be valid JSON") from error
+        if not isinstance(value, dict):
+            raise ValueError("request body must be a JSON object")
+        return value
+
+    @staticmethod
+    def _reject_query(query: str) -> None:
+        if query:
+            raise ValueError("this route does not accept query parameters")
+
+    @staticmethod
+    def _single_query(query: str, name: str) -> str | None:
+        if "%" in query:
+            raise ValueError("encoded query values are not accepted by this V2 route")
+        values = (
+            parse_qsl(query, keep_blank_values=True, strict_parsing=True)
+            if query
+            else []
+        )
+        if any(key != name for key, _ in values) or len(values) > 1:
+            raise ValueError("query parameters do not match the V2 contract")
+        if not values:
+            return None
+        if not values[0][1]:
+            raise ValueError(f"{name} cannot be empty")
+        return values[0][1]
+
+    def _single_int_query(
+        self,
+        query: str,
+        name: str,
+        *,
+        default: int,
+        maximum: int,
+    ) -> int:
+        value = self._single_query(query, name)
+        if value is None:
+            return default
+        try:
+            parsed = int(value)
+        except ValueError as error:
+            raise ValueError(f"{name} must be an integer") from error
+        if not 1 <= parsed <= maximum:
+            raise ValueError(f"{name} is outside the allowed range")
+        return parsed
+
+    def _serve_static(self, path: str, *, head_only: bool) -> None:
+        name = {
+            "/": "index.html",
+            "/index.html": "index.html",
+            "/assets/app.js": "app.js",
+            "/assets/styles.css": "styles.css",
+        }[path]
+        resource = Path(__file__).with_name("regulatory_web") / name
+        try:
+            body = resource.read_bytes()
+        except FileNotFoundError as error:
+            raise RegulatoryV2NotFoundError("frontend asset not found") from error
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        self._send_bytes(
+            200,
+            body,
+            content_type=f"{content_type}; charset=utf-8",
+            head_only=head_only,
+            headers={
+                "Cache-Control": "no-cache"
+            },
+        )
+
+    def _send_json(
+        self,
+        status: int,
+        value: Any,
+        *,
+        headers: Mapping[str, str] | None = None,
+        head_only: bool = False,
+    ) -> None:
+        self._send_bytes(
+            status,
+            _canonical_bytes(value),
+            content_type="application/json; charset=utf-8",
+            headers={"Cache-Control": "no-store", **dict(headers or {})},
+            head_only=head_only,
+        )
+
+    def _send_empty(
+        self,
+        status: int,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self._send_bytes(status, b"", headers=headers)
+
+    def _send_error(
+        self,
+        status: int,
+        code: str,
+        message: str,
+        *,
+        detail: Any | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        normalized_code = re.sub(r"[^A-Z0-9_]", "_", code.upper())
+        detail_text = message
+        if detail is not None:
+            rendered = json.dumps(
+                detail,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            detail_text = f"{message}：{rendered}"
+        payload = {
+            "type": f"/problems/{code.lower().replace('_', '-')}",
+            "title": message[:256] or "请求失败",
+            "status": status,
+            "code": normalized_code[:128],
+            "detail": detail_text[:2000] or "请求失败",
+            "trace_id": self.headers.get("X-Request-ID") or str(uuid4()),
+        }
+        self._send_bytes(
+            status,
+            _canonical_bytes(payload),
+            content_type="application/problem+json; charset=utf-8",
+            headers={"Cache-Control": "no-store", **dict(headers or {})},
+        )
+
+    def _send_bytes(
+        self,
+        status: int,
+        body: bytes,
+        *,
+        content_type: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        head_only: bool = False,
+    ) -> None:
+        self.send_response(status)
+        if content_type is not None:
+            self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' data:; object-src 'none'; base-uri 'none'; "
+            "frame-ancestors 'none'",
+        )
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        if not head_only and body:
+            self.wfile.write(body)
+
+
+def create_server(
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    *,
+    database_path: str | Path = ".mineguard/mineguard.db",
+    auth_database_path: str | Path = ".mineguard/auth.db",
+    auth_required: bool = True,
+    secure_cookie: bool = False,
+    clients: Mapping[str, ExchangeClient] | None = None,
+    platform_system_id: str | None = None,
+    platform_party_id: str | None = None,
+    platform_key_id: str | None = None,
+    clock: Callable[[], datetime] = _utc_now,
+    **_: Any,
+) -> RegulatoryV2HTTPServer:
+    registry = (
+        dict(clients)
+        if clients is not None
+        else parse_exchange_clients(os.environ.get("MINEGUARD_V2_CLIENTS_JSON"))
+    )
+    store = RegulatoryV2Store(database_path, now=clock)
+    auth_store = LocalAuthStore(auth_database_path, clock=clock)
+    try:
+        for client in registry.values():
+            store.bind_agent_to_mine(client.sender_id, client.mine_id)
+        return RegulatoryV2HTTPServer(
+            (host, port),
+            store=store,
+            auth_store=auth_store,
+            clients=registry,
+            auth_required=auth_required,
+            secure_cookie=secure_cookie,
+            platform_system_id=platform_system_id
+            or os.environ.get("MINEGUARD_V2_PLATFORM_SYSTEM_ID", "mineguard-qinyuan"),
+            platform_party_id=platform_party_id
+            or os.environ.get("MINEGUARD_V2_PLATFORM_PARTY_ID", "regulator-qinyuan"),
+            platform_key_id=platform_key_id
+            or os.environ.get("MINEGUARD_V2_PLATFORM_KEY_ID", "regulator-key-v2"),
+            clock=clock,
+        )
+    except BaseException:
+        store.close()
+        auth_store.close()
+        raise
+
+
+def serve(host: str = "127.0.0.1", port: int = 8080, **kwargs: Any) -> None:
+    server = create_server(host, port, **kwargs)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+
+__all__ = ["RegulatoryV2HTTPServer", "create_server", "serve"]
