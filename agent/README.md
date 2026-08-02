@@ -43,6 +43,10 @@
 
 ## 本机安装与启动
 
+Windows 原生安装、逐矿实例、WinSW 服务、日志、完整业务状态备份和恢复见
+[Windows 部署说明](deploy/windows/README.md)。Windows 配置由受 ACL 保护的严格
+`KEY=VALUE` 文件在进程启动时读取，不执行 PowerShell 代码。
+
 在仓库的 `agent/` 目录执行：
 
 ```bash
@@ -73,8 +77,10 @@ PYTHONPATH=src python -m enterprise_agent serve --host 127.0.0.1 --port 8090
 
 ## 最小 V2 配置
 
-复制 [.env.example](.env.example) 的变量到启动环境。程序不会自动读取 `.env`；
-可以由 systemd `EnvironmentFile`、容器 Secret 或受控 shell 注入。
+复制 [.env.example](.env.example) 的变量到启动环境。Linux 可由 systemd
+`EnvironmentFile`、容器 Secret 或受控 shell 注入；Windows 服务使用
+`enterprise-agent --env-file <绝对路径> serve` 读取严格 UTF-8 `KEY=VALUE` 文件。
+已有进程环境变量优先，配置文件不会被执行，也不支持变量展开或命令替换。
 
 ```bash
 export ENTERPRISE_MINE_ID=MINE-QY-001

@@ -1,0 +1,24 @@
+<service>
+  <id>__SERVICE_ID__</id>
+  <name>__SERVICE_NAME__</name>
+  <description>MineGuard enterprise reporting agent instance __INSTANCE_NAME__</description>
+  <executable>__EXECUTABLE__</executable>
+  <arguments>--env-file &quot;__ENV_FILE__&quot; serve</arguments>
+  <workingdirectory>__WORKING_DIRECTORY__</workingdirectory>
+  <env name="PYTHONUTF8" value="1" />
+  <env name="PYTHONUNBUFFERED" value="1" />
+  <serviceaccount>
+    <username>NT AUTHORITY\LOCAL SERVICE</username>
+  </serviceaccount>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <stoptimeout>30 sec</stoptimeout>
+  <onfailure action="restart" delay="5 sec" />
+  <onfailure action="restart" delay="15 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <logpath>__LOG_DIRECTORY__</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>14</keepFiles>
+  </log>
+</service>

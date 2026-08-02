@@ -14,8 +14,11 @@ from datetime import UTC, date, datetime, timedelta, timezone as fixed_timezone
 import hashlib
 import hmac
 import json
+import os
+from pathlib import Path
 import re
 import secrets
+import stat
 from typing import Annotated, Any, Iterable, Literal, Mapping
 from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -58,6 +61,7 @@ EXCHANGE_SIGNATURE_CONTEXT = "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2"
 EXCHANGE_TRANSPORT_CONTEXT = "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V2"
 EXCHANGE_AUTH_WINDOW_SECONDS = 300
 EXCHANGE_NONCE_RETENTION_SECONDS = 600
+EXCHANGE_CLIENTS_FILE_MAX_BYTES = 4 * 1024 * 1024
 
 SENDER_ID_HEADER = "X-Exchange-Sender-Id"
 TIMESTAMP_HEADER = "X-Exchange-Timestamp"
@@ -616,9 +620,7 @@ class FiveQuantitySubmissionMessage(ExchangeMessageBase):
             day: WireDay,
             metric: str,
         ) -> ReportedQuantity:
-            daily_measurement = getattr(
-                day.reported_quantity.daily_total, metric
-            )
+            daily_measurement = getattr(day.reported_quantity.daily_total, metric)
             shifts = day.reported_quantity.shifts
             return ReportedQuantity(
                 daily_total=daily_measurement.value,
@@ -1361,6 +1363,105 @@ def parse_exchange_clients(value: str | None) -> dict[str, ExchangeClient]:
     return clients
 
 
+def _reject_linked_path(path: Path) -> None:
+    """Reject symlinks/junction-like reparse points in a secret file path."""
+
+    candidates = [path, *path.parents]
+    for candidate in candidates:
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        if candidate.is_symlink():
+            raise ValueError("MINEGUARD_V2_CLIENTS_FILE must not use symbolic links")
+        try:
+            attributes = candidate.lstat().st_file_attributes
+        except (AttributeError, OSError):
+            continue
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if attributes & reparse_flag:
+            raise ValueError("MINEGUARD_V2_CLIENTS_FILE must not use reparse points")
+
+
+def load_exchange_clients(
+    inline_value: str | None,
+    file_value: str | None,
+    *,
+    maximum_bytes: int = EXCHANGE_CLIENTS_FILE_MAX_BYTES,
+) -> dict[str, ExchangeClient]:
+    """Load the V2 client registry from exactly one explicit source.
+
+    A file avoids the Windows environment-block limit for multi-mine
+    registries.  It is still parsed by :func:`parse_exchange_clients`, so the
+    inline and file forms have identical validation and fail-closed behavior.
+    """
+
+    if inline_value is not None and file_value is not None:
+        raise ValueError(
+            "configure only one of MINEGUARD_V2_CLIENTS_JSON and "
+            "MINEGUARD_V2_CLIENTS_FILE"
+        )
+    if file_value is None:
+        return parse_exchange_clients(inline_value)
+    if not file_value.strip():
+        raise ValueError("MINEGUARD_V2_CLIENTS_FILE must not be empty")
+    if maximum_bytes < 1:
+        raise ValueError("V2 client registry file size limit must be positive")
+
+    path = Path(file_value.strip()).expanduser()
+    if not path.is_absolute():
+        raise ValueError("MINEGUARD_V2_CLIENTS_FILE must be an absolute path")
+    _reject_linked_path(path)
+    try:
+        metadata = path.stat()
+    except OSError as error:
+        raise ValueError(f"MINEGUARD_V2_CLIENTS_FILE cannot be read: {path}") from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("MINEGUARD_V2_CLIENTS_FILE must be a regular file")
+    if metadata.st_size > maximum_bytes:
+        raise ValueError("MINEGUARD_V2_CLIENTS_FILE exceeds the 4 MiB safety limit")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode):
+                raise ValueError("MINEGUARD_V2_CLIENTS_FILE must be a regular file")
+            if (metadata.st_dev, metadata.st_ino) != (
+                opened.st_dev,
+                opened.st_ino,
+            ):
+                raise ValueError(
+                    "MINEGUARD_V2_CLIENTS_FILE changed while it was opened"
+                )
+            if opened.st_size > maximum_bytes:
+                raise ValueError(
+                    "MINEGUARD_V2_CLIENTS_FILE exceeds the 4 MiB safety limit"
+                )
+            chunks: list[bytes] = []
+            remaining = maximum_bytes + 1
+            while remaining:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise ValueError(
+            f"MINEGUARD_V2_CLIENTS_FILE cannot be read safely: {path}"
+        ) from error
+    if len(payload) > maximum_bytes:
+        raise ValueError("MINEGUARD_V2_CLIENTS_FILE exceeds the 4 MiB safety limit")
+    try:
+        value = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ValueError("MINEGUARD_V2_CLIENTS_FILE must contain UTF-8 JSON") from error
+    return parse_exchange_clients(value)
+
+
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -1661,6 +1762,7 @@ __all__ = [
     "decode_inbound_message",
     "exchange_signature_material",
     "message_nonce",
+    "load_exchange_clients",
     "parse_exchange_clients",
     "parse_inbound_message",
     "sha256_bytes",

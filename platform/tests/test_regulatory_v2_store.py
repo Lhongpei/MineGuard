@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 import sqlite3
+from typing import Literal
 from uuid import uuid4
 
 import pytest
@@ -83,6 +85,25 @@ def _submission(
                 evidence_sha256="b" * 64,
             )
         ],
+    )
+
+
+def _record_exchange_audit(
+    store: RegulatoryV2Store,
+    *,
+    mine_id: str,
+    direction: Literal["inbound", "outbound"],
+    marker: str,
+) -> None:
+    store.record_exchange_message(
+        ExchangeMessageInput(
+            message_id=str(uuid4()),
+            direction=direction,
+            message_type="test_exchange",
+            mine_id=mine_id,
+            body={"marker": marker},
+            exchanged_at=NOW,
+        )
     )
 
 
@@ -477,3 +498,140 @@ def test_nonce_replay_survives_store_and_core_tables_are_append_only() -> None:
                 "UPDATE v2_analysis_runs SET decision = 'risk' WHERE run_id = ?",
                 (receipt.run_id,),
             )
+
+
+def test_audit_page_snapshot_has_no_duplicates_or_gaps_after_concurrent_append(
+    tmp_path: Path,
+) -> None:
+    clock = [NOW]
+    database = tmp_path / "audit-page.sqlite3"
+    with (
+        RegulatoryV2Store(database, now=lambda: clock[0]) as reader,
+        RegulatoryV2Store(database, now=lambda: clock[0]) as writer,
+    ):
+        for index in range(7):
+            clock[0] = NOW + timedelta(minutes=index)
+            _record_exchange_audit(
+                writer,
+                mine_id="mine-a",
+                direction="inbound",
+                marker=f"original-{index}",
+            )
+
+        first = reader.list_audit_events_page(limit=3)
+        assert [item.sequence for item in first.items] == [7, 6, 5]
+        assert first.snapshot_sequence == 7
+        assert first.matched_count == 7
+        assert first.has_more is True
+        assert first.next_before_sequence == 5
+
+        # This append represents an event arriving while a user is browsing.
+        clock[0] = NOW + timedelta(minutes=8)
+        _record_exchange_audit(
+            writer,
+            mine_id="mine-a",
+            direction="inbound",
+            marker="new-after-snapshot",
+        )
+
+        second = reader.list_audit_events_page(
+            snapshot_sequence=first.snapshot_sequence,
+            before_sequence=first.next_before_sequence,
+            limit=3,
+        )
+        third = reader.list_audit_events_page(
+            snapshot_sequence=second.snapshot_sequence,
+            before_sequence=second.next_before_sequence,
+            limit=3,
+        )
+
+        combined = [*first.items, *second.items, *third.items]
+        assert [item.sequence for item in combined] == list(range(7, 0, -1))
+        assert len({item.event_id for item in combined}) == 7
+        assert second.matched_count == third.matched_count == 7
+        assert second.next_before_sequence == 2
+        assert third.has_more is False
+        assert third.next_before_sequence is None
+        assert reader.list_audit_events_page(limit=1).items[0].sequence == 8
+
+
+def test_audit_page_combines_scope_event_and_half_open_time_filters() -> None:
+    clock = [NOW]
+    fixtures: list[tuple[str, Literal["inbound", "outbound"]]] = [
+        ("mine-a", "inbound"),
+        ("mine-a", "outbound"),
+        ("mine-b", "inbound"),
+        ("mine-a", "inbound"),
+        ("mine-b", "outbound"),
+    ]
+    with RegulatoryV2Store(":memory:", now=lambda: clock[0]) as store:
+        for index, (mine_id, direction) in enumerate(fixtures):
+            clock[0] = NOW + timedelta(hours=index)
+            _record_exchange_audit(
+                store,
+                mine_id=mine_id,
+                direction=direction,
+                marker=f"event-{index}",
+            )
+
+        page = store.list_audit_events_page(
+            mine_ids=["mine-a", "mine-a"],
+            event_types=["exchange_inbound_recorded"],
+            occurred_from=NOW,
+            occurred_before=NOW + timedelta(hours=3),
+        )
+        assert page.snapshot_sequence == 5
+        assert page.matched_count == 1
+        assert [item.sequence for item in page.items] == [1]
+        assert page.items[0].occurred_at == NOW
+
+        boundary_page = store.list_audit_events_page(
+            event_types=["exchange_inbound_recorded"],
+            occurred_from=NOW + timedelta(hours=2),
+            occurred_before=NOW + timedelta(hours=4),
+        )
+        assert [item.sequence for item in boundary_page.items] == [4, 3]
+
+        empty_scope = store.list_audit_events_page(mine_ids=[])
+        assert empty_scope.snapshot_sequence == 5
+        assert empty_scope.matched_count == 0
+        assert empty_scope.items == []
+        assert empty_scope.has_more is False
+        assert empty_scope.next_before_sequence is None
+
+        assert store.list_audit_events_page(event_types=[]).matched_count == 0
+        assert store.list_audit_events_page(mine_ids=None).matched_count == 5
+
+        with pytest.raises(ValueError, match="timezone-aware"):
+            store.list_audit_events_page(occurred_from=datetime(2026, 1, 1))
+        with pytest.raises(ValueError, match="must be before"):
+            store.list_audit_events_page(
+                occurred_from=NOW + timedelta(days=1),
+                occurred_before=NOW,
+            )
+
+
+def test_audit_page_query_indexes_exist() -> None:
+    with RegulatoryV2Store(":memory:") as store:
+        rows = store._connection.execute(  # noqa: SLF001 - schema assertion
+            "PRAGMA index_list(v2_audit_events)"
+        ).fetchall()
+        names = {row["name"] for row in rows}
+
+        expected = {
+            "idx_v2_audit_mine_sequence": ["mine_id", "sequence"],
+            "idx_v2_audit_event_sequence": ["event_type", "sequence"],
+            "idx_v2_audit_occurred_sequence": ["occurred_at", "sequence"],
+        }
+        columns = {
+            name: [
+                row["name"]
+                for row in store._connection.execute(  # noqa: SLF001
+                    f"PRAGMA index_info({name})"
+                ).fetchall()
+            ]
+            for name in expected
+        }
+
+    assert expected.keys() <= names
+    assert columns == expected

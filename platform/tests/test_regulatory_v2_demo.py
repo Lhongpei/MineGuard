@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from mineguard.regulatory_v2_demo import (
     V2_DEMO_STATE_MARKER,
     V2DemoSeedResult,
     V2DemoStateOwnershipError,
+    _build_day,
     claim_v2_demo_state_directory,
     seed_v2_demo,
     v2_demo_status,
@@ -51,6 +53,11 @@ def test_seed_has_eight_explicitly_synthetic_mines_and_monthly_daily_rows(
     assert result.disclaimer == SYNTHETIC_DEMO_DISCLAIMER
     assert result.mine_count == 8
     assert result.submission_count == 24
+    assert result.decision_counts == {
+        "insufficient_data": 1,
+        "normal_candidate": 19,
+        "risk": 4,
+    }
     assert result.period_start == date(2026, 5, 1)
     assert result.period_end == date(2026, 7, 31)
 
@@ -151,6 +158,50 @@ def test_real_engine_produces_each_teaching_scenario(
         assert "production" in states
 
 
+def test_normal_demo_has_six_distinct_nonconstant_daily_trajectories() -> None:
+    """The normalised chart must not hide fixed-ratio series behind output."""
+
+    mine = V2_DEMO_MINES[1]
+    rows = [
+        _build_day(
+            mine,
+            date(2026, 7, day),
+            month_index=2,
+            day_index=day - 1,
+            mine_index=1,
+        )
+        for day in range(1, 32)
+    ]
+    metric_series = {
+        metric: [float(getattr(row, metric).daily_total) for row in rows]
+        for metric in (
+            "ventilation_m3_min",
+            "electricity_kwh",
+            "detonators_count",
+            "explosives_kg",
+            "mine_entry_persons",
+            "production_t",
+        )
+    }
+    normalised: dict[str, tuple[float, ...]] = {}
+    for metric, values in metric_series.items():
+        lower, upper = min(values), max(values)
+        assert upper > lower, metric
+        assert len(set(values)) >= (4 if metric == "detonators_count" else 8)
+        normalised[metric] = tuple(
+            round((value - lower) / (upper - lower), 6) for value in values
+        )
+
+    assert len(set(normalised.values())) == len(normalised)
+    for left_index, left in enumerate(normalised):
+        for right in tuple(normalised)[left_index + 1 :]:
+            mean_absolute_distance = sum(
+                abs(a - b)
+                for a, b in zip(normalised[left], normalised[right], strict=True)
+            ) / len(rows)
+            assert mean_absolute_distance >= 0.10, (left, right)
+
+
 def test_repeated_seed_is_idempotent_and_does_not_extend_audit_chain(
     seeded_demo: tuple[Path, V2DemoSeedResult],
 ) -> None:
@@ -191,3 +242,21 @@ def test_demo_state_marker_refuses_non_owned_or_different_month(
     assert claim_v2_demo_state_directory(owned, through_month=THROUGH_MONTH) == owned
     with pytest.raises(V2DemoStateOwnershipError, match="另一数据月份"):
         claim_v2_demo_state_directory(owned, through_month=date(2026, 8, 31))
+
+    legacy = tmp_path / "legacy-v1"
+    legacy.mkdir()
+    (legacy / V2_DEMO_STATE_MARKER).write_text(
+        json.dumps(
+            {
+                "schema_version": "mineguard-regulatory-v2-synthetic-demo-v1",
+                "synthetic_demo": True,
+                "through_month": THROUGH_MONTH.isoformat(),
+                "database": "mineguard.db",
+                "disclaimer": SYNTHETIC_DEMO_DISCLAIMER,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(V2DemoStateOwnershipError, match="标记版本"):
+        claim_v2_demo_state_directory(legacy, through_month=THROUGH_MONTH)

@@ -19,6 +19,7 @@ RUNTIME_DISTRIBUTIONS: Final[tuple[str, ...]] = (
     "scipy",
     "pydantic",
     "PyYAML",
+    "tzdata",
     "olefile",
     "xlrd",
 )

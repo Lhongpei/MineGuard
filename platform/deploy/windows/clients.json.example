@@ -1,0 +1,24 @@
+{
+  "clients": [
+    {
+      "sender_id": "agent-mine-qy-001",
+      "party_id": "operator-qy-001",
+      "mine_id": "MINE-QY-001",
+      "mine_name": "示例煤矿（部署时替换）",
+      "comparison_context": {
+        "capacity_band": "部署时按正式分组填写",
+        "mining_method": "underground-longwall",
+        "shift_system": "three-shift-eight-hour",
+        "coal_type": "thermal-coal",
+        "operating_regime": "normal-production"
+      },
+      "active_message_key_id": "enterprise-key-v2",
+      "message_keys": {
+        "enterprise-key-v2": "REPLACE"
+      },
+      "transport_secrets": [
+        "REPLACE_DIFFERENT"
+      ]
+    }
+  ]
+}

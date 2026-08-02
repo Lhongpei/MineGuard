@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<service>
+  <id>MineGuardPlatform</id>
+  <name>MineGuard Platform（矿安智察政府端）</name>
+  <description>MineGuard 煤矿智能辅助监管系统政府侧只读监管服务</description>
+  <executable>%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe</executable>
+  <arguments>-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BASE%\Start-MineGuardPlatform.ps1" -InstallRoot "%BASE%\.."</arguments>
+  <workingdirectory>%BASE%</workingdirectory>
+  <serviceaccount>
+    <username>NT AUTHORITY\LocalService</username>
+  </serviceaccount>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <priority>normal</priority>
+  <onfailure action="restart" delay="5 sec" />
+  <onfailure action="restart" delay="15 sec" />
+  <onfailure action="restart" delay="60 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>30 sec</stoptimeout>
+  <env name="PYTHONUTF8" value="1" />
+  <env name="PYTHONIOENCODING" value="utf-8" />
+  <logpath>%BASE%\..\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>10</keepFiles>
+  </log>
+</service>

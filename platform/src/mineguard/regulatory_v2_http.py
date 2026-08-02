@@ -8,10 +8,13 @@ sent by one mine's independently deployed enterprise agent.
 from __future__ import annotations
 
 import base64
+import csv
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import mimetypes
 import os
@@ -19,7 +22,7 @@ from pathlib import Path
 import re
 from threading import BoundedSemaphore
 from typing import Any, Callable, Mapping
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
@@ -46,7 +49,7 @@ from .exchange_v2 import (
     RiskDeliveryAckMessage,
     authenticate_transport,
     decode_inbound_message,
-    parse_exchange_clients,
+    load_exchange_clients,
     sign_exchange_message,
     validate_exchange_lineage,
     verify_exchange_message_signature,
@@ -79,6 +82,196 @@ _RESPONSE_RECEIPT = re.compile(rf"^/v2/risk-responses/(?P<id>{_UUID_PATH})/recei
 _MINE_DETAIL = re.compile(
     r"^/v2/regulatory/mines/(?P<id>[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$"
 )
+_OVERVIEW_BUSINESS_EVENT_LIMIT = 8
+_OVERVIEW_AUDIT_SCAN_LIMIT = 512
+_TRACE_DEFAULT_LIMIT = 20
+_TRACE_MAX_LIMIT = 100
+_TRACE_EXPORT_LIMIT = 10_000
+_TRACE_MINE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_TRACE_EVENT_GROUPS: dict[str, frozenset[str]] = {
+    "submission": frozenset({"submission_received"}),
+    "analysis": frozenset({"analysis_completed"}),
+    "finding": frozenset({"finding_automatically_issued", "issued"}),
+    "delivery": frozenset(
+        {
+            "analysis_report_automatically_issued",
+            "analysis_report_delivery_acknowledged",
+        }
+    ),
+    "response": frozenset(
+        {
+            "enterprise_explanation_recorded",
+            "enterprise_response_batch_recorded",
+            "explanation_recorded",
+        }
+    ),
+    "reanalysis": frozenset(
+        {
+            "finding_resolved_by_revision_reanalysis",
+            "resolved_by_revision",
+        }
+    ),
+    "security": frozenset(
+        {"agent_mine_bound", "inbox_idempotency_conflict_rejected"}
+    ),
+}
+_TRACE_BUSINESS_EVENT_TYPES = frozenset().union(*_TRACE_EVENT_GROUPS.values())
+_TRACE_EVENT_GROUP_LABELS = {
+    "submission": "企业报送",
+    "analysis": "政府研判",
+    "finding": "风险形成",
+    "delivery": "结果送达",
+    "response": "企业回复",
+    "reanalysis": "修订重算与解除",
+    "security": "接入与安全拦截",
+    "technical": "技术留痕",
+    "system": "系统留痕",
+}
+_TRACE_STATUS_LABELS = {
+    "connected": "连接已建立",
+    "received": "已接收",
+    "analyzing": "正在研判",
+    "normal_candidate": "暂未发现异常",
+    "risk": "存在风险线索",
+    "insufficient_data": "数据待补充",
+    "delivered": "已送达",
+    "explanation_recorded": "企业已回复、风险未解除",
+    "cleared_by_reanalysis": "修订重算已解除",
+    "reference_admitted": "已纳入历史参考",
+    "reference_rejected": "未纳入历史参考",
+    "updated": "已更新",
+    "rejected": "已拦截",
+    "information": "已记录",
+}
+
+
+@dataclass(frozen=True)
+class _TraceQuery:
+    limit: int
+    cursor: str | None
+    mine_id: str | None
+    event_group: str | None
+    view: str
+    occurred_from: datetime | None
+    occurred_before: datetime | None
+
+    def applied_filters(self) -> dict[str, Any]:
+        return {
+            "view": self.view,
+            "event_group": self.event_group,
+            "mine_id": self.mine_id,
+            "from": (
+                None if self.occurred_from is None else _iso(self.occurred_from)
+            ),
+            "to": (
+                None if self.occurred_before is None else _iso(self.occurred_before)
+            ),
+        }
+
+
+def _trace_event_group(event_type: str) -> str:
+    for group, event_types in _TRACE_EVENT_GROUPS.items():
+        if event_type in event_types:
+            return group
+    if event_type in {
+        "exchange_inbound_recorded",
+        "exchange_outbound_recorded",
+        "anonymous_peer_snapshot_frozen",
+        "baseline_candidate_admitted",
+        "baseline_candidate_rejected",
+    }:
+        return "technical"
+    return "system"
+_BUSINESS_TEXT_LABELS = {
+    "ventilation_m3_min": "风量",
+    "wind_m3_min": "风量",
+    "electricity_kwh": "电量",
+    "detonators_count": "火工品量（雷管）",
+    "explosives_kg": "火工品量（炸药）",
+    "mine_entry_persons": "入井人员量",
+    "labor_persons": "入井人员量",
+    "production_t": "产量",
+    "ventilation_per_production": "单位产量风量",
+    "electricity_per_production": "单位产量电耗",
+    "detonators_per_production": "单位产量雷管用量",
+    "explosives_per_production": "单位产量炸药用量",
+    "mine_entry_persons_per_production": "单位产量入井人员量",
+    "labor_per_production": "单位产量入井人员量",
+    "anonymous_peer": "匿名同类矿",
+    "same_mine_history": "本矿历史",
+    "within_submission": "本期数据",
+    "wire_quality_flags": "报送质量标记",
+    "required_metric_completeness": "五量完整性规则",
+    "declared_vs_inferred_operating_state": "申报与推断工况",
+    "weighted_l1": "加权偏差协调",
+    "median_mad": "稳健中位数基线",
+    "robust_half_window_median_drift": "窗口中位数漂移",
+    "sse_bic_step_vs_linear": "变化点与趋势比较",
+    "strict_profile_mcs_diagnostic_not_causation": "最小冲突集诊断",
+    "state_aware_context_rule_not_physical_violation": "工况上下文规则",
+    "qualified_measurement_requires_review": "测量值需复核",
+    "incomplete_five_quantity_days": "五量日数据不完整",
+    "soft_reference_interval_exceeded": "超出软参考区间",
+    "robust_temporal_outlier": "稳健时序偏离",
+    "strict_counterfactual_conflict_set": "最小放宽组合",
+}
+_LOWER_SNAKE_CASE_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?![A-Za-z0-9_])"
+)
+_DATED_FINDING_CLAUSE = re.compile(r"^(\d{4}-\d{2}-\d{2})\s*(.+)$")
+
+
+def _humanize_business_text(value: Any) -> str:
+    """Render algorithm/storage tokens as controlled government-facing text."""
+
+    rendered = _LOWER_SNAKE_CASE_TOKEN.sub(
+        lambda matched: _BUSINESS_TEXT_LABELS.get(
+            matched.group(1), "其他业务项"
+        ),
+        str(value or ""),
+    )
+    # Prefer whole-phrase translations where a literal acronym replacement
+    # would repeat the following Chinese noun (for example, "CUSUM 累积偏移").
+    for technical_phrase, business_phrase in (
+        ("CUSUM 累积偏移", "持续累积偏移值"),
+        ("EWMA 水平", "近期加权均值"),
+        ("Page-Hinkley 检测到", "均值变化检测发现"),
+        ("median/MAD 基线", "历史稳健基线"),
+    ):
+        rendered = rendered.replace(technical_phrase, business_phrase)
+    for technical_term, business_term in (
+        ("CUSUM", "持续累积偏移"),
+        ("EWMA", "近期均值越界"),
+        ("Page-Hinkley", "均值变化检测"),
+        ("median/MAD", "历史稳健范围"),
+    ):
+        rendered = rendered.replace(technical_term, business_term)
+    return re.sub(r"(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])", "", rendered)
+
+
+def _humanize_finding_summary(value: Any) -> str:
+    rendered = _humanize_business_text(value)
+    clauses = [item.strip() for item in rendered.split("；") if item.strip()]
+    dated: list[tuple[str, str]] = []
+    for clause in clauses:
+        matched = _DATED_FINDING_CLAUSE.fullmatch(clause)
+        if matched is None:
+            return rendered
+        body = re.sub(r"^的(?=[\u3400-\u9fff])", "", matched.group(2).strip())
+        dated.append((matched.group(1), body))
+    if len(dated) < 3:
+        return rendered
+    groups: dict[str, tuple[int, str]] = {}
+    for observed_date, body in dated:
+        count, first_date = groups.get(body, (0, observed_date))
+        groups[body] = (count + 1, first_date)
+    if len(groups) > 3:
+        return rendered
+    summaries = [
+        f"多日出现：{body}" if count > 1 else f"{first_date} {body}"
+        for body, (count, first_date) in groups.items()
+    ]
+    return f"{'；'.join(summaries)}。逐日证据见下方。"
 
 
 def _utc_now() -> datetime:
@@ -161,6 +354,7 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
         self.platform_key_id = platform_key_id
         self.clock = clock
         self.integrity_valid = store.verify_integrity()
+        self.integrity_checked_at = clock()
         self.analysis_slots = {
             sender_id: BoundedSemaphore(1) for sender_id in self.clients
         }
@@ -189,7 +383,9 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
-        if path.startswith("/v2/analysis-reports") or path.startswith(
+        if path == "/v2/regulatory/exchanges/export.csv" or path.startswith(
+            "/v2/analysis-reports"
+        ) or path.startswith(
             "/v2/five-quantity-submissions"
         ) or path.startswith("/v2/risk-responses"):
             self._send_empty(405, {"Allow": "GET, POST, OPTIONS"})
@@ -269,7 +465,13 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 head_only=head_only,
             )
             return
-        if path in {"/", "/index.html", "/assets/app.js", "/assets/styles.css"}:
+        if path in {
+            "/",
+            "/index.html",
+            "/wallboard",
+            "/assets/app.js",
+            "/assets/styles.css",
+        }:
             self._serve_static(path, head_only=head_only)
             return
         if path == "/v2/auth/me":
@@ -322,16 +524,13 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 head_only=head_only,
             )
             return
+        if path == "/v2/regulatory/exchanges/export.csv":
+            principal = self._government_principal()
+            self._export_trace_csv(principal, parsed.query)
+            return
         if path == "/v2/regulatory/exchanges":
             principal = self._government_principal()
-            limit = self._single_int_query(
-                parsed.query, "limit", default=100, maximum=1000
-            )
-            self._send_json(
-                200,
-                {"items": self._trace_rows(principal, limit=limit)},
-                head_only=head_only,
-            )
+            self._send_json(200, self._trace_page(principal, parsed.query), head_only=head_only)
             return
 
         if path == "/v2/analysis-reports/next":
@@ -1428,27 +1627,256 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             "awaiting_response": finding_counts["open"],
             "overdue": 0,
         }
-        severity_counts = {
-            "critical": 0,
-            "high": finding_counts["risk"],
-            "medium": finding_counts["data_insufficient"],
-            "low": 0,
+        attention_counts = {
+            "risk_findings": finding_counts["risk"],
+            "data_to_complete": finding_counts["data_insufficient"],
+            "awaiting_enterprise_response": finding_counts["open"],
+            "enterprise_responded_unresolved": finding_counts["explanation_recorded"],
+            "cleared_by_reanalysis": finding_counts["cleared_by_reanalysis"],
+            "total_unresolved": (
+                finding_counts["risk"] + finding_counts["data_insufficient"]
+            ),
         }
-        events = self._trace_rows(principal, limit=8)
+        mine_names = {item["mine_id"]: item["mine_name"] for item in rows}
+        events = self._latest_business_events(
+            principal,
+            mine_names=mine_names,
+            limit=_OVERVIEW_BUSINESS_EVENT_LIMIT,
+        )
         return {
             "counts": counts,
-            "severity_counts": severity_counts,
-            "highest_severity": next(
-                (
-                    level
-                    for level in ("critical", "high", "medium", "low")
-                    if severity_counts[level]
-                ),
-                None,
-            ),
+            "attention_counts": attention_counts,
             "as_of": _iso(self.server.clock()),
             "latest_events": events,
         }
+
+    def _latest_business_events(
+        self,
+        principal: Principal,
+        *,
+        mine_names: Mapping[str, str],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Project raw audit traffic into a short list of business milestones.
+
+        One submission produces several transport, analysis, baseline and report
+        audit rows in a single transaction.  The leadership overview scans well
+        beyond its display limit, groups those rows by business milestone and
+        exposes only the result that a regulator needs to read.  The underlying
+        exchange/audit endpoint remains available for the complete machine trace.
+        """
+
+        events = self._audit_events(
+            principal,
+            limit=max(_OVERVIEW_AUDIT_SCAN_LIMIT, limit * 32),
+        )
+        grouped: dict[tuple[str, str, str], list[AuditProjection]] = {}
+        for event in events:
+            key = self._business_event_key(event)
+            if key is not None:
+                grouped.setdefault(key, []).append(event)
+
+        projected: list[tuple[int, dict[str, Any]]] = []
+        for group in grouped.values():
+            row = self._business_event_projection(group, mine_names=mine_names)
+            if row is not None:
+                projected.append((max(item.sequence for item in group), row))
+        projected.sort(key=lambda item: item[0], reverse=True)
+        return [row for _, row in projected[:limit]]
+
+    @staticmethod
+    def _business_event_key(
+        item: AuditProjection,
+    ) -> tuple[str, str, str] | None:
+        mine_id = item.mine_id or ""
+        payload = item.payload
+        if item.event_type in {
+            "submission_received",
+            "analysis_completed",
+            "finding_automatically_issued",
+            "analysis_report_automatically_issued",
+        }:
+            submission_id = payload.get("submission_id")
+            if submission_id is None and item.event_type == "submission_received":
+                submission_id = item.aggregate_id
+            return ("analysis", mine_id, str(submission_id or item.aggregate_id))
+        if item.event_type in {
+            "enterprise_explanation_recorded",
+            "enterprise_response_batch_recorded",
+        }:
+            return ("enterprise_response", mine_id, item.aggregate_id)
+        if item.event_type == "analysis_report_delivery_acknowledged":
+            return ("delivery", mine_id, item.aggregate_id)
+        if item.event_type == "finding_resolved_by_revision_reanalysis":
+            resolving_submission_id = payload.get("resolving_submission_id")
+            return (
+                "analysis",
+                mine_id,
+                str(resolving_submission_id or item.aggregate_id),
+            )
+        if item.event_type == "inbox_idempotency_conflict_rejected":
+            return ("rejected_exchange", mine_id, item.aggregate_id)
+        return None
+
+    def _business_event_projection(
+        self,
+        events: list[AuditProjection],
+        *,
+        mine_names: Mapping[str, str],
+    ) -> dict[str, Any] | None:
+        by_type: dict[str, list[AuditProjection]] = {}
+        for event in events:
+            by_type.setdefault(event.event_type, []).append(event)
+
+        resolutions = by_type.get("finding_resolved_by_revision_reanalysis", [])
+        if resolutions:
+            return self._presented_audit_row(
+                resolutions[0],
+                mine_names=mine_names,
+                event_label="风险已解除",
+                status="cleared_by_reanalysis",
+                summary=(
+                    "修订数据经同一算法重新分析通过，"
+                    f"{len(resolutions)} 项相关风险已解除。"
+                ),
+            )
+
+        report = next(
+            iter(by_type.get("analysis_report_automatically_issued", [])), None
+        )
+        analysis = next(iter(by_type.get("analysis_completed", [])), None)
+        submission = next(iter(by_type.get("submission_received", [])), None)
+        finding_events = by_type.get("finding_automatically_issued", [])
+        if report is not None or analysis is not None or submission is not None:
+            anchor = report or analysis or submission
+            assert anchor is not None
+            decision = (
+                report.payload.get("outcome") if report is not None else None
+            ) or (analysis.payload.get("decision") if analysis is not None else None)
+            finding_ids = report.payload.get("finding_ids") if report else None
+            finding_count = max(
+                len(finding_events),
+                len(finding_ids) if isinstance(finding_ids, list) else 0,
+            )
+            if decision == "risk":
+                event_label = "发现风险线索"
+                status = "risk"
+                summary = (
+                    f"本期五量数据研判发现 {finding_count} 项风险线索，"
+                    "等待企业核实或提交修订数据。"
+                    if finding_count
+                    else "本期五量数据研判发现风险线索，等待企业核实或提交修订数据。"
+                )
+            elif decision == "insufficient_data":
+                event_label = "数据待补充"
+                status = "insufficient_data"
+                summary = (
+                    "本期数据不完整，暂不能作出判断；"
+                    f"已形成 {finding_count} 项数据补充要求。"
+                    if finding_count
+                    else "本期数据不完整，暂不能作出判断，请企业补充或核对数据。"
+                )
+            elif decision == "normal_candidate":
+                event_label = "研判完成"
+                status = "normal_candidate"
+                summary = "本期五量数据研判完成，暂未发现需要企业核实的风险线索。"
+            elif finding_events:
+                event_label = "形成待核事项"
+                finding_type = finding_events[0].payload.get("finding_type")
+                status = (
+                    "insufficient_data"
+                    if finding_type == "data_insufficient"
+                    else "risk"
+                )
+                summary = f"系统已形成 {len(finding_events)} 项待企业核实事项。"
+            else:
+                event_label = "数据已接收"
+                status = "analyzing"
+                revision = submission.payload.get("revision") if submission else None
+                summary = (
+                    f"已收到企业提交的第 {revision} 版修订数据，系统正在重新分析。"
+                    if isinstance(revision, int) and revision > 1
+                    else "已收到企业本期五量数据，系统正在分析。"
+                )
+            return self._presented_audit_row(
+                anchor,
+                mine_names=mine_names,
+                event_label=event_label,
+                status=status,
+                summary=summary,
+            )
+
+        response_batch = next(
+            iter(by_type.get("enterprise_response_batch_recorded", [])), None
+        )
+        explanation = next(
+            iter(by_type.get("enterprise_explanation_recorded", [])), None
+        )
+        if response_batch is not None or explanation is not None:
+            anchor = response_batch or explanation
+            assert anchor is not None
+            finding_ids = anchor.payload.get("finding_ids")
+            count = len(finding_ids) if isinstance(finding_ids, list) else 1
+            return self._presented_audit_row(
+                anchor,
+                mine_names=mine_names,
+                event_label="企业已回复",
+                status="explanation_recorded",
+                summary=(
+                    f"企业已回复 {count} 项待核实事项；说明已追加留痕，"
+                    "相关风险尚未解除。"
+                ),
+            )
+
+        delivery = next(
+            iter(by_type.get("analysis_report_delivery_acknowledged", [])), None
+        )
+        if delivery is not None:
+            return self._presented_audit_row(
+                delivery,
+                mine_names=mine_names,
+                event_label="企业已收悉",
+                status="delivered",
+                summary="企业端已确认收到本次研判结果。",
+            )
+
+        rejected = next(
+            iter(by_type.get("inbox_idempotency_conflict_rejected", [])), None
+        )
+        if rejected is not None:
+            return self._presented_audit_row(
+                rejected,
+                mine_names=mine_names,
+                event_label="冲突报送已拦截",
+                status="rejected",
+                summary=(
+                    "同一业务编号对应了不同报送内容，本笔数据已拒收且未进入分析。"
+                ),
+            )
+        return None
+
+    def _presented_audit_row(
+        self,
+        item: AuditProjection,
+        *,
+        mine_names: Mapping[str, str],
+        event_label: str,
+        status: str,
+        summary: str,
+    ) -> dict[str, Any]:
+        row = self._audit_row(item)
+        row.update(
+            {
+                "mine_name": mine_names.get(
+                    item.mine_id or "", item.mine_id or "辖区系统"
+                ),
+                "event_label": event_label,
+                "status": status,
+                "summary": summary,
+                "integrity_valid": self.server.integrity_valid,
+            }
+        )
+        return row
 
     def _mine_detail(self, principal: Principal, mine_id: str) -> dict[str, Any]:
         visible = self._visible_mines(principal)
@@ -1545,7 +1973,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             "findings": findings,
             "responses": responses,
             "timeline": [
-                self._audit_row(item) for item in reversed(detail.audit_events)
+                {
+                    **self._audit_row(item),
+                    "mine_name": detail.overview.mine_name,
+                }
+                for item in reversed(detail.audit_events)
             ],
         }
 
@@ -1583,74 +2015,592 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _finding_projection(item: FindingProjection) -> dict[str, Any]:
         finding = item.finding
-        signals = [
-            *finding.result.data_quality_signals,
-            *finding.result.relationship_signals,
-            *finding.result.temporal_signals,
-        ]
+        # A card only explains the category that created it.  Mixing every
+        # signal from the same analysis run made, for example, a time-series
+        # risk appear to be caused by an unrelated data-format warning.
+        signals_by_category = {
+            "data_quality": finding.result.data_quality_signals,
+            "data_completeness": finding.result.data_quality_signals,
+            "relationship_consistency": finding.result.relationship_signals,
+            "temporal_pattern": finding.result.temporal_signals,
+        }
+        signals = signals_by_category.get(finding.category, ())
         return {
             "finding_id": finding.finding_id,
             "mine_id": finding.mine_id,
+            "finding_type": finding.finding_type,
+            # Kept for older API consumers. The leadership UI uses finding_type
+            # because risk/data-insufficient are categories, not audited grades.
             "severity": "medium"
             if finding.finding_type == "data_insufficient"
             else "high",
             "category": finding.category,
-            "title": finding.title,
-            "summary": finding.summary,
+            "title": _humanize_business_text(finding.title),
+            "summary": _humanize_finding_summary(finding.summary),
             "state": item.state,
             "issued_at": _iso(finding.issued_at),
-            "evidence": [signal.message for signal in signals[:20]],
+            "evidence": [
+                _humanize_business_text(signal.message) for signal in signals[:20]
+            ],
             "response_count": len(item.responses),
             "resolved_by_submission_id": item.resolved_by_submission_id,
         }
 
-    def _trace_rows(self, principal: Principal, *, limit: int) -> list[dict[str, Any]]:
+    def _audit_events(
+        self, principal: Principal, *, limit: int
+    ) -> list[AuditProjection]:
         visible = self._visible_mines(principal)
         if visible is None:
-            rows = self.server.store.list_audit_events(
-                limit=limit, newest_first=True
+            return self.server.store.list_audit_events(limit=limit, newest_first=True)
+        rows = [
+            event
+            for mine_id in sorted(visible)
+            for event in self.server.store.list_audit_events(
+                mine_id=mine_id, limit=limit, newest_first=True
             )
-        else:
-            rows = [
-                event
-                for mine_id in visible
-                for event in self.server.store.list_audit_events(
-                    mine_id=mine_id, limit=limit, newest_first=True
-                )
-            ]
-            rows.sort(key=lambda item: item.sequence, reverse=True)
-            rows = rows[:limit]
+        ]
+        rows.sort(key=lambda item: item.sequence, reverse=True)
+        return rows[:limit]
+
+    def _mine_name_map(self, principal: Principal) -> dict[str, str]:
+        visible = self._visible_mines(principal)
+        names = {
+            item.mine_id: item.mine_name
+            for item in self.server.store.list_mine_overviews()
+            if visible is None or item.mine_id in visible
+        }
+        for client in self.server.clients.values():
+            if visible is None or client.mine_id in visible:
+                names.setdefault(client.mine_id, client.mine_name or client.mine_id)
+        return names
+
+    def _trace_rows(self, principal: Principal, *, limit: int) -> list[dict[str, Any]]:
+        rows = self._audit_events(principal, limit=limit)
+        mine_names = self._mine_name_map(principal)
         return [
             {
                 **self._audit_row(item),
+                "mine_name": mine_names.get(
+                    item.mine_id or "", item.mine_id or "辖区系统"
+                ),
                 "integrity_valid": self.server.integrity_valid,
             }
             for item in rows
         ]
 
     @staticmethod
-    def _audit_row(item: AuditProjection) -> dict[str, Any]:
+    def _parse_trace_timestamp(value: str, name: str) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(f"{name} must be an RFC3339 timestamp") from error
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{name} must include a timezone")
+        return parsed.astimezone(UTC)
+
+    @classmethod
+    def _parse_trace_query(cls, query: str, *, for_export: bool) -> _TraceQuery:
+        allowed = {"mine_id", "event_group", "view", "from", "to"}
+        if not for_export:
+            allowed.update({"limit", "cursor"})
+        pairs = (
+            parse_qsl(query, keep_blank_values=True, strict_parsing=True)
+            if query
+            else []
+        )
+        values: dict[str, str] = {}
+        for key, value in pairs:
+            if key not in allowed:
+                raise ValueError(f"unsupported trace query parameter: {key}")
+            if key in values:
+                raise ValueError(f"trace query parameter is repeated: {key}")
+            if not value:
+                raise ValueError(f"{key} cannot be empty")
+            values[key] = value
+
+        raw_limit = values.get("limit")
+        if raw_limit is None:
+            limit = _TRACE_EXPORT_LIMIT if for_export else _TRACE_DEFAULT_LIMIT
+        else:
+            try:
+                limit = int(raw_limit)
+            except ValueError as error:
+                raise ValueError("limit must be an integer") from error
+            if not 1 <= limit <= _TRACE_MAX_LIMIT:
+                raise ValueError("limit is outside the allowed range")
+
+        view = values.get("view", "business")
+        if view not in {"business", "technical"}:
+            raise ValueError("view must be business or technical")
+        event_group = values.get("event_group")
+        if event_group is not None and event_group not in _TRACE_EVENT_GROUPS:
+            raise ValueError("event_group is not supported")
+        mine_id = values.get("mine_id")
+        if mine_id is not None and _TRACE_MINE_ID.fullmatch(mine_id) is None:
+            raise ValueError("mine_id has an invalid format")
+        cursor = values.get("cursor")
+        if cursor is not None and len(cursor) > 1024:
+            raise ValueError("cursor is too long")
+
+        occurred_from = (
+            None
+            if values.get("from") is None
+            else cls._parse_trace_timestamp(values["from"], "from")
+        )
+        occurred_before = (
+            None
+            if values.get("to") is None
+            else cls._parse_trace_timestamp(values["to"], "to")
+        )
+        if occurred_from is not None and occurred_before is not None:
+            if occurred_from >= occurred_before:
+                raise ValueError("from must be earlier than to")
+            if occurred_before - occurred_from > timedelta(days=366):
+                raise ValueError("trace time window cannot exceed 366 days")
+        if for_export and (occurred_from is None or occurred_before is None):
+            raise ValueError("export requires both from and to")
+        return _TraceQuery(
+            limit=limit,
+            cursor=cursor,
+            mine_id=mine_id,
+            event_group=event_group,
+            view=view,
+            occurred_from=occurred_from,
+            occurred_before=occurred_before,
+        )
+
+    def _trace_scope(
+        self, principal: Principal, mine_id: str | None
+    ) -> tuple[str, ...] | None:
+        visible = self._visible_mines(principal)
+        if mine_id is not None:
+            if visible is not None and mine_id not in visible:
+                raise RegulatoryV2NotFoundError("mine is outside principal scope")
+            return (mine_id,)
+        return None if visible is None else tuple(sorted(visible))
+
+    @staticmethod
+    def _trace_event_types(query: _TraceQuery) -> tuple[str, ...] | None:
+        if query.event_group is not None:
+            return tuple(sorted(_TRACE_EVENT_GROUPS[query.event_group]))
+        if query.view == "business":
+            return tuple(sorted(_TRACE_BUSINESS_EVENT_TYPES))
+        return None
+
+    @staticmethod
+    def _trace_filter_fingerprint(
+        query: _TraceQuery, mine_ids: tuple[str, ...] | None
+    ) -> str:
+        return sha256(
+            _canonical_bytes(
+                {
+                    "filters": query.applied_filters(),
+                    "scope": "all" if mine_ids is None else list(mine_ids),
+                }
+            )
+        ).hexdigest()
+
+    @staticmethod
+    def _encode_trace_cursor(
+        *, snapshot: int, before: int, fingerprint: str
+    ) -> str:
+        payload = _canonical_bytes(
+            {"v": 1, "snapshot": snapshot, "before": before, "fp": fingerprint}
+        )
+        return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_trace_cursor(value: str) -> tuple[int, int, str]:
+        try:
+            padded = value + "=" * (-len(value) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+            if not isinstance(payload, dict) or payload.get("v") != 1:
+                raise ValueError
+            snapshot = int(payload["snapshot"])
+            before = int(payload["before"])
+            fingerprint = str(payload["fp"])
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("cursor is invalid") from error
+        if snapshot < 0 or before <= 0 or not re.fullmatch(
+            r"[0-9a-f]{64}", fingerprint
+        ):
+            raise ValueError("cursor is invalid")
+        return snapshot, before, fingerprint
+
+    def _trace_page(
+        self, principal: Principal, raw_query: str
+    ) -> dict[str, Any]:
+        query = self._parse_trace_query(raw_query, for_export=False)
+        mine_ids = self._trace_scope(principal, query.mine_id)
+        event_types = self._trace_event_types(query)
+        fingerprint = self._trace_filter_fingerprint(query, mine_ids)
+        snapshot_sequence: int | None = None
+        before_sequence: int | None = None
+        if query.cursor is not None:
+            snapshot_sequence, before_sequence, cursor_fingerprint = (
+                self._decode_trace_cursor(query.cursor)
+            )
+            if cursor_fingerprint != fingerprint:
+                raise ValueError("cursor does not match the current filters or scope")
+        page = self.server.store.list_audit_events_page(
+            mine_ids=mine_ids,
+            event_types=event_types,
+            occurred_from=query.occurred_from,
+            occurred_before=query.occurred_before,
+            snapshot_sequence=snapshot_sequence,
+            before_sequence=before_sequence,
+            limit=query.limit,
+        )
+        mine_names = self._mine_name_map(principal)
+        items = [
+            {
+                **self._audit_row(item),
+                "mine_name": mine_names.get(
+                    item.mine_id or "", item.mine_id or "辖区系统"
+                ),
+            }
+            for item in page.items
+        ]
+        now = self.server.clock()
+        if (
+            now < self.server.integrity_checked_at
+            or now - self.server.integrity_checked_at >= timedelta(seconds=60)
+        ):
+            self.server.integrity_valid = self.server.store.verify_integrity()
+            self.server.integrity_checked_at = now
+        next_cursor = None
+        if page.has_more and page.next_before_sequence is not None:
+            next_cursor = self._encode_trace_cursor(
+                snapshot=page.snapshot_sequence,
+                before=page.next_before_sequence,
+                fingerprint=fingerprint,
+            )
         return {
+            "items": items,
+            "matched_count": page.matched_count,
+            "has_more": page.has_more,
+            "next_cursor": next_cursor,
+            "as_of": _iso(now),
+            "integrity": {
+                "valid": self.server.integrity_valid,
+                "scope": "complete_chain",
+                "checked_at": _iso(self.server.integrity_checked_at),
+            },
+            "applied_filters": query.applied_filters(),
+        }
+
+    @staticmethod
+    def _safe_csv_cell(value: Any) -> str:
+        text = "" if value is None else str(value)
+        text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+        probe = text.lstrip(" \u00a0\u200b\ufeff")
+        if probe.startswith(("=", "+", "-", "@")):
+            return "'" + text
+        return text
+
+    def _trace_export_items(
+        self,
+        query: _TraceQuery,
+        mine_ids: tuple[str, ...] | None,
+    ) -> tuple[list[AuditProjection], int, int] | None:
+        event_types = self._trace_event_types(query)
+        first = self.server.store.list_audit_events_page(
+            mine_ids=mine_ids,
+            event_types=event_types,
+            occurred_from=query.occurred_from,
+            occurred_before=query.occurred_before,
+            limit=1000,
+        )
+        if first.matched_count > _TRACE_EXPORT_LIMIT:
+            self._send_error(
+                422,
+                "export_too_large",
+                "当前筛选结果超过 10000 条，请缩小煤矿或时间范围后再导出",
+                detail={
+                    "matched_count": first.matched_count,
+                    "maximum": _TRACE_EXPORT_LIMIT,
+                },
+            )
+            return None
+        rows = list(first.items)
+        page = first
+        while page.has_more:
+            if page.next_before_sequence is None:
+                raise RuntimeError("audit page has_more without a next cursor")
+            page = self.server.store.list_audit_events_page(
+                mine_ids=mine_ids,
+                event_types=event_types,
+                occurred_from=query.occurred_from,
+                occurred_before=query.occurred_before,
+                snapshot_sequence=first.snapshot_sequence,
+                before_sequence=page.next_before_sequence,
+                limit=1000,
+            )
+            rows.extend(page.items)
+        if len(rows) != first.matched_count:
+            raise RuntimeError("audit export snapshot count changed unexpectedly")
+        return rows, first.snapshot_sequence, first.matched_count
+
+    def _export_trace_csv(self, principal: Principal, raw_query: str) -> None:
+        query = self._parse_trace_query(raw_query, for_export=True)
+        mine_ids = self._trace_scope(principal, query.mine_id)
+        integrity_valid = self.server.store.verify_integrity()
+        checked_at = self.server.clock()
+        self.server.integrity_valid = integrity_valid
+        self.server.integrity_checked_at = checked_at
+        if not integrity_valid:
+            self._send_error(
+                409,
+                "audit_integrity_failed",
+                "完整留痕链校验未通过，已停止导出，请联系系统管理员核验",
+            )
+            return
+        collected = self._trace_export_items(query, mine_ids)
+        if collected is None:
+            return
+        rows, snapshot_sequence, matched_count = collected
+        mine_names = self._mine_name_map(principal)
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream, lineterminator="\r\n")
+        writer.writerow(
+            [
+                "留痕序号",
+                "时间（北京时间）",
+                "UTC时间",
+                "煤矿名称",
+                "煤矿编号",
+                "业务环节",
+                "事件",
+                "状态",
+                "关联编号",
+                "摘要",
+                "完整链校验",
+                "事件编号",
+                "前序哈希",
+                "事件哈希",
+            ]
+        )
+        shanghai = ZoneInfo("Asia/Shanghai")
+        for item in rows:
+            event_label, status, summary = self._audit_presentation(item)
+            correlation_id = (
+                item.payload.get("correlation_id")
+                or item.payload.get("submission_id")
+                or item.payload.get("resolving_submission_id")
+                or item.aggregate_id
+            )
+            group = _trace_event_group(item.event_type)
+            values = [
+                item.sequence,
+                item.occurred_at.astimezone(shanghai).strftime("%Y-%m-%d %H:%M:%S"),
+                _iso(item.occurred_at),
+                mine_names.get(item.mine_id or "", item.mine_id or "辖区系统"),
+                item.mine_id or "",
+                _TRACE_EVENT_GROUP_LABELS[group],
+                event_label,
+                _TRACE_STATUS_LABELS.get(status, "已记录"),
+                correlation_id,
+                summary,
+                "完整留痕链校验通过",
+                item.event_id,
+                item.previous_hash,
+                item.event_hash,
+            ]
+            writer.writerow([self._safe_csv_cell(value) for value in values])
+        encoded = b"\xef\xbb\xbf" + stream.getvalue().encode("utf-8")
+        exported_at = self.server.clock().astimezone(UTC)
+        ascii_filename = (
+            "mineguard-exchange-trace-"
+            f"{exported_at.strftime('%Y%m%d-%H%M%S')}.csv"
+        )
+        chinese_filename = (
+            "MineGuard_双系统交换留痕_"
+            f"{exported_at.astimezone(shanghai).strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        export_sha256 = sha256(encoded).hexdigest()
+        self.server.auth_store.record_audit_event(
+            "regulatory_exchange_trace_exported",
+            principal=principal,
+            client_id=self.client_address[0],
+            detail={
+                "filters": query.applied_filters(),
+                "snapshot_sequence": snapshot_sequence,
+                "row_count": matched_count,
+                "first_sequence": rows[0].sequence if rows else None,
+                "last_sequence": rows[-1].sequence if rows else None,
+                "export_sha256": export_sha256,
+                "chain_integrity": "valid",
+                "filename": ascii_filename,
+            },
+        )
+        self._send_bytes(
+            200,
+            encoded,
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_filename}"; '
+                    f"filename*=UTF-8''{quote(chinese_filename, safe='')}"
+                ),
+                "X-Download-Options": "noopen",
+                "X-MineGuard-Snapshot-Sequence": str(snapshot_sequence),
+                "X-MineGuard-Row-Count": str(matched_count),
+            },
+        )
+
+    @staticmethod
+    def _audit_row(item: AuditProjection) -> dict[str, Any]:
+        event_label, status, summary = RegulatoryV2RequestHandler._audit_presentation(
+            item
+        )
+        return {
+            "sequence": item.sequence,
             "event_id": item.event_id,
             "event_type": item.event_type,
+            "event_group": _trace_event_group(item.event_type),
             "mine_id": item.mine_id,
             "message_id": item.aggregate_id,
             "correlation_id": item.payload.get("correlation_id")
             or item.payload.get("submission_id")
+            or item.payload.get("resolving_submission_id")
             or item.aggregate_id,
-            "summary": RegulatoryV2RequestHandler._audit_summary(item),
+            "event_label": event_label,
+            "status": status,
+            "summary": summary,
             "occurred_at": _iso(item.occurred_at),
         }
 
     @staticmethod
-    def _audit_summary(item: AuditProjection) -> str:
+    def _audit_presentation(item: AuditProjection) -> tuple[str, str, str]:
+        event_type = item.event_type
+        payload = item.payload
         decision = item.payload.get("decision") or item.payload.get("outcome")
-        if decision:
-            return f"状态：{decision}"
-        finding_ids = item.payload.get("finding_ids")
-        if finding_ids:
-            return f"涉及 {len(finding_ids)} 项风险"
-        return item.event_type.replace("_", " ")
+        decision_summaries = {
+            "normal_candidate": (
+                "研判完成",
+                "本期五量数据研判完成，暂未发现需要企业核实的风险线索。",
+            ),
+            "risk": (
+                "发现风险线索",
+                "本期五量数据研判发现风险线索，等待企业核实或提交修订数据。",
+            ),
+            "insufficient_data": (
+                "数据待补充",
+                "本期数据不完整，暂不能作出判断，请企业补充或核对数据。",
+            ),
+        }
+        if (
+            event_type
+            in {
+                "analysis_completed",
+                "analysis_report_automatically_issued",
+            }
+            and decision in decision_summaries
+        ):
+            label, summary = decision_summaries[str(decision)]
+            finding_ids = payload.get("finding_ids")
+            if isinstance(finding_ids, list) and finding_ids:
+                if decision == "risk":
+                    summary = (
+                        f"本期五量数据研判发现 {len(finding_ids)} 项风险线索，"
+                        "等待企业核实或提交修订数据。"
+                    )
+                elif decision == "insufficient_data":
+                    summary = (
+                        "本期数据不完整，暂不能作出判断；"
+                        f"已形成 {len(finding_ids)} 项数据补充要求。"
+                    )
+            return label, str(decision), summary
+
+        if event_type == "agent_mine_bound":
+            return (
+                "报送关系已建立",
+                "connected",
+                "企业报送端已与本矿建立固定报送关系。",
+            )
+        if event_type == "exchange_inbound_recorded":
+            return "收到企业消息", "received", "企业交换消息已安全接收并留痕。"
+        if event_type == "exchange_outbound_recorded":
+            return "监管消息已发出", "delivered", "监管结果或回执已发送至企业端。"
+        if event_type == "submission_received":
+            revision = payload.get("revision")
+            summary = (
+                f"已收到企业提交的第 {revision} 版修订数据，系统正在重新分析。"
+                if isinstance(revision, int) and revision > 1
+                else "已收到企业本期五量数据，系统正在分析。"
+            )
+            return "数据已接收", "analyzing", summary
+        if event_type == "finding_automatically_issued":
+            category = {
+                "data_quality": "数据质量",
+                "relationship_consistency": "五量关系协调",
+                "temporal_pattern": "五量时序变化",
+                "data_completeness": "数据完整性",
+            }.get(str(payload.get("category")), "数据")
+            status = (
+                "insufficient_data"
+                if payload.get("finding_type") == "data_insufficient"
+                else "risk"
+            )
+            return (
+                "形成待核事项",
+                status,
+                f"系统已形成 1 项{category}待企业核实事项。",
+            )
+        if event_type == "enterprise_explanation_recorded":
+            return (
+                "企业已回复",
+                "explanation_recorded",
+                "企业说明已追加留痕，相关风险尚未解除。",
+            )
+        if event_type == "enterprise_response_batch_recorded":
+            finding_ids = payload.get("finding_ids")
+            count = len(finding_ids) if isinstance(finding_ids, list) else 1
+            return (
+                "企业已回复",
+                "explanation_recorded",
+                f"企业已回复 {count} 项待核实事项；相关风险尚未解除。",
+            )
+        if event_type == "analysis_report_delivery_acknowledged":
+            return "企业已收悉", "delivered", "企业端已确认收到本次研判结果。"
+        if event_type == "finding_resolved_by_revision_reanalysis":
+            return (
+                "风险已解除",
+                "cleared_by_reanalysis",
+                "修订数据经同一算法重新分析通过，相关风险已解除。",
+            )
+        if event_type == "baseline_candidate_admitted":
+            return (
+                "已纳入历史参考",
+                "reference_admitted",
+                "本期数据符合参考样本条件，可用于后续同矿历史比较。",
+            )
+        if event_type == "baseline_candidate_rejected":
+            return (
+                "未纳入历史参考",
+                "reference_rejected",
+                "本期数据不作为后续历史参考样本，不影响本次研判结论。",
+            )
+        if event_type == "anonymous_peer_snapshot_frozen":
+            mine_count = payload.get("mine_count")
+            summary = (
+                f"本轮分析已固定 {mine_count} 座同类矿的匿名参考样本。"
+                if isinstance(mine_count, int)
+                else "本轮分析使用的同类矿匿名参考样本已固定。"
+            )
+            return "同类矿参考已更新", "updated", summary
+        if event_type == "inbox_idempotency_conflict_rejected":
+            return (
+                "冲突报送已拦截",
+                "rejected",
+                "同一业务编号对应了不同报送内容，本笔数据已拒收且未进入分析。",
+            )
+        return "系统状态已更新", "information", "系统已记录一项审计事件。"
+
+    @staticmethod
+    def _audit_summary(item: AuditProjection) -> str:
+        return RegulatoryV2RequestHandler._audit_presentation(item)[2]
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -1724,6 +2674,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         name = {
             "/": "index.html",
             "/index.html": "index.html",
+            "/wallboard": "index.html",
             "/assets/app.js": "app.js",
             "/assets/styles.css": "styles.css",
         }[path]
@@ -1848,7 +2799,10 @@ def create_server(
     registry = (
         dict(clients)
         if clients is not None
-        else parse_exchange_clients(os.environ.get("MINEGUARD_V2_CLIENTS_JSON"))
+        else load_exchange_clients(
+            os.environ.get("MINEGUARD_V2_CLIENTS_JSON"),
+            os.environ.get("MINEGUARD_V2_CLIENTS_FILE"),
+        )
     )
     store = RegulatoryV2Store(database_path, now=clock)
     auth_store = LocalAuthStore(auth_database_path, clock=clock)

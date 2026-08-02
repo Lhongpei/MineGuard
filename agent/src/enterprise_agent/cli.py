@@ -5,20 +5,25 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import sqlite3
 import sys
 import sysconfig
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import __version__
 from .auth import build_auth_manager, hash_password, is_loopback
 from .client import PlatformClient
+from .environment import load_environment_file
 from .errors import AgentError
 from .five_quantity_exchange import FiveQuantityPlatformClient
 from .five_quantity_runtime import FiveQuantityRuntime
 from .http_api import serve
+from .instance_lock import lock_for_database
 from .llm import OpenAICompatibleProvider
+from .maintenance import backup_database, restore_database
 from .service import EnterpriseAgentService
 from .settings import Settings
 from .skills import build_skill_registry
@@ -174,6 +179,75 @@ def _print(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
 
 
+def _configuration_errors(
+    settings: Settings,
+    *,
+    production: bool,
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    try:
+        ZoneInfo(settings.five_quantity_identity.timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        errors.append("ENTERPRISE_REPORTING_TIMEZONE 在本机不可用")
+    seen_directories: set[str] = set()
+    for value in settings.five_quantity_watch_directories:
+        path = Path(value).expanduser()
+        is_junction = getattr(path, "is_junction", None)
+        if (
+            path.is_symlink()
+            or (callable(is_junction) and is_junction())
+            or not path.is_dir()
+        ):
+            errors.append(f"五量监听目录不存在、不是目录或为重解析点：{path}")
+            continue
+        resolved = path.resolve()
+        if resolved == Path(resolved.anchor):
+            errors.append("五量监听目录不能是文件系统根目录")
+        folded = str(resolved).casefold()
+        if folded in seen_directories:
+            errors.append(f"五量监听目录重复：{resolved}")
+        seen_directories.add(folded)
+    if settings.database_path == ":memory:":
+        errors.append("服务配置不能使用内存数据库")
+    if not production:
+        return tuple(errors)
+
+    if not settings.users:
+        errors.append("正式服务必须配置逐用户 ENTERPRISE_AGENT_USERS_JSON")
+    elif not any(
+        {"read", "write", "confirm", "submit"}.issubset(account.permissions)
+        and not account.must_change_password
+        and not account.temporary_demo
+        for account in settings.users
+    ):
+        errors.append("正式服务至少需要一个已换密且可复核报送的账号")
+    if settings.allow_anonymous_local:
+        errors.append("正式服务不得启用匿名本机身份")
+    if not settings.secure_cookie:
+        errors.append("正式服务必须启用 Secure Cookie")
+    if settings.public_origin is None or not settings.public_origin.startswith(
+        "https://"
+    ):
+        errors.append("正式服务必须配置 HTTPS PUBLIC_ORIGIN")
+    if not is_loopback(settings.host):
+        errors.append("Windows Agent 应只监听回环地址并由 HTTPS 反向代理接入")
+    if settings.five_quantity_platform is None:
+        errors.append("正式服务必须完整配置政府 V2 接口及两把不同 HMAC 密钥")
+    elif not settings.five_quantity_platform.base_url.startswith("https://"):
+        errors.append("正式服务连接政府 V2 平台必须使用 HTTPS")
+    if settings.five_quantity_demo_secret:
+        errors.append("正式服务不得使用演示应用消息密钥")
+    identity = settings.five_quantity_identity
+    if identity.key_id.startswith(
+        "not-configured-"
+    ) or identity.regulator_key_id.startswith("not-configured-"):
+        errors.append("正式服务必须配置企业和政府应用签名 key ID")
+    for field, value in identity.comparison_context.items():
+        if value.casefold() == "unclassified":
+            errors.append(f"正式服务必须配置同类矿分组字段 {field}")
+    return tuple(errors)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="enterprise-agent",
@@ -187,6 +261,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--db",
         help="覆盖 ENTERPRISE_AGENT_DB",
+    )
+    parser.add_argument(
+        "--env-file",
+        help=(
+            "从严格 KEY=VALUE UTF-8 文件加载配置；已有进程环境变量优先且文件不会被执行"
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -273,13 +353,125 @@ def _parser() -> argparse.ArgumentParser:
 
     audit = sub.add_parser("audit", help="验证并显示追加审计链")
     audit.add_argument("draft_id")
+
+    backup = sub.add_parser(
+        "database-backup",
+        help="仅创建 SQLite 一致备份；完整灾备还须包含隔离文件",
+    )
+    backup.add_argument("--output", type=Path, required=True)
+    backup.add_argument("--overwrite", action="store_true")
+
+    restore = sub.add_parser(
+        "database-restore",
+        help="仅离线恢复 SQLite；完整恢复请使用部署脚本",
+    )
+    restore.add_argument("--input", type=Path, required=True)
+    restore.add_argument("--rollback-directory", type=Path, required=True)
+    restore.add_argument(
+        "--yes-service-stopped",
+        action="store_true",
+        help="确认本实例服务已停止",
+    )
+    config_check = sub.add_parser("config-check", help="检查启动或正式服务配置")
+    config_check.add_argument("--production", action="store_true")
     return parser
+
+
+def _serve_agent(
+    args: argparse.Namespace,
+    *,
+    settings: Settings,
+    parser: argparse.ArgumentParser,
+) -> int:
+    host = args.host or settings.host
+    port = args.port or settings.port
+    if not is_loopback(host) and not settings.secure_cookie:
+        parser.error(
+            "监听非本机地址时必须设置 ENTERPRISE_AGENT_SECURE_COOKIE=true，"
+            "并在 HTTPS 反向代理后提供服务"
+        )
+    if not is_loopback(host) and settings.public_origin is None:
+        parser.error("监听非本机地址时必须设置唯一的 ENTERPRISE_AGENT_PUBLIC_ORIGIN")
+    if (
+        settings.public_origin is not None
+        and settings.public_origin.startswith("https://")
+        and not settings.secure_cookie
+    ):
+        parser.error(
+            "配置 HTTPS ENTERPRISE_AGENT_PUBLIC_ORIGIN 时必须设置 "
+            "ENTERPRISE_AGENT_SECURE_COOKIE=true"
+        )
+    if (
+        settings.public_origin is not None
+        and settings.public_origin.startswith("http://")
+        and settings.secure_cookie
+    ):
+        parser.error(
+            "HTTP ENTERPRISE_AGENT_PUBLIC_ORIGIN 不能设置 "
+            "ENTERPRISE_AGENT_SECURE_COOKIE=true"
+        )
+    auth_manager = build_auth_manager(
+        accounts=settings.users,
+        bind_host=host,
+        allow_anonymous_local=settings.allow_anonymous_local,
+        session_ttl_seconds=settings.session_ttl_seconds,
+        public_origin_exposed=settings.public_origin is not None,
+    )
+    if not settings.users and is_loopback(host):
+        print(
+            "警告：启用仅限本机的演示账号 demo，默认密码为 "
+            "123123123；该账号标记为必须修改，正式使用前请配置逐用户账号。",
+            file=sys.stderr,
+        )
+    if settings.allow_anonymous_local:
+        print(
+            "警告：已启用仅限回环地址的匿名开发身份，不得用于正式环境。",
+            file=sys.stderr,
+        )
+    selected_web = (
+        Path(args.web_root).expanduser().resolve()
+        if args.web_root
+        else _default_web_root()
+    )
+    if not selected_web.is_dir() or not (selected_web / "index.html").is_file():
+        parser.error(
+            f"前端资源目录无效：{selected_web}；"
+            "请重新安装软件包或通过 --web-root 指定目录"
+        )
+    with lock_for_database(settings.database_path):
+        service = _service(settings)
+        serve(
+            service,
+            host=host,
+            port=port,
+            auth_manager=auth_manager,
+            secure_cookie=settings.secure_cookie,
+            public_origin=settings.public_origin,
+            web_root=selected_web,
+            on_started=lambda server: _startup_banner(
+                server=server,
+                service=service,
+                settings=settings,
+                requested_host=host,
+                web_root=selected_web,
+            ),
+        )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
+        selected_environment_file = (
+            args.env_file
+            or os.environ.get(
+                "ENTERPRISE_AGENT_ENV_FILE",
+                "",
+            ).strip()
+        )
+        if selected_environment_file:
+            load_environment_file(selected_environment_file)
         if args.command == "hash-password":
             if args.password_stdin:
                 password = sys.stdin.readline().rstrip("\r\n")
@@ -306,82 +498,47 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                 }
             )
-        service = _service(settings)
-        if args.command == "serve":
-            host = args.host or settings.host
-            port = args.port or settings.port
-            if not is_loopback(host) and not settings.secure_cookie:
-                parser.error(
-                    "监听非本机地址时必须设置 ENTERPRISE_AGENT_SECURE_COOKIE=true，"
-                    "并在 HTTPS 反向代理后提供服务"
+        if args.command == "database-backup":
+            _print(
+                backup_database(
+                    settings.database_path,
+                    args.output,
+                    overwrite=args.overwrite,
                 )
-            if not is_loopback(host) and settings.public_origin is None:
-                parser.error(
-                    "监听非本机地址时必须设置唯一的 ENTERPRISE_AGENT_PUBLIC_ORIGIN"
-                )
-            if (
-                settings.public_origin is not None
-                and settings.public_origin.startswith("https://")
-                and not settings.secure_cookie
-            ):
-                parser.error(
-                    "配置 HTTPS ENTERPRISE_AGENT_PUBLIC_ORIGIN 时必须设置 "
-                    "ENTERPRISE_AGENT_SECURE_COOKIE=true"
-                )
-            if (
-                settings.public_origin is not None
-                and settings.public_origin.startswith("http://")
-                and settings.secure_cookie
-            ):
-                parser.error(
-                    "HTTP ENTERPRISE_AGENT_PUBLIC_ORIGIN 不能设置 "
-                    "ENTERPRISE_AGENT_SECURE_COOKIE=true"
-                )
-            auth_manager = build_auth_manager(
-                accounts=settings.users,
-                bind_host=host,
-                allow_anonymous_local=settings.allow_anonymous_local,
-                session_ttl_seconds=settings.session_ttl_seconds,
-                public_origin_exposed=settings.public_origin is not None,
-            )
-            if not settings.users and is_loopback(host):
-                print(
-                    "警告：启用仅限本机的演示账号 demo，默认密码为 "
-                    "123123123；该账号标记为必须修改，正式使用前请配置逐用户账号。",
-                    file=sys.stderr,
-                )
-            if settings.allow_anonymous_local:
-                print(
-                    "警告：已启用仅限回环地址的匿名开发身份，不得用于正式环境。",
-                    file=sys.stderr,
-                )
-            selected_web = (
-                Path(args.web_root).expanduser().resolve()
-                if args.web_root
-                else _default_web_root()
-            )
-            if not selected_web.is_dir() or not (selected_web / "index.html").is_file():
-                parser.error(
-                    f"前端资源目录无效：{selected_web}；"
-                    "请重新安装软件包或通过 --web-root 指定目录"
-                )
-            serve(
-                service,
-                host=host,
-                port=port,
-                auth_manager=auth_manager,
-                secure_cookie=settings.secure_cookie,
-                public_origin=settings.public_origin,
-                web_root=selected_web,
-                on_started=lambda server: _startup_banner(
-                    server=server,
-                    service=service,
-                    settings=settings,
-                    requested_host=host,
-                    web_root=selected_web,
-                ),
             )
             return 0
+        if args.command == "config-check":
+            configuration_errors = _configuration_errors(
+                settings,
+                production=args.production,
+            )
+            _print(
+                {
+                    "valid": not configuration_errors,
+                    "mode": "production" if args.production else "runtime",
+                    "errors": list(configuration_errors),
+                    "mine_id": settings.five_quantity_identity.mine_id,
+                    "system_id": settings.five_quantity_identity.system_id,
+                    "database_path": str(Path(settings.database_path).resolve()),
+                    "port": settings.port,
+                }
+            )
+            return 0 if not configuration_errors else 2
+        if args.command == "database-restore":
+            if not args.yes_service_stopped:
+                parser.error("恢复前必须停止本实例服务并传入 --yes-service-stopped")
+            with lock_for_database(settings.database_path):
+                _print(
+                    restore_database(
+                        settings.database_path,
+                        args.input,
+                        rollback_directory=args.rollback_directory,
+                    )
+                )
+            return 0
+        if args.command == "serve":
+            return _serve_agent(args, settings=settings, parser=parser)
+        service = _service(settings)
         if args.command == "create":
             _print(service.create_draft(args.values, actor=args.actor))
         elif args.command == "list":

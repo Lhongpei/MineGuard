@@ -8,7 +8,7 @@ findings directly.
 Every mine, source record and retained exchange envelope says that it is
 synthetic.  ``manual_import`` and ``direct_collection`` are both represented
 as provenance facts; the demo does not turn either mode into a trust grade.
-The default filesystem wrapper owns only ``.mineguard-v2-demo`` and refuses to
+The default filesystem wrapper owns only ``.mineguard-v2-demo-v2`` and refuses to
 reuse an unmarked, non-empty directory.
 """
 
@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -48,8 +49,8 @@ from .regulatory_v2_store import (
 )
 
 
-V2_DEMO_SCHEMA_VERSION = "mineguard-regulatory-v2-synthetic-demo-v1"
-DEFAULT_V2_DEMO_STATE_DIRECTORY = ".mineguard-v2-demo"
+V2_DEMO_SCHEMA_VERSION = "mineguard-regulatory-v2-synthetic-demo-v2"
+DEFAULT_V2_DEMO_STATE_DIRECTORY = ".mineguard-v2-demo-v2"
 V2_DEMO_DATABASE_FILENAME = "mineguard.db"
 V2_DEMO_STATE_MARKER = ".mineguard-v2-synthetic-owner.json"
 V2_DEMO_AGENT_PREFIX = "synthetic-demo-agent-"
@@ -178,7 +179,7 @@ class V2DemoScenarioSummary(StrictModel):
 
 
 class V2DemoSeedResult(StrictModel):
-    schema_version: Literal["mineguard-regulatory-v2-synthetic-demo-v1"] = (
+    schema_version: Literal["mineguard-regulatory-v2-synthetic-demo-v2"] = (
         V2_DEMO_SCHEMA_VERSION
     )
     status: Literal["seeded", "resumed", "already_seeded"]
@@ -203,7 +204,7 @@ class V2DemoSeedResult(StrictModel):
 
 
 class V2DemoStatusResult(StrictModel):
-    schema_version: Literal["mineguard-regulatory-v2-synthetic-demo-v1"] = (
+    schema_version: Literal["mineguard-regulatory-v2-synthetic-demo-v2"] = (
         V2_DEMO_SCHEMA_VERSION
     )
     status: Literal["empty", "partial", "complete"]
@@ -322,7 +323,7 @@ def seed_v2_demo(
     )
     return V2DemoSeedResult(
         status=state,
-        dataset_id=f"regulatory-v2-synthetic-demo-{month_end:%Y-%m}",
+        dataset_id=f"regulatory-v2-synthetic-demo-series-v2-{month_end:%Y-%m}",
         through_month=month_end,
         period_start=first_period,
         period_end=month_end,
@@ -358,7 +359,7 @@ def v2_demo_status(
             if recorded == len(plan)
             else "partial"
         ),
-        dataset_id=f"regulatory-v2-synthetic-demo-{month_end:%Y-%m}",
+        dataset_id=f"regulatory-v2-synthetic-demo-series-v2-{month_end:%Y-%m}",
         through_month=month_end,
         expected_submission_count=len(plan),
         recorded_submission_count=recorded,
@@ -488,7 +489,7 @@ def _validated_existing_prefix(
     if existing_ids != expected_prefix or foreign_audit or foreign_exchange:
         raise V2DemoSeedError(
             "目标数据库包含非本批次合成演示报送，已拒绝写入；"
-            "请使用独立的 .mineguard-v2-demo 状态目录。"
+            "请使用独立的 .mineguard-v2-demo-v2 状态目录。"
         )
     return existing
 
@@ -506,7 +507,7 @@ def _build_plan(through_month: date) -> list[_PlannedSubmission]:
             submission_id = str(
                 uuid5(
                     NAMESPACE_URL,
-                    f"mineguard:v2:synthetic-demo:{through_month}:{mine.mine_id}:"
+                    f"mineguard:v2:synthetic-demo-v2:{through_month}:{mine.mine_id}:"
                     f"{period_start}",
                 )
             )
@@ -653,8 +654,32 @@ def _build_day(
             **{metric: ReportedQuantity(shifts=ShiftValues()) for metric in METRICS},
         )
 
-    variation = (((observed_date.toordinal() + mine_index * 3) % 9) - 4) * 0.006
-    production = mine.base_production_t * (1.0 + variation)
+    # Do not derive every quantity from one daily multiplier.  The dashboard
+    # normalises each metric to its own visible range, so fixed metric-to-output
+    # ratios make otherwise different units collapse onto the same line.  The
+    # deterministic cycles below model distinct operational drivers while
+    # keeping each relationship inside a plausible, stable envelope:
+    #
+    # * production follows the face/haulage organisation cycle;
+    # * ventilation is mostly a continuous safety load;
+    # * electricity combines a fixed auxiliary load and a production load;
+    # * mine entries mostly follow staffing rather than daily tonnage;
+    # * blasting-material subitems follow their own work schedule.
+    #
+    # Absolute calendar ordinals make adjacent months continuous and replaying
+    # a seed byte-for-byte deterministic.  Mine-specific phases avoid making
+    # all eight synthetic mines move in lockstep.
+    ordinal = observed_date.toordinal()
+    production_factor = 1.0 + _wave(
+        ordinal,
+        mine_index,
+        primary_period=9,
+        primary_amplitude=0.036,
+        secondary_period=17,
+        secondary_amplitude=0.018,
+        phase=1,
+    )
+    production = mine.base_production_t * production_factor
     declared: Literal["producing", "stopped", "restarting"] = "producing"
     if mine.scenario_code == "shutdown_restart" and month_index == 2:
         if 8 <= day_index < 13:
@@ -679,12 +704,84 @@ def _build_day(
         and day_index >= 15
     ):
         electricity_ratio = 31.0
+    ventilation_factor = (
+        0.82
+        + 0.18 * production_factor
+        + _wave(
+            ordinal,
+            mine_index,
+            primary_period=13,
+            primary_amplitude=0.026,
+            secondary_period=7,
+            secondary_amplitude=0.012,
+            phase=3,
+        )
+    )
+    electricity_factor = (
+        0.25
+        + 0.75 * production_factor
+        + _wave(
+            ordinal,
+            mine_index,
+            primary_period=11,
+            primary_amplitude=0.036,
+            secondary_period=5,
+            secondary_amplitude=0.014,
+            phase=7,
+        )
+    )
+    mine_entry_factor = (
+        0.50
+        + 0.50 * production_factor
+        + _wave(
+            ordinal,
+            mine_index,
+            primary_period=8,
+            primary_amplitude=0.035,
+            secondary_period=19,
+            secondary_amplitude=0.012,
+            phase=11,
+        )
+    )
+    detonator_factor = production_factor * (
+        1.0
+        + _wave(
+            ordinal,
+            mine_index,
+            primary_period=5,
+            primary_amplitude=0.075,
+            secondary_period=12,
+            secondary_amplitude=0.030,
+            phase=13,
+        )
+    )
+    explosives_factor = production_factor * (
+        1.0
+        + _wave(
+            ordinal,
+            mine_index,
+            primary_period=6,
+            primary_amplitude=0.065,
+            secondary_period=14,
+            secondary_amplitude=0.025,
+            phase=17,
+        )
+    )
     values = {
-        "ventilation_m3_min": 3.0 * production,
-        "mine_entry_persons": round(0.10 * production),
-        "electricity_kwh": electricity_ratio * production,
-        "detonators_count": float(round(0.010 * production)),
-        "explosives_kg": 0.050 * production,
+        "ventilation_m3_min": 3.0 * mine.base_production_t * ventilation_factor,
+        "electricity_kwh": (
+            electricity_ratio * mine.base_production_t * electricity_factor
+        ),
+        # Daily mine entries and detonators are counts.  A slightly larger
+        # blasting baseline avoids quantisation turning the detonator series
+        # into a constant ten-count line in the 0.9--1.2 kt/day demo band.
+        "detonators_count": float(
+            round(0.022 * mine.base_production_t * detonator_factor)
+        ),
+        "explosives_kg": 0.050 * mine.base_production_t * explosives_factor,
+        "mine_entry_persons": round(
+            0.10 * mine.base_production_t * mine_entry_factor
+        ),
         "production_t": production,
     }
     mismatch_metric = (
@@ -699,6 +796,30 @@ def _build_day(
         values,
         declared=declared,
         mismatch_metric=mismatch_metric,
+    )
+
+
+def _wave(
+    ordinal: int,
+    mine_index: int,
+    *,
+    primary_period: int,
+    primary_amplitude: float,
+    secondary_period: int,
+    secondary_amplitude: float,
+    phase: int,
+) -> float:
+    """Return one bounded, deterministic operational variation component."""
+
+    primary_angle = math.tau * (
+        ordinal + phase + mine_index * (phase % 5 + 1)
+    ) / primary_period
+    secondary_angle = math.tau * (
+        ordinal + phase * 2 + mine_index * (phase % 7 + 1)
+    ) / secondary_period
+    return (
+        primary_amplitude * math.sin(primary_angle)
+        + secondary_amplitude * math.cos(secondary_angle)
     )
 
 

@@ -19,6 +19,15 @@ from .llm import LLMConfig
 from .skills import CoalNewsConfig
 
 
+def split_path_list(raw: str, *, separator: str | None = None) -> tuple[str, ...]:
+    """Split an OS path list, including Windows' semicolon-separated form."""
+
+    selected_separator = os.pathsep if separator is None else separator
+    if len(selected_separator) != 1:
+        raise ValueError("path list separator must be one character")
+    return tuple(part.strip() for part in raw.split(selected_separator) if part.strip())
+
+
 def _integer(name: str, default: int, minimum: int, maximum: int) -> int:
     raw = os.environ.get(name)
     if raw is None:
@@ -305,9 +314,7 @@ class Settings:
                 ),
             )
         watched_raw = os.environ.get("ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS", "")
-        five_quantity_watch_directories = tuple(
-            part.strip() for part in watched_raw.split(os.pathsep) if part.strip()
-        )
+        five_quantity_watch_directories = split_path_list(watched_raw)
         database_state_directory = (
             Path("./data").resolve()
             if database_path == ":memory:"

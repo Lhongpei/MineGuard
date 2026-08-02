@@ -152,13 +152,15 @@ enterprise-agent serve --host 127.0.0.1 --port 8090
 ```bash
 cd /home/sevan/coral/platform
 mineguard seed-v2-demo \
-  --state-directory .mineguard-v2-demo \
+  --state-directory .mineguard-v2-demo-v2 \
   --through-month 2026-07-31
 mineguard serve --host 127.0.0.1 --port 8080 \
-  --state-directory .mineguard-v2-demo
+  --state-directory .mineguard-v2-demo-v2
 ```
 
-默认仍用 `admin / 123123123` 登录。演示覆盖人工导入、直采、正常基线、日报与班次
+默认仍用 `admin / 123123123` 登录。新版演示中的产量、连续通风负荷、电耗、入井人员
+和火工品作业节奏具有确定但彼此独立的日波动，不会再因固定比例而在时序图中完全
+重合。演示覆盖人工导入、直采、正常基线、日报与班次
 不一致、时序漂移、变化点、匿名同类矿偏离、缺失值和停复产；所有矿名、来源和留痕
 均明确标注为合成数据。该命令拒绝写入未由它创建的非空目录，演示数据不得用于监管
 认定。只查看大屏无需配置企业客户端；要让 `/readyz` 通过并实际接收 Agent 报送，仍须
@@ -183,7 +185,8 @@ PYTHONPATH=agent/src python3 -m pytest -q agent/tests
 ```
 
 进一步说明见 [V2 双系统目标架构](docs/V2双系统目标架构.md)、
-[V2 部署与运行](docs/V2部署与运行.md)、[V2 验收清单](docs/V2验收清单.md)、
+[V2 部署与运行](docs/V2部署与运行.md)、
+[Windows 原生部署与运维](docs/Windows原生部署与运维.md)、[V2 验收清单](docs/V2验收清单.md)、
 [政府平台说明](platform/README.md)和[企业智能体说明](agent/README.md)。
 
 旧 V1 契约仅保留用于历史记录审计重放，不属于新部署的默认启动拓扑。

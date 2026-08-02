@@ -51,20 +51,14 @@ class ManagedProcess:
     log_stream: Any
 
     def stop(self) -> None:
-        """Terminate only this process group, escalating after a short grace."""
+        """Terminate only this managed process tree after a short grace."""
 
         if self.process.poll() is None:
-            try:
-                os.killpg(self.process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            _request_process_stop(self.process)
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                _force_stop_process_tree(self.process)
                 self.process.wait(timeout=5)
         if not self.log_stream.closed:
             self.log_stream.flush()
@@ -85,6 +79,53 @@ class ManagedProcess:
                 text = text.replace(secret_value, "<redacted>")
         lines = text.splitlines()
         return "\n".join(lines[-40:]) or "<empty log>"
+
+
+def _request_process_stop(process: subprocess.Popen[str]) -> None:
+    """Ask exactly one managed process group to stop without touching peers."""
+
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            # Each Windows child is created in its own process group below.
+            # CTRL_BREAK can therefore be targeted at that group without
+            # sending Ctrl+C to the acceptance runner itself.
+            ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+            if ctrl_break is not None:
+                process.send_signal(ctrl_break)
+            else:  # pragma: no cover - only for unusual Windows runtimes
+                process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        # The child may have exited between poll() and signal delivery.
+        pass
+
+
+def _force_stop_process_tree(process: subprocess.Popen[str]) -> None:
+    """Force-stop only the timed-out child tree selected by its exact PID."""
+
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        # taskkill is used only after the dedicated process group ignored the
+        # graceful request.  /PID is an already resolved child PID; no name,
+        # wildcard or user-controlled target is accepted here.
+        completed = subprocess.run(
+            ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if completed.returncode != 0 and process.poll() is None:
+            process.kill()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -296,18 +337,32 @@ def _interrupt_cleanly(
 
     if managed.process.poll() is None:
         try:
-            os.killpg(managed.process.pid, signal.SIGINT)
-        except ProcessLookupError:
+            if os.name == "nt":
+                # A targeted CTRL_C_EVENT is not reliable for a non-zero
+                # Windows process group. CTRL_BREAK_EVENT is the equivalent
+                # targeted console stop used by this non-interactive harness.
+                managed.process.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                os.killpg(managed.process.pid, signal.SIGINT)
+        except (OSError, ProcessLookupError):
             pass
     try:
         return_code = managed.process.wait(timeout=timeout)
     except subprocess.TimeoutExpired as error:
+        _force_stop_process_tree(managed.process)
+        managed.process.wait(timeout=5)
         raise VerificationError(
-            f"{managed.name} 收到 Ctrl+C 后未在 {timeout:g} 秒内退出"
+            f"{managed.name} 收到终端中断后未在 {timeout:g} 秒内退出"
         ) from error
-    if return_code != 0:
+    windows_console_exit_codes = {
+        -1_073_741_510,  # signed 0xC000013A
+        3_221_225_786,  # unsigned 0xC000013A
+    }
+    if return_code != 0 and not (
+        os.name == "nt" and return_code in windows_console_exit_codes
+    ):
         raise VerificationError(
-            f"{managed.name} 收到 Ctrl+C 后返回码为 {return_code}"
+            f"{managed.name} 收到终端中断后返回码为 {return_code}"
         )
     log = managed.log_tail()
     if "Traceback (most recent call last)" in log:
@@ -324,6 +379,9 @@ def _start_process(
 ) -> ManagedProcess:
     log_stream = log_path.open("w", encoding="utf-8")
     try:
+        creation_flags = 0
+        if os.name == "nt":
+            creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
         process = subprocess.Popen(
             command,
             cwd=cwd,
@@ -332,7 +390,8 @@ def _start_process(
             stdout=log_stream,
             stderr=subprocess.STDOUT,
             text=True,
-            start_new_session=True,
+            start_new_session=os.name != "nt",
+            creationflags=creation_flags,
         )
     except Exception:
         log_stream.close()
@@ -1731,9 +1790,21 @@ def _application_environment(source_root: Path) -> dict[str, str]:
 
 def _python_for(application_root: Path, explicit: str | None) -> str:
     if explicit:
+        explicit_path = Path(explicit).expanduser()
+        if explicit_path.is_file():
+            # Keep a virtual environment's launcher path intact.  resolve()
+            # would follow the POSIX venv symlink to the base interpreter and
+            # silently defeat the independent-environment acceptance check.
+            return str(explicit_path.absolute())
         return explicit
-    candidate = application_root / ".venv" / "bin" / "python"
-    return str(candidate) if candidate.is_file() else sys.executable
+    candidates = (
+        application_root / ".venv" / "Scripts" / "python.exe",
+        application_root / ".venv" / "bin" / "python",
+    )
+    return next(
+        (str(candidate) for candidate in candidates if candidate.is_file()),
+        sys.executable,
+    )
 
 
 def _verify_occupied_port_failure(
@@ -2760,6 +2831,156 @@ def verify(
     return result
 
 
+def verify_runtime_smoke(
+    *,
+    timeout: float,
+    platform_python: str | None,
+    agent_python: str | None,
+) -> dict[str, Any]:
+    """Start only the current products and verify their public health routes.
+
+    This is the portable Windows/Linux release smoke.  It intentionally uses
+    separate interpreters and source paths, performs no business write, and
+    keeps all state under a disposable Unicode path containing spaces.
+    """
+
+    platform_port = _unused_port()
+    agent_port = _unused_port()
+    while agent_port == platform_port:
+        agent_port = _unused_port()
+    platform_executable = _python_for(PLATFORM_ROOT, platform_python)
+    agent_executable = _python_for(AGENT_ROOT, agent_python)
+    processes: list[ManagedProcess] = []
+    with tempfile.TemporaryDirectory(
+        prefix="MineGuard Windows Smoke 矿安智察 "
+    ) as temporary:
+        temporary_root = Path(temporary)
+        platform_state = temporary_root / "Platform 状态"
+        agent_database = (
+            temporary_root / "Agent 状态" / "enterprise agent.db"
+        )
+        agent_database.parent.mkdir(parents=True, exist_ok=True)
+        platform_environment = _application_environment(
+            PLATFORM_ROOT / "src"
+        )
+        platform_environment["MINEGUARD_ADMIN_PASSWORD"] = (
+            "WINDOWS-smoke-" + secrets.token_urlsafe(24)
+        )
+        agent_environment = _application_environment(AGENT_ROOT / "src")
+        agent_environment["ENTERPRISE_AGENT_DB"] = str(agent_database)
+
+        for executable, module, cwd, environment in (
+            (
+                platform_executable,
+                "mineguard",
+                PLATFORM_ROOT,
+                platform_environment,
+            ),
+            (
+                agent_executable,
+                "enterprise_agent",
+                AGENT_ROOT,
+                agent_environment,
+            ),
+        ):
+            completed = subprocess.run(
+                [executable, "-m", module, "--help"],
+                cwd=cwd,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise VerificationError(
+                    f"{module} CLI 入口失败，返回码 "
+                    f"{completed.returncode}：{completed.stdout[-2000:]}"
+                )
+
+        try:
+            platform = _start_process(
+                name="监管平台",
+                command=[
+                    platform_executable,
+                    "-m",
+                    "mineguard",
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(platform_port),
+                    "--state-directory",
+                    str(platform_state),
+                ],
+                cwd=PLATFORM_ROOT,
+                environment=platform_environment,
+                log_path=temporary_root / "platform.log",
+            )
+            processes.append(platform)
+            _wait_until_ready(
+                platform,
+                port=platform_port,
+                path="/healthz",
+                timeout=timeout,
+            )
+
+            agent = _start_process(
+                name="企业智能体",
+                command=[
+                    agent_executable,
+                    "-m",
+                    "enterprise_agent",
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(agent_port),
+                ],
+                cwd=AGENT_ROOT,
+                environment=agent_environment,
+                log_path=temporary_root / "agent.log",
+            )
+            processes.append(agent)
+            _wait_until_ready(
+                agent,
+                port=agent_port,
+                path="/api/v1/health",
+                timeout=timeout,
+            )
+        except Exception as error:
+            diagnostics = "".join(
+                f"\n[{managed.name} log]\n{managed.log_tail()}"
+                for managed in processes
+            )
+            raise VerificationError(f"{error}{diagnostics}") from error
+        finally:
+            for managed in reversed(processes):
+                managed.stop()
+
+        if _port_accepts_connections(platform_port):
+            raise VerificationError("监管平台 smoke 后仍残留监听进程")
+        if _port_accepts_connections(agent_port):
+            raise VerificationError("企业智能体 smoke 后仍残留监听进程")
+
+    return {
+        "result": "passed",
+        "mode": "runtime-smoke",
+        "platform": {
+            "python": platform_executable,
+            "health": "/healthz",
+        },
+        "agent": {
+            "python": agent_executable,
+            "health": "/api/v1/health",
+        },
+        "boundary": "separate interpreters and HTTP health only",
+        "unicode_space_state_path": True,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -2773,18 +2994,33 @@ def main() -> int:
         help="每个服务的启动超时秒数（默认 30）",
     )
     parser.add_argument(
+        "--runtime-smoke",
+        action="store_true",
+        help=(
+            "只用两个独立解释器启动当前两产品并检查健康端点；"
+            "不执行业务写入"
+        ),
+    )
+    parser.add_argument(
         "--platform-python",
-        help="监管平台 Python 解释器；默认优先 platform/.venv/bin/python",
+        help=(
+            "监管平台 Python 解释器；默认优先使用 "
+            "platform/.venv 中当前系统的解释器"
+        ),
     )
     parser.add_argument(
         "--agent-python",
-        help="企业智能体 Python 解释器；默认优先 agent/.venv/bin/python",
+        help=(
+            "企业智能体 Python 解释器；默认优先使用 "
+            "agent/.venv 中当前系统的解释器"
+        ),
     )
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout 必须大于 0")
     try:
-        result = verify(
+        operation = verify_runtime_smoke if args.runtime_smoke else verify
+        result = operation(
             timeout=args.timeout,
             platform_python=args.platform_python,
             agent_python=args.agent_python,
@@ -2792,7 +3028,10 @@ def main() -> int:
     except (VerificationError, OSError, ValueError) as error:
         print(f"双进程验收失败：{error}", file=sys.stderr)
         return 1
-    print("双进程端到端验收通过")
+    if args.runtime_smoke:
+        print("双进程运行时 smoke 验收通过")
+    else:
+        print("双进程端到端验收通过")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

@@ -274,6 +274,16 @@ class AuditProjection(StrictModel):
     event_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
+class AuditPage(StrictModel):
+    """One stable, newest-first page from the immutable audit ledger."""
+
+    items: list[AuditProjection]
+    snapshot_sequence: Annotated[int, Field(ge=0)]
+    matched_count: Annotated[int, Field(ge=0)]
+    has_more: bool
+    next_before_sequence: Annotated[int | None, Field(ge=1)] = None
+
+
 class MineDetailProjection(StrictModel):
     overview: MineOverview
     submissions: list[dict[str, Any]]
@@ -563,6 +573,12 @@ class RegulatoryV2Store:
             previous_hash TEXT NOT NULL,
             event_hash TEXT NOT NULL UNIQUE
         );
+        CREATE INDEX IF NOT EXISTS idx_v2_audit_mine_sequence
+            ON v2_audit_events(mine_id, sequence);
+        CREATE INDEX IF NOT EXISTS idx_v2_audit_event_sequence
+            ON v2_audit_events(event_type, sequence);
+        CREATE INDEX IF NOT EXISTS idx_v2_audit_occurred_sequence
+            ON v2_audit_events(occurred_at, sequence);
 
         CREATE INDEX IF NOT EXISTS idx_v2_submissions_mine_period
             ON v2_submissions(mine_id, period_start, period_end, revision);
@@ -2362,6 +2378,156 @@ class RegulatoryV2Store:
             for row in rows
         ]
 
+    def list_audit_events_page(
+        self,
+        *,
+        mine_ids: Sequence[str] | None = None,
+        event_types: Sequence[str] | None = None,
+        occurred_from: datetime | None = None,
+        occurred_before: datetime | None = None,
+        snapshot_sequence: int | None = None,
+        before_sequence: int | None = None,
+        limit: int = 100,
+    ) -> AuditPage:
+        """Return a stable newest-first audit page for a filtered snapshot.
+
+        The first call captures the ledger's current maximum sequence.  Pass
+        the returned ``snapshot_sequence`` and ``next_before_sequence`` to the
+        next call so events appended during browsing cannot move, duplicate or
+        hide rows in the original result set.  The time range is half-open:
+        ``[occurred_from, occurred_before)``.
+        """
+
+        limit = _validated_limit(limit)
+        if snapshot_sequence is not None and snapshot_sequence < 0:
+            raise ValueError("snapshot_sequence must be non-negative")
+        if before_sequence is not None and before_sequence < 0:
+            raise ValueError("before_sequence must be non-negative")
+
+        occurred_from_utc = (
+            _as_utc(occurred_from) if occurred_from is not None else None
+        )
+        occurred_before_utc = (
+            _as_utc(occurred_before) if occurred_before is not None else None
+        )
+        if (
+            occurred_from_utc is not None
+            and occurred_before_utc is not None
+            and occurred_from_utc >= occurred_before_utc
+        ):
+            raise ValueError("occurred_from must be before occurred_before")
+
+        scoped_mines = None if mine_ids is None else tuple(dict.fromkeys(mine_ids))
+        scoped_event_types = (
+            None if event_types is None else tuple(dict.fromkeys(event_types))
+        )
+
+        with self._lock:
+            if snapshot_sequence is None:
+                snapshot_row = self._connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM v2_audit_events"
+                ).fetchone()
+                snapshot_sequence = int(snapshot_row["sequence"])
+
+            # Empty permission/event scopes deliberately match nothing.  The
+            # snapshot is still captured above so the response is complete and
+            # can be handled exactly like any other first page.
+            if scoped_mines == () or scoped_event_types == ():
+                return AuditPage(
+                    items=[],
+                    snapshot_sequence=snapshot_sequence,
+                    matched_count=0,
+                    has_more=False,
+                    next_before_sequence=None,
+                )
+
+            clauses = ["sequence <= ?"]
+            values: list[Any] = [snapshot_sequence]
+            if scoped_mines is not None:
+                placeholders = ",".join("?" for _ in scoped_mines)
+                clauses.append(f"mine_id IN ({placeholders})")
+                values.extend(scoped_mines)
+            if scoped_event_types is not None:
+                placeholders = ",".join("?" for _ in scoped_event_types)
+                clauses.append(f"event_type IN ({placeholders})")
+                values.extend(scoped_event_types)
+            if occurred_from_utc is not None:
+                clauses.append("occurred_at >= ?")
+                values.append(occurred_from_utc.isoformat())
+            if occurred_before_utc is not None:
+                clauses.append("occurred_at < ?")
+                values.append(occurred_before_utc.isoformat())
+
+            page_where = ""
+            if before_sequence is not None:
+                page_where = "WHERE sequence < ?"
+                values.append(before_sequence)
+            values.append(limit + 1)
+
+            # The count and page share one filtered CTE and one SQLite
+            # statement.  This keeps matched_count tied to the same immutable
+            # snapshot even while another connection appends newer events.
+            rows = self._connection.execute(
+                f"""
+                WITH filtered AS (
+                    SELECT * FROM v2_audit_events
+                    WHERE {" AND ".join(clauses)}
+                ),
+                matched AS (
+                    SELECT COUNT(*) AS matched_count FROM filtered
+                ),
+                paged AS (
+                    SELECT * FROM filtered
+                    {page_where}
+                    ORDER BY sequence DESC
+                    LIMIT ?
+                )
+                SELECT
+                    paged.sequence,
+                    paged.event_id,
+                    paged.event_type,
+                    paged.aggregate_type,
+                    paged.aggregate_id,
+                    paged.mine_id,
+                    paged.payload_json,
+                    paged.occurred_at,
+                    paged.previous_hash,
+                    paged.event_hash,
+                    matched.matched_count
+                FROM matched
+                LEFT JOIN paged ON 1 = 1
+                ORDER BY paged.sequence DESC
+                """,
+                values,
+            ).fetchall()
+
+        matched_count = int(rows[0]["matched_count"]) if rows else 0
+        item_rows = [row for row in rows if row["sequence"] is not None]
+        has_more = len(item_rows) > limit
+        selected = item_rows[:limit]
+        items = [
+            AuditProjection(
+                sequence=row["sequence"],
+                event_id=row["event_id"],
+                event_type=row["event_type"],
+                aggregate_type=row["aggregate_type"],
+                aggregate_id=row["aggregate_id"],
+                mine_id=row["mine_id"],
+                payload=json.loads(row["payload_json"]),
+                occurred_at=_parse_datetime(row["occurred_at"]),
+                previous_hash=row["previous_hash"],
+                event_hash=row["event_hash"],
+            )
+            for row in selected
+        ]
+        return AuditPage(
+            items=items,
+            snapshot_sequence=snapshot_sequence,
+            matched_count=matched_count,
+            has_more=has_more,
+            next_before_sequence=(items[-1].sequence if has_more and items else None),
+        )
+
     def finding_summary_counts(
         self,
         *,
@@ -3632,6 +3798,7 @@ def _median(values: Sequence[float]) -> float:
 __all__ = [
     "AnalysisReport",
     "AnalysisReportDeliveryAck",
+    "AuditPage",
     "AuditProjection",
     "DeliveryAckReceipt",
     "EnterpriseFindingResponse",

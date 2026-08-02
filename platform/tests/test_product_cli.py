@@ -24,6 +24,22 @@ def test_product_cli_exposes_only_v2_runtime_and_operations() -> None:
         "backup",
         "verify-backup",
         "restore-backup",
+        "user",
+    }
+    user_parser = subparsers.choices["user"]
+    user_subparsers = next(
+        action
+        for action in user_parser._actions  # noqa: SLF001
+        if action.__class__.__name__ == "_SubParsersAction"
+    )
+    assert set(user_subparsers.choices) == {
+        "list",
+        "mines",
+        "add",
+        "set-access",
+        "enable",
+        "disable",
+        "reset-password",
     }
     source = inspect.getsource(product_cli)
     assert "from .api" not in source
@@ -54,6 +70,165 @@ def test_loopback_first_start_uses_requested_demo_password(
     with LocalAuthStore(state / "auth.db") as auth:
         login = auth.login("admin", "123123123", client_id="test")
         assert login.principal.username == "admin"
+
+
+def test_user_cli_manages_accounts_in_the_selected_live_state(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    with LocalAuthStore(state / "auth.db") as auth:
+        auth.bootstrap_admin("admin", "admin password")
+    with sqlite3.connect(state / "mineguard.db") as connection:
+        connection.execute(
+            """
+            CREATE TABLE v2_agent_mine_bindings(
+                agent_id TEXT PRIMARY KEY,
+                mine_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO v2_agent_mine_bindings VALUES (?,?,?)",
+            [
+                ("agent-001", "MINE-QY-001", "2026-08-01T00:00:00+00:00"),
+                ("agent-002", "MINE-QY-002", "2026-08-01T00:00:00+00:00"),
+            ],
+        )
+
+    monkeypatch.setenv("MINEGUARD_NEW_USER_PASSWORD", "initial password")
+    assert (
+        product_cli.main(
+            [
+                "user",
+                "add",
+                "领导甲",
+                "--role",
+                "viewer",
+                "--mine-id",
+                "MINE-QY-001",
+                "--state-directory",
+                str(state),
+            ]
+        )
+        == 0
+    )
+    created = json.loads(capsys.readouterr().out)
+    assert created["status"] == "created"
+    assert created["restart_required"] is False
+    assert created["user"]["mine_scopes"] == ["MINE-QY-001"]
+    assert "password" not in created["user"]
+
+    with LocalAuthStore(state / "auth.db") as auth:
+        login = auth.login("领导甲", "initial password", client_id="test")
+        assert login.principal.mine_scopes == ("MINE-QY-001",)
+
+    assert (
+        product_cli.main(
+            ["user", "list", "--state-directory", str(state)]
+        )
+        == 0
+    )
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["count"] == 2
+    assert {item["username"] for item in listed["users"]} == {"admin", "领导甲"}
+
+    assert (
+        product_cli.main(
+            [
+                "user",
+                "set-access",
+                "领导甲",
+                "--role",
+                "reviewer",
+                "--all-mines",
+                "--state-directory",
+                str(state),
+            ]
+        )
+        == 0
+    )
+    changed = json.loads(capsys.readouterr().out)
+    assert changed["sessions_revoked"] is True
+    assert changed["user"]["role"] == "reviewer"
+    assert changed["user"]["mine_scopes"] == ["MINE-QY-001", "MINE-QY-002"]
+
+    assert (
+        product_cli.main(
+            ["user", "disable", "领导甲", "--state-directory", str(state)]
+        )
+        == 0
+    )
+    disabled = json.loads(capsys.readouterr().out)
+    assert disabled["status"] == "disabled"
+    assert disabled["user"]["active"] is False
+
+    assert (
+        product_cli.main(
+            ["user", "enable", "领导甲", "--state-directory", str(state)]
+        )
+        == 0
+    )
+    enabled = json.loads(capsys.readouterr().out)
+    assert enabled["user"]["active"] is True
+
+    monkeypatch.delenv("MINEGUARD_NEW_USER_PASSWORD")
+    assert (
+        product_cli.main(
+            [
+                "user",
+                "reset-password",
+                "领导甲",
+                "--demo-default-password",
+                "--state-directory",
+                str(state),
+            ]
+        )
+        == 0
+    )
+    reset = json.loads(capsys.readouterr().out)
+    assert reset["status"] == "password_reset"
+    assert reset["warnings"]
+    with LocalAuthStore(state / "auth.db") as auth:
+        login = auth.login("领导甲", "123123123", client_id="test-after-reset")
+        assert login.principal.role.value == "reviewer"
+
+
+def test_user_cli_rejects_wrong_state_directory_and_missing_mine_scope(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "missing"
+    assert (
+        product_cli.main(
+            ["user", "list", "--state-directory", str(missing)]
+        )
+        == 2
+    )
+    error = json.loads(capsys.readouterr().out)
+    assert "同一 --state-directory" in error["error"]["message"]
+
+    state = tmp_path / "state"
+    state.mkdir()
+    with LocalAuthStore(state / "auth.db") as auth:
+        auth.bootstrap_admin("admin", "admin password")
+    assert (
+        product_cli.main(
+            [
+                "user",
+                "add",
+                "scope-less",
+                "--demo-default-password",
+                "--state-directory",
+                str(state),
+            ]
+        )
+        == 2
+    )
+    error = json.loads(capsys.readouterr().out)
+    assert "至少需要一个 --mine-id 或 --all-mines" in error["error"]["message"]
 
 
 def test_seed_v2_demo_command_creates_isolated_dashboard_data(

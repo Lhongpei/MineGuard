@@ -8,6 +8,7 @@ from http.client import HTTPConnection
 import json
 from pathlib import Path
 from threading import Thread
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -15,20 +16,132 @@ from jsonschema import Draft202012Validator, FormatChecker
 import pytest
 from referencing import Registry, Resource
 
+from mineguard.auth import Principal, Role
 from mineguard.exchange_v2 import (
     ExchangeClient,
+    FiveQuantitySubmissionMessage,
     exchange_signature_material,
     sign_exchange_message,
     sign_transport_headers,
 )
 from mineguard.external_submission import jcs_canonical_json
-from mineguard.regulatory_v2_http import RegulatoryV2RequestHandler, create_server
+from mineguard.regulatory_v2_http import (
+    RegulatoryV2RequestHandler,
+    _humanize_business_text,
+    _humanize_finding_summary,
+    create_server,
+)
+from mineguard.regulatory_v2_store import AuditProjection
 
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = ROOT / "contracts"
 EXAMPLE_SECRET = b"example-v2-exchange-secret-not-for-production"
 FIXED_NOW = datetime(2026, 8, 1, 0, 20, tzinfo=UTC)
+
+
+def test_government_business_text_hides_internal_tokens_but_preserves_ids() -> None:
+    rendered = _humanize_business_text(
+        "2026-07-01 electricity_per_production偏离anonymous_peer稳健基线；"
+        "CUSUM、EWMA、Page-Hinkley、median/MAD均未触发；"
+        "unmapped_ratio_signal待核；编号 FINDING_QY_20260705_001"
+    )
+
+    for raw in (
+        "electricity_per_production",
+        "anonymous_peer",
+        "unmapped_ratio_signal",
+        "CUSUM",
+        "EWMA",
+        "Page-Hinkley",
+        "median/MAD",
+    ):
+        assert raw not in rendered
+    for label in (
+        "单位产量电耗",
+        "匿名同类矿",
+        "其他业务项",
+        "持续累积偏移",
+        "近期均值越界",
+        "均值变化检测",
+        "历史稳健范围",
+        "FINDING_QY_20260705_001",
+    ):
+        assert label in rendered
+
+
+def test_government_finding_summary_groups_repeated_daily_machine_prose() -> None:
+    rendered = _humanize_finding_summary(
+        "2026-07-01 electricity_per_production偏离anonymous_peer稳健基线；"
+        "2026-07-02 electricity_per_production偏离anonymous_peer稳健基线；"
+        "2026-07-03 electricity_per_production偏离anonymous_peer稳健基线"
+    )
+
+    assert rendered == (
+        "多日出现：单位产量电耗偏离匿名同类矿稳健基线。逐日证据见下方。"
+    )
+
+    relationship = _humanize_finding_summary(
+        "2026-07-01 electricity_per_production 超出anonymous_peer软参考区间；"
+        "2026-07-01 的日报、班次或软参考带无法同时成立；"
+        "2026-07-02 electricity_per_production 超出anonymous_peer软参考区间；"
+        "2026-07-02 的日报、班次或软参考带无法同时成立"
+    )
+    assert relationship == (
+        "多日出现：单位产量电耗超出匿名同类矿软参考区间；"
+        "多日出现：日报、班次或软参考带无法同时成立。逐日证据见下方。"
+    )
+
+
+def test_government_business_text_translates_complete_algorithm_phrases_naturally() -> None:
+    rendered = _humanize_business_text(
+        "正向 CUSUM 累积偏移超过持续漂移阈值；"
+        "EWMA 水平超过控制限；"
+        "Page-Hinkley 检测到均值变点；"
+        "滚动 median/MAD 基线发生偏离"
+    )
+
+    assert rendered == (
+        "正向持续累积偏移值超过持续漂移阈值；"
+        "近期加权均值超过控制限；"
+        "均值变化检测发现均值变点；"
+        "滚动历史稳健基线发生偏离"
+    )
+
+
+def test_finding_projection_only_exposes_evidence_for_its_own_category() -> None:
+    def signal(message: str) -> SimpleNamespace:
+        return SimpleNamespace(message=message)
+
+    item = SimpleNamespace(
+        finding=SimpleNamespace(
+            finding_id="finding-001",
+            mine_id="MINE-QY-001",
+            finding_type="risk",
+            category="relationship_consistency",
+            title="五量关系待核",
+            summary="electricity_per_production偏离anonymous_peer稳健基线",
+            issued_at=FIXED_NOW,
+            result=SimpleNamespace(
+                data_quality_signals=[signal("wire_quality_flags存在格式提示")],
+                relationship_signals=[
+                    signal("electricity_per_production超出anonymous_peer参考区间")
+                ],
+                temporal_signals=[signal("CUSUM发现持续偏移")],
+            ),
+        ),
+        state="open",
+        responses=[],
+        resolved_by_submission_id=None,
+    )
+
+    projected = RegulatoryV2RequestHandler._finding_projection(item)
+
+    assert projected["summary"] == "单位产量电耗偏离匿名同类矿稳健基线"
+    assert projected["evidence"] == ["单位产量电耗超出匿名同类矿参考区间"]
+    serialized = json.dumps(projected, ensure_ascii=False)
+    assert "wire_quality_flags" not in serialized
+    assert "CUSUM" not in serialized
 
 
 def _schema_registry() -> Registry:
@@ -379,7 +492,38 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
         assert overview["counts"]["configured_mines"] == 1
         assert overview["counts"]["insufficient_data"] == 1
         assert overview["counts"]["awaiting_response"] == 0
+        assert overview["attention_counts"] == {
+            "risk_findings": 0,
+            "data_to_complete": 1,
+            "awaiting_enterprise_response": 0,
+            "enterprise_responded_unresolved": 1,
+            "cleared_by_reanalysis": 0,
+            "total_unresolved": 1,
+        }
+        assert "severity_counts" not in overview
+        assert "highest_severity" not in overview
         assert "notice" not in overview
+        assert overview["latest_events"]
+        assert overview["latest_events"][0]["event_label"] == "企业已回复"
+        assert overview["latest_events"][0]["status"] == "explanation_recorded"
+        assert "风险尚未解除" in overview["latest_events"][0]["summary"]
+        assert all(
+            item["mine_name"] == "示例一号煤矿"
+            and item["event_label"]
+            and item["status"]
+            and "_" not in item["summary"]
+            for item in overview["latest_events"]
+        )
+        assert not {
+            "agent_mine_bound",
+            "exchange_inbound_recorded",
+            "exchange_outbound_recorded",
+            "anonymous_peer_snapshot_frozen",
+            "baseline_candidate_admitted",
+            "baseline_candidate_rejected",
+            "finding_automatically_issued",
+            "analysis_completed",
+        } & {item["event_type"] for item in overview["latest_events"]}
 
         connection.request("GET", "/v2/regulatory/mines/MINE-QY-001")
         detail_response = connection.getresponse()
@@ -389,6 +533,7 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
         assert detail["latest_analysis"]["algorithm_version"].startswith(
             "regulatory-five-quantity-v2"
         )
+        assert detail["findings"][0]["finding_type"] == "data_insufficient"
         assert detail["findings"][0]["state"] == "explanation_recorded"
 
         connection.request(
@@ -408,4 +553,188 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
         connection.close()
         server.shutdown()
         thread.join(timeout=5)
+        server.server_close()
+
+
+def test_overview_attention_and_business_events_respect_mine_scope(
+    tmp_path: Path,
+) -> None:
+    document = json.loads(
+        (CONTRACTS / "examples" / "five-quantity-submission-v2.json").read_text()
+    )
+    first = FiveQuantitySubmissionMessage.model_validate(
+        document
+    ).to_regulatory_submission()
+    second = first.model_copy(
+        update={
+            "submission_id": str(uuid4()),
+            "mine_id": "MINE-OUTSIDE-002",
+            "mine_name": "辖区外保密煤矿",
+        }
+    )
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "regulatory.db",
+        auth_database_path=tmp_path / "auth.db",
+        auth_required=True,
+        clients={},
+        clock=lambda: FIXED_NOW,
+    )
+    try:
+        server.store.submit_and_analyze(first)
+        server.store.submit_and_analyze(second)
+        handler = object.__new__(RegulatoryV2RequestHandler)
+        handler.server = server
+        scoped = Principal(
+            user_id="reviewer-001",
+            username="reviewer",
+            role=Role.REVIEWER,
+            mine_scopes=(first.mine_id,),
+            session_id="session-reviewer-001",
+        )
+
+        overview = handler._overview(scoped)
+
+        assert overview["counts"]["configured_mines"] == 1
+        assert overview["attention_counts"] == {
+            "risk_findings": 0,
+            "data_to_complete": 1,
+            "awaiting_enterprise_response": 1,
+            "enterprise_responded_unresolved": 0,
+            "cleared_by_reanalysis": 0,
+            "total_unresolved": 1,
+        }
+        assert len(overview["latest_events"]) == 1
+        assert overview["latest_events"][0]["mine_id"] == first.mine_id
+        assert overview["latest_events"][0]["mine_name"] == first.mine_name
+        serialized = json.dumps(overview, ensure_ascii=False)
+        assert second.mine_id not in serialized
+        assert second.mine_name not in serialized
+
+        admin = Principal(
+            user_id="admin-001",
+            username="admin",
+            role=Role.ADMIN,
+            mine_scopes=(),
+            session_id="session-admin-001",
+        )
+        admin_overview = handler._overview(admin)
+        assert admin_overview["counts"]["configured_mines"] == 2
+        assert admin_overview["attention_counts"]["data_to_complete"] == 2
+        assert len(admin_overview["latest_events"]) == 2
+        assert {item["mine_id"] for item in admin_overview["latest_events"]} == {
+            first.mine_id,
+            second.mine_id,
+        }
+        assert len(server.store.list_audit_events(limit=200)) > len(
+            admin_overview["latest_events"]
+        )
+    finally:
+        server.server_close()
+
+
+def test_revision_resolution_events_share_correlation_and_aggregate(
+    tmp_path: Path,
+) -> None:
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "regulatory.db",
+        auth_database_path=tmp_path / "auth.db",
+        auth_required=False,
+        clients={},
+        clock=lambda: FIXED_NOW,
+    )
+    try:
+        handler = object.__new__(RegulatoryV2RequestHandler)
+        handler.server = server
+        resolving_submission_id = "revision-submission-002"
+        resolution_events = [
+            AuditProjection(
+                sequence=sequence,
+                event_id=str(uuid4()),
+                event_type="finding_resolved_by_revision_reanalysis",
+                aggregate_type="finding",
+                aggregate_id=f"finding-{sequence}",
+                mine_id="MINE-QY-001",
+                payload={
+                    "resolving_submission_id": resolving_submission_id,
+                    "rule": "normal_candidate_revision_reanalysis_only",
+                },
+                occurred_at=FIXED_NOW,
+                previous_hash="0" * 64,
+                event_hash=f"{sequence}" * 64,
+            )
+            for sequence in (3, 4)
+        ]
+        events = [
+            AuditProjection(
+                sequence=1,
+                event_id=str(uuid4()),
+                event_type="submission_received",
+                aggregate_type="submission",
+                aggregate_id=resolving_submission_id,
+                mine_id="MINE-QY-001",
+                payload={"revision": 2, "supersedes_submission_id": "submission-001"},
+                occurred_at=FIXED_NOW,
+                previous_hash="0" * 64,
+                event_hash="1" * 64,
+            ),
+            AuditProjection(
+                sequence=2,
+                event_id=str(uuid4()),
+                event_type="analysis_completed",
+                aggregate_type="analysis_run",
+                aggregate_id="analysis-run-002",
+                mine_id="MINE-QY-001",
+                payload={
+                    "submission_id": resolving_submission_id,
+                    "decision": "normal_candidate",
+                },
+                occurred_at=FIXED_NOW,
+                previous_hash="1" * 64,
+                event_hash="2" * 64,
+            ),
+            *resolution_events,
+            AuditProjection(
+                sequence=5,
+                event_id=str(uuid4()),
+                event_type="analysis_report_automatically_issued",
+                aggregate_type="analysis_report",
+                aggregate_id="analysis-report-002",
+                mine_id="MINE-QY-001",
+                payload={
+                    "submission_id": resolving_submission_id,
+                    "outcome": "normal_candidate",
+                    "finding_ids": [],
+                },
+                occurred_at=FIXED_NOW,
+                previous_hash="4" * 64,
+                event_hash="5" * 64,
+            ),
+        ]
+
+        assert len({handler._business_event_key(item) for item in events}) == 1
+        handler._audit_events = lambda principal, *, limit: list(reversed(events))
+        projected_events = handler._latest_business_events(
+            Principal(
+                user_id="admin-001",
+                username="admin",
+                role=Role.ADMIN,
+                mine_scopes=(),
+                session_id="session-admin-001",
+            ),
+            mine_names={"MINE-QY-001": "示例一号煤矿"},
+            limit=8,
+        )
+
+        assert len(projected_events) == 1
+        projected = projected_events[0]
+        assert projected["event_type"] == "finding_resolved_by_revision_reanalysis"
+        assert projected["correlation_id"] == resolving_submission_id
+        assert projected["event_label"] == "风险已解除"
+        assert projected["status"] == "cleared_by_reanalysis"
+        assert "2 项相关风险已解除" in projected["summary"]
+    finally:
         server.server_close()

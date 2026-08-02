@@ -1,0 +1,162 @@
+name: Windows native verification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-native:
+    name: Python 3.12 / Windows Server 2022
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      PLATFORM_VENV: '${{ runner.temp }}\MineGuard Platform Runtime'
+      PLATFORM_PYTHON: '${{ runner.temp }}\MineGuard Platform Runtime\Scripts\python.exe'
+      AGENT_VENV: '${{ runner.temp }}\MineGuard Agent Runtime'
+      AGENT_PYTHON: '${{ runner.temp }}\MineGuard Agent Runtime\Scripts\python.exe'
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+          cache: pip
+          cache-dependency-path: |
+            platform/constraints.txt
+            platform/pyproject.toml
+            agent/constraints.txt
+            agent/pyproject.toml
+            contracts/requirements-validation.txt
+
+      - name: Set up Node for static JavaScript checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install both independent products and verification tools
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r contracts/requirements-validation.txt tzdata
+
+          python -m venv "$env:PLATFORM_VENV"
+          & $env:PLATFORM_PYTHON -m pip install --upgrade pip
+          & $env:PLATFORM_PYTHON -m pip install `
+            -c platform/constraints.txt -e ./platform
+          & $env:PLATFORM_PYTHON -m pip install `
+            -c platform/constraints.txt pytest tzdata
+
+          python -m venv "$env:AGENT_VENV"
+          & $env:AGENT_PYTHON -m pip install --upgrade pip
+          Push-Location agent
+          try {
+            & $env:AGENT_PYTHON -m pip install `
+              --constraint constraints.txt -e ".[dev]" tzdata
+          }
+          finally {
+            Pop-Location
+          }
+
+      - name: Verify independent 64-bit runtimes and Asia Shanghai timezone
+        shell: pwsh
+        run: |
+          & $env:PLATFORM_PYTHON -c "import importlib.util, struct; from zoneinfo import ZoneInfo; assert struct.calcsize('P') == 8; assert importlib.util.find_spec('enterprise_agent') is None; print(ZoneInfo('Asia/Shanghai'))"
+          & $env:AGENT_PYTHON -c "import importlib.util, struct; from zoneinfo import ZoneInfo; assert struct.calcsize('P') == 8; assert importlib.util.find_spec('mineguard') is None; print(ZoneInfo('Asia/Shanghai'))"
+
+      - name: Parse every Windows deployment script with PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(
+            Get-ChildItem -Path 'platform\deploy\windows','agent\deploy\windows' `
+              -Filter '*.ps1' -File -Recurse
+          )
+          if ($files.Count -eq 0) {
+            throw 'No Windows deployment scripts were found.'
+          }
+          foreach ($file in $files) {
+            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+            $hasUtf8Bom = (
+              $bytes.Length -ge 3 -and
+              $bytes[0] -eq 0xEF -and
+              $bytes[1] -eq 0xBB -and
+              $bytes[2] -eq 0xBF
+            )
+            $contentOffset = if ($hasUtf8Bom) { 3 } else { 0 }
+            $hasNonAscii = $false
+            for ($index = $contentOffset; $index -lt $bytes.Length; $index++) {
+              if ($bytes[$index] -gt 0x7F) {
+                $hasNonAscii = $true
+                break
+              }
+            }
+            if ($hasNonAscii -and -not $hasUtf8Bom) {
+              throw (
+                "$($file.FullName) contains non-ASCII text but has no " +
+                'UTF-8 BOM; Windows PowerShell 5.1 would misdecode it.'
+              )
+            }
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $file.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $details = ($errors | ForEach-Object {
+                '{0}:{1}: {2}' -f `
+                  $file.FullName,$_.Extent.StartLineNumber,$_.Message
+              }) -join [Environment]::NewLine
+              throw $details
+            }
+          }
+          Write-Host ("Parsed {0} PowerShell deployment scripts." -f $files.Count)
+
+      - name: Validate neutral exchange contracts
+        shell: pwsh
+        run: python contracts/scripts/validate_contracts.py
+
+      - name: Compile and test the government platform
+        shell: pwsh
+        run: |
+          & $env:PLATFORM_PYTHON -m compileall -q platform/src
+          & $env:PLATFORM_PYTHON -m pytest -q platform/tests
+          & $env:PLATFORM_PYTHON -m mineguard --help
+
+      - name: Compile, lint and test the enterprise agent
+        shell: pwsh
+        run: |
+          & $env:AGENT_PYTHON -m compileall -q agent/src
+          & $env:AGENT_PYTHON -m ruff check agent/src agent/tests
+          & $env:AGENT_PYTHON -m pytest -q agent/tests
+          & $env:AGENT_PYTHON -m enterprise_agent --help
+
+      - name: Check browser JavaScript syntax
+        shell: pwsh
+        run: |
+          node --check platform/src/mineguard/regulatory_web/app.js
+          node --check agent/web/v2-app.js
+
+      - name: Start both products and verify Windows health endpoints
+        shell: pwsh
+        run: |
+          python scripts/verify_two_process.py `
+            --runtime-smoke `
+            --timeout 45 `
+            --platform-python "$env:PLATFORM_PYTHON" `
+            --agent-python "$env:AGENT_PYTHON"

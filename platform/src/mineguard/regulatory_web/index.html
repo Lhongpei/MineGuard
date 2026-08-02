@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#07111f">
-  <title>五量智能监管驾驶舱</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=2.3.2">
+  <title>MineGuard · 矿安智察 · 煤矿智能辅助监管系统</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=2.8.0">
 </head>
 <body>
   <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -17,9 +17,9 @@
       <div class="brand-block">
         <div class="emblem" aria-hidden="true"><span></span></div>
         <div>
-          <p class="eyebrow">QINYUAN · FIVE QUANTITY SUPERVISION</p>
-          <h1>五量智能监管驾驶舱</h1>
-          <p class="subtitle">政府只读监管平台 · 单矿研判 · 辖区综合 · 全程留痕</p>
+          <p class="eyebrow">COAL MINE INTELLIGENT SUPERVISION</p>
+          <h1>MineGuard · 矿安智察</h1>
+          <p class="subtitle">煤矿智能辅助监管系统 · 政府只读监管端 · 五量智能研判 · 全程留痕</p>
         </div>
       </div>
       <div class="topbar-actions">
@@ -30,6 +30,7 @@
         </div>
         <button id="refreshButton" class="quiet-button" type="button">刷新</button>
         <button id="fullscreenButton" class="quiet-button" type="button">全屏</button>
+        <button id="wallboardButton" class="quiet-button wallboard-launch-button" type="button">大屏展示</button>
         <button id="logoutButton" class="quiet-button hidden" type="button">退出</button>
       </div>
     </header>
@@ -52,10 +53,10 @@
           <span>本期已报</span><strong id="metricReported">—</strong><small id="metricCoverage">覆盖率 —</small>
         </article>
         <article class="metric-card tone-green">
-          <span>正常候选</span><strong id="metricNormal">—</strong><small>通过唯一监管引擎</small>
+          <span>暂未发现异常</span><strong id="metricNormal">—</strong><small>本期自动核验结果</small>
         </article>
         <article class="metric-card tone-red">
-          <span>风险煤矿</span><strong id="metricRisk">—</strong><small id="metricHighest">最高风险 —</small>
+          <span>风险煤矿</span><strong id="metricRisk">—</strong><small id="metricHighest">待核事项 —</small>
         </article>
         <article class="metric-card tone-amber">
           <span>数据不足</span><strong id="metricInsufficient">—</strong><small>不能形成确定判断</small>
@@ -83,19 +84,35 @@
 
         <article class="panel risk-panel">
           <header class="panel-header">
-            <div><p class="panel-kicker">RISK DISTRIBUTION</p><h2>风险等级分布</h2></div>
+            <div><p class="panel-kicker">SUPERVISION FOCUS</p><h2>辖区待关注事项</h2></div>
           </header>
-          <div id="severityBars" class="severity-bars"></div>
-          <div class="explain-card">
-            <strong>结论口径</strong>
-            <p>企业说明只作追加留痕；只有修订数据经同一算法重算通过，风险才会解除。</p>
+          <div class="attention-overview" aria-live="polite">
+            <div class="attention-total-block">
+              <span>待关注总数</span>
+              <div><strong id="attentionTotal">正在汇总</strong></div>
+            </div>
+            <div id="attentionStatus" class="attention-status" aria-label="待关注事项状态">
+              <div><span>待企业回复</span><strong>—</strong></div>
+              <div><span>企业已回复<br>风险未解除</span><strong>—</strong></div>
+              <div><span>修订数据复核<br>已解除</span><strong>—</strong></div>
+            </div>
           </div>
+          <div id="severityBars" class="severity-bars" aria-label="待关注事项构成"></div>
+          <div class="risk-action-card">
+            <strong>当前先看什么</strong>
+            <p id="riskGuidance" class="risk-guidance">正在汇总辖区风险状态，请稍候。</p>
+            <div class="risk-state-guide" aria-label="风险状态变化说明">
+              <span>企业提交说明</span><i aria-hidden="true"></i><strong>已回复、待复核</strong>
+              <span>修订数据复核无异常</span><i aria-hidden="true"></i><strong>风险已解除</strong>
+            </div>
+          </div>
+          <button id="openFindingsButton" class="risk-ledger-button" type="button">查看风险台账</button>
         </article>
 
         <article class="panel activity-panel">
           <header class="panel-header">
-            <div><p class="panel-kicker">LIVE EXCHANGE</p><h2>最新状态变化</h2></div>
-            <span class="refresh-hint">10 秒自动刷新</span>
+            <div><p class="panel-kicker">JURISDICTION UPDATES</p><h2>辖区最新动态</h2></div>
+            <span class="refresh-hint">每 10 秒更新</span>
           </header>
           <ol id="activityList" class="activity-list"></ol>
         </article>
@@ -128,10 +145,10 @@
           <article class="panel response-card"><p class="panel-kicker">RESPONSE LOOP</p><h2>风险回执</h2><dl id="responseMeta"></dl></article>
         </div>
         <article class="panel chart-panel">
-          <header class="panel-header chart-panel-header"><div><p class="panel-kicker">TIME SERIES</p><h2>五量时序（火工品分项）</h2></div></header>
+          <header class="panel-header chart-panel-header"><div><p class="panel-kicker">TIME SERIES</p><h2>五量时序（火工品分项）</h2><p class="chart-note">按五量分轨展示；火工品量分为雷管、炸药两个子项，共用同一日期轴。</p></div></header>
           <div id="seriesLegend" class="series-legend" role="list" aria-label="五量时序图例"></div>
-          <div id="seriesChart" class="series-chart" role="img" aria-label="五量标准化时序图"></div>
-          <p class="chart-note">为便于同图比较，各指标按当前窗口内自身尺度标准化；悬停可查看原始单位数值。</p>
+          <div id="seriesChart" class="series-chart" role="img" aria-label="五量分轨时序图；火工品包含雷管和炸药子项"></div>
+          <p class="chart-note">每条轨道只表示该项在当前窗口内的自身高低，不代表不同单位可以直接比较；恒定值位于轨道中线，数据空缺处断开，悬停可查看原始数值。</p>
         </article>
         <div class="detail-grid">
           <article class="panel"><header class="panel-header"><div><p class="panel-kicker">FINDINGS</p><h2>风险与算法依据</h2></div></header><div id="mineFindings" class="finding-list"></div></article>
@@ -141,20 +158,146 @@
     </section>
 
     <section id="findingsView" class="view" data-view-panel="findings">
-      <article class="panel">
+      <article class="panel finding-ledger-panel">
         <header class="panel-header table-header">
           <div><p class="panel-kicker">FINDING LEDGER</p><h2>不可变风险台账</h2></div>
-          <div class="filters"><select id="findingSeverity"><option value="">全部等级</option><option value="critical">重大</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select><select id="findingState"><option value="">全部状态</option><option value="open">待回复</option><option value="explanation_recorded">已解释</option><option value="risk_persists">风险持续</option><option value="cleared_by_reanalysis">重算解除</option></select></div>
+          <div class="filters"><select id="findingSeverity" aria-label="事项类型"><option value="">全部事项类型</option><option value="risk">风险线索</option><option value="data_insufficient">数据待补</option></select><select id="findingState"><option value="">全部状态</option><option value="open">待企业回复</option><option value="explanation_recorded">企业已回复（未解除）</option><option value="risk_persists">复核后风险仍存在</option><option value="cleared_by_reanalysis">修订复核已解除</option></select></div>
         </header>
         <div id="findingLedger" class="finding-ledger"></div>
       </article>
     </section>
 
     <section id="traceView" class="view" data-view-panel="trace">
-      <article class="panel">
-        <header class="panel-header"><div><p class="panel-kicker">IMMUTABLE TRACE</p><h2>双系统交换留痕</h2></div><span class="read-only-tag">追加式记录</span></header>
+      <article class="panel trace-panel">
+        <header class="panel-header trace-title-row">
+          <div><p class="panel-kicker">IMMUTABLE TRACE</p><h2>双系统交换留痕</h2></div>
+          <div class="trace-header-actions">
+            <span class="read-only-tag">追加式记录</span>
+            <span id="traceIntegrity" class="status-pill status-neutral">完整留痕链待校验</span>
+            <button id="traceExportButton" class="trace-export-button" type="button">导出当前筛选</button>
+          </div>
+        </header>
         <div class="trace-explainer"><span>企业报送</span><i></i><span>政府分析</span><i></i><span>风险送达</span><i></i><span>企业回复</span><i></i><span>必要时重算</span></div>
-        <div class="table-wrap"><table><thead><tr><th>时间</th><th>煤矿</th><th>事件</th><th>关联编号</th><th>摘要</th><th>链校验</th></tr></thead><tbody id="traceTableBody"></tbody></table></div>
+        <div class="trace-filter-panel" aria-label="交换留痕筛选">
+          <div class="trace-filter-row trace-time-filter">
+            <span class="trace-filter-label">时间范围</span>
+            <div id="traceRangePresets" class="trace-range-presets" role="group" aria-label="快捷时间范围">
+              <button type="button" data-trace-range="24h">近24小时</button>
+              <button type="button" class="active" data-trace-range="7d">近7天</button>
+              <button type="button" data-trace-range="30d">近30天</button>
+              <button type="button" data-trace-range="month">本月</button>
+              <button type="button" data-trace-range="custom">自定义</button>
+            </div>
+            <div id="traceCustomRange" class="trace-custom-range hidden">
+              <label>开始<input id="traceFrom" type="datetime-local" step="60"></label>
+              <span>至</span>
+              <label>结束<input id="traceTo" type="datetime-local" step="60"></label>
+            </div>
+          </div>
+          <div class="trace-filter-row trace-business-filters">
+            <label>煤矿
+              <select id="traceMineFilter"><option value="">全部可见煤矿</option></select>
+            </label>
+            <label>业务环节
+              <select id="traceEventGroup">
+                <option value="">全部业务环节</option>
+                <option value="submission">企业报送</option>
+                <option value="analysis">政府研判</option>
+                <option value="finding">风险形成</option>
+                <option value="delivery">结果送达</option>
+                <option value="response">企业回复</option>
+                <option value="reanalysis">修订重算</option>
+                <option value="security">接入与安全拦截</option>
+              </select>
+            </label>
+            <label>记录范围
+              <select id="traceViewMode">
+                <option value="business">业务关键节点</option>
+                <option value="technical">完整技术留痕</option>
+              </select>
+            </label>
+            <div class="trace-filter-actions">
+              <button id="traceApplyButton" class="primary-button compact-button" type="button">应用筛选</button>
+              <button id="traceClearButton" class="quiet-button compact-button" type="button">清空筛选</button>
+            </div>
+          </div>
+        </div>
+        <button id="traceNewRecords" class="trace-new-records hidden" type="button" aria-live="polite"></button>
+        <div class="trace-result-meta" aria-live="polite">
+          <strong id="traceResultCount">当前显示 0 / 共 0 条</strong>
+          <span id="traceDataAsOf">尚未加载</span>
+        </div>
+        <div class="table-wrap trace-table-wrap">
+          <table class="trace-table">
+            <thead><tr><th>时间</th><th>煤矿</th><th>业务环节</th><th>事件</th><th>关联编号</th><th>摘要</th><th>留痕序号</th></tr></thead>
+            <tbody id="traceTableBody"></tbody>
+          </table>
+        </div>
+        <div class="trace-load-more-wrap">
+          <button id="traceLoadMoreButton" class="quiet-button trace-load-more hidden" type="button">加载更早 20 条</button>
+        </div>
+      </article>
+    </section>
+
+    <section id="wallboardView" class="wallboard-view hidden" aria-label="MineGuard 矿安智察监管大屏">
+      <header class="wallboard-header">
+        <div class="wallboard-brand">
+          <div class="emblem" aria-hidden="true"><span></span></div>
+          <div><p>COAL MINE INTELLIGENT SUPERVISION</p><h2>MineGuard · 矿安智察</h2></div>
+        </div>
+        <div class="wallboard-title">
+          <h1>煤矿智能辅助监管态势大屏</h1>
+          <p>政府只读监管 · 五量统一研判 · 风险闭环 · 全程留痕</p>
+        </div>
+        <div class="wallboard-header-status">
+          <div><span class="pulse-dot" aria-hidden="true"></span><strong>实时监测</strong></div>
+          <time id="wallboardClock">—</time>
+          <small id="wallboardAsOf">数据尚未加载</small>
+        </div>
+        <button id="wallboardExitButton" class="wallboard-exit-button" type="button" title="返回监管工作台（Esc）">返回监管端</button>
+      </header>
+
+      <div class="wallboard-metrics" aria-label="辖区核心指标">
+        <article class="wallboard-metric tone-blue"><span>监管煤矿</span><strong id="wallboardMetricExpected">—</strong><small>一矿一智能体</small></article>
+        <article class="wallboard-metric tone-cyan"><span>已有报送</span><strong id="wallboardMetricReported">—</strong><small id="wallboardMetricCoverage">覆盖率 —</small></article>
+        <article class="wallboard-metric tone-green"><span>暂未发现异常</span><strong id="wallboardMetricNormal">—</strong><small>本期自动核验结果</small></article>
+        <article class="wallboard-metric tone-red"><span>待关注煤矿</span><strong id="wallboardMetricRisk">—</strong><small id="wallboardMetricRiskItems">待核事项 —</small></article>
+        <article class="wallboard-metric tone-amber"><span>数据不足</span><strong id="wallboardMetricInsufficient">—</strong><small>需补充或核对数据</small></article>
+        <article class="wallboard-metric tone-violet"><span>待企业回复</span><strong id="wallboardMetricAwaiting">—</strong><small>需企业说明或提交修订</small></article>
+      </div>
+
+      <div class="wallboard-main-grid">
+        <article class="wallboard-panel wallboard-situation-panel">
+          <header><div><p>JURISDICTION SITUATION</p><h2>辖区总体态势</h2></div><span>自动更新</span></header>
+          <div class="wallboard-situation-body">
+            <div id="wallboardCoverageRing" class="wallboard-coverage-ring" aria-label="已有报送覆盖率">
+              <svg viewBox="0 0 100 100" aria-hidden="true"><circle class="wallboard-coverage-track" cx="50" cy="50" r="44"></circle><circle id="wallboardCoverageArc" class="wallboard-coverage-arc" cx="50" cy="50" r="44" pathLength="100" stroke-dasharray="0 100"></circle></svg>
+              <div><strong id="wallboardCoverageValue">—</strong><span>报送覆盖率</span></div>
+            </div>
+            <div id="wallboardStatusLegend" class="wallboard-status-legend"></div>
+          </div>
+          <div class="wallboard-attention-summary">
+            <div><span>风险线索</span><strong id="wallboardRiskFindings">—</strong></div>
+            <div><span>数据待补</span><strong id="wallboardDataToComplete">—</strong></div>
+            <div><span>已回复未解除</span><strong id="wallboardResponded">—</strong></div>
+            <div><span>修订复核已解除</span><strong id="wallboardCleared">—</strong></div>
+          </div>
+        </article>
+
+        <article id="wallboardCorePanel" class="wallboard-panel wallboard-focus-panel wallboard-core-panel">
+          <header><div><p>FIVE QUANTITY INTELLIGENCE CORE</p><h2>智能研判核心 · 五量联动核验</h2></div><span id="wallboardFocusProgress">—</span></header>
+          <div id="wallboardFocusBody" class="wallboard-focus-body" aria-live="polite"><div id="wallboardCoreBody" class="wallboard-core-body"></div></div>
+        </article>
+
+        <article class="wallboard-panel wallboard-activity-panel">
+          <header><div><p>LIVE SUPERVISION UPDATES</p><h2>辖区最新动态</h2></div><span>每 10 秒更新</span></header>
+          <ol id="wallboardActivityList" class="wallboard-activity-list" aria-live="polite"></ol>
+        </article>
+      </div>
+
+      <article class="wallboard-panel wallboard-mine-rail-panel">
+        <header><div><p>MINE STATUS MATRIX</p><h2>煤矿监管状态</h2></div><span id="wallboardMinePage">—</span></header>
+        <div id="wallboardMineRail" class="wallboard-mine-rail" aria-live="polite"></div>
       </article>
     </section>
   </main>
@@ -162,8 +305,8 @@
   <dialog id="loginDialog" class="login-dialog">
     <form id="loginForm" method="dialog">
       <div class="login-mark"><span></span></div>
-      <p class="eyebrow">REGULATORY READ-ONLY ACCESS</p>
-      <h2>进入监管驾驶舱</h2>
+      <p class="eyebrow">MINEGUARD · 矿安智察</p>
+      <h2>登录煤矿智能辅助监管系统</h2>
       <p>政府业务端仅查看算法结果、风险回执和留痕，不修改企业数据或算法结论。</p>
       <label>账号<input id="username" name="username" autocomplete="username" required value="admin"></label>
       <label>密码<input id="password" name="password" autocomplete="current-password" type="password" required></label>
@@ -172,6 +315,6 @@
     </form>
   </dialog>
 
-  <script src="/assets/app.js?v=2.3.2" defer></script>
+  <script src="/assets/app.js?v=2.8.0" defer></script>
 </body>
 </html>

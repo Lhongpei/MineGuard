@@ -15,6 +15,7 @@ from mineguard.exchange_v2 import (
     ExchangeClient,
     ExchangeLineageError,
     decode_inbound_message,
+    load_exchange_clients,
     parse_exchange_clients,
     parse_inbound_message,
     sign_exchange_message,
@@ -208,6 +209,55 @@ def test_named_key_config_and_single_key_legacy_config_are_supported() -> None:
         )
     )["agent-mine-001"]
     assert legacy.message_key_id == "demo-exchange-key"
+
+
+def test_exchange_clients_can_be_loaded_from_an_absolute_utf8_bom_file(
+    tmp_path: Path,
+) -> None:
+    registry = {
+        "clients": [
+            {
+                "sender_id": "agent-mine-001",
+                "party_id": "operator-mine-001",
+                "mine_id": "MINE-001",
+                "message_secret": "message-secret-material-that-is-long-enough",
+                "transport_secret": "transport-secret-material-that-is-long-enough",
+            }
+        ]
+    }
+    path = tmp_path / "clients.json"
+    path.write_text(json.dumps(registry), encoding="utf-8-sig")
+
+    clients = load_exchange_clients(None, str(path))
+
+    assert set(clients) == {"agent-mine-001"}
+    assert clients["agent-mine-001"].mine_id == "MINE-001"
+
+
+def test_exchange_clients_file_fails_closed_for_ambiguous_or_unsafe_sources(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "clients.json"
+    path.write_text('{"clients": []}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="only one"):
+        load_exchange_clients('{"clients": []}', str(path))
+    with pytest.raises(ValueError, match="only one"):
+        load_exchange_clients("", str(path))
+    with pytest.raises(ValueError, match="must not be empty"):
+        load_exchange_clients(None, "")
+    with pytest.raises(ValueError, match="absolute"):
+        load_exchange_clients(None, "clients.json")
+    with pytest.raises(ValueError, match="4 MiB"):
+        load_exchange_clients(None, str(path), maximum_bytes=4)
+
+    link = tmp_path / "clients-link.json"
+    try:
+        link.symlink_to(path)
+    except OSError:
+        pytest.skip("the current test account cannot create symbolic links")
+    with pytest.raises(ValueError, match="symbolic links"):
+        load_exchange_clients(None, str(link))
 
 
 def test_legacy_rotation_requires_parallel_key_ids() -> None:

@@ -1,4 +1,4 @@
-# MineGuard 政府五量监管平台 V2
+# MineGuard · 矿安智察 · 煤矿智能辅助监管系统 V2
 
 `platform/` 是政府侧独立软件。它只接收各煤矿企业智能体发送的规范五量报文，自动
 运行唯一监管算法，形成不可变报告、风险通知、企业回复和修订重算留痕，并向领导
@@ -112,6 +112,48 @@ mineguard serve --host 127.0.0.1 --port 8080 \
 `admin / 123123123`。这只用于回环地址演示；非本机监听首次启动必须预先设置至少
 8 个字符的 `MINEGUARD_ADMIN_PASSWORD`，生产应使用独立随机长口令和 HTTPS。
 
+领导端账号由独立运维命令维护，不在只读监管业务页中修改。命令必须指向正在运行
+服务使用的同一个 `--state-directory`，可以在服务运行时执行，无需重启：
+
+```bash
+# 先查看可授权的煤矿 ID 和现有账号
+mineguard user mines --state-directory .mineguard-v2
+mineguard user list  --state-directory .mineguard-v2
+
+# 新增只能查看指定煤矿的领导账号；受控演示初始密码为 123123123
+mineguard user add leader_a \
+  --role viewer \
+  --mine-id MINE-QY-001 \
+  --state-directory .mineguard-v2 \
+  --demo-default-password
+
+# 辖区全部煤矿仍使用只读 viewer，不必授予 admin
+mineguard user add leader_all \
+  --role viewer \
+  --all-mines \
+  --state-directory .mineguard-v2 \
+  --demo-default-password
+
+# 多矿账号重复传入 --mine-id；修改范围会立即注销该账号现有会话
+mineguard user set-access leader_a \
+  --role viewer \
+  --mine-id MINE-QY-001 \
+  --mine-id MINE-QY-002 \
+  --state-directory .mineguard-v2
+
+mineguard user disable leader_a --state-directory .mineguard-v2
+mineguard user enable leader_a  --state-directory .mineguard-v2
+mineguard user reset-password leader_a \
+  --state-directory .mineguard-v2 --demo-default-password
+```
+
+不加 `--demo-default-password` 时会安全交互输入密码，也可通过
+`MINEGUARD_NEW_USER_PASSWORD` 注入。`viewer`、`reviewer`、`supervisor` 在当前 V2
+领导端均为只读且受 `--mine-id` 限制；`admin` 查看全部煤矿，只应给系统管理员。
+`--all-mines` 会展开为当前全部煤矿的明确授权；后续新增煤矿时再次执行
+`set-access --all-mines` 即可。账号不物理删除，离岗时使用 `disable`，以保留权限
+审计和历史留痕。
+
 正式注册表必须显式配置消息密钥和另一把不同的运输密钥；相同密钥或缺少运输密钥会
 在启动时直接拒绝。轮换时可在 `message_keys` 中短期保留旧 key ID，并用
 `active_message_key_id` 指定当前密钥。
@@ -126,12 +168,13 @@ curl -fsS http://127.0.0.1:8080/readyz
 需要直接查看多矿时序和风险场景时，可生成完全隔离的合成数据：
 
 ```bash
-mineguard seed-v2-demo --state-directory .mineguard-v2-demo \
+mineguard seed-v2-demo --state-directory .mineguard-v2-demo-v2 \
   --through-month 2026-07-31
-mineguard serve --state-directory .mineguard-v2-demo
+mineguard serve --state-directory .mineguard-v2-demo-v2
 ```
 
-该数据集为 8 座合成矿、3 个完整月，所有记录均明确标注“合成演示”；命令不会写入
+该数据集为 8 座合成矿、3 个完整月，各五量原子序列采用确定、独立的业务周期，既能
+演示关系变化也不会在标准化时序图中全部重合。所有记录均明确标注“合成演示”；命令不会写入
 没有演示所有权标记的非空目录。只查看大屏无需客户端注册，实际接收 Agent 报送和
 通过 `/readyz` 仍需要配置注册表。
 
@@ -159,6 +202,18 @@ GET /v2/regulatory/findings
 GET /v2/regulatory/exchanges
 ```
 
+政府前端右上角“全屏”按钮右侧提供“大屏展示”。也可以在已登录会话中直接打开并收藏：
+
+```text
+http://<政府平台地址>:<端口>/wallboard
+```
+
+大屏是独立只读单页：不显示筛选、搜索、导出和业务操作，业务数据每 10 秒自动更新，
+重点煤矿每 8 秒自动轮播；更新失败时保留最后一次成功数据并提示异常。浏览器禁止页面
+在无用户手势时自行进入全屏，因此从普通监管页点击“大屏展示”会尝试进入全屏，直接
+打开上述地址时可使用浏览器 F11 或受管终端的 kiosk 模式。大屏不绕过政府账号登录，
+不得把账号、密码或会话令牌写入 URL。
+
 不存在企业数据新增、修改、删除、手工改结论或风险关闭接口。后台机器交换 POST 不
 授予领导账号任何写权限。
 
@@ -175,6 +230,9 @@ GET /v2/regulatory/exchanges
 生产部署、Nginx、systemd、密钥轮换、备份和故障验收见
 [V2 部署与运行](../docs/V2部署与运行.md)与
 [V2 验收清单](../docs/V2验收清单.md)。
+
+政府端原生 Windows 安装、离线 wheelhouse、低权限 WinSW 服务、NTFS ACL、健康检查
+和备份恢复见 [Windows 原生部署与运维](docs/Windows原生部署与运维.md)。
 
 ## 验证
 

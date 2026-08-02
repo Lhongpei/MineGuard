@@ -9,16 +9,20 @@ from __future__ import annotations
 
 import argparse
 from datetime import date
+import getpass
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
+import sqlite3
 import sys
 from typing import Sequence
 
 from . import __version__
-from .auth import LocalAuthStore
+from .auth import AuthError, LocalAuthStore, Role
+from .instance_lock import StateInstanceLock
 from .operations import BackupManager, OperationsError
 from .regulatory_v2_demo import (
     DEFAULT_V2_DEMO_STATE_DIRECTORY,
@@ -30,6 +34,17 @@ from .regulatory_v2_http import serve
 
 class ProductConfigurationError(ValueError):
     """Safe operator-facing configuration error."""
+
+
+_DEMO_DEFAULT_PASSWORD = "123123123"
+_MIN_PASSWORD_LENGTH = 8
+_MINE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_ROLE_LABELS = {
+    Role.ADMIN: "系统管理员（查看全部煤矿）",
+    Role.SUPERVISOR: "辖区监管负责人（只读）",
+    Role.REVIEWER: "监管复核人员（只读）",
+    Role.VIEWER: "领导查看账号（只读）",
+}
 
 
 def _port(value: str) -> int:
@@ -52,7 +67,10 @@ def _calendar_date(value: str) -> date:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mineguard",
-        description="政府五量监管平台 V2（唯一算法、只读业务前端）",
+        description=(
+            "MineGuard · 矿安智察——煤矿智能辅助监管系统"
+            "（唯一算法、只读业务前端）"
+        ),
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -105,6 +123,88 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("--backup-directory", required=True)
     restore.add_argument("--key-file", required=True)
     restore.add_argument("--key-id", default="mineguard-v2-backup-key")
+
+    users = commands.add_parser(
+        "user",
+        help="管理政府领导端登录账号（独立运维命令，不改变业务数据）",
+    )
+    user_commands = users.add_subparsers(dest="user_command", required=True)
+
+    user_list = user_commands.add_parser("list", help="列出账号和煤矿查看范围")
+    user_list.add_argument("--state-directory", default=".mineguard-v2")
+
+    user_mines = user_commands.add_parser("mines", help="列出可授权的煤矿 ID")
+    user_mines.add_argument("--state-directory", default=".mineguard-v2")
+
+    user_add = user_commands.add_parser("add", help="新增领导端账号")
+    user_add.add_argument("username")
+    user_add.add_argument(
+        "--role",
+        choices=tuple(role.value for role in Role),
+        default=Role.VIEWER.value,
+    )
+    user_add_scope = user_add.add_mutually_exclusive_group()
+    user_add_scope.add_argument(
+        "--mine-id",
+        dest="mine_scopes",
+        action="append",
+        default=[],
+        help="允许查看的煤矿 ID；非管理员至少指定一次，可重复",
+    )
+    user_add_scope.add_argument(
+        "--all-mines",
+        action="store_true",
+        help="把当前监管库中的全部煤矿授予该只读账号",
+    )
+    user_add.add_argument("--state-directory", default=".mineguard-v2")
+    user_add.add_argument(
+        "--demo-default-password",
+        action="store_true",
+        help="非交互演示时使用默认初始密码 123123123",
+    )
+
+    user_access = user_commands.add_parser(
+        "set-access", help="替换账号角色和煤矿查看范围，并撤销其现有会话"
+    )
+    user_access.add_argument("username")
+    user_access.add_argument(
+        "--role",
+        choices=tuple(role.value for role in Role),
+        required=True,
+    )
+    user_access_scope = user_access.add_mutually_exclusive_group()
+    user_access_scope.add_argument(
+        "--mine-id",
+        dest="mine_scopes",
+        action="append",
+        default=[],
+        help="允许查看的煤矿 ID；非管理员至少指定一次，可重复",
+    )
+    user_access_scope.add_argument(
+        "--all-mines",
+        action="store_true",
+        help="用当前监管库中的全部煤矿替换账号查看范围",
+    )
+    user_access.add_argument("--state-directory", default=".mineguard-v2")
+
+    for action, help_text in (
+        ("enable", "启用账号"),
+        ("disable", "停用账号并撤销其现有会话"),
+    ):
+        status = user_commands.add_parser(action, help=help_text)
+        status.add_argument("username")
+        status.add_argument("--state-directory", default=".mineguard-v2")
+
+    reset = user_commands.add_parser(
+        "reset-password", help="重置初始密码并撤销该账号现有会话"
+    )
+    reset.add_argument("username")
+    reset.add_argument("--state-directory", default=".mineguard-v2")
+    reset.add_argument(
+        "--demo-default-password",
+        action="store_true",
+        help="非交互演示时重置为 123123123",
+    )
     return parser
 
 
@@ -115,6 +215,221 @@ def _state_root(value: str) -> Path:
     if root == Path(root.anchor):
         raise ProductConfigurationError("状态目录不能是文件系统根目录")
     return root
+
+
+def _state_database(args: argparse.Namespace, name: str) -> tuple[Path, Path]:
+    root = _state_root(args.state_directory)
+    database = root / name
+    if not database.is_file():
+        raise ProductConfigurationError(
+            f"状态目录中不存在 {name}：{root}。"
+            "请使用正在运行的 serve 命令对应的同一 --state-directory。"
+        )
+    return root, database
+
+
+def _known_mines(root: Path) -> list[dict[str, str]]:
+    database = root / "mineguard.db"
+    if not database.is_file():
+        return []
+    with sqlite3.connect(database) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        names: dict[str, str] = {}
+        if "v2_submissions" in tables:
+            rows = connection.execute(
+                """
+                SELECT mine_id,mine_name FROM v2_submissions
+                ORDER BY period_end DESC,revision DESC,received_at DESC
+                """
+            )
+            for mine_id, mine_name in rows:
+                names.setdefault(str(mine_id), str(mine_name))
+        if "v2_agent_mine_bindings" in tables:
+            for (mine_id,) in connection.execute(
+                "SELECT mine_id FROM v2_agent_mine_bindings ORDER BY mine_id"
+            ):
+                names.setdefault(str(mine_id), str(mine_id))
+    return [
+        {"mine_id": mine_id, "mine_name": names[mine_id]}
+        for mine_id in sorted(names, key=lambda item: (names[item], item))
+    ]
+
+
+def _selected_access(
+    args: argparse.Namespace, root: Path
+) -> tuple[Role, tuple[str, ...], list[str]]:
+    role = Role(args.role)
+    if args.all_mines:
+        scopes = tuple(item["mine_id"] for item in _known_mines(root))
+        if not scopes:
+            raise ProductConfigurationError(
+                "当前监管库尚无煤矿，不能使用 --all-mines；"
+                "请等待首份数据到达或明确指定 --mine-id"
+            )
+    else:
+        scopes = tuple(
+            sorted(
+                {
+                    str(value).strip()
+                    for value in args.mine_scopes
+                    if str(value).strip()
+                }
+            )
+        )
+    if role is Role.ADMIN:
+        if scopes:
+            raise ProductConfigurationError(
+                "admin 自动查看全部煤矿，不应再指定 --mine-id"
+            )
+    elif not scopes:
+        raise ProductConfigurationError(
+            "非管理员账号至少需要一个 --mine-id 或 --all-mines；"
+            "可先运行 mineguard user mines"
+        )
+    invalid = [scope for scope in scopes if _MINE_ID.fullmatch(scope) is None]
+    if invalid:
+        raise ProductConfigurationError(
+            f"煤矿 ID 格式不合法：{', '.join(invalid)}"
+        )
+    known = {item["mine_id"] for item in _known_mines(root)}
+    unknown = [scope for scope in scopes if known and scope not in known]
+    return role, scopes, unknown
+
+
+def _new_password(args: argparse.Namespace) -> tuple[str, bool]:
+    configured = os.environ.get("MINEGUARD_NEW_USER_PASSWORD")
+    used_demo_default = False
+    if configured is not None:
+        password = configured
+    elif args.demo_default_password:
+        password = _DEMO_DEFAULT_PASSWORD
+        used_demo_default = True
+    else:
+        try:
+            password = getpass.getpass(
+                "初始密码（直接回车使用本机演示默认密码 123123123）："
+            )
+            if not password:
+                password = _DEMO_DEFAULT_PASSWORD
+                used_demo_default = True
+            else:
+                confirmation = getpass.getpass("再次输入初始密码：")
+                if not secrets.compare_digest(password, confirmation):
+                    raise ProductConfigurationError("两次输入的密码不一致")
+        except (EOFError, KeyboardInterrupt) as error:
+            raise ProductConfigurationError(
+                "无法交互读取密码；请设置 MINEGUARD_NEW_USER_PASSWORD，"
+                "演示环境也可加 --demo-default-password"
+            ) from error
+    if len(password) < _MIN_PASSWORD_LENGTH:
+        raise ProductConfigurationError(
+            f"初始密码至少需要 {_MIN_PASSWORD_LENGTH} 个字符"
+        )
+    return password, used_demo_default
+
+
+def _present_user(value: dict[str, object]) -> dict[str, object]:
+    rendered = dict(value)
+    role = Role(str(value["role"]))
+    rendered["role_label"] = _ROLE_LABELS[role]
+    return rendered
+
+
+def _user_operation(args: argparse.Namespace) -> dict[str, object]:
+    root, auth_database = _state_database(args, "auth.db")
+    if args.user_command == "mines":
+        mines = _known_mines(root)
+        return {
+            "status": "ok",
+            "state_directory": str(root),
+            "count": len(mines),
+            "mines": mines,
+        }
+
+    with LocalAuthStore(auth_database) as store:
+        if args.user_command == "list":
+            users = [_present_user(item) for item in store.list_users()]
+            return {
+                "status": "ok",
+                "state_directory": str(root),
+                "count": len(users),
+                "users": users,
+            }
+
+        if args.user_command == "add":
+            role, scopes, unknown = _selected_access(args, root)
+            password, used_demo_default = _new_password(args)
+            user = store.create_user(args.username, password, role, scopes)
+            result: dict[str, object] = {
+                "status": "created",
+                "state_directory": str(root),
+                "user": _present_user(user.to_audit_dict()),
+                "restart_required": False,
+            }
+            warnings = []
+            if used_demo_default:
+                warnings.append(
+                    "当前账号初始密码为 123123123，仅限受控演示；正式使用前请重置。"
+                )
+            if unknown:
+                warnings.append(
+                    "以下煤矿尚未出现在当前监管库中，账号将在数据到达后看到它们："
+                    + "、".join(unknown)
+                )
+            if warnings:
+                result["warnings"] = warnings
+            return result
+
+        if args.user_command == "set-access":
+            role, scopes, unknown = _selected_access(args, root)
+            user = store.update_user_access(args.username, role, scopes)
+            result = {
+                "status": "access_updated",
+                "state_directory": str(root),
+                "user": _present_user(user.to_audit_dict()),
+                "sessions_revoked": True,
+                "restart_required": False,
+            }
+            if unknown:
+                result["warnings"] = [
+                    "以下煤矿尚未出现在当前监管库中，账号将在数据到达后看到它们："
+                    + "、".join(unknown)
+                ]
+            return result
+
+        if args.user_command in {"enable", "disable"}:
+            active = args.user_command == "enable"
+            user = store.set_user_active(args.username, active)
+            return {
+                "status": "enabled" if active else "disabled",
+                "state_directory": str(root),
+                "user": _present_user(user.to_audit_dict()),
+                "sessions_revoked": not active,
+                "restart_required": False,
+            }
+
+        if args.user_command == "reset-password":
+            password, used_demo_default = _new_password(args)
+            store.reset_password(args.username, password)
+            result = {
+                "status": "password_reset",
+                "state_directory": str(root),
+                "username": args.username,
+                "sessions_revoked": True,
+                "restart_required": False,
+            }
+            if used_demo_default:
+                result["warnings"] = [
+                    "密码已重置为 123123123，仅限受控演示；正式使用前请再次重置。"
+                ]
+            return result
+
+    raise ProductConfigurationError(f"不支持的账号操作：{args.user_command}")
 
 
 def _load_or_create_key(path: Path) -> bytes:
@@ -196,36 +511,37 @@ def _serve(args: argparse.Namespace) -> None:
         raise ProductConfigurationError("--no-auth 只能与回环监听地址一起使用")
     root = _state_root(args.state_directory)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    database = root / "mineguard.db"
-    auth_database = root / "auth.db"
-    backup_key = root / "backup.key"
-    _load_or_create_key(backup_key)
-    bootstrap = None
-    if not args.no_auth:
-        bootstrap = _bootstrap_admin(
-            auth_database, args.admin_username, host=args.host
+    with StateInstanceLock(root):
+        database = root / "mineguard.db"
+        auth_database = root / "auth.db"
+        backup_key = root / "backup.key"
+        _load_or_create_key(backup_key)
+        bootstrap = None
+        if not args.no_auth:
+            bootstrap = _bootstrap_admin(
+                auth_database, args.admin_username, host=args.host
+            )
+        if bootstrap is not None:
+            username, displayed_password = bootstrap
+            print(f"首次管理员账号：{username}", file=sys.stderr)
+            if displayed_password is not None:
+                print(f"本机演示默认密码：{displayed_password}", file=sys.stderr)
+            else:
+                print("管理员密码来自环境变量，未回显。", file=sys.stderr)
+        print(
+            f"MineGuard · 矿安智察监听 http://{args.host}:{args.port}\n"
+            f"状态目录：{root}\n"
+            "业务前端只读；按 Ctrl+C 安全停止。",
+            file=sys.stderr,
         )
-    if bootstrap is not None:
-        username, displayed_password = bootstrap
-        print(f"首次管理员账号：{username}", file=sys.stderr)
-        if displayed_password is not None:
-            print(f"本机演示默认密码：{displayed_password}", file=sys.stderr)
-        else:
-            print("管理员密码来自环境变量，未回显。", file=sys.stderr)
-    print(
-        f"政府五量监管平台监听 http://{args.host}:{args.port}\n"
-        f"状态目录：{root}\n"
-        "业务前端只读；按 Ctrl+C 安全停止。",
-        file=sys.stderr,
-    )
-    serve(
-        args.host,
-        args.port,
-        database_path=database,
-        auth_database_path=auth_database,
-        auth_required=not args.no_auth,
-        secure_cookie=args.secure_cookie,
-    )
+        serve(
+            args.host,
+            args.port,
+            database_path=database,
+            auth_database_path=auth_database,
+            auth_required=not args.no_auth,
+            secure_cookie=args.secure_cookie,
+        )
 
 
 def _manager(
@@ -326,8 +642,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print(_verify(args))
         elif args.command == "restore-backup":
             _print(_restore(args))
+        elif args.command == "user":
+            _print(_user_operation(args))
         return 0
     except (
+        AuthError,
         ProductConfigurationError,
         V2DemoSeedError,
         OperationsError,
