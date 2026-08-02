@@ -254,7 +254,7 @@ if ($RequireSignedBinary -and
 }
 $probeCode = @'
 import json, platform, struct, sys
-print(json.dumps({"version": list(sys.version_info[:3]), "bits": struct.calcsize("P") * 8, "implementation": platform.python_implementation()}))
+print(json.dumps({'version': list(sys.version_info[:3]), 'bits': struct.calcsize('P') * 8, 'implementation': platform.python_implementation()}))
 '@
 $probeText = & $PythonExecutable @launcherArguments '-c' $probeCode
 if ($LASTEXITCODE -ne 0) { throw '无法执行指定的 Python。' }

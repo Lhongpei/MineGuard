@@ -191,7 +191,7 @@ function Get-PythonIdentity {
     param([string]$PathValue)
     $ProbeCode = @'
 import json, platform, struct, sys
-print(json.dumps({"implementation": platform.python_implementation(), "version": platform.python_version(), "bits": struct.calcsize("P") * 8, "executable": sys.executable}))
+print(json.dumps({'implementation': platform.python_implementation(), 'version': platform.python_version(), 'bits': struct.calcsize('P') * 8, 'executable': sys.executable}))
 '@
     $ProbeText = (& $PathValue -c $ProbeCode | Select-Object -Last 1)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($ProbeText)) {

@@ -416,6 +416,32 @@ def test_powershell_interpolation_is_ps51_unambiguous() -> None:
     )
 
 
+def test_windows_python_probe_quoting() -> None:
+    roots = (
+        ROOT / "platform/deploy/windows",
+        ROOT / "platform/packaging/windows",
+        ROOT / "agent/deploy/windows",
+        ROOT / "agent/packaging/windows",
+        ROOT / "scripts",
+    )
+    probes: list[str] = []
+    for root in roots:
+        for path in sorted(root.rglob("*.ps1")):
+            source = path.read_text(encoding="utf-8-sig")
+            if "json.dumps(" not in source:
+                continue
+            relative = path.relative_to(ROOT).as_posix()
+            probes.append(relative)
+            assert 'json.dumps({"' not in source, (
+                f"{relative} uses double-quoted Python literals that Windows "
+                "PowerShell 5.1 removes when passing a native -c argument"
+            )
+            assert "json.dumps({'" in source, (
+                f"{relative} must keep Python -c literals with native-safe single quotes"
+            )
+    assert len(probes) == 3, f"review every PowerShell JSON probe: {probes}"
+
+
 def test_workflow() -> None:
     workflow = read(".github/workflows/windows-release.yml")
     for token in (
@@ -587,6 +613,7 @@ def main() -> int:
         test_audit_and_lifecycle,
         test_authenticode_interface,
         test_powershell_interpolation_is_ps51_unambiguous,
+        test_windows_python_probe_quoting,
         test_workflow,
         test_workflow_context_availability,
         test_disclosure_and_documentation,
