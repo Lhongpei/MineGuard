@@ -240,6 +240,37 @@ function Find-InnoCompiler {
     throw "ISCC.exe was not found. Install an organization-approved Inno Setup 6.7.1 build before running this script; the release build never downloads it ad hoc."
 }
 
+function Get-InnoCompilerVersion {
+    param([string]$PathValue)
+    $VersionProbeSource = @'
+[Setup]
+AppName=MineGuard Inno Version Probe
+AppVersion=0.0.0
+DefaultDirName={tmp}\MineGuardInnoVersionProbe
+PrivilegesRequired=lowest
+Uninstallable=no
+'@
+    $VersionProbeOutput = @(
+        $VersionProbeSource | & $PathValue "/O-" "-" 2>&1
+    )
+    $VersionProbeExitCode = $LASTEXITCODE
+    $VersionProbeText = @(
+        $VersionProbeOutput | ForEach-Object { [string]$_ }
+    ) -join [Environment]::NewLine
+    if ($VersionProbeExitCode -ne 0) {
+        throw "Unable to execute the Inno Setup compiler version probe."
+    }
+    $VersionMatch = [regex]::Match(
+        $VersionProbeText,
+        'Compiler engine version:\s+Inno Setup\s+(\d+\.\d+\.\d+(?:\.\d+)?)',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if (-not $VersionMatch.Success) {
+        throw "Unable to identify the Inno Setup compiler engine version from ISCC output."
+    }
+    return [version]$VersionMatch.Groups[1].Value
+}
+
 function Get-SemanticVersionFromStage {
     param([string]$StageRoot)
     $Version = (Get-Content -LiteralPath (Join-Path $StageRoot "VERSION.txt") -Raw -Encoding UTF8).Trim()
@@ -565,30 +596,9 @@ $script:ExpectedInnoCompilerSha256 = $ExpectedInnoCompilerSha256
 $ActualInnoCompilerSha256 = Assert-ApprovedFileSha256 -Name 'InnoCompiler' `
     -PathValue $script:ResolvedInnoCompiler `
     -ExpectedSha256 $ExpectedInnoCompilerSha256
-$InnoItem = Get-Item -LiteralPath $script:ResolvedInnoCompiler
-$InnoVersionCandidates = @(
-    [string]$InnoItem.VersionInfo.ProductVersion,
-    [string]$InnoItem.VersionInfo.FileVersion
-)
-$ParsedInnoVersions = @(foreach ($InnoVersionText in $InnoVersionCandidates) {
-    $InnoVersionMatch = [regex]::Match(
-        $InnoVersionText,
-        '\d+\.\d+\.\d+(?:\.\d+)?'
-    )
-    if ($InnoVersionMatch.Success) {
-        [version]$InnoVersionMatch.Value
-    }
-})
-if ($ParsedInnoVersions.Count -eq 0) {
-    throw "Unable to identify the installed Inno Setup version from ProductVersion or FileVersion."
-}
-$InnoVersion = @($ParsedInnoVersions | Sort-Object -Descending)[0]
+$InnoVersion = Get-InnoCompilerVersion -PathValue $script:ResolvedInnoCompiler
 if ($InnoVersion.Major -ne 6 -or $InnoVersion -lt [version]"6.7.1") {
-    throw (
-        "The verified compiler baseline is Inno Setup 6.7.1 or newer within " +
-        "major version 6. ProductVersion: $($InnoItem.VersionInfo.ProductVersion); " +
-        "FileVersion: $($InnoItem.VersionInfo.FileVersion)."
-    )
+    throw "The verified compiler baseline is Inno Setup 6.7.1 or newer within major version 6. Found: $InnoVersion"
 }
 Write-Host "Using preinstalled Inno Setup $InnoVersion at $script:ResolvedInnoCompiler"
 

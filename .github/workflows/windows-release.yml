@@ -100,7 +100,7 @@ jobs:
           }
           $versionInfo = (Get-Item -LiteralPath $iscc).VersionInfo
           Write-Host (
-            "Preinstalled ISCC.exe ProductVersion: {0}; FileVersion: {1}" -f `
+            "Preinstalled ISCC.exe PE metadata ProductVersion: {0}; FileVersion: {1}" -f `
               $versionInfo.ProductVersion,$versionInfo.FileVersion
           )
           "INNO_COMPILER=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

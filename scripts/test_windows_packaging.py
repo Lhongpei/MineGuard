@@ -255,19 +255,20 @@ def test_root_build_orchestration() -> None:
         "unsigned PowerShell 5.1 build receives an empty array instead of null"
     )
     inno_version_probe = build[
-        build.index("$InnoVersionCandidates") : build.index(
-            'Write-Host "Using preinstalled Inno Setup'
+        build.index("function Get-InnoCompilerVersion") : build.index(
+            "function Get-SemanticVersionFromStage"
         )
     ]
     for token in (
-        "VersionInfo.ProductVersion",
-        "VersionInfo.FileVersion",
-        "$ParsedInnoVersions = @(",
-        "Sort-Object -Descending",
+        'AppName=MineGuard Inno Version Probe',
+        '$VersionProbeSource | & $PathValue "/O-" "-" 2>&1',
+        'Compiler engine version:\\s+Inno Setup\\s+',
+        "$VersionProbeExitCode -ne 0",
     ):
         assert token in inno_version_probe, (
-            f"Inno version detection must tolerate uninformative ProductVersion: {token}"
+            f"Inno version detection must use the compiler engine output: {token}"
         )
+    assert "$InnoVersion = Get-InnoCompilerVersion" in build
     assert build.index("Final installer audit") < build.index("$FilesToPublish")
     assert build.index("Published artifact audit") < build.index(
         "[IO.Directory]::Move($PublishStage, $OutputDirectory)"
