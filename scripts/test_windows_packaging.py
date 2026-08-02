@@ -481,6 +481,31 @@ def test_windows_python_probe_quoting() -> None:
     assert len(probes) == 3, f"review every PowerShell JSON probe: {probes}"
 
 
+def test_ps51_native_argument_roundtrip_guards() -> None:
+    builders = (
+        read("platform/packaging/windows/Build-MineGuardPlatform.ps1"),
+        read("agent/packaging/windows/Build-EnterpriseAgentBinary.ps1"),
+    )
+    for source in builders:
+        for token in (
+            "function ConvertTo-WindowsCommandLineArgument",
+            "System.Text.StringBuilder",
+            "System.Diagnostics.ProcessStartInfo",
+            ".UseShellExecute = $false",
+            ".Arguments = $",
+            "WindowsCommandLineArgument -Value",
+            "ConvertTo-Json",
+            "json.loads(sys.argv[1])",
+            "actual=sys.argv[2:]",
+            "C:\\path with spaces\\",
+            'embedded"quote',
+            'slashes\\\\\\"quote',
+        ):
+            assert token in source, f"PS5.1 native argv guard missing: {token}"
+        assert "@Arguments\n" not in source
+        assert "@ArgumentList\n" not in source
+
+
 def test_workflow() -> None:
     workflow = read(".github/workflows/windows-release.yml")
     for token in (
@@ -654,6 +679,7 @@ def main() -> int:
         test_powershell_interpolation_is_ps51_unambiguous,
         test_psscriptroot_is_resolved_after_parameter_binding,
         test_windows_python_probe_quoting,
+        test_ps51_native_argument_roundtrip_guards,
         test_workflow,
         test_workflow_context_availability,
         test_disclosure_and_documentation,

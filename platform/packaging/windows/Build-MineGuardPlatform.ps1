@@ -174,15 +174,73 @@ function Test-ReleaseDirectoryIntegrity {
     }
 }
 
+function ConvertTo-WindowsCommandLineArgument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $Value
+    )
+
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    $builder = New-Object -TypeName System.Text.StringBuilder
+    [void] $builder.Append([char]'"')
+    $backslashCount = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq [char]'\') {
+            $backslashCount += 1
+            continue
+        }
+        if ($character -eq [char]'"') {
+            [void] $builder.Append([char]'\', (($backslashCount * 2) + 1))
+            [void] $builder.Append([char]'"')
+            $backslashCount = 0
+            continue
+        }
+        if ($backslashCount -gt 0) {
+            [void] $builder.Append([char]'\', $backslashCount)
+            $backslashCount = 0
+        }
+        [void] $builder.Append($character)
+    }
+    if ($backslashCount -gt 0) {
+        [void] $builder.Append([char]'\', ($backslashCount * 2))
+    }
+    [void] $builder.Append([char]'"')
+    return $builder.ToString()
+}
+
 function Invoke-CheckedNative {
     param(
         [Parameter(Mandatory = $true)] [string] $Command,
         [Parameter(Mandatory = $true)] [object[]] $Arguments,
         [Parameter(Mandatory = $true)] [string] $Label
     )
-    & $Command @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label 失败，退出码 $LASTEXITCODE。"
+    $serializedArguments = @(foreach ($argument in $Arguments) {
+        if ($null -eq $argument) {
+            throw "$Label 含 null 原生命令参数。"
+        }
+        ConvertTo-WindowsCommandLineArgument -Value ([string] $argument)
+    }) -join ' '
+    $startInfo = New-Object -TypeName System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Command
+    $startInfo.Arguments = $serializedArguments
+    $startInfo.UseShellExecute = $false
+    $process = New-Object -TypeName System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw "$Label 无法启动原生进程。"
+        }
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+    } finally {
+        $process.Dispose()
+    }
+    if ($exitCode -ne 0) {
+        throw "$Label 失败，退出码 $exitCode。"
     }
 }
 
@@ -272,6 +330,23 @@ if ($ExpectedPythonPatchVersion -and
     $actualPythonPatchVersion -ne $ExpectedPythonPatchVersion) {
     throw 'Python patch 与根构建传入的精确版本不一致。'
 }
+$nativeArgumentProbeValues = @(
+    '',
+    'plain',
+    '--product-name=MineGuard Platform',
+    'C:\Program Files\MineGuard\bin',
+    'C:\path with spaces\',
+    'embedded"quote',
+    'slashes\\\"quote'
+)
+$nativeArgumentProbeJson = ConvertTo-Json `
+    -InputObject $nativeArgumentProbeValues -Compress
+$nativeArgumentProbeCode = "import json,sys; expected=json.loads(sys.argv[1]); actual=sys.argv[2:]; assert actual == expected, (actual, expected)"
+Invoke-CheckedNative -Command $PythonExecutable -Arguments (
+    $launcherArguments + @(
+        '-c', $nativeArgumentProbeCode, $nativeArgumentProbeJson
+    ) + $nativeArgumentProbeValues
+) -Label 'Windows 原生命令参数往返自验'
 
 if (-not [string]::IsNullOrWhiteSpace($Wheelhouse)) {
     $Wheelhouse = Get-LocalAbsolutePath -Value $Wheelhouse -Label '离线 wheelhouse'

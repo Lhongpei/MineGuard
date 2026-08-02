@@ -36,11 +36,69 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
     throw "Windows PowerShell 5.1 or later is required."
 }
 
+function ConvertTo-WindowsCommandLineArgument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    $Builder = New-Object -TypeName System.Text.StringBuilder
+    [void]$Builder.Append([char]'"')
+    $BackslashCount = 0
+    foreach ($Character in $Value.ToCharArray()) {
+        if ($Character -eq [char]'\') {
+            $BackslashCount += 1
+            continue
+        }
+        if ($Character -eq [char]'"') {
+            [void]$Builder.Append([char]'\', (($BackslashCount * 2) + 1))
+            [void]$Builder.Append([char]'"')
+            $BackslashCount = 0
+            continue
+        }
+        if ($BackslashCount -gt 0) {
+            [void]$Builder.Append([char]'\', $BackslashCount)
+            $BackslashCount = 0
+        }
+        [void]$Builder.Append($Character)
+    }
+    if ($BackslashCount -gt 0) {
+        [void]$Builder.Append([char]'\', ($BackslashCount * 2))
+    }
+    [void]$Builder.Append([char]'"')
+    return $Builder.ToString()
+}
+
 function Invoke-NativeChecked {
     param([string]$FilePath, [string[]]$ArgumentList)
-    & $FilePath @ArgumentList
-    if ($LASTEXITCODE -ne 0) {
-        throw "Command failed with exit code ${LASTEXITCODE}: $FilePath"
+    $SerializedArguments = @(foreach ($Argument in $ArgumentList) {
+        if ($null -eq $Argument) {
+            throw "Native command contains a null argument: $FilePath"
+        }
+        ConvertTo-WindowsCommandLineArgument -Value ([string]$Argument)
+    }) -join " "
+    $StartInfo = New-Object -TypeName System.Diagnostics.ProcessStartInfo
+    $StartInfo.FileName = $FilePath
+    $StartInfo.Arguments = $SerializedArguments
+    $StartInfo.UseShellExecute = $false
+    $Process = New-Object -TypeName System.Diagnostics.Process
+    $Process.StartInfo = $StartInfo
+    try {
+        if (-not $Process.Start()) {
+            throw "Native command could not be started: $FilePath"
+        }
+        $Process.WaitForExit()
+        $ExitCode = $Process.ExitCode
+    } finally {
+        $Process.Dispose()
+    }
+    if ($ExitCode -ne 0) {
+        throw "Command failed with exit code ${ExitCode}: $FilePath"
     }
 }
 
@@ -276,6 +334,23 @@ try {
             throw "PythonExecutable changed before build environment creation."
         }
     }
+    $NativeArgumentProbeValues = @(
+        "",
+        "plain",
+        "--product-name=MineGuard Enterprise Agent",
+        "C:\Program Files\MineGuard\bin",
+        "C:\path with spaces\",
+        'embedded"quote',
+        'slashes\\\"quote'
+    )
+    $NativeArgumentProbeJson = ConvertTo-Json `
+        -InputObject $NativeArgumentProbeValues -Compress
+    $NativeArgumentProbeCode = "import json,sys; expected=json.loads(sys.argv[1]); actual=sys.argv[2:]; assert actual == expected, (actual, expected)"
+    Invoke-NativeChecked -FilePath $PythonCommand -ArgumentList (
+        $PythonArguments + @(
+            "-c", $NativeArgumentProbeCode, $NativeArgumentProbeJson
+        ) + $NativeArgumentProbeValues
+    )
     $VersionCheck = "import struct,sys; assert sys.version_info[:2] == (3,12) and struct.calcsize('P') == 8, sys.version"
     Invoke-NativeChecked -FilePath $PythonCommand -ArgumentList ($PythonArguments + @("-c", $VersionCheck))
     Invoke-NativeChecked -FilePath $PythonCommand -ArgumentList ($PythonArguments + @("-m", "venv", $BuildEnvironment))
