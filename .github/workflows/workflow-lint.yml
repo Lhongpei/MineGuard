@@ -3,11 +3,29 @@ name: GitHub Actions workflow validation
 on:
   push:
     paths:
+      - ".gitattributes"
       - ".github/**"
+      - "agent/deploy/windows/**"
+      - "agent/packaging/windows/**"
+      - "contracts/examples/*.json"
+      - "docs/Windows二进制发行与安装.md"
+      - "packaging/windows/**"
+      - "platform/deploy/windows/**"
+      - "platform/packaging/windows/**"
+      - "scripts/*.ps1"
       - "scripts/test_windows_packaging.py"
   pull_request:
     paths:
+      - ".gitattributes"
       - ".github/**"
+      - "agent/deploy/windows/**"
+      - "agent/packaging/windows/**"
+      - "contracts/examples/*.json"
+      - "docs/Windows二进制发行与安装.md"
+      - "packaging/windows/**"
+      - "platform/deploy/windows/**"
+      - "platform/packaging/windows/**"
+      - "scripts/*.ps1"
       - "scripts/test_windows_packaging.py"
   workflow_dispatch:
 
@@ -24,7 +42,7 @@ jobs:
       ACTIONLINT_ARCHIVE_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
     steps:
       - name: Check out exact source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download and verify actionlint
         shell: bash

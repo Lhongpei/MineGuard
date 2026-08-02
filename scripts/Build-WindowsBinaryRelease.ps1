@@ -414,8 +414,11 @@ if ($null -ne $Git -and (Test-Path -LiteralPath (Join-Path $RepositoryRoot ".git
     }
 }
 
-$SigningValues = @($SignToolPath, $SigningCertificateThumbprint, [string]$TimestampUrl) |
-    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+$SigningValues = @(@(
+    $SignToolPath,
+    $SigningCertificateThumbprint,
+    [string]$TimestampUrl
+) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 $SigningEnabled = $SigningValues.Count -ne 0
 $SigningCertificateStore = $null
 $ActualSignToolSha256 = $null
@@ -562,17 +565,30 @@ $script:ExpectedInnoCompilerSha256 = $ExpectedInnoCompilerSha256
 $ActualInnoCompilerSha256 = Assert-ApprovedFileSha256 -Name 'InnoCompiler' `
     -PathValue $script:ResolvedInnoCompiler `
     -ExpectedSha256 $ExpectedInnoCompilerSha256
-$InnoVersionText = (Get-Item -LiteralPath $script:ResolvedInnoCompiler).VersionInfo.ProductVersion
-if ([string]::IsNullOrWhiteSpace($InnoVersionText)) {
-    $InnoVersionText = (Get-Item -LiteralPath $script:ResolvedInnoCompiler).VersionInfo.FileVersion
+$InnoItem = Get-Item -LiteralPath $script:ResolvedInnoCompiler
+$InnoVersionCandidates = @(
+    [string]$InnoItem.VersionInfo.ProductVersion,
+    [string]$InnoItem.VersionInfo.FileVersion
+)
+$ParsedInnoVersions = @(foreach ($InnoVersionText in $InnoVersionCandidates) {
+    $InnoVersionMatch = [regex]::Match(
+        $InnoVersionText,
+        '\d+\.\d+\.\d+(?:\.\d+)?'
+    )
+    if ($InnoVersionMatch.Success) {
+        [version]$InnoVersionMatch.Value
+    }
+})
+if ($ParsedInnoVersions.Count -eq 0) {
+    throw "Unable to identify the installed Inno Setup version from ProductVersion or FileVersion."
 }
-$InnoVersionMatch = [regex]::Match([string]$InnoVersionText, '\d+\.\d+\.\d+(?:\.\d+)?')
-if (-not $InnoVersionMatch.Success) {
-    throw "Unable to identify the installed Inno Setup version: $InnoVersionText"
-}
-$InnoVersion = [version]$InnoVersionMatch.Value
+$InnoVersion = @($ParsedInnoVersions | Sort-Object -Descending)[0]
 if ($InnoVersion.Major -ne 6 -or $InnoVersion -lt [version]"6.7.1") {
-    throw "The verified compiler baseline is Inno Setup 6.7.1 or newer within major version 6. Found: $InnoVersion"
+    throw (
+        "The verified compiler baseline is Inno Setup 6.7.1 or newer within " +
+        "major version 6. ProductVersion: $($InnoItem.VersionInfo.ProductVersion); " +
+        "FileVersion: $($InnoItem.VersionInfo.FileVersion)."
+    )
 }
 Write-Host "Using preinstalled Inno Setup $InnoVersion at $script:ResolvedInnoCompiler"
 

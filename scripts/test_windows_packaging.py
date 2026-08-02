@@ -242,6 +242,32 @@ def test_root_build_orchestration() -> None:
     )
     for token in required:
         assert token in build, f"root build contract missing: {token}"
+    signing_values = re.search(
+        r"\$SigningValues\s*=\s*(.*?)\r?\n\$SigningEnabled\s*=",
+        build,
+        re.DOTALL,
+    )
+    signing_expression = (
+        re.sub(r"\s+", "", signing_values.group(1)) if signing_values else ""
+    )
+    assert signing_expression.startswith("@(@(") and signing_expression.endswith("})"), (
+        "the optional signing-parameter pipeline must be array-wrapped so an "
+        "unsigned PowerShell 5.1 build receives an empty array instead of null"
+    )
+    inno_version_probe = build[
+        build.index("$InnoVersionCandidates") : build.index(
+            'Write-Host "Using preinstalled Inno Setup'
+        )
+    ]
+    for token in (
+        "VersionInfo.ProductVersion",
+        "VersionInfo.FileVersion",
+        "$ParsedInnoVersions = @(",
+        "Sort-Object -Descending",
+    ):
+        assert token in inno_version_probe, (
+            f"Inno version detection must tolerate uninformative ProductVersion: {token}"
+        )
     assert build.index("Final installer audit") < build.index("$FilesToPublish")
     assert build.index("Published artifact audit") < build.index(
         "[IO.Directory]::Move($PublishStage, $OutputDirectory)"
@@ -399,7 +425,7 @@ def test_workflow() -> None:
         "UNSIGNED-TEST-ONLY",
         "WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT",
         "WINDOWS_RELEASE_WHEELHOUSE",
-        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
         "platform/packaging/windows",
         "agent/packaging/windows",
         "WINDOWS_RELEASE_WHEELHOUSE_MANIFEST",
@@ -451,7 +477,29 @@ def test_workflow_context_availability() -> None:
             f"{relative} uses runner context in jobs.<job_id>.env"
         )
 
+    approved_node24_actions = {
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+        "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    }
+    actual_official_actions = {
+        match.group(1)
+        for workflow in workflows.values()
+        for match in re.finditer(
+            r"(?m)^\s*uses:\s*(actions/[^@\s]+@[0-9a-f]{40})\s*(?:#.*)?$",
+            workflow,
+        )
+    }
+    assert actual_official_actions == approved_node24_actions, (
+        "official Actions must use the reviewed Node 24 releases pinned by full SHA; "
+        f"found {sorted(actual_official_actions)}"
+    )
+
     native = workflows[".github/workflows/windows-native.yml"]
+    assert "package-manager-cache: false" in native, (
+        "setup-node must not infer an implicit dependency cache from package metadata"
+    )
     initializer = "Define isolated runtime paths after runner allocation"
     installer = "Install both independent products and verification tools"
     init_block, _, init_end = named_step_block(native, initializer)
@@ -493,7 +541,7 @@ def test_workflow_context_availability() -> None:
     for token in (
         'ACTIONLINT_VERSION: "1.7.12"',
         'ACTIONLINT_ARCHIVE_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"',
-        "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "curl --proto '=https' --tlsv1.2 --fail",
         "sha256sum --check --strict",
         '"$ACTIONLINT" -color',
