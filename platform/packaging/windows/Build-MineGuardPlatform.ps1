@@ -507,6 +507,8 @@ try {
         '-m', 'nuitka',
         '--mode=standalone',
         '--deployment',
+        '--low-memory',
+        '--jobs=1',
         '--msvc=latest',
         ('--output-dir=' + $compileRoot),
         '--output-filename=MineGuardPlatform.exe',
@@ -532,6 +534,7 @@ try {
         '--include-distribution-metadata=tzdata',
         '--include-distribution-metadata=olefile',
         '--include-distribution-metadata=xlrd',
+        '--nofollow-import-to=scipy.integrate._lebedev',
         '--remove-output'
     )
     if ($AllowNuitkaToolDownloads) {
