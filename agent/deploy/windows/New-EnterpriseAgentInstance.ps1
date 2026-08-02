@@ -260,7 +260,7 @@ catch {
         }
         foreach ($WatchDirectory in $ExternalAclBackups.Keys) {
             try { Set-Acl -LiteralPath $WatchDirectory -AclObject $ExternalAclBackups[$WatchDirectory] }
-            catch { Write-Warning "Could not restore watch ACL on $WatchDirectory: $($_.Exception.Message)" }
+            catch { Write-Warning "Could not restore watch ACL on ${WatchDirectory}: $($_.Exception.Message)" }
         }
         if (Test-Path -LiteralPath $StageRoot) {
             try {

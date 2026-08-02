@@ -31,7 +31,7 @@ function Invoke-NativeChecked {
     param([string]$FilePath, [string[]]$ArgumentList)
     & $FilePath @ArgumentList
     if ($LASTEXITCODE -ne 0) {
-        throw "Command failed with exit code $LASTEXITCODE: $FilePath"
+        throw "Command failed with exit code ${LASTEXITCODE}: $FilePath"
     }
 }
 

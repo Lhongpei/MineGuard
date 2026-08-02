@@ -264,7 +264,7 @@ function Invoke-ExecutableChecked {
     param([string]$Executable, [string[]]$Arguments)
     & $Executable @Arguments | Out-Host
     if ($LASTEXITCODE -ne 0) {
-        throw "Executable returned $LASTEXITCODE: $Executable $($Arguments -join ' ')"
+        throw "Executable returned ${LASTEXITCODE}: $Executable $($Arguments -join ' ')"
     }
 }
 

@@ -167,7 +167,7 @@ foreach ($FullPath in $ResolvedFiles) {
     }
     $Signature = Get-AuthenticodeSignature -LiteralPath $FullPath
     if ($Signature.Status -ne "Valid") {
-        throw "Authenticode status is not Valid for $FullPath: $($Signature.Status)"
+        throw "Authenticode status is not Valid for ${FullPath}: $($Signature.Status)"
     }
     if ($null -eq $Signature.SignerCertificate -or
         ($Signature.SignerCertificate.Thumbprint -replace '\s', '').ToUpperInvariant() -ne $Thumbprint) {

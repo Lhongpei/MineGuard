@@ -343,6 +343,32 @@ def test_authenticode_interface() -> None:
         assert token in evidence, f"wheelhouse evidence generator missing: {token}"
 
 
+def test_powershell_interpolation_is_ps51_unambiguous() -> None:
+    ambiguous_variable_before_colon = re.compile(
+        r"\$(?!(?:env|script|global|local|private):)"
+        r"[A-Za-z_][A-Za-z0-9_]*:",
+        re.IGNORECASE,
+    )
+    roots = (
+        ROOT / "platform/deploy/windows",
+        ROOT / "platform/packaging/windows",
+        ROOT / "agent/deploy/windows",
+        ROOT / "agent/packaging/windows",
+        ROOT / "scripts",
+    )
+    failures: list[str] = []
+    for root in roots:
+        for path in sorted(root.rglob("*.ps1")):
+            source = path.read_text(encoding="utf-8-sig")
+            for match in ambiguous_variable_before_colon.finditer(source):
+                line = source.count("\n", 0, match.start()) + 1
+                failures.append(f"{path.relative_to(ROOT)}:{line}: {match.group(0)}")
+    assert not failures, (
+        "PowerShell 5.1 requires ${name}: when a variable is followed by a colon: "
+        + ", ".join(failures)
+    )
+
+
 def test_workflow() -> None:
     workflow = read(".github/workflows/windows-release.yml")
     for token in (
@@ -490,6 +516,7 @@ def main() -> int:
         test_root_build_orchestration,
         test_audit_and_lifecycle,
         test_authenticode_interface,
+        test_powershell_interpolation_is_ps51_unambiguous,
         test_workflow,
         test_workflow_context_availability,
         test_disclosure_and_documentation,
