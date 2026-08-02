@@ -513,6 +513,8 @@ def test_ps51_native_argument_roundtrip_guards() -> None:
         "('--output-dir='",
         "('--file-version=",
         "('--product-version=",
+        "--include-package=_yaml",
+        "--include-distribution-metadata=PyYAML",
         "$nuitkaPositionalArguments.Count -ne 1",
         "Nuitka 参数数组含意外的位置参数",
     ):

@@ -522,6 +522,7 @@ try {
         ('--include-data-dir=' +
             (Join-Path $SourceDirectory 'src\mineguard\web') +
             '=mineguard/web'),
+        '--include-package=_yaml',
         '--include-package=tzdata',
         '--include-package-data=tzdata',
         '--include-distribution-metadata=numpy',
