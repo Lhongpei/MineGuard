@@ -504,6 +504,19 @@ def test_ps51_native_argument_roundtrip_guards() -> None:
             assert token in source, f"PS5.1 native argv guard missing: {token}"
         assert "@Arguments\n" not in source
         assert "@ArgumentList\n" not in source
+        assert not re.search(
+            r"(?m)^\s*['\"]--[^'\"]+['\"]\s*\+.*?,\s*$", source
+        ), "PowerShell comma binds before +; parenthesize dynamic argv elements"
+
+    platform_builder = builders[0]
+    for token in (
+        "('--output-dir='",
+        "('--file-version=",
+        "('--product-version=",
+        "$nuitkaPositionalArguments.Count -ne 1",
+        "Nuitka 参数数组含意外的位置参数",
+    ):
+        assert token in platform_builder, f"Nuitka argv structure guard missing: {token}"
 
 
 def test_workflow() -> None:

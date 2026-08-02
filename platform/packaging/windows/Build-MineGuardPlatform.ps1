@@ -508,16 +508,20 @@ try {
         '--mode=standalone',
         '--deployment',
         '--msvc=latest',
-        '--output-dir=' + $compileRoot,
+        ('--output-dir=' + $compileRoot),
         '--output-filename=MineGuardPlatform.exe',
         '--windows-console-mode=force',
         '--company-name=MineGuard',
         '--product-name=MineGuard Platform',
         '--file-description=MineGuard Government Regulatory Platform',
-        '--file-version=' + $windowsVersion,
-        '--product-version=' + $windowsVersion,
-        '--include-data-dir=' + (Join-Path $SourceDirectory 'src\mineguard\regulatory_web') + '=mineguard/regulatory_web',
-        '--include-data-dir=' + (Join-Path $SourceDirectory 'src\mineguard\web') + '=mineguard/web',
+        ('--file-version=' + $windowsVersion),
+        ('--product-version=' + $windowsVersion),
+        ('--include-data-dir=' +
+            (Join-Path $SourceDirectory 'src\mineguard\regulatory_web') +
+            '=mineguard/regulatory_web'),
+        ('--include-data-dir=' +
+            (Join-Path $SourceDirectory 'src\mineguard\web') +
+            '=mineguard/web'),
         '--include-package=tzdata',
         '--include-package-data=tzdata',
         '--include-distribution-metadata=numpy',
@@ -533,6 +537,13 @@ try {
         $nuitkaArguments += '--assume-yes-for-downloads'
     }
     $nuitkaArguments += $entryPoint
+    $nuitkaPositionalArguments = @($nuitkaArguments | Select-Object -Skip 2 |
+        Where-Object { -not ([string] $_).StartsWith('-') })
+    if ($nuitkaPositionalArguments.Count -ne 1 -or
+        ([string] $nuitkaPositionalArguments[0]) -ne $entryPoint) {
+        $nuitkaArgumentsJson = ConvertTo-Json -InputObject $nuitkaArguments -Compress
+        throw "Nuitka 参数数组含意外的位置参数：$nuitkaArgumentsJson"
+    }
     Invoke-CheckedNative -Command $buildPython -Arguments $nuitkaArguments `
         -Label 'Nuitka standalone 编译'
 
