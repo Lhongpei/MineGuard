@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$SourceRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+    [string]$SourceRoot = "",
     [string]$ArtifactsRoot = "",
     [string]$PythonExecutable = "",
     [string]$ExpectedPythonPatchVersion = "",
@@ -24,6 +24,9 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONUNBUFFERED = "1"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
+if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
+    $SourceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+}
 
 if ($env:OS -ne "Windows_NT") {
     throw "The Enterprise Agent Windows binary must be built on native Windows."

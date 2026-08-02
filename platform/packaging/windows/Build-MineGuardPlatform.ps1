@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)] [string] $OutputDirectory,
-    [string] $SourceDirectory = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
+    [string] $SourceDirectory = '',
     [string] $PythonExecutable,
     [string] $ExpectedPythonPatchVersion,
     [string] $ExpectedPythonExecutableSha256,
@@ -22,6 +22,9 @@ $ProgressPreference = 'SilentlyContinue'
 $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 $OutputEncoding = $utf8NoBom
 try { [Console]::OutputEncoding = $utf8NoBom } catch { }
+if ([string]::IsNullOrWhiteSpace($SourceDirectory)) {
+    $SourceDirectory = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+}
 
 function Get-LocalAbsolutePath {
     param([string] $Value, [string] $Label)

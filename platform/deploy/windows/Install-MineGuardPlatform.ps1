@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string] $SourceDirectory = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
+    [string] $SourceDirectory = '',
     [string] $InstallRoot = (Join-Path $env:ProgramData 'MineGuard\Platform'),
     [string] $PythonExecutable,
     [string] $Wheelhouse,
@@ -15,6 +15,9 @@ $ServiceSid = 'S-1-5-19'
 $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 $OutputEncoding = $utf8NoBom
 try { [Console]::OutputEncoding = $utf8NoBom } catch { }
+if ([string]::IsNullOrWhiteSpace($SourceDirectory)) {
+    $SourceDirectory = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+}
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

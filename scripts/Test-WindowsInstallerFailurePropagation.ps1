@@ -3,12 +3,16 @@ param(
     [Parameter(Mandatory = $true)][string]$InnoCompiler,
     [Parameter(Mandatory = $true)][string]$PlatformStage,
     [Parameter(Mandatory = $true)][string]$AgentStage,
-    [string]$AssetsRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) "packaging\windows\assets")
+    [string]$AssetsRoot = ""
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+if ([string]::IsNullOrWhiteSpace($AssetsRoot)) {
+    $AssetsRoot = Join-Path (Split-Path -Parent $PSScriptRoot) `
+        "packaging\windows\assets"
+}
 
 if ($env:OS -ne "Windows_NT") {
     throw "Installer failure-propagation verification must run on Windows."

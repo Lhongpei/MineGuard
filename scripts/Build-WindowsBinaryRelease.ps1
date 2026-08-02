@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepositoryRoot = "",
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [string]$Wheelhouse = "",
     [string]$WheelhouseManifest = "",
@@ -26,6 +26,9 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $env:PYTHONUTF8 = "1"
 $env:PYTHONUNBUFFERED = "1"
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $RepositoryRoot = Split-Path -Parent $PSScriptRoot
+}
 
 if ($env:OS -ne "Windows_NT") {
     throw "The root Windows binary release must be built on native Windows x64."

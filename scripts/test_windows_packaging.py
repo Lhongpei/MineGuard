@@ -416,6 +416,45 @@ def test_powershell_interpolation_is_ps51_unambiguous() -> None:
     )
 
 
+def test_psscriptroot_is_resolved_after_parameter_binding() -> None:
+    roots = (
+        ROOT / "platform/deploy/windows",
+        ROOT / "platform/packaging/windows",
+        ROOT / "agent/deploy/windows",
+        ROOT / "agent/packaging/windows",
+        ROOT / "scripts",
+    )
+    failures: list[str] = []
+    for root in roots:
+        for path in sorted(root.rglob("*.ps1")):
+            source = path.read_text(encoding="utf-8-sig")
+            script_param = re.search(
+                r"\A\s*(?:\[CmdletBinding[^\]]*\]\s*)?param\s*\(",
+                source,
+                re.IGNORECASE,
+            )
+            if script_param is None:
+                continue
+            binding_end = re.search(
+                r"(?im)^\s*(?:Set-StrictMode\b|\$ErrorActionPreference\s*=)",
+                source[script_param.end() :],
+            )
+            header_end = (
+                script_param.end() + binding_end.start()
+                if binding_end is not None
+                else len(source)
+            )
+            parameter_binding_source = source[script_param.start() : header_end]
+            if re.search(
+                r"\$PSScriptRoot\b", parameter_binding_source, re.IGNORECASE
+            ):
+                failures.append(path.relative_to(ROOT).as_posix())
+    assert not failures, (
+        "Windows PowerShell 5.1 may leave $PSScriptRoot empty while binding "
+        f"script parameter defaults; resolve it after param(): {failures}"
+    )
+
+
 def test_windows_python_probe_quoting() -> None:
     roots = (
         ROOT / "platform/deploy/windows",
@@ -613,6 +652,7 @@ def main() -> int:
         test_audit_and_lifecycle,
         test_authenticode_interface,
         test_powershell_interpolation_is_ps51_unambiguous,
+        test_psscriptroot_is_resolved_after_parameter_binding,
         test_windows_python_probe_quoting,
         test_workflow,
         test_workflow_context_availability,

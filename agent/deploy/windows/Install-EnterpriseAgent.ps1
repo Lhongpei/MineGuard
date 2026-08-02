@@ -2,7 +2,7 @@
 param(
     [string]$InstallRoot = (Join-Path $env:ProgramFiles "MineGuard\EnterpriseAgent"),
     [string]$StateRoot = (Join-Path $env:ProgramData "MineGuard\EnterpriseAgent\instances"),
-    [Alias("ReleaseRoot")][string]$SourceRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+    [Alias("ReleaseRoot")][string]$SourceRoot = "",
     [switch]$BuildFromSource,
     [string]$PythonCommand = "py",
     [string[]]$PythonArguments = @("-3.12"),
@@ -16,6 +16,9 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONUNBUFFERED = "1"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
+if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
+    $SourceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+}
 
 if ($PSVersionTable.PSVersion.Major -lt 5 -or
     ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -lt 1)) {
