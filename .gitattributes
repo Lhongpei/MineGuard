@@ -1,0 +1,2 @@
+# Contract examples include byte-exact transport-signature test vectors.
+/contracts/examples/*.json text eol=lf

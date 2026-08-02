@@ -58,6 +58,7 @@ def named_step_block(workflow: str, name: str) -> tuple[str, int, int]:
 
 def test_layout() -> None:
     expected = {
+        ".gitattributes",
         "packaging/windows/inno/MineGuardPlatform.iss",
         "packaging/windows/inno/MineGuardEnterpriseAgent.iss",
         "packaging/windows/assets/RELEASE-NOTICE.txt",
@@ -81,6 +82,25 @@ def test_layout() -> None:
     assert not (ROOT / "packaging/windows/requirements-build.txt").exists(), (
         "root packaging must not maintain a duplicate Nuitka environment"
     )
+
+
+def test_contract_transport_vectors_keep_lf_bytes() -> None:
+    attributes = {
+        line.strip()
+        for line in read(".gitattributes").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert "/contracts/examples/*.json text eol=lf" in attributes, (
+        "contract examples must keep LF bytes on Windows checkouts because "
+        "transport HMAC vectors authenticate the raw file body"
+    )
+    for relative in (
+        "contracts/examples/enterprise-submission-v1.json",
+        "contracts/examples/edge-telemetry-batch-v1.json",
+    ):
+        body = (ROOT / relative).read_bytes()
+        assert body.endswith(b"\n"), f"transport vector must end in LF: {relative}"
+        assert b"\r\n" not in body, f"transport vector must not contain CRLF: {relative}"
 
 
 def test_child_toolchain_pins() -> None:
@@ -511,6 +531,7 @@ def test_disclosure_and_documentation() -> None:
 def main() -> int:
     tests = (
         test_layout,
+        test_contract_transport_vectors_keep_lf_bytes,
         test_child_toolchain_pins,
         test_inno_scripts,
         test_root_build_orchestration,
