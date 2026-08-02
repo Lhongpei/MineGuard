@@ -20,10 +20,6 @@ jobs:
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
-      PLATFORM_VENV: '${{ runner.temp }}\MineGuard Platform Runtime'
-      PLATFORM_PYTHON: '${{ runner.temp }}\MineGuard Platform Runtime\Scripts\python.exe'
-      AGENT_VENV: '${{ runner.temp }}\MineGuard Agent Runtime'
-      AGENT_PYTHON: '${{ runner.temp }}\MineGuard Agent Runtime\Scripts\python.exe'
 
     steps:
       - name: Check out source
@@ -46,6 +42,18 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
+
+      - name: Define isolated runtime paths after runner allocation
+        shell: pwsh
+        run: |
+          $platformVenv = Join-Path $env:RUNNER_TEMP 'MineGuard Platform Runtime'
+          $agentVenv = Join-Path $env:RUNNER_TEMP 'MineGuard Agent Runtime'
+          @(
+            "PLATFORM_VENV=$platformVenv"
+            "PLATFORM_PYTHON=$(Join-Path $platformVenv 'Scripts\python.exe')"
+            "AGENT_VENV=$agentVenv"
+            "AGENT_PYTHON=$(Join-Path $agentVenv 'Scripts\python.exe')"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install both independent products and verification tools
         shell: pwsh

@@ -28,6 +28,34 @@ def assert_pinned_requirements(relative: str) -> None:
     ), f"all build requirements must be exact pins: {relative}"
 
 
+def job_level_env_blocks(workflow: str) -> list[str]:
+    """Return complete four-space job env blocks for this repository's YAML."""
+
+    lines = workflow.splitlines()
+    blocks: list[str] = []
+    for index, line in enumerate(lines):
+        if line != "    env:":
+            continue
+        block: list[str] = []
+        for candidate in lines[index + 1 :]:
+            stripped = candidate.lstrip(" ")
+            indentation = len(candidate) - len(stripped)
+            if stripped and indentation <= 4:
+                break
+            if not stripped.startswith("#"):
+                block.append(candidate)
+        blocks.append("\n".join(block))
+    return blocks
+
+
+def named_step_block(workflow: str, name: str) -> tuple[str, int, int]:
+    marker = f"      - name: {name}"
+    start = workflow.index(marker)
+    next_step = workflow.find("\n      - name:", start + len(marker))
+    end = len(workflow) if next_step < 0 else next_step
+    return workflow[start:end], start, end
+
+
 def test_layout() -> None:
     expected = {
         "packaging/windows/inno/MineGuardPlatform.iss",
@@ -39,6 +67,9 @@ def test_layout() -> None:
         "scripts/Test-WindowsInstallerFailurePropagation.ps1",
         "scripts/Invoke-WindowsAuthenticodeSign.ps1",
         "scripts/New-WindowsWheelhouseManifest.ps1",
+        ".github/actionlint.yaml",
+        ".github/workflows/workflow-lint.yml",
+        ".github/workflows/windows-native.yml",
         ".github/workflows/windows-release.yml",
         "docs/Windows二进制发行与安装.md",
     }
@@ -358,6 +389,73 @@ def test_workflow() -> None:
     )
 
 
+def test_workflow_context_availability() -> None:
+    workflows = {
+        path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8-sig")
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml"))
+    }
+    illegal_job_env_runner = re.compile(
+        r"\$\{\{[^}\n]*\brunner\s*(?:\.|\[)", re.IGNORECASE
+    )
+    for relative, workflow in workflows.items():
+        assert all(
+            illegal_job_env_runner.search(block) is None
+            for block in job_level_env_blocks(workflow)
+        ), (
+            f"{relative} uses runner context in jobs.<job_id>.env"
+        )
+
+    native = workflows[".github/workflows/windows-native.yml"]
+    initializer = "Define isolated runtime paths after runner allocation"
+    installer = "Install both independent products and verification tools"
+    init_block, _, init_end = named_step_block(native, initializer)
+    for token in (
+        "$env:RUNNER_TEMP",
+        "$env:GITHUB_ENV",
+        "PLATFORM_VENV=",
+        "PLATFORM_PYTHON=",
+        "AGENT_VENV=",
+        "AGENT_PYTHON=",
+    ):
+        assert token in init_block, f"native workflow misses runtime setup: {token}"
+    assert native.index(initializer) < native.index(installer)
+    for variable in (
+        "PLATFORM_VENV",
+        "PLATFORM_PYTHON",
+        "AGENT_VENV",
+        "AGENT_PYTHON",
+    ):
+        consumer = re.search(
+            rf"\$env:{variable}\b|\$\{{\{{\s*env\.{variable}\s*\}}\}}", native
+        )
+        assert consumer and consumer.start() >= init_end, (
+            f"native workflow consumes {variable} before initializing it"
+        )
+
+    release = workflows[".github/workflows/windows-release.yml"]
+    signed_build, _, _ = named_step_block(
+        release, "Build, sign, audit and lifecycle-test both installers"
+    )
+    output_assignment = signed_build.index(
+        "WINDOWS_RELEASE_OUTPUT: ${{ runner.temp }}"
+    )
+    run_block = signed_build.index("        run: |")
+    output_use = signed_build.index("$env:WINDOWS_RELEASE_OUTPUT")
+    assert output_assignment < run_block < output_use
+
+    lint = workflows[".github/workflows/workflow-lint.yml"]
+    for token in (
+        'ACTIONLINT_VERSION: "1.7.12"',
+        'ACTIONLINT_ARCHIVE_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"',
+        "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "curl --proto '=https' --tlsv1.2 --fail",
+        "sha256sum --check --strict",
+        '"$ACTIONLINT" -color',
+        "python3 scripts/test_windows_packaging.py",
+    ):
+        assert token in lint, f"workflow lint supply-chain gate missing: {token}"
+
+
 def test_disclosure_and_documentation() -> None:
     combined = re.sub(
         r"\s+",
@@ -393,6 +491,7 @@ def main() -> int:
         test_audit_and_lifecycle,
         test_authenticode_interface,
         test_workflow,
+        test_workflow_context_availability,
         test_disclosure_and_documentation,
     )
     for test in tests:

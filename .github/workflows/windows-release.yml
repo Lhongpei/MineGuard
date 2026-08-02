@@ -145,7 +145,6 @@ jobs:
       WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256: ${{ vars.WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256 }}
       INNO_COMPILER: ${{ vars.WINDOWS_INNO_COMPILER }}
       INNO_COMPILER_SHA256: ${{ vars.WINDOWS_INNO_COMPILER_SHA256 }}
-      WINDOWS_RELEASE_OUTPUT: ${{ runner.temp }}\mineguard-signed-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Check out exact source
@@ -222,6 +221,8 @@ jobs:
 
       - name: Build, sign, audit and lifecycle-test both installers
         shell: powershell
+        env:
+          WINDOWS_RELEASE_OUTPUT: ${{ runner.temp }}\mineguard-signed-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           .\scripts\Build-WindowsBinaryRelease.ps1 `
             -OutputDirectory $env:WINDOWS_RELEASE_OUTPUT `
