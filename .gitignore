@@ -10,6 +10,9 @@ dist/
 node_modules/
 .next/
 out/
+agent/artifacts/
+platform/artifacts/
+/release/
 next-env.d.ts
 .wrangler/
 .mineguard/

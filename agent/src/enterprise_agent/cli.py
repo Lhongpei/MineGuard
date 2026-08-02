@@ -73,7 +73,14 @@ def _service(settings: Settings) -> EnterpriseAgentService:
 
 
 def _default_web_root() -> Path:
+    # A Nuitka standalone build places data files next to the executable.  Do
+    # not derive this location only from ``__file__``: compiled modules may be
+    # represented by extension modules inside the distribution directory and
+    # wheel ``data-files`` use a different layout again.
+    binary_directory = Path(sys.executable).resolve().parent
     candidates = (
+        # Native Windows standalone release.
+        binary_directory / "web",
         # Editable/source checkout.
         Path(__file__).resolve().parents[2] / "web",
         # Wheel installation via setuptools data-files.

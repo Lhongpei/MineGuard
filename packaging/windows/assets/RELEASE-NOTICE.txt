@@ -1,0 +1,41 @@
+MineGuard Windows binary release notice
+=======================================
+
+This installer contains one MineGuard product only. The government Platform
+and each enterprise-side Agent are released as independent installers and do
+not share a runtime, database, service or credential store.
+
+Trust classification
+--------------------
+An installer whose name contains "UNSIGNED-TEST-ONLY" is an unsigned test
+artifact. It is for isolated acceptance testing only and is not a
+production-trusted release. A production candidate must have a valid
+organization-approved Authenticode signature, an approved timestamp and a
+SHA-256 that matches the separately delivered release manifest.
+
+Contents and visibility
+-----------------------
+The media contains no MineGuard backend Python source, Python bytecode, tests,
+Git history or real credentials/private keys. The browser frontend HTML,
+JavaScript and CSS and the Windows operations PowerShell scripts remain
+plaintext and can be inspected by administrators. Core backend code is
+compiled with Nuitka; compilation does not make an executable impossible to
+inspect or reverse engineer.
+
+State preservation
+------------------
+Uninstall removes the installed immutable runtime and deployment scripts. It
+does not delete government state/configuration/backups/logs or enterprise mine
+instances under ProgramData. Remove associated Windows services first. Back up
+and verify all operational state before an upgrade or uninstall.
+
+The build manifest records product, Python, Nuitka, Inno Setup, dependency and
+source revision information plus file hashes. This supports a constrained,
+traceable and repeatable process; it is not a promise of byte-for-byte identical
+output on different machines.
+
+Before redistribution, the delivery organization must review and record the
+applicable Nuitka builder/runtime exception and license obligations, the Inno
+Setup commercial-use terms, bundled dependency licenses and all locally
+applicable procurement/security requirements. Tool versions are evidence, not
+a substitute for that review.

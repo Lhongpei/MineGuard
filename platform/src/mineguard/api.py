@@ -211,6 +211,7 @@ from .safety_attachments import (
     attachment_content_disposition,
     validate_safety_attachment,
 )
+from .resources import read_package_resource
 from .runtime_manifest import build_runtime_manifest
 from .temporal import (
     TemporalDetectionParameters,
@@ -226,7 +227,6 @@ from .verification import (
 
 
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
-WEB_ROOT = Path(__file__).resolve().with_name("web")
 OPERATIONAL_FIVE_QUANTITY_ANALYSIS_PATH = (
     "/v1/analyze/operational-five-quantity-monthly-file"
 )
@@ -8879,8 +8879,13 @@ class MineGuardRequestHandler(BaseHTTPRequestHandler):
         """Serve one explicitly allowlisted frontend file."""
 
         try:
-            encoded = (WEB_ROOT / filename).read_bytes()
-        except (FileNotFoundError, IsADirectoryError, OSError):
+            encoded = read_package_resource("web", filename)
+        except (
+            FileNotFoundError,
+            IsADirectoryError,
+            ModuleNotFoundError,
+            OSError,
+        ):
             # A source or packaging error must not disclose local filesystem
             # details to the caller.
             self._send_not_found()

@@ -233,6 +233,8 @@ http://<政府平台地址>:<端口>/wallboard
 
 政府端原生 Windows 安装、离线 wheelhouse、低权限 WinSW 服务、NTFS ACL、健康检查
 和备份恢复见 [Windows 原生部署与运维](docs/Windows原生部署与运维.md)。
+不交付源码的 Windows 二进制构建入口、Nuitka standalone 结构、自检和签名参数见
+[Windows 二进制构建](packaging/windows/README.md)。
 
 ## 验证
 

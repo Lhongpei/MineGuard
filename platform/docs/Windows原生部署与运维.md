@@ -6,9 +6,14 @@
 ## 1. 已支持的 Windows 基线
 
 - Windows 10/11 x64（演示、运维终端）或 Windows Server 2019/2022 x64；
-- 当前经约束验证的 CPython 3.12 x64；安装脚本会拒绝其他 Python 小版本；
-- Windows PowerShell 5.1；脚本不依赖 PowerShell 7，也不需要执行虚拟环境激活脚本；
-- 本机 NTFS SSD；状态库不得位于 UNC/SMB、映射网络盘、OneDrive 或其他同步目录；
+- 客户机不需要安装 Python；正式包自带经验证的 Nuitka standalone 运行时；
+- 只有可信构建机需要 CPython 3.12 x64 和 Visual Studio 2022 C++ Build Tools；
+- Windows PowerShell 5.1；安装、配置、启动、健康检查、备份、恢复和服务移除脚本都会
+  显式检查该门槛，不依赖 PowerShell 7，也不需要执行虚拟环境激活脚本；
+- 安装根、状态、备份、备份密钥暂存和恢复目标都必须写成 `X:\...` 盘符绝对路径，位于
+  已就绪的本机固定 NTFS 磁盘；不得使用 UNC/SMB、盘符相对路径、映射/移动盘、OneDrive
+  或其他同步目录，路径自身和每一级现有祖先均不得是 symlink、junction、挂载点或其他
+  reparse point；
 - 新版 Edge/Chrome；领导大屏建议 1920×1080 或更高分辨率；
 - 准确的 Windows 时间同步；报文 HMAC 的可接受时间窗为 5 分钟；
 - 不需要 GPU、Java、Node.js、Office/WPS 或单独安装 HiGHS。
@@ -20,21 +25,35 @@ Windows 没有系统 IANA 时区库。本发布把 `tzdata` 固定为运行依�
 
 ```text
 C:\ProgramData\MineGuard\Platform\
-  runtime\       独立 Python 运行时（LocalService 只读）
+  runtime\       MineGuardPlatform.exe 与受控 DLL/PYD/资源（LocalService 只读）
   config\        settings.json、clients.json、首启密码文件（只读 ACL）
   state\         mineguard.db、auth.db、backup.key（LocalService 可写）
+                 .mineguard-platform-state.json（专用状态根所有权标记）
   backups\       在线一致性备份（LocalService 可写）
   logs\          WinSW 滚动日志（LocalService 可写）
   service\       PowerShell 包装和 WinSW XML（LocalService 只读）
+  release-metadata\ 版本、构建、文件摘要与签名状态（LocalService 只读）
 ```
 
 安装脚本用 SID 设置 ACL，避免中文 Windows 上内置账号名称本地化造成权限错误。默认
 服务身份是低权限 `LocalService`（SID `S-1-5-19`），不是 `LocalSystem`。
 
-## 2. 在线安装
+状态目录必须是用途单一的状态根。位于安装根内时只允许使用 `Platform\state` 或其专用
+子目录，不能指向 `runtime/config/service` 等程序树；位于外部磁盘时必须为空或带上述
+MineGuard 所有权标记。状态目录也不能等于安装根或成为安装根的宽泛祖先。
+从早期无所有权标记版本升级时，先停止服务，再用当前注册表和当前 `-StateDirectory`
+重新运行 `Set-MineGuardPlatformConfiguration.ps1`；它只会接纳可识别的既有 MineGuard
+状态根并补写标记。启动、备份和恢复脚本在标记补齐前会安全拒绝，不能手工伪造标记绕过。
 
-在“以管理员身份运行”的 **Windows PowerShell 5.1** 中进入解压后的 `platform`
-目录：
+## 2. 正式二进制安装
+
+对外只交付经 Authenticode 签名的 `MineGuard-Platform-Setup-x64-<version>.exe`、
+SHA-256 和使用手册，不交付 Python 源码、测试、Git 历史或开发虚拟环境。安装器会把
+临时展开的发布目录交给同一套受保护安装逻辑；客户机不访问 PyPI，也不需要 Python。
+
+如在受控验收机直接核验尚未封装为 Setup.exe 的二进制 staging，可在“以管理员身份
+运行”的 **Windows PowerShell 5.1** 中进入
+`MineGuardPlatform-<version>-windows-x64`：
 
 ```powershell
 # 先按独立发布清单核验整个交付包；确认可信后只为当前进程放行脚本。
@@ -45,24 +64,26 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
   -InstallRoot 'C:\ProgramData\MineGuard\Platform'
 ```
 
-脚本创建隔离运行时、按照 `constraints.txt` 安装依赖、验证 NumPy/SciPy/HiGHS 和上海
-时区，并设置最小 NTFS 权限。它不会激活虚拟环境，不会创建服务，也不会下载 WinSW。
+脚本逐项核验 `release-manifest.json` 和 `SHA256SUMS.txt`，拒绝未列入文件和 reparse
+point，再校验前端资源、NumPy/SciPy/HiGHS、上海时区及 Authenticode 状态。运行时、
+运维脚本和发布元数据作为同一事务切换；失败会恢复旧版本。配置、状态、备份和日志不
+参与覆盖。
 
-## 3. 无互联网内网安装
+## 3. 可信 Windows 构建与离线介质
 
-先在相同 Python 3.12 x64/Windows 架构的联网交付机准备经审批的 wheelhouse。它至少
-要包含 `constraints.txt` 中所有包、`setuptools>=68` 及其 Windows `win_amd64` wheel。
-将源码、wheelhouse、文件清单和 SHA-256 一并通过正式介质转入内网，然后运行：
+二进制必须在可信 Windows Server 2022 x64 构建机生成。构建入口和精确 staging 契约
+见 `platform/packaging/windows/README.md`。联网内部测试构建示例：
 
 ```powershell
-& .\deploy\windows\Install-MineGuardPlatform.ps1 `
-  -SourceDirectory $PWD.Path `
-  -InstallRoot 'C:\ProgramData\MineGuard\Platform' `
-  -Wheelhouse 'D:\ApprovedWheelhouse'
+& .\platform\packaging\windows\Build-MineGuardPlatform.ps1 `
+  -OutputDirectory 'C:\MineGuardBuild\Platform' `
+  -AllowNuitkaToolDownloads
 ```
 
-指定 `-Wheelhouse` 后脚本强制使用 `--no-index`，不会回退到互联网。缺少任何兼容
-wheel 都会中止安装。
+正式构建必须传入签名工具、代码签名证书 thumbprint、HTTPS 时间戳 URL 和
+`-RequireSignedBinary`。离线构建通过 `-Wheelhouse` 使用审批后的 Windows wheels，
+并预置 Nuitka 工具缓存；脚本强制 `--no-index`，不会回退互联网。源码和 wheelhouse
+只留在构建区，绝不进入 staging 或最终 Setup.exe。
 
 ## 4. 配置多矿注册表和首次管理员
 
@@ -143,17 +164,24 @@ $demoPassword = Read-Host '演示管理员密码' -AsSecureString
 
 ```powershell
 $ApprovedWinSWSha256 = '<从独立批准清单粘贴64位SHA-256>'
+# 只有批准介质存在 WinSW-x64.exe.config 时才设置这一项：
+$ApprovedWinSWConfigSha256 = '<该 .config 的独立批准 SHA-256>'
 
 & 'C:\ProgramData\MineGuard\Platform\service\Install-MineGuardPlatformService.ps1' `
   -WinSWExecutable 'D:\Approved\WinSW-x64.exe' `
   -ExpectedSha256 $ApprovedWinSWSha256 `
+  -ExpectedConfigSha256 $ApprovedWinSWConfigSha256 `
   -StartService
 ```
 
 `-ExpectedSha256` 必须来自独立签名/批准清单，不能从待校验文件现场计算后原样传回。
-安装脚本核对 SHA-256、XML 服务身份、回环监听和首启密码条件；现有同名服务不会
-被隐式覆盖。WinSW 以 `LocalService` 运行 PowerShell 包装，包装再用固定
-`runtime\Scripts\python.exe -m mineguard` 启动，日志滚动写入 `logs\`。
+如果 WinSW 没有 companion `.config`，应同时删掉上例变量和参数；如果存在，则
+`ExpectedConfigSha256` 同样必须来自外部批准清单。安装脚本还会核对产品 release
+manifest、配置/状态身份、XML 服务身份、回环监听和首启密码条件；现有同名服务不会
+被隐式覆盖。文件以随机临时名完整写入和复核后才发布，注册、启动或健康检查失败会
+撤销本次服务并删除本次文件；归属无法证明时停止清理并报告回滚不完整。注册成功后
+还会从 `Win32_Service.PathName` 核对无参数精确 wrapper 和 `LocalService` 账号。
+WinSW 包装使用固定 `runtime\MineGuardPlatform.exe`，日志滚动写入 `logs\`。
 
 服务操作：
 
@@ -170,9 +198,12 @@ Restart-Service MineGuardPlatform
 & 'C:\ProgramData\MineGuard\Platform\service\Remove-MineGuardPlatformService.ps1'
 ```
 
-该脚本核对同名服务确实指向当前安装目录，随后通过 Windows 服务管理器停止并删除固定
-服务注册；它不会运行未知包装程序，也不会删除任何数据。需要无人值守执行时，变更单
-已经明确批准后才使用 `-Confirm:$false`。
+该脚本在每次停止和最终 `sc.exe delete` 前重新核对同名服务确实以无参数 PathName
+指向当前 wrapper，并等待服务记录真正消失；它不会运行未知包装程序，也不会删除业务
+数据。需要重新安装服务文件时可显式增加 `-RemoveWrapperFiles`，该开关也只删除经过
+完整性记录核验的 wrapper、可选 `.config` 和记录本身，仍保留
+`runtime/config/state/backups/logs`。需要无人值守执行时，变更单已经明确批准后才使用
+`-Confirm:$false`。
 
 ## 7. HTTPS 和防火墙
 
@@ -194,6 +225,9 @@ Restart-Service MineGuardPlatform
 
 `state\backup.key` 不包含在备份里，必须另行加密、离线保管。备份目录也必须有容量
 和新鲜度监控，并定期复制到批准的备份系统；应用工作状态仍不能直接运行在网络盘。
+执行脚本时，自定义 `-BackupDirectory` 和 `-KeyFile` 必须先放到受 ACL 保护的本机固定
+NTFS 专用路径，脚本会逐级拒绝 reparse point。权威密钥仍应离线保管；需要恢复时只把
+受控副本暂存到该本机路径，操作完成后按单位密钥制度清理暂存副本。
 
 恢复脚本只允许恢复到一个不存在或空的新目录，绝不覆盖当前状态：
 
@@ -201,11 +235,17 @@ Restart-Service MineGuardPlatform
 & 'C:\ProgramData\MineGuard\Platform\service\Restore-MineGuardPlatform.ps1' `
   -BackupId '20260802T120000Z-1234' `
   -TargetStateDirectory 'D:\MineGuardRestore\state-20260802' `
-  -KeyFile 'E:\OfflineKeys\mineguard-backup.key'
+  -KeyFile 'D:\MineGuardSecureKeys\mineguard-backup.key'
 ```
 
+恢复目标必须不存在或为空、不能与当前状态或备份目录重叠，并满足同一固定 NTFS/逐级
+无 reparse/状态边界要求。恢复成功后脚本会在新目录创建并核验同一份
+`.mineguard-platform-state.json` 所有权标记，再设置 LocalService ACL；返回结果的
+`nextStep` 也只会引导使用配置事务。
+
 先用另一个端口隔离验收恢复副本。确认后，在维护窗口停止服务，并通过配置脚本的
-`-StateDirectory` 指向恢复目录，再重启；不要手工覆盖旧目录：
+`-StateDirectory` 原子切换到恢复目录，再重启；禁止手工编辑 `settings.json` 或覆盖旧
+目录：
 
 ```powershell
 Stop-Service MineGuardPlatform

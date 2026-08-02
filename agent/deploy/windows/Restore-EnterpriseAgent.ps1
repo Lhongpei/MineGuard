@@ -5,29 +5,30 @@ param(
     [Parameter(Mandatory = $true)][switch]$ConfirmRestore,
     [string]$InstallRoot = (Join-Path $env:ProgramFiles "MineGuard\EnterpriseAgent"),
     [string]$StateRoot = (Join-Path $env:ProgramData "MineGuard\EnterpriseAgent\instances"),
+    [string]$SnapshotAuthenticationKeyFile = "",
+    [switch]$AllowUnauthenticatedLegacySnapshot,
     [switch]$StartAfterRestore
 )
 
+Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"
 $env:PYTHONUNBUFFERED = "1"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
 
-$Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+$SafetyHelper = Join-Path $PSScriptRoot "EnterpriseAgent.WindowsSafety.ps1"
+if (-not (Test-Path -LiteralPath $SafetyHelper -PathType Leaf)) {
+    throw "Windows safety helper is missing: $SafetyHelper"
+}
+. $SafetyHelper
+Assert-EAPowerShell51
+
+$Principal = New-Object Security.Principal.WindowsPrincipal(
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+)
 if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "This script must run in an elevated Administrator PowerShell."
-}
-
-function Test-AgentEndpoint {
-    param([int]$Port)
-    try {
-        $Response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/v1/health" -UseBasicParsing -TimeoutSec 2
-        return [int]$Response.StatusCode -eq 200
-    }
-    catch {
-        return $false
-    }
 }
 
 function Invoke-NativeChecked {
@@ -41,79 +42,182 @@ function Invoke-NativeChecked {
 if (-not $ConfirmRestore) {
     throw "Restore requires the explicit -ConfirmRestore switch."
 }
-if ($InstanceName -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$') {
-    throw "Invalid InstanceName."
+$MaximumSnapshotFiles = 10000
+$MaximumSnapshotFileBytes = 32GB
+$MaximumSnapshotTotalBytes = 256GB
+$Context = Get-EAInstanceContext -InstanceName $InstanceName `
+    -InstallRoot $InstallRoot -StateRoot $StateRoot
+if (-not [bool]$Context.Metadata.acl_hardened) {
+    throw "State restore refuses an instance created with -SkipAcl."
 }
-$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
-$StateRoot = [IO.Path]::GetFullPath($StateRoot)
-$SnapshotPath = [IO.Path]::GetFullPath($SnapshotPath)
-$InstanceRoot = Join-Path $StateRoot $InstanceName
-$MetadataPath = Join-Path $InstanceRoot "instance.json"
-$ConfigPath = Join-Path (Join-Path $InstanceRoot "config") "agent.env"
-$Executable = Join-Path $InstallRoot "runtime\.venv\Scripts\enterprise-agent.exe"
+# Raw caller input is validated before normalization.
+$SnapshotPath = Resolve-EASafeLocalPath -Name "SnapshotPath" -PathValue $SnapshotPath `
+    -MustExist -RequiredType Container
+Assert-EAOrdinaryTree -Root $SnapshotPath -Name "Snapshot" `
+    -MaximumEntries ($MaximumSnapshotFiles + 4)
+if ((Test-EAPathWithin -Candidate $SnapshotPath -Parent $Context.DataDirectory) -or
+    (Test-EAPathWithin -Candidate $Context.DataDirectory -Parent $SnapshotPath)) {
+    throw "Snapshot must not overlap the live data directory."
+}
+if ((Test-EAPathWithin -Candidate $SnapshotPath -Parent $Context.InstallRoot) -or
+    (Test-EAPathWithin -Candidate $Context.InstallRoot -Parent $SnapshotPath)) {
+    throw "Snapshot must not overlap InstallRoot."
+}
+if ((Test-EAPathWithin -Candidate $SnapshotPath -Parent $Context.StateRoot) -and
+    -not (Test-EAPathWithin -Candidate $SnapshotPath -Parent $Context.BackupDirectory)) {
+    throw "A snapshot inside StateRoot must be inside this instance's backups directory."
+}
+$EffectiveKeyPath = if ([string]::IsNullOrWhiteSpace($SnapshotAuthenticationKeyFile)) {
+    Join-Path $Context.BackupDirectory "snapshot-auth.key"
+} else {
+    Resolve-EASafeLocalPath -Name "SnapshotAuthenticationKeyFile" `
+        -PathValue $SnapshotAuthenticationKeyFile -MustExist -RequiredType Leaf
+}
+if ((Test-EAPathWithin -Candidate $EffectiveKeyPath -Parent $SnapshotPath) -or
+    (Test-EAPathWithin -Candidate $SnapshotPath -Parent $EffectiveKeyPath)) {
+    throw "Snapshot authentication key must be delivered independently, outside SnapshotPath."
+}
+Assert-EAProtectedSnapshotAcl -SnapshotRoot $SnapshotPath
+
 $SnapshotManifestPath = Join-Path $SnapshotPath "snapshot.json"
-foreach ($Required in @($MetadataPath, $ConfigPath, $Executable, $SnapshotManifestPath)) {
-    if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
-        throw "Required file is missing: $Required"
-    }
-}
-$SnapshotRootItem = Get-Item -LiteralPath $SnapshotPath -Force
-$SnapshotManifestItem = Get-Item -LiteralPath $SnapshotManifestPath -Force
-if ((($SnapshotRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
-    (($SnapshotManifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
-    throw "Snapshot root and manifest must not be symlinks, junctions or reparse points."
-}
-$SnapshotFiles = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
-$PendingDirectories = New-Object 'System.Collections.Generic.Queue[System.IO.DirectoryInfo]'
-$PendingDirectories.Enqueue($SnapshotRootItem)
-while ($PendingDirectories.Count -gt 0) {
-    $CurrentDirectory = $PendingDirectories.Dequeue()
-    foreach ($Item in Get-ChildItem -LiteralPath $CurrentDirectory.FullName -Force) {
-        if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Snapshot must not contain a symlink, junction or reparse point: $($Item.FullName)"
-        }
-        if ($Item.PSIsContainer) {
-            $PendingDirectories.Enqueue($Item)
-        }
-        else {
-            $SnapshotFiles.Add($Item)
-        }
-    }
-}
-$Metadata = Get-Content -LiteralPath $MetadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$Manifest = Get-Content -LiteralPath $SnapshotManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($Manifest.format -ne "mineguard-enterprise-agent-state-snapshot-v1") {
+$Manifest = Read-EAJsonFile -Path $SnapshotManifestPath -Name "Snapshot manifest" `
+    -MaximumBytes 8MB
+$SnapshotFormat = [string](Get-EARequiredProperty -Object $Manifest -Name "format" `
+    -Context "Snapshot manifest")
+$IsAuthenticatedV2 = $SnapshotFormat -eq "mineguard-enterprise-agent-state-snapshot-v2"
+$IsLegacyV1 = $SnapshotFormat -eq "mineguard-enterprise-agent-state-snapshot-v1"
+if (-not $IsAuthenticatedV2 -and -not $IsLegacyV1) {
     throw "Unsupported snapshot format."
 }
-if ([string]$Manifest.instance_name -ne $InstanceName -or [string]$Manifest.mine_id -ne [string]$Metadata.mine_id) {
-    throw "Snapshot belongs to a different Agent instance or mine."
+if ($IsLegacyV1 -and -not $AllowUnauthenticatedLegacySnapshot) {
+    throw "Unauthenticated v1 snapshots are refused by default. Use -AllowUnauthenticatedLegacySnapshot only under an approved legacy recovery procedure."
 }
-
+$AllowedManifestProperties = @(
+    "format", "created_at", "instance_name", "service_id", "mine_id",
+    "state_root_id", "files", "integrity_note"
+)
+if ($IsAuthenticatedV2) {
+    $AllowedManifestProperties += @("hmac_algorithm", "hmac_key_id", "hmac_sha256")
+}
+$ActualManifestProperties = @($Manifest.PSObject.Properties.Name)
+$RequiredManifestProperties = @(
+    "format", "created_at", "instance_name", "service_id", "mine_id", "files",
+    "integrity_note"
+)
+if ($IsAuthenticatedV2) {
+    $RequiredManifestProperties += @(
+        "state_root_id", "hmac_algorithm", "hmac_key_id", "hmac_sha256"
+    )
+}
+foreach ($RequiredName in $RequiredManifestProperties) {
+    if ($ActualManifestProperties -notcontains $RequiredName) {
+        throw "Snapshot manifest is missing $RequiredName."
+    }
+}
+foreach ($ActualName in $ActualManifestProperties) {
+    if ($AllowedManifestProperties -notcontains $ActualName) {
+        throw "Snapshot manifest contains an unexpected property: $ActualName"
+    }
+}
+if ([string]$Manifest.instance_name -ne $Context.InstanceName -or
+    [string]$Manifest.service_id -ne $Context.ServiceId -or
+    [string]$Manifest.mine_id -ne $Context.MineId) {
+    throw "Snapshot identity does not match the selected Agent instance and mine."
+}
+if ($IsAuthenticatedV2 -and (
+        [string]$Manifest.integrity_note -ne
+            "Authenticated by the separate per-instance snapshot key." -or
+        [string]$Manifest.hmac_algorithm -ne "HMAC-SHA256" -or
+        [string]$Manifest.hmac_key_id -notmatch '^[A-Fa-f0-9]{64}$' -or
+        [string]$Manifest.hmac_sha256 -notmatch '^[A-Fa-f0-9]{64}$'
+    )) {
+    throw "Authenticated snapshot metadata is invalid."
+}
+if ($IsLegacyV1 -and
+    -not ([string]$Manifest.integrity_note).Contains("not an authenticity signature")) {
+    throw "Legacy snapshot authenticity warning is missing."
+}
+$CreatedAt = [DateTimeOffset]::MinValue
+if (-not [DateTimeOffset]::TryParse([string]$Manifest.created_at, [ref]$CreatedAt)) {
+    throw "Snapshot manifest created_at is invalid."
+}
+if ($ActualManifestProperties -contains "state_root_id") {
+    $SnapshotRootId = [Guid]::Empty
+    if (-not [Guid]::TryParse([string]$Manifest.state_root_id, [ref]$SnapshotRootId) -or
+        $SnapshotRootId -eq [Guid]::Empty) {
+        throw "Snapshot state_root_id is invalid."
+    }
+}
+if ($Manifest.files -isnot [Array]) {
+    throw "Snapshot manifest files must be an array."
+}
+$ManifestEntries = @($Manifest.files)
+if ($ManifestEntries.Count -lt 2 -or $ManifestEntries.Count -gt $MaximumSnapshotFiles) {
+    throw "Snapshot manifest file count is outside the safety limit."
+}
 $Expected = @{}
-foreach ($Entry in $Manifest.files) {
+$DeclaredTotalBytes = 0L
+foreach ($Entry in $ManifestEntries) {
+    Assert-EAExactProperties -Object $Entry -Expected @("path", "bytes", "sha256") `
+        -Context "Snapshot file entry"
     $Relative = [string]$Entry.path
     $RelativeParts = $Relative -split '[\\/]'
-    if ([string]::IsNullOrWhiteSpace($Relative) -or [IO.Path]::IsPathRooted($Relative) -or
-        $Relative.Contains(":") -or $RelativeParts -contains "." -or $RelativeParts -contains "..") {
+    if ([string]::IsNullOrWhiteSpace($Relative) -or
+        [IO.Path]::IsPathRooted($Relative) -or $Relative.Contains(":") -or
+        $RelativeParts -contains "." -or $RelativeParts -contains ".." -or
+        $RelativeParts -contains "") {
         throw "Snapshot manifest contains an unsafe relative path."
     }
     $DeclaredBytes = 0L
-    if (-not [long]::TryParse([string]$Entry.bytes, [ref]$DeclaredBytes) -or $DeclaredBytes -lt 0) {
+    if (-not [long]::TryParse([string]$Entry.bytes, [ref]$DeclaredBytes) -or
+        $DeclaredBytes -lt 0 -or $DeclaredBytes -gt $MaximumSnapshotFileBytes) {
         throw "Snapshot manifest contains an invalid byte length: $Relative"
     }
-    $DeclaredSha = [string]$Entry.sha256
-    if ($DeclaredSha -notmatch '^[A-Fa-f0-9]{64}$') {
-        throw "Snapshot manifest contains an invalid SHA-256: $Relative"
+    $DeclaredTotalBytes += $DeclaredBytes
+    if ($DeclaredTotalBytes -gt $MaximumSnapshotTotalBytes) {
+        throw "Snapshot exceeds the total size limit."
     }
-    if ($Expected.ContainsKey($Relative)) {
-        throw "Snapshot manifest contains a duplicate path: $Relative"
+    $DeclaredSha = [string]$Entry.sha256
+    if ($DeclaredSha -notmatch '^[A-Fa-f0-9]{64}$' -or $Expected.ContainsKey($Relative)) {
+        throw "Snapshot manifest contains an invalid hash or duplicate path: $Relative"
     }
     $Expected[$Relative] = $Entry
 }
+if ($IsAuthenticatedV2) {
+    $SnapshotAuthenticationKey = Get-EASnapshotAuthenticationKey -Context $Context `
+        -KeyPath $EffectiveKeyPath
+    $LocalKeyId = Get-EASnapshotKeyId -Key $SnapshotAuthenticationKey
+    if (-not (Test-EAFixedTimeHexEquals -Left $LocalKeyId `
+            -Right ([string]$Manifest.hmac_key_id))) {
+        throw "Snapshot was authenticated by a different snapshot key. Restore the escrowed key for this instance."
+    }
+    $ExpectedHmac = Get-EASnapshotHmacSha256 -Key $SnapshotAuthenticationKey `
+        -Manifest $Manifest
+    if (-not (Test-EAFixedTimeHexEquals -Left $ExpectedHmac `
+            -Right ([string]$Manifest.hmac_sha256))) {
+        throw "Snapshot HMAC-SHA256 authentication failed."
+    }
+}
+
+$SnapshotDirectories = @(Get-ChildItem -LiteralPath $SnapshotPath -Directory -Force -Recurse)
+$SnapshotQuarantine = Join-Path $SnapshotPath "five-quantity-quarantine"
+foreach ($Directory in $SnapshotDirectories) {
+    if (-not $Directory.FullName.Equals(
+            $SnapshotQuarantine, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Snapshot contains an unexpected directory: $($Directory.FullName)"
+    }
+}
+if (-not (Test-Path -LiteralPath $SnapshotQuarantine -PathType Container)) {
+    throw "Snapshot quarantine directory is missing."
+}
 $Actual = @{}
-foreach ($File in $SnapshotFiles) {
+foreach ($File in Get-ChildItem -LiteralPath $SnapshotPath -File -Recurse -Force) {
     $Relative = $File.FullName.Substring($SnapshotPath.Length).TrimStart('\')
     if ($Relative -eq "snapshot.json") { continue }
+    if ($Actual.ContainsKey($Relative)) {
+        throw "Snapshot contains a duplicate relative path: $Relative"
+    }
     $Actual[$Relative] = $File
 }
 if ($Expected.Count -ne $Actual.Count) {
@@ -125,80 +229,123 @@ foreach ($Relative in $Expected.Keys) {
     }
     $File = $Actual[$Relative]
     $Entry = $Expected[$Relative]
-    if ([long]$File.Length -ne [long]$Entry.bytes) {
-        throw "Snapshot file size mismatch: $Relative"
-    }
-    $Digest = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($Digest -ne [string]$Entry.sha256) {
-        throw "Snapshot SHA-256 mismatch: $Relative"
+    if ([long]$File.Length -ne [long]$Entry.bytes -or
+        (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant() `
+            -ne ([string]$Entry.sha256).ToLowerInvariant()) {
+        throw "Snapshot file size or SHA-256 mismatch: $Relative"
     }
 }
-
-$ServiceId = [string]$Metadata.service_id
-$Service = Get-Service -Name $ServiceId -ErrorAction SilentlyContinue
-if ($null -ne $Service -and $Service.Status -ne "Stopped") {
-    throw "Restore refuses an online service. Stop $ServiceId first."
-}
-if (Test-AgentEndpoint -Port ([int]$Metadata.port)) {
-    throw "Restore refuses a running foreground Agent. Stop it first."
-}
-
-$DatabasePath = [IO.Path]::GetFullPath([string]$Metadata.database_path)
-$DataDirectory = Split-Path -Parent $DatabasePath
-$DataPrefix = $DataDirectory.TrimEnd('\') + '\'
-if ($SnapshotPath.Equals($DataDirectory, [StringComparison]::OrdinalIgnoreCase) -or
-    $SnapshotPath.StartsWith($DataPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Snapshot must not be stored inside the live data directory."
-}
-$CurrentQuarantine = Join-Path $DataDirectory "five-quantity-quarantine"
 $SnapshotDatabase = Join-Path $SnapshotPath "enterprise-agent.db"
-$SnapshotQuarantine = Join-Path $SnapshotPath "five-quantity-quarantine"
 if (-not (Test-Path -LiteralPath $SnapshotDatabase -PathType Leaf)) {
     throw "Snapshot database is missing."
 }
-if (-not (Test-Path -LiteralPath $SnapshotQuarantine -PathType Container)) {
-    throw "Snapshot quarantine directory is missing."
-}
-$RestoreTimestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
-$RollbackRoot = Join-Path (Join-Path $InstanceRoot "backups\restore-rollbacks") $RestoreTimestamp
-$StagedQuarantine = Join-Path $DataDirectory (".quarantine-restore-" + [Guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path $RollbackRoot -Force | Out-Null
-Copy-Item -LiteralPath $SnapshotQuarantine -Destination $StagedQuarantine -Recurse
 
-if ($PSCmdlet.ShouldProcess($InstanceName, "restore Agent database and quarantine evidence")) {
-    $OldQuarantine = Join-Path $RollbackRoot "five-quantity-quarantine"
+$ServiceContext = Get-EAServiceContext -Context $Context
+if ($null -ne $ServiceContext -and $ServiceContext.Service.Status -ne "Stopped") {
+    throw "Restore refuses an online service. Stop $($Context.ServiceId) first."
+}
+Assert-EANoInstanceProcesses -Context $Context
+if ($IsLegacyV1) {
+    Write-Warning "The explicit legacy override accepts checksums without cryptographic source authentication."
+}
+$TransactionParent = Resolve-EASafeLocalPath -Name "Restore transaction parent" `
+    -PathValue (Join-Path $Context.BackupDirectory "restore-transactions")
+$RollbackParent = Resolve-EASafeLocalPath -Name "Restore rollback parent" `
+    -PathValue (Join-Path $Context.BackupDirectory "restore-rollbacks")
+
+if ($PSCmdlet.ShouldProcess(
+        $Context.InstanceName, "restore Agent database and quarantine evidence"
+    )) {
+    # No directory creation, copy, move or other mutation occurs before ShouldProcess.
+    $ServiceContext = Get-EAServiceContext -Context $Context
+    if ($null -ne $ServiceContext -and $ServiceContext.Service.Status -ne "Stopped") {
+        throw "Service state changed during validation; restore aborted."
+    }
+    Assert-EANoInstanceProcesses -Context $Context
+    $TransactionId = [Guid]::NewGuid().ToString("N")
+    $TransactionRoot = Join-Path $TransactionParent $TransactionId
+    $RollbackRoot = Join-Path $RollbackParent (
+        [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssfffZ-") + $TransactionId
+    )
+    $StagedQuarantine = Join-Path $TransactionRoot "staged-quarantine"
+    $OldQuarantine = Join-Path $TransactionRoot "pre-restore-quarantine"
+    $CurrentQuarantine = Join-Path $Context.DataDirectory "five-quantity-quarantine"
     $QuarantineSwitched = $false
+    $DatabaseRestored = $false
+    New-Item -ItemType Directory -Path $TransactionParent -Force | Out-Null
+    [void](Resolve-EASafeLocalPath -Name "Restore transaction parent" `
+        -PathValue $TransactionParent -MustExist -RequiredType Container)
+    New-Item -ItemType Directory -Path $TransactionRoot | Out-Null
+    New-Item -ItemType Directory -Path $StagedQuarantine | Out-Null
+    Invoke-EAIcaclsChecked -ArgumentList @($TransactionRoot, "/inheritance:r")
+    Invoke-EAIcaclsChecked -ArgumentList @(
+        $TransactionRoot, "/grant:r", "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F", "/T", "/C"
+    )
+    foreach ($EvidenceFile in Get-ChildItem -LiteralPath $SnapshotQuarantine -File -Force) {
+        Copy-Item -LiteralPath $EvidenceFile.FullName -Destination $StagedQuarantine
+    }
     try {
-        if (Test-Path -LiteralPath $CurrentQuarantine -PathType Container) {
+        Assert-EANoInstanceProcesses -Context $Context
+        if (Test-Path -LiteralPath $CurrentQuarantine) {
+            if (-not (Test-Path -LiteralPath $CurrentQuarantine -PathType Container)) {
+                throw "Live quarantine path is not a directory."
+            }
+            Assert-EAOrdinaryTree -Root $CurrentQuarantine -Name "Live quarantine"
             Move-Item -LiteralPath $CurrentQuarantine -Destination $OldQuarantine
         }
         Move-Item -LiteralPath $StagedQuarantine -Destination $CurrentQuarantine
         $QuarantineSwitched = $true
-        Invoke-NativeChecked -FilePath $Executable -ArgumentList @(
-            "--env-file", $ConfigPath, "--db", $DatabasePath,
+        Invoke-NativeChecked -FilePath $Context.Executable -ArgumentList @(
+            "--env-file", $Context.ConfigPath, "--db", $Context.DatabasePath,
             "database-restore", "--input", $SnapshotDatabase,
-            "--rollback-directory", $RollbackRoot, "--yes-service-stopped"
+            "--rollback-directory", (Join-Path $TransactionRoot "database"),
+            "--yes-service-stopped"
         )
+        $DatabaseRestored = $true
+        New-Item -ItemType Directory -Path $RollbackParent -Force | Out-Null
+        [void](Resolve-EASafeLocalPath -Name "Restore rollback parent" `
+            -PathValue $RollbackParent -MustExist -RequiredType Container)
+        Move-Item -LiteralPath $TransactionRoot -Destination $RollbackRoot
     }
     catch {
-        if ($QuarantineSwitched -and (Test-Path -LiteralPath $CurrentQuarantine -PathType Container)) {
-            Move-Item -LiteralPath $CurrentQuarantine -Destination (Join-Path $RollbackRoot "failed-restored-quarantine")
+        $OriginalError = $_
+        if (-not $DatabaseRestored -and $QuarantineSwitched) {
+            try {
+                if (Test-Path -LiteralPath $CurrentQuarantine -PathType Container) {
+                    Move-Item -LiteralPath $CurrentQuarantine `
+                        -Destination (Join-Path $TransactionRoot "failed-restored-quarantine")
+                }
+                if (Test-Path -LiteralPath $OldQuarantine -PathType Container) {
+                    Move-Item -LiteralPath $OldQuarantine -Destination $CurrentQuarantine
+                }
+            }
+            catch { Write-Warning "Quarantine rollback needs manual recovery: $($_.Exception.Message)" }
         }
-        if (Test-Path -LiteralPath $OldQuarantine -PathType Container) {
-            Move-Item -LiteralPath $OldQuarantine -Destination $CurrentQuarantine
+        if (Test-Path -LiteralPath $TransactionRoot -PathType Container) {
+            try {
+                New-Item -ItemType Directory -Path $RollbackParent -Force | Out-Null
+                [void](Resolve-EASafeLocalPath -Name "Restore rollback parent" `
+                    -PathValue $RollbackParent -MustExist -RequiredType Container)
+                $FailureRoot = "$RollbackRoot-failed"
+                if (-not (Test-Path -LiteralPath $FailureRoot)) {
+                    Move-Item -LiteralPath $TransactionRoot -Destination $FailureRoot
+                    Write-Warning "Failed restore material was preserved at $FailureRoot"
+                }
+            }
+            catch { Write-Warning "Could not publish failed restore material: $($_.Exception.Message)" }
         }
-        throw
+        throw $OriginalError
     }
     Write-Host "Agent state restored. Rollback material: $RollbackRoot"
     if ($StartAfterRestore) {
-        if ($null -eq (Get-Service -Name $ServiceId -ErrorAction SilentlyContinue)) {
+        if ($null -eq (Get-Service -Name $Context.ServiceId -ErrorAction SilentlyContinue)) {
             throw "Restore succeeded, but Windows service is not installed. Start manually."
         }
-        Start-Service -Name $ServiceId
-        (Get-Service -Name $ServiceId).WaitForStatus("Running", [TimeSpan]::FromSeconds(30))
-        Write-Host "Windows service started: $ServiceId"
+        Start-Service -Name $Context.ServiceId
+        (Get-Service -Name $Context.ServiceId).WaitForStatus(
+            "Running", [TimeSpan]::FromSeconds(30)
+        )
+        Write-Host "Windows service started: $($Context.ServiceId)"
     }
-}
-elseif (Test-Path -LiteralPath $StagedQuarantine -PathType Container) {
-    Remove-Item -LiteralPath $StagedQuarantine -Recurse -Force
 }

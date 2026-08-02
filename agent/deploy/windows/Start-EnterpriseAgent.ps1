@@ -5,26 +5,32 @@ param(
     [string]$StateRoot = (Join-Path $env:ProgramData "MineGuard\EnterpriseAgent\instances")
 )
 
+Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"
 $env:PYTHONUNBUFFERED = "1"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
 
-if ($InstanceName -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$') {
-    throw "Invalid InstanceName."
+$SafetyHelper = Join-Path $PSScriptRoot "EnterpriseAgent.WindowsSafety.ps1"
+if (-not (Test-Path -LiteralPath $SafetyHelper -PathType Leaf)) {
+    throw "Windows safety helper is missing: $SafetyHelper"
 }
-$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
-$StateRoot = [IO.Path]::GetFullPath($StateRoot)
-$Executable = Join-Path $InstallRoot "runtime\.venv\Scripts\enterprise-agent.exe"
-$Config = Join-Path (Join-Path (Join-Path $StateRoot $InstanceName) "config") "agent.env"
-if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
-    throw "Agent executable is missing: $Executable"
+. $SafetyHelper
+Assert-EAPowerShell51
+
+# The shared context resolves the runtime\MineGuardEnterpriseAgent.exe contract,
+# validates the StateRoot marker, and binds config/database identity to this mine.
+$Context = Get-EAInstanceContext -InstanceName $InstanceName `
+    -InstallRoot $InstallRoot -StateRoot $StateRoot
+$ServiceContext = Get-EAServiceContext -Context $Context
+if ($null -ne $ServiceContext -and $ServiceContext.Service.Status -ne "Stopped") {
+    throw "Windows service $($Context.ServiceId) is not stopped. Do not run a second foreground instance."
 }
-if (-not (Test-Path -LiteralPath $Config -PathType Leaf)) {
-    throw "Instance configuration is missing: $Config"
-}
+Assert-EANoInstanceProcesses -Context $Context
 
 Write-Host "Starting Enterprise Agent in the foreground. Ctrl+C stops it safely."
-& $Executable "--env-file" $Config "serve"
+# Recheck immediately before process creation to narrow the validation/use race.
+Assert-EANoInstanceProcesses -Context $Context
+& $Context.Executable "--env-file" $Context.ConfigPath "serve"
 exit $LASTEXITCODE

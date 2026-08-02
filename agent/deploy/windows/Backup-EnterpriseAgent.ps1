@@ -4,29 +4,29 @@ param(
     [string]$InstallRoot = (Join-Path $env:ProgramFiles "MineGuard\EnterpriseAgent"),
     [string]$StateRoot = (Join-Path $env:ProgramData "MineGuard\EnterpriseAgent\instances"),
     [string]$DestinationRoot = "",
+    [string]$SnapshotAuthenticationKeyFile = "",
     [switch]$LeaveStopped
 )
 
+Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"
 $env:PYTHONUNBUFFERED = "1"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
 
-$Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+$SafetyHelper = Join-Path $PSScriptRoot "EnterpriseAgent.WindowsSafety.ps1"
+if (-not (Test-Path -LiteralPath $SafetyHelper -PathType Leaf)) {
+    throw "Windows safety helper is missing: $SafetyHelper"
+}
+. $SafetyHelper
+Assert-EAPowerShell51
+
+$Principal = New-Object Security.Principal.WindowsPrincipal(
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+)
 if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "This script must run in an elevated Administrator PowerShell."
-}
-
-function Test-AgentEndpoint {
-    param([int]$Port)
-    try {
-        $Response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/v1/health" -UseBasicParsing -TimeoutSec 2
-        return [int]$Response.StatusCode -eq 200
-    }
-    catch {
-        return $false
-    }
 }
 
 function Invoke-NativeChecked {
@@ -37,124 +37,183 @@ function Invoke-NativeChecked {
     }
 }
 
-if ($InstanceName -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$') {
-    throw "Invalid InstanceName."
+$MaximumSnapshotFiles = 10000
+$MaximumSnapshotFileBytes = 32GB
+$MaximumSnapshotTotalBytes = 256GB
+$Context = Get-EAInstanceContext -InstanceName $InstanceName `
+    -InstallRoot $InstallRoot -StateRoot $StateRoot
+if (-not [bool]$Context.Metadata.acl_hardened) {
+    throw "State backup refuses an instance created with -SkipAcl."
 }
-$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
-$StateRoot = [IO.Path]::GetFullPath($StateRoot)
-$InstanceRoot = Join-Path $StateRoot $InstanceName
-$MetadataPath = Join-Path $InstanceRoot "instance.json"
-$ConfigPath = Join-Path (Join-Path $InstanceRoot "config") "agent.env"
-$Executable = Join-Path $InstallRoot "runtime\.venv\Scripts\enterprise-agent.exe"
-foreach ($Required in @($MetadataPath, $ConfigPath, $Executable)) {
-    if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
-        throw "Required file is missing: $Required"
+$QuarantineDirectory = Join-Path $Context.DataDirectory "five-quantity-quarantine"
+if ([string]::IsNullOrWhiteSpace($DestinationRoot)) {
+    $DestinationRoot = $Context.BackupDirectory
+}
+# Destination validation is deliberately performed on the raw caller value.
+$DestinationRoot = Resolve-EASafeLocalPath -Name "Backup destination" `
+    -PathValue $DestinationRoot
+if ((Test-EAPathWithin -Candidate $DestinationRoot -Parent $Context.DataDirectory) -or
+    (Test-EAPathWithin -Candidate $Context.DataDirectory -Parent $DestinationRoot)) {
+    throw "Backup destination must not overlap the live data directory."
+}
+if ((Test-EAPathWithin -Candidate $DestinationRoot -Parent $Context.InstallRoot) -or
+    (Test-EAPathWithin -Candidate $Context.InstallRoot -Parent $DestinationRoot)) {
+    throw "Backup destination must not overlap InstallRoot."
+}
+if (Test-EAPathWithin -Candidate $DestinationRoot -Parent $Context.StateRoot) {
+    if (-not (Test-EAPathWithin -Candidate $DestinationRoot -Parent $Context.BackupDirectory)) {
+        throw "A destination inside StateRoot must be inside this instance's backups directory."
     }
 }
-$Metadata = Get-Content -LiteralPath $MetadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$DatabasePath = [IO.Path]::GetFullPath([string]$Metadata.database_path)
-$DataDirectory = Split-Path -Parent $DatabasePath
-$QuarantineDirectory = Join-Path $DataDirectory "five-quantity-quarantine"
-if (-not $DestinationRoot) {
-    $DestinationRoot = Join-Path $InstanceRoot "backups"
-}
-$DestinationRoot = [IO.Path]::GetFullPath($DestinationRoot)
-$DataPrefix = $DataDirectory.TrimEnd('\') + '\'
-if ($DestinationRoot.Equals($DataDirectory, [StringComparison]::OrdinalIgnoreCase) -or
-    $DestinationRoot.StartsWith($DataPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Backup destination must not be inside the live data directory."
+elseif (Test-EAPathWithin -Candidate $Context.StateRoot -Parent $DestinationRoot) {
+    throw "Backup destination must not be an ancestor of StateRoot."
 }
 New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
+$DestinationRoot = Resolve-EASafeLocalPath -Name "Backup destination" `
+    -PathValue $DestinationRoot -MustExist -RequiredType Container
+Assert-EAProtectedDirectoryAcl -Path $DestinationRoot -Name "Backup destination"
+$Timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssfffZ")
+$SnapshotName = "$InstanceName-$Timestamp"
+$FinalSnapshot = Join-Path $DestinationRoot $SnapshotName
+$TemporarySnapshot = Join-Path $DestinationRoot (
+    ".incomplete-" + [Guid]::NewGuid().ToString("N")
+)
+$EffectiveKeyPath = if ([string]::IsNullOrWhiteSpace($SnapshotAuthenticationKeyFile)) {
+    Join-Path $Context.BackupDirectory "snapshot-auth.key"
+} else {
+    Resolve-EASafeLocalPath -Name "SnapshotAuthenticationKeyFile" `
+        -PathValue $SnapshotAuthenticationKeyFile
+}
+foreach ($SnapshotBoundary in @($FinalSnapshot, $TemporarySnapshot)) {
+    if ((Test-EAPathWithin -Candidate $EffectiveKeyPath -Parent $SnapshotBoundary) -or
+        (Test-EAPathWithin -Candidate $SnapshotBoundary -Parent $EffectiveKeyPath)) {
+        throw "Snapshot authentication key must remain outside the snapshot directory."
+    }
+}
+$SnapshotAuthenticationKey = Get-EASnapshotAuthenticationKey -Context $Context `
+    -KeyPath $EffectiveKeyPath -CreateIfMissing
 
-$ServiceId = [string]$Metadata.service_id
-$Port = [int]$Metadata.port
-$Service = Get-Service -Name $ServiceId -ErrorAction SilentlyContinue
-$WasRunning = $null -ne $Service -and $Service.Status -ne "Stopped"
+$ServiceContext = Get-EAServiceContext -Context $Context
+$WasRunning = $null -ne $ServiceContext -and
+    $ServiceContext.Service.Status -ne "Stopped"
 if ($WasRunning) {
     try {
-        Stop-Service -Name $ServiceId -Force
-        (Get-Service -Name $ServiceId).WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
+        Stop-Service -Name $Context.ServiceId -Force
+        (Get-Service -Name $Context.ServiceId).WaitForStatus(
+            "Stopped", [TimeSpan]::FromSeconds(30)
+        )
     }
     catch {
-        $CurrentService = Get-Service -Name $ServiceId -ErrorAction SilentlyContinue
+        $CurrentService = Get-Service -Name $Context.ServiceId -ErrorAction SilentlyContinue
         if ($null -ne $CurrentService -and $CurrentService.Status -eq "Stopped") {
-            Start-Service -Name $ServiceId
+            Start-Service -Name $Context.ServiceId
         }
         throw
     }
 }
-elseif (Test-AgentEndpoint -Port $Port) {
-    throw "A foreground Agent is using this instance. Stop it before a complete state backup."
-}
 
-$Timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
-$SnapshotName = "$InstanceName-$Timestamp"
-$FinalSnapshot = Join-Path $DestinationRoot $SnapshotName
-$TemporarySnapshot = Join-Path $DestinationRoot (".incomplete-" + [Guid]::NewGuid().ToString("N"))
 $Completed = $false
 try {
+    Assert-EANoInstanceProcesses -Context $Context
+    if (Test-Path -LiteralPath $FinalSnapshot) {
+        throw "Snapshot target already exists: $FinalSnapshot"
+    }
     New-Item -ItemType Directory -Path $TemporarySnapshot | Out-Null
     $SnapshotDatabase = Join-Path $TemporarySnapshot "enterprise-agent.db"
-    Invoke-NativeChecked -FilePath $Executable -ArgumentList @(
-        "--env-file", $ConfigPath, "--db", $DatabasePath,
+    # Recheck immediately before SQLite backup after all path/service validation.
+    Assert-EANoInstanceProcesses -Context $Context
+    Invoke-NativeChecked -FilePath $Context.Executable -ArgumentList @(
+        "--env-file", $Context.ConfigPath, "--db", $Context.DatabasePath,
         "database-backup", "--output", $SnapshotDatabase
     )
+
     $SnapshotQuarantine = Join-Path $TemporarySnapshot "five-quantity-quarantine"
+    New-Item -ItemType Directory -Path $SnapshotQuarantine | Out-Null
     if (Test-Path -LiteralPath $QuarantineDirectory -PathType Container) {
-        $QuarantineItem = Get-Item -LiteralPath $QuarantineDirectory -Force
-        if (($QuarantineItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Live quarantine directory cannot be a reparse point."
+        Assert-EAOrdinaryTree -Root $QuarantineDirectory -Name "Live quarantine"
+        $EvidenceFiles = @(Get-ChildItem -LiteralPath $QuarantineDirectory -Force)
+        if ($EvidenceFiles.Count -gt $MaximumSnapshotFiles) {
+            throw "Quarantine exceeds the $MaximumSnapshotFiles file snapshot limit."
         }
-        New-Item -ItemType Directory -Path $SnapshotQuarantine | Out-Null
-        foreach ($EvidenceFile in Get-ChildItem -LiteralPath $QuarantineDirectory -Force) {
-            if ($EvidenceFile.PSIsContainer -or (($EvidenceFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        $EvidenceBytes = 0L
+        foreach ($EvidenceFile in $EvidenceFiles) {
+            if ($EvidenceFile.PSIsContainer) {
                 throw "Quarantine must contain only ordinary evidence files: $($EvidenceFile.FullName)"
+            }
+            if ([long]$EvidenceFile.Length -gt $MaximumSnapshotFileBytes) {
+                throw "Evidence file exceeds the snapshot size limit: $($EvidenceFile.FullName)"
+            }
+            $EvidenceBytes += [long]$EvidenceFile.Length
+            if ($EvidenceBytes -gt $MaximumSnapshotTotalBytes) {
+                throw "Quarantine exceeds the total snapshot size limit."
             }
             Copy-Item -LiteralPath $EvidenceFile.FullName -Destination $SnapshotQuarantine
         }
     }
-    else {
-        New-Item -ItemType Directory -Path $SnapshotQuarantine | Out-Null
-    }
 
     $Files = @()
-    foreach ($File in Get-ChildItem -LiteralPath $TemporarySnapshot -File -Recurse | Sort-Object FullName) {
+    $TotalBytes = 0L
+    $SnapshotFiles = @(Get-ChildItem -LiteralPath $TemporarySnapshot -File -Recurse | `
+        Sort-Object FullName)
+    if ($SnapshotFiles.Count -gt $MaximumSnapshotFiles) {
+        throw "Snapshot exceeds the $MaximumSnapshotFiles file limit."
+    }
+    foreach ($File in $SnapshotFiles) {
+        if ([long]$File.Length -gt $MaximumSnapshotFileBytes) {
+            throw "Snapshot file exceeds the size limit: $($File.FullName)"
+        }
+        $TotalBytes += [long]$File.Length
+        if ($TotalBytes -gt $MaximumSnapshotTotalBytes) {
+            throw "Snapshot exceeds the total size limit."
+        }
         $Relative = $File.FullName.Substring($TemporarySnapshot.Length).TrimStart('\')
         $Files += [ordered]@{
             path = $Relative
             bytes = [long]$File.Length
-            sha256 = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            sha256 = (Get-FileHash -LiteralPath $File.FullName `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
         }
     }
     $SnapshotManifest = [ordered]@{
-        format = "mineguard-enterprise-agent-state-snapshot-v1"
+        format = "mineguard-enterprise-agent-state-snapshot-v2"
         created_at = [DateTime]::UtcNow.ToString("o")
-        instance_name = $InstanceName
-        service_id = $ServiceId
-        mine_id = [string]$Metadata.mine_id
+        instance_name = $Context.InstanceName
+        service_id = $Context.ServiceId
+        mine_id = $Context.MineId
+        state_root_id = $Context.RootId
         files = $Files
-        integrity_note = "SHA-256 detects corruption but is not an authenticity signature."
+        integrity_note = "Authenticated by the separate per-instance snapshot key."
+        hmac_algorithm = "HMAC-SHA256"
+        hmac_key_id = Get-EASnapshotKeyId -Key $SnapshotAuthenticationKey
     }
+    $SnapshotManifest["hmac_sha256"] = Get-EASnapshotHmacSha256 `
+        -Key $SnapshotAuthenticationKey -Manifest $SnapshotManifest
     $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [IO.File]::WriteAllText(
         (Join-Path $TemporarySnapshot "snapshot.json"),
         (($SnapshotManifest | ConvertTo-Json -Depth 8) + [Environment]::NewLine),
         $Utf8NoBom
     )
-    if (Test-Path -LiteralPath $FinalSnapshot) {
-        throw "Snapshot target already exists: $FinalSnapshot"
-    }
+    Invoke-EAIcaclsChecked -ArgumentList @($TemporarySnapshot, "/inheritance:r")
+    Invoke-EAIcaclsChecked -ArgumentList @(
+        $TemporarySnapshot, "/grant:r", "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F", "/T", "/C"
+    )
+    Assert-EAProtectedSnapshotAcl -SnapshotRoot $TemporarySnapshot
     Move-Item -LiteralPath $TemporarySnapshot -Destination $FinalSnapshot
     $Completed = $true
     Write-Host "Complete Agent state snapshot created: $FinalSnapshot"
-    Write-Host "Copy this snapshot to protected independent storage. SHA-256 is not proof of authenticity."
+    Write-Warning "Back up snapshot-auth.key separately through the approved key escrow. The key is never included in a snapshot."
 }
 finally {
     if (-not $Completed -and (Test-Path -LiteralPath $TemporarySnapshot)) {
-        Remove-Item -LiteralPath $TemporarySnapshot -Recurse -Force
+        Remove-EAOwnedTemporaryTree -Path $TemporarySnapshot `
+            -ExpectedParent $DestinationRoot -RequiredPrefix ".incomplete-"
     }
     if ($WasRunning -and -not $LeaveStopped) {
-        Start-Service -Name $ServiceId
-        (Get-Service -Name $ServiceId).WaitForStatus("Running", [TimeSpan]::FromSeconds(30))
+        Start-Service -Name $Context.ServiceId
+        (Get-Service -Name $Context.ServiceId).WaitForStatus(
+            "Running", [TimeSpan]::FromSeconds(30)
+        )
     }
 }

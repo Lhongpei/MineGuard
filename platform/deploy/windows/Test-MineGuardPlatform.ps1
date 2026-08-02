@@ -12,6 +12,12 @@ $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 $OutputEncoding = $utf8NoBom
 try { [Console]::OutputEncoding = $utf8NoBom } catch { }
 
+if ($PSVersionTable.PSVersion.Major -lt 5 -or
+    ($PSVersionTable.PSVersion.Major -eq 5 -and
+        $PSVersionTable.PSVersion.Minor -lt 1)) {
+    throw '需要 Windows PowerShell 5.1 或更高版本。'
+}
+
 function Invoke-HealthEndpoint {
     param([string] $Name, [string] $RelativePath)
     $uri = New-Object -TypeName System.Uri -ArgumentList @($BaseUri, $RelativePath)

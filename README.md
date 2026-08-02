@@ -186,6 +186,7 @@ PYTHONPATH=agent/src python3 -m pytest -q agent/tests
 
 进一步说明见 [V2 双系统目标架构](docs/V2双系统目标架构.md)、
 [V2 部署与运行](docs/V2部署与运行.md)、
+[Windows 二进制发行与安装](docs/Windows二进制发行与安装.md)、
 [Windows 原生部署与运维](docs/Windows原生部署与运维.md)、[V2 验收清单](docs/V2验收清单.md)、
 [政府平台说明](platform/README.md)和[企业智能体说明](agent/README.md)。
 

@@ -24,6 +24,8 @@ def test_product_cli_exposes_only_v2_runtime_and_operations() -> None:
         "backup",
         "verify-backup",
         "restore-backup",
+        "config-check",
+        "self-check",
         "user",
     }
     user_parser = subparsers.choices["user"]
@@ -46,6 +48,51 @@ def test_product_cli_exposes_only_v2_runtime_and_operations() -> None:
     assert "from .edge_store" not in source
     with pytest.raises(SystemExit):
         parser.parse_args(["production", "{}"])
+
+
+def test_product_cli_self_check_covers_both_frontends_timezone_and_solver(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert product_cli.main(["self-check"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "ok"
+    assert result["timezone"] == "Asia/Shanghai"
+    assert result["solver"] == "scipy.optimize.linprog/highs"
+    assert result["solver_objective"] == pytest.approx(1.0)
+    assert {
+        "regulatory_web/index.html",
+        "regulatory_web/app.js",
+        "regulatory_web/styles.css",
+        "web/index.html",
+        "web/app.js",
+        "web/styles.css",
+    } == set(result["assets"])
+    assert all(item["bytes"] > 0 for item in result["assets"].values())
+    assert all(
+        value != "not-installed"
+        for value in result["runtime"]["dependencies"].values()
+    )
+
+
+def test_product_cli_config_check_is_read_only_and_machine_parseable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    auth_database = tmp_path / "auth.db"
+    with LocalAuthStore(auth_database) as auth:
+        auth.bootstrap_admin("admin", "admin password")
+
+    assert (
+        product_cli.main(
+            ["config-check", "--auth-database", str(auth_database)]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"status": "ok", "auth_user_count": 1}
+
+    assert product_cli.main(["config-check"]) == 2
+    error = json.loads(capsys.readouterr().out)
+    assert error["error"]["code"] == "operation_failed"
 
 
 def test_loopback_first_start_uses_requested_demo_password(

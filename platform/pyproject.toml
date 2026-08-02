@@ -34,6 +34,7 @@ mineguard = [
   "web/*.css",
   "web/*.js",
   "web/*.svg",
+  "web/*.png",
   "web/*.webmanifest",
   "regulatory_web/*.html",
   "regulatory_web/*.css",

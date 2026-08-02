@@ -1,5 +1,9 @@
 # MineGuard · 矿安智察 Windows 原生部署与运维
 
+需要给非研发目标机交付两个独立离线安装器时，优先按
+[《Windows 二进制发行与安装》](./Windows二进制发行与安装.md)构建、签名和验收；本文继续
+说明源码/运维层面的 Windows 运行方式。
+
 本文是两套独立软件的 Windows 总体部署基线：每座煤矿各自部署一个
 `agent/` 企业智能体，政府集中部署一个 `platform/` 监管平台。两端不共享
 代码包、数据库、用户、状态目录或密钥，只通过版本化 HTTPS/JSON/HMAC 契约
@@ -337,6 +341,34 @@ Get-CimInstance Win32_Service |
 Agent 服务安装前会执行 `--env-file <绝对路径> config-check --production`，并拒绝
 使用 `-SkipAcl` 创建的实例。`-AllowIncompleteDemo` 只用于隔离演示，不得用来绕过
 生产身份、账号、HTTPS 或两把 HMAC 配置门槛。
+
+Platform 服务必须从已安装目录的 `service` 子目录安装；脚本会复核产品
+`release-metadata`、配置与状态目录身份，只接受无参数指向固定 wrapper 的
+`Win32_Service.PathName` 和 `NT AUTHORITY\LocalService`。WinSW 必须提供外部批准的
+SHA-256；若批准介质同时带 `WinSW.exe.config`，还必须显式传入其独立批准摘要：
+
+```powershell
+Set-Location 'C:\ProgramData\MineGuard\Platform\service'
+.\Install-MineGuardPlatformService.ps1 `
+  -WinSWExecutable 'D:\approved-media\WinSW-x64.exe' `
+  -ExpectedSha256 '<批准的 WinSW EXE SHA-256>' `
+  -ExpectedConfigSha256 '<仅在存在 .config 时提供其批准 SHA-256>' `
+  -StartService
+```
+
+服务文件先以同目录随机名完整写入并复核，再无覆盖发布。注册、启动或健康检查任一
+失败时，脚本会撤销本次服务注册并删除本次创建的 wrapper 文件；如果同名服务归属
+无法证明，则保留现场并报告回滚不完整。移除时每次停止和 `sc.exe delete` 前都会重新
+核对完整、无参数的 `PathName`，并等待服务记录真正消失。默认保留 wrapper 以便审计；
+需要重装时可在确认服务身份后使用：
+
+```powershell
+.\Remove-MineGuardPlatformService.ps1 `
+  -InstallRoot 'C:\ProgramData\MineGuard\Platform' `
+  -RemoveWrapperFiles
+```
+
+以上两种移除方式都不会删除 `runtime/config/state/backups/logs` 中的业务数据。
 
 ## 10. 监控和故障处置
 

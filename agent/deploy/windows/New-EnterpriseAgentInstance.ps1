@@ -14,33 +14,34 @@ param(
     [switch]$SkipAcl
 )
 
+Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
 
-if (-not $SkipAcl) {
-    $Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-    if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw "Run in an elevated Administrator PowerShell, or use -SkipAcl only for local development."
-    }
+$SafetyHelper = Join-Path $PSScriptRoot "EnterpriseAgent.WindowsSafety.ps1"
+if (-not (Test-Path -LiteralPath $SafetyHelper -PathType Leaf)) {
+    throw "Windows safety helper is missing: $SafetyHelper"
 }
+. $SafetyHelper
+Assert-EAPowerShell51
 
-function Assert-InstanceName {
-    param([string]$Value)
-    if ($Value -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$') {
-        throw "InstanceName must be 1-64 ASCII letters, digits, dot, underscore or dash."
-    }
-    $BaseName = ($Value.Split('.')[0]).ToUpperInvariant()
-    $Reserved = @("CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9")
-    if ($Reserved -contains $BaseName) {
-        throw "InstanceName is a reserved Windows device name."
+if (-not $SkipAcl) {
+    $Principal = New-Object Security.Principal.WindowsPrincipal(
+        [Security.Principal.WindowsIdentity]::GetCurrent()
+    )
+    if (-not $Principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator
+        )) {
+        throw "Run in an elevated Administrator PowerShell, or use -SkipAcl only for local development."
     }
 }
 
 function Assert-EnvironmentValue {
     param([string]$Name, [string]$Value)
-    if ([string]::IsNullOrWhiteSpace($Value) -or $Value.IndexOfAny(@([char]0, [char]10, [char]13)) -ge 0) {
+    if ([string]::IsNullOrWhiteSpace($Value) -or
+        $Value.IndexOfAny(@([char]0, [char]10, [char]13)) -ge 0) {
         throw "$Name must be non-empty and contain no control characters."
     }
 }
@@ -55,172 +56,219 @@ function Assert-ContractIdentifier {
 function Assert-DisplayName {
     param([string]$Name, [string]$Value)
     Assert-EnvironmentValue -Name $Name -Value $Value
-    if ($Value.Length -gt 256) {
-        throw "$Name must be at most 256 characters."
-    }
+    if ($Value.Length -gt 256) { throw "$Name must be at most 256 characters." }
 }
 
-function Assert-LocalFixedPath {
-    param([string]$PathValue)
-    $FullPath = [IO.Path]::GetFullPath($PathValue)
-    if ($FullPath.StartsWith("\\")) {
-        throw "Agent state must not use a UNC/network path: $FullPath"
+function Assert-SafeWatchAclTarget {
+    param([string]$WatchRoot, [string]$ApplicationRoot, [string]$InstancesRoot)
+    foreach ($ProductRoot in @($ApplicationRoot, $InstancesRoot)) {
+        if ((Test-EAPathWithin -Candidate $WatchRoot -Parent $ProductRoot) -or
+            (Test-EAPathWithin -Candidate $ProductRoot -Parent $WatchRoot)) {
+            throw "Custom watch ACL target must not overlap InstallRoot or StateRoot: $WatchRoot"
+        }
     }
-    $Root = [IO.Path]::GetPathRoot($FullPath)
-    if ($Root -match '^([A-Za-z]):\\$') {
-        $DeviceId = $Matches[1] + ":"
-        $Disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$DeviceId'" -ErrorAction SilentlyContinue
-        if ($null -ne $Disk -and [int]$Disk.DriveType -ne 3) {
-            throw "Agent state must use a local fixed disk: $FullPath"
+    $ProtectedRoots = @(
+        $env:SystemRoot, $env:ProgramData, $env:ALLUSERSPROFILE,
+        $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:PUBLIC
+    )
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemDrive)) {
+        $ProtectedRoots += Join-Path $env:SystemDrive "Users"
+    }
+    foreach ($ProtectedCandidate in @($ProtectedRoots | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_)
+    })) {
+        $Protected = [IO.Path]::GetFullPath([string]$ProtectedCandidate).TrimEnd('\')
+        if ((Test-EAPathWithin -Candidate $WatchRoot -Parent $Protected) -or
+            (Test-EAPathWithin -Candidate $Protected -Parent $WatchRoot)) {
+            throw "Custom watch ACL target is too broad or system-managed: $WatchRoot"
         }
     }
 }
 
-function Invoke-IcaclsChecked {
-    param([string[]]$ArgumentList)
-    & icacls.exe @ArgumentList | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "icacls failed with exit code $LASTEXITCODE"
-    }
-}
-
-Assert-InstanceName -Value $InstanceName
+Assert-EAInstanceName -Value $InstanceName
 Assert-ContractIdentifier -Name "MineId" -Value $MineId
 Assert-DisplayName -Name "MineName" -Value $MineName
 Assert-ContractIdentifier -Name "OperatorId" -Value $OperatorId
 Assert-DisplayName -Name "OperatorName" -Value $OperatorName
 Assert-ContractIdentifier -Name "SystemId" -Value $SystemId
-$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
-$StateRoot = [IO.Path]::GetFullPath($StateRoot)
-Assert-LocalFixedPath -PathValue $StateRoot
-if (-not (Test-Path -LiteralPath $StateRoot -PathType Container)) {
-    throw "StateRoot does not exist. Run Install-EnterpriseAgent.ps1 first."
-}
-$StateRootItem = Get-Item -LiteralPath $StateRoot -Force
-if (($StateRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-    throw "StateRoot cannot be a symlink, junction or reparse point."
-}
 
-$AgentExecutable = Join-Path $InstallRoot "runtime\.venv\Scripts\enterprise-agent.exe"
-$Template = Join-Path $InstallRoot "deploy\windows\agent.env.template"
-if (-not (Test-Path -LiteralPath $AgentExecutable -PathType Leaf)) {
-    throw "Installed Agent executable is missing: $AgentExecutable"
-}
-if (-not (Test-Path -LiteralPath $Template -PathType Leaf)) {
-    throw "Instance template is missing: $Template"
-}
+# Raw X:\ path validation intentionally precedes GetFullPath normalization.
+$InstallRoot = Resolve-EASafeLocalPath -Name "InstallRoot" -PathValue $InstallRoot `
+    -MustExist -RequiredType Container
+$StateRoot = Resolve-EASafeLocalPath -Name "StateRoot" -PathValue $StateRoot `
+    -MustExist -RequiredType Container
+[void](Assert-EAStateRootMarker -StateRoot $StateRoot)
+$AgentExecutable = Get-EAAgentExecutable -InstallRoot $InstallRoot
+$Template = Resolve-EASafeLocalPath -Name "Instance template" `
+    -PathValue (Join-Path $InstallRoot "deploy\windows\agent.env.template") `
+    -MustExist -RequiredType Leaf
+Assert-EAOrdinaryLeaf -Path $Template -Name "Instance template" -MaximumBytes 1MB
 
 $InstanceRoot = Join-Path $StateRoot $InstanceName
 if (Test-Path -LiteralPath $InstanceRoot) {
     throw "Instance already exists: $InstanceRoot"
 }
-foreach ($ExistingConfig in Get-ChildItem -LiteralPath $StateRoot -Filter "agent.env" -File -Recurse -ErrorAction SilentlyContinue) {
-    foreach ($Line in Get-Content -LiteralPath $ExistingConfig.FullName) {
-        if ($Line -match '^ENTERPRISE_AGENT_PORT=([0-9]+)$' -and [int]$Matches[1] -eq $Port) {
-            throw "Port $Port is already assigned by $($ExistingConfig.FullName)"
-        }
+foreach ($ExistingDirectory in Get-ChildItem -LiteralPath $StateRoot -Directory -Force) {
+    if ($ExistingDirectory.Name.StartsWith(".instance-staging-")) { continue }
+    if ($ExistingDirectory.Name -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$') {
+        throw "StateRoot contains an unrecognized instance directory: $($ExistingDirectory.FullName)"
+    }
+    $ExistingContext = Get-EAInstanceContext -InstanceName $ExistingDirectory.Name `
+        -InstallRoot $InstallRoot -StateRoot $StateRoot
+    if ($ExistingContext.Port -eq $Port) {
+        throw "Port $Port is already assigned by $($ExistingContext.InstanceName)."
     }
 }
 
-$ConfigDirectory = Join-Path $InstanceRoot "config"
-$DataDirectory = Join-Path $InstanceRoot "data"
-$LogDirectory = Join-Path $InstanceRoot "logs"
-$BackupDirectory = Join-Path $InstanceRoot "backups"
-$InboxDirectory = Join-Path $InstanceRoot "inbox"
-$ServiceDirectory = Join-Path $InstanceRoot "service"
-foreach ($Directory in @($ConfigDirectory, $DataDirectory, $LogDirectory, $BackupDirectory, $InboxDirectory, $ServiceDirectory)) {
-    New-Item -ItemType Directory -Path $Directory -Force | Out-Null
-}
 $UsingDefaultInbox = $WatchDirectories.Count -eq 0
-if ($UsingDefaultInbox) {
-    $WatchDirectories = @($InboxDirectory)
-}
 $ResolvedWatchDirectories = @()
-foreach ($WatchDirectory in $WatchDirectories) {
-    if ([string]::IsNullOrWhiteSpace($WatchDirectory) -or $WatchDirectory.Contains(";")) {
-        throw "Watch directory must be non-empty and cannot contain a semicolon."
-    }
-    $ResolvedWatch = [IO.Path]::GetFullPath($WatchDirectory)
-    if (-not (Test-Path -LiteralPath $ResolvedWatch -PathType Container)) {
-        throw "Watch directory does not exist: $ResolvedWatch"
-    }
-    $WatchItem = Get-Item -LiteralPath $ResolvedWatch -Force
-    if (($WatchItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Watch directory cannot be a symlink, junction or reparse point: $ResolvedWatch"
-    }
-    if ($ResolvedWatch.TrimEnd('\') -eq [IO.Path]::GetPathRoot($ResolvedWatch).TrimEnd('\')) {
-        throw "Watch directory cannot be a filesystem root."
-    }
-    foreach ($ExistingWatch in $ResolvedWatchDirectories) {
-        if ($ExistingWatch.Equals($ResolvedWatch, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Watch directories must be unique: $ResolvedWatch"
+if (-not $UsingDefaultInbox) {
+    foreach ($WatchDirectory in $WatchDirectories) {
+        if ([string]::IsNullOrWhiteSpace($WatchDirectory) -or
+            $WatchDirectory.Contains(";")) {
+            throw "Watch directory must be non-empty and cannot contain a semicolon."
         }
-    }
-    $ResolvedWatchDirectories += $ResolvedWatch
-}
-$WatchValue = $ResolvedWatchDirectories -join ";"
-$DatabasePath = Join-Path $DataDirectory "enterprise-agent.db"
-$ConfigPath = Join-Path $ConfigDirectory "agent.env"
-$Content = [IO.File]::ReadAllText($Template)
-$Replacements = @{
-    "__DATABASE_PATH__" = $DatabasePath
-    "__PORT__" = $Port.ToString()
-    "__MINE_ID__" = $MineId
-    "__MINE_NAME__" = $MineName
-    "__OPERATOR_ID__" = $OperatorId
-    "__OPERATOR_NAME__" = $OperatorName
-    "__SYSTEM_ID__" = $SystemId
-    "__WATCH_DIRECTORIES__" = $WatchValue
-}
-foreach ($Entry in $Replacements.GetEnumerator()) {
-    $Content = $Content.Replace([string]$Entry.Key, [string]$Entry.Value)
-}
-$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[IO.File]::WriteAllText($ConfigPath, $Content, $Utf8NoBom)
-
-$ServiceId = "MineGuardEnterpriseAgent-$InstanceName"
-$Metadata = [ordered]@{
-    format = "mineguard-enterprise-agent-windows-instance-v1"
-    instance_name = $InstanceName
-    service_id = $ServiceId
-    port = $Port
-    mine_id = $MineId
-    system_id = $SystemId
-    config_path = $ConfigPath
-    database_path = $DatabasePath
-    acl_hardened = (-not $SkipAcl.IsPresent)
-}
-[IO.File]::WriteAllText(
-    (Join-Path $InstanceRoot "instance.json"),
-    (($Metadata | ConvertTo-Json -Depth 4) + [Environment]::NewLine),
-    $Utf8NoBom
-)
-
-if (-not $SkipAcl) {
-    Invoke-IcaclsChecked -ArgumentList @($InstanceRoot, "/inheritance:r")
-    Invoke-IcaclsChecked -ArgumentList @($InstanceRoot, "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-19:(OI)(CI)RX", "/T", "/C")
-    foreach ($Writable in @($DataDirectory, $LogDirectory)) {
-        Invoke-IcaclsChecked -ArgumentList @($Writable, "/grant:r", "*S-1-5-19:(OI)(CI)M", "/T", "/C")
-    }
-    Invoke-IcaclsChecked -ArgumentList @($BackupDirectory, "/inheritance:r")
-    Invoke-IcaclsChecked -ArgumentList @($BackupDirectory, "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T", "/C")
-    if (-not $UsingDefaultInbox) {
-        if ($GrantWatchReadAcl) {
-            foreach ($WatchDirectory in $ResolvedWatchDirectories) {
-                Invoke-IcaclsChecked -ArgumentList @($WatchDirectory, "/grant", "*S-1-5-19:(OI)(CI)RX", "/T", "/C")
+        $ResolvedWatch = Resolve-EASafeLocalPath -Name "Watch directory" `
+            -PathValue $WatchDirectory -MustExist -RequiredType Container -CheckTree
+        foreach ($ExistingWatch in $ResolvedWatchDirectories) {
+            if ((Test-EAPathWithin -Candidate $ResolvedWatch -Parent $ExistingWatch) -or
+                (Test-EAPathWithin -Candidate $ExistingWatch -Parent $ResolvedWatch)) {
+                throw "Watch directories must be unique and non-overlapping: $ResolvedWatch"
             }
         }
-        else {
-            Write-Warning "Custom watch directories were not modified. Grant LocalService SID S-1-5-19 read access before service startup."
-        }
+        Assert-SafeWatchAclTarget -WatchRoot $ResolvedWatch `
+            -ApplicationRoot $InstallRoot -InstancesRoot $StateRoot
+        $ResolvedWatchDirectories += $ResolvedWatch
     }
 }
-else {
-    Write-Warning "ACL hardening was skipped. Do not use this instance in production."
-}
 
-Write-Host "Enterprise Agent instance created: $InstanceName"
-Write-Host "Config: $ConfigPath"
-Write-Host "Database: $DatabasePath"
-Write-Host "Port: $Port"
-Write-Host "Edit the ACL-protected config, then run Start-EnterpriseAgent.ps1."
+$StageRoot = Join-Path $StateRoot (".instance-staging-" + [Guid]::NewGuid().ToString("N"))
+$Published = $false
+$ExternalAclBackups = @{}
+try {
+    New-Item -ItemType Directory -Path $StageRoot -ErrorAction Stop | Out-Null
+    $StageConfigDirectory = Join-Path $StageRoot "config"
+    $StageDataDirectory = Join-Path $StageRoot "data"
+    $StageLogDirectory = Join-Path $StageRoot "logs"
+    $StageBackupDirectory = Join-Path $StageRoot "backups"
+    $StageInboxDirectory = Join-Path $StageRoot "inbox"
+    $StageServiceDirectory = Join-Path $StageRoot "service"
+    foreach ($Directory in @(
+        $StageConfigDirectory, $StageDataDirectory, $StageLogDirectory,
+        $StageBackupDirectory, $StageInboxDirectory, $StageServiceDirectory
+    )) {
+        New-Item -ItemType Directory -Path $Directory | Out-Null
+    }
+
+    $FinalConfigPath = Join-Path $InstanceRoot "config\agent.env"
+    $FinalDatabasePath = Join-Path $InstanceRoot "data\enterprise-agent.db"
+    if ($UsingDefaultInbox) {
+        $ResolvedWatchDirectories = @(Join-Path $InstanceRoot "inbox")
+    }
+    $Content = [IO.File]::ReadAllText($Template)
+    $Replacements = @{
+        "__DATABASE_PATH__" = $FinalDatabasePath
+        "__PORT__" = $Port.ToString()
+        "__MINE_ID__" = $MineId
+        "__MINE_NAME__" = $MineName
+        "__OPERATOR_ID__" = $OperatorId
+        "__OPERATOR_NAME__" = $OperatorName
+        "__SYSTEM_ID__" = $SystemId
+        "__WATCH_DIRECTORIES__" = ($ResolvedWatchDirectories -join ";")
+    }
+    foreach ($Entry in $Replacements.GetEnumerator()) {
+        $Content = $Content.Replace([string]$Entry.Key, [string]$Entry.Value)
+    }
+    if ($Content -match '__[A-Z0-9_]+__') {
+        throw "Instance template contains an unresolved placeholder."
+    }
+    $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $StageConfigPath = Join-Path $StageConfigDirectory "agent.env"
+    [IO.File]::WriteAllText($StageConfigPath, $Content, $Utf8NoBom)
+    [void](Read-EAEnvironmentFile -Path $StageConfigPath)
+
+    $ServiceId = "MineGuardEnterpriseAgent-$InstanceName"
+    $Metadata = [ordered]@{
+        format = "mineguard-enterprise-agent-windows-instance-v1"
+        instance_name = $InstanceName
+        service_id = $ServiceId
+        port = $Port
+        mine_id = $MineId
+        system_id = $SystemId
+        config_path = $FinalConfigPath
+        database_path = $FinalDatabasePath
+        acl_hardened = (-not $SkipAcl.IsPresent)
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path $StageRoot "instance.json"),
+        (($Metadata | ConvertTo-Json -Depth 4) + [Environment]::NewLine),
+        $Utf8NoBom
+    )
+
+    if (-not $SkipAcl) {
+        Invoke-EAIcaclsChecked -ArgumentList @($StageRoot, "/inheritance:r")
+        Invoke-EAIcaclsChecked -ArgumentList @(
+            $StageRoot, "/grant:r", "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-19:(OI)(CI)RX", "/T", "/C"
+        )
+        foreach ($Writable in @($StageDataDirectory, $StageLogDirectory)) {
+            Invoke-EAIcaclsChecked -ArgumentList @(
+                $Writable, "/grant:r", "*S-1-5-19:(OI)(CI)M", "/T", "/C"
+            )
+        }
+        Invoke-EAIcaclsChecked -ArgumentList @($StageBackupDirectory, "/inheritance:r")
+        Invoke-EAIcaclsChecked -ArgumentList @(
+            $StageBackupDirectory, "/grant:r", "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F", "/T", "/C"
+        )
+        if (-not $UsingDefaultInbox -and $GrantWatchReadAcl) {
+            foreach ($WatchDirectory in $ResolvedWatchDirectories) {
+                $ExternalAclBackups[$WatchDirectory] = Get-Acl -LiteralPath $WatchDirectory
+                # Set one inheritable read ACE on the dedicated root. Do not recursively
+                # rewrite vendor files or protected child ACLs.
+                Invoke-EAIcaclsChecked -ArgumentList @(
+                    $WatchDirectory, "/grant", "*S-1-5-19:(OI)(CI)RX"
+                )
+            }
+        }
+        elseif (-not $UsingDefaultInbox) {
+            Write-Warning "Custom watch directories were not modified. Grant LocalService read access through the directory owner."
+        }
+    }
+    else {
+        Write-Warning "ACL hardening was skipped. Do not use this instance in production."
+    }
+
+    Assert-EAOrdinaryTree -Root $StageRoot -Name "Staged instance"
+    Move-Item -LiteralPath $StageRoot -Destination $InstanceRoot
+    $CreatedContext = Get-EAInstanceContext -InstanceName $InstanceName `
+        -InstallRoot $InstallRoot -StateRoot $StateRoot
+    $Published = $true
+    Write-Host "Enterprise Agent instance created: $InstanceName"
+    Write-Host "Config: $($CreatedContext.ConfigPath)"
+    Write-Host "Database: $($CreatedContext.DatabasePath)"
+    Write-Host "Port: $Port"
+    Write-Host "Edit the ACL-protected config, then run Start-EnterpriseAgent.ps1."
+}
+catch {
+    $OriginalError = $_
+    if (-not $Published) {
+        if ((Test-Path -LiteralPath $InstanceRoot -PathType Container) -and
+            -not (Test-Path -LiteralPath $StageRoot)) {
+            try { Move-Item -LiteralPath $InstanceRoot -Destination $StageRoot }
+            catch { Write-Warning "Could not retract the unpublished instance: $($_.Exception.Message)" }
+        }
+        foreach ($WatchDirectory in $ExternalAclBackups.Keys) {
+            try { Set-Acl -LiteralPath $WatchDirectory -AclObject $ExternalAclBackups[$WatchDirectory] }
+            catch { Write-Warning "Could not restore watch ACL on $WatchDirectory: $($_.Exception.Message)" }
+        }
+        if (Test-Path -LiteralPath $StageRoot) {
+            try {
+                Remove-EAOwnedTemporaryTree -Path $StageRoot `
+                    -ExpectedParent $StateRoot -RequiredPrefix ".instance-staging-"
+            }
+            catch { Write-Warning "Could not remove failed staging directory: $($_.Exception.Message)" }
+        }
+    }
+    throw $OriginalError
+}

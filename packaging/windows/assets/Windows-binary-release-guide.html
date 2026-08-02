@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MineGuard Windows 安装后指南</title>
+  <style>
+    :root { color-scheme: dark; --bg:#071725; --card:#10283d; --line:#28506c;
+      --cyan:#56d5ff; --text:#eef7ff; --muted:#a9bfd0; --warn:#ffc65a; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:linear-gradient(135deg,#06121f,#0b2538);
+      color:var(--text); font:16px/1.65 "Segoe UI","Microsoft YaHei",sans-serif; }
+    main { max-width:1050px; margin:0 auto; padding:44px 24px 72px; }
+    h1 { margin:0; font-size:34px; } h2 { color:var(--cyan); margin-top:34px; }
+    .tag { color:var(--cyan); letter-spacing:.16em; text-transform:uppercase; }
+    .card { background:rgba(16,40,61,.9); border:1px solid var(--line);
+      border-radius:14px; padding:20px 24px; margin:18px 0; }
+    .warn { border-left:4px solid var(--warn); }
+    code,pre { font-family:Consolas,monospace; }
+    pre { white-space:pre-wrap; background:#06131f; border-radius:9px; padding:15px;
+      overflow:auto; color:#d8efff; }
+    li { margin:.4em 0; } .muted { color:var(--muted); }
+  </style>
+</head>
+<body><main>
+  <div class="tag">MineGuard · 矿安智察</div>
+  <h1>Windows 二进制安装后指南</h1>
+  <p class="muted">政府监管平台和企业侧智能体是两个独立软件。请只按本机安装的产品执行对应步骤。</p>
+
+  <section class="card warn">
+    <h2>先确认交付可信度</h2>
+    <p>文件名含 <strong>UNSIGNED-TEST-ONLY</strong> 的安装包仅供隔离验收，不得作为正式可信发布。正式候选包必须同时核验单位批准的 Authenticode 签名、时间戳以及随交付清单提供的 SHA-256。</p>
+  </section>
+
+  <section class="card">
+    <h2>政府侧 Platform</h2>
+    <ol>
+      <li>以管理员身份打开“MineGuard Platform operations console”。</li>
+      <li>准备正式的逐矿客户端注册表，不要使用示例密钥。</li>
+      <li>通过安全交互输入首次管理员密码并完成配置：</li>
+    </ol>
+    <pre>Set-Location 'C:\ProgramData\MineGuard\Platform\service'
+&amp; '.\Set-MineGuardPlatformConfiguration.ps1' `
+  -InstallRoot 'C:\ProgramData\MineGuard\Platform' `
+  -ClientsFile 'D:\approved-media\clients.json'</pre>
+    <p>具体命令见安装目录 <code>service\README.md</code>。先运行 <code>Start-MineGuardPlatform.ps1</code> 前台验收，再用 <code>Test-MineGuardPlatform.ps1</code> 检查健康状态；正式对外访问应由批准的 HTTPS 反向代理提供。</p>
+  </section>
+
+  <section class="card">
+    <h2>企业侧 Agent（一矿一智能体）</h2>
+    <ol>
+      <li>从开始菜单打开“Create an enterprise mine instance”。</li>
+      <li>为本矿填写独立实例名、煤矿编号、企业编号、系统身份和本机端口。</li>
+      <li>在生成的 ProgramData 实例目录内配置账号摘要、政府接口、两把不同的交换密钥以及可选模型 API；不要把明文密码或密钥写入命令行。</li>
+      <li>用 <code>Start-EnterpriseAgent.ps1</code> 前台启动，用 <code>Test-EnterpriseAgentHealth.ps1</code> 验收，再按 <code>deploy\windows\README.md</code> 安装本矿服务。</li>
+    </ol>
+    <pre>Set-Location 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
+.\New-EnterpriseAgentInstance.ps1 `
+  -InstanceName qinyuan-001 -MineId MINE-QY-001 `
+  -MineName '本矿名称' -OperatorId OP-QY-001 `
+  -OperatorName '本企业名称' -SystemId agent-qy-001 -Port 8090</pre>
+  </section>
+
+  <section class="card">
+    <h2>升级、卸载与数据</h2>
+    <ul>
+      <li>升级前先停止对应服务，制作完整备份并验证恢复流程。</li>
+      <li>允许同版本修复和向更高版本升级；默认拒绝覆盖安装更低版本。旧 Python/venv Agent 必须先逐矿移除旧服务注册，安装二进制版后再逐矿注册服务，实例数据不会因此删除。</li>
+      <li>状态必须使用本机固定 NTFS 上用途单一的专用目录；不得指向程序/runtime/service/源码目录、整个安装根、整个 ProgramData、磁盘根、网络/同步目录或 junction/reparse point。</li>
+      <li>卸载前先运行产品自带的服务移除脚本。</li>
+      <li>卸载器只移除不可变运行时和部署脚本，不删除 ProgramData 中的政府业务状态或企业实例。卸载后仍须按单位数据保留制度处置这些目录。</li>
+      <li>目标机运行离线安装包不需要 Python、Node.js、编译器、GPU 或互联网；联网业务本身仍需要批准的网络、DNS、证书和准确系统时间。</li>
+    </ul>
+  </section>
+
+  <p class="muted">前端 HTML/JavaScript/CSS 与运维 PowerShell 为可见文本；后端由 Nuitka 编译，但任何 EXE 都不能视作绝对不可逆向。完整说明见交付文档《Windows二进制发行与安装》。</p>
+</main></body></html>

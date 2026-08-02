@@ -16,7 +16,8 @@ param(
     [switch] $AllowDemoDefaultPassword,
     [switch] $HttpOnlyDemo,
     [switch] $NonInteractive,
-    [switch] $ClearBootstrapPassword
+    [switch] $ClearBootstrapPassword,
+    [switch] $AuditFailAfterFirstMutation
 )
 
 Set-StrictMode -Version 2.0
@@ -54,28 +55,169 @@ function Set-StateAcl {
     if ($LASTEXITCODE -ne 0) { throw "设置状态目录 NTFS ACL 失败：$Path" }
 }
 
-function Test-ReparsePoint {
-    param([string] $Path)
-    $item = Get-Item -LiteralPath $Path -Force
-    return (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+function Test-PathEqualOrChild {
+    param([string] $Candidate, [string] $Parent)
+    $candidateFull = [System.IO.Path]::GetFullPath($Candidate).TrimEnd('\')
+    $parentFull = [System.IO.Path]::GetFullPath($Parent).TrimEnd('\')
+    return $candidateFull.Equals($parentFull, [StringComparison]::OrdinalIgnoreCase) -or
+        $candidateFull.StartsWith(
+            $parentFull + '\', [StringComparison]::OrdinalIgnoreCase
+        )
+}
+
+function Get-SafeLocalPath {
+    param(
+        [string] $Path,
+        [string] $Label,
+        [switch] $RequireFixedNtfs
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or
+        $Path -notmatch '^[A-Za-z]:\\') {
+        throw "$Label 必须是 X:\\... 形式的本机完整绝对路径。"
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($fullPath.StartsWith('\\')) {
+        throw "$Label 不能使用 UNC/SMB 网络路径。"
+    }
+    $root = [System.IO.Path]::GetPathRoot($fullPath)
+    if ($fullPath.TrimEnd('\') -eq $root.TrimEnd('\')) {
+        throw "$Label 不能是磁盘根目录。"
+    }
+    if ($RequireFixedNtfs) {
+        $drive = New-Object -TypeName System.IO.DriveInfo -ArgumentList $root
+        if ($drive.DriveType -ne [System.IO.DriveType]::Fixed) {
+            throw "$Label 必须位于本机固定磁盘，不能使用映射盘或移动盘。"
+        }
+        if (-not $drive.IsReady -or $drive.DriveFormat -ne 'NTFS') {
+            throw "$Label 必须位于已就绪的 NTFS 磁盘。"
+        }
+    }
+    $current = $fullPath
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Label 及其现有祖先目录不能包含符号链接、junction 或挂载点：$current"
+            }
+        }
+        if ($current.TrimEnd('\') -eq $root.TrimEnd('\')) { break }
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) { break }
+        $current = $parent
+    }
+    return $fullPath
+}
+
+function Assert-NoReparseTree {
+    param([string] $Path, [string] $Label)
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+    $pending = New-Object System.Collections.Queue
+    $pending.Enqueue((Get-Item -LiteralPath $Path -Force))
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Dequeue()
+        if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Label 不能包含符号链接、junction 或挂载点：$($directory.FullName)"
+        }
+        foreach ($child in Get-ChildItem -LiteralPath $directory.FullName -Force) {
+            if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Label 不能包含 reparse point：$($child.FullName)"
+            }
+            if ($child.PSIsContainer) { $pending.Enqueue($child) }
+        }
+    }
+}
+
+function Assert-StateBoundary {
+    param([string] $Candidate, [string] $Root)
+    $defaultState = Join-Path $Root 'state'
+    if (Test-PathEqualOrChild -Candidate $Candidate -Parent $Root) {
+        if (-not (Test-PathEqualOrChild -Candidate $Candidate -Parent $defaultState)) {
+            throw '状态目录位于安装目录内时，只允许使用 Platform\state 或其专用子目录。'
+        }
+    } elseif (Test-PathEqualOrChild -Candidate $Root -Parent $Candidate) {
+        throw '状态目录不能等于安装目录，也不能是安装目录的祖先。'
+    }
+}
+
+function Initialize-StateOwnership {
+    param([string] $Path, [string] $Root)
+    $markerPath = Join-Path $Path '.mineguard-platform-state.json'
+    $insideDefaultState = Test-PathEqualOrChild `
+        -Candidate $Path -Parent (Join-Path $Root 'state')
+    if (-not $insideDefaultState) {
+        $entries = @(Get-ChildItem -LiteralPath $Path -Force)
+        if ($entries.Count -gt 0 -and
+            -not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+            $allowedLegacyNames = @(
+                'mineguard.db', 'mineguard.db-wal', 'mineguard.db-shm',
+                'auth.db', 'auth.db-wal', 'auth.db-shm', 'backup.key',
+                'backups', '.mineguard-platform.instance.lock',
+                '.mineguard-v2-synthetic-owner.json'
+            )
+            $unexpected = @($entries | Where-Object {
+                    $allowedLegacyNames -notcontains $_.Name
+                })
+            if ($unexpected.Count -gt 0 -or
+                -not ((Test-Path -LiteralPath (Join-Path $Path 'mineguard.db') `
+                        -PathType Leaf) -or
+                    (Test-Path -LiteralPath (Join-Path $Path 'auth.db') `
+                        -PathType Leaf))) {
+                throw '外部状态目录必须为空、带 MineGuard 所有权标记，或是可识别的既有 MineGuard 状态根；拒绝对宽泛目录递归授权。'
+            }
+        }
+    }
+    if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+        try {
+            $marker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 |
+                ConvertFrom-Json
+        } catch {
+            throw "状态目录所有权标记无效：$($_.Exception.Message)"
+        }
+        if ([int]$marker.schemaVersion -ne 1 -or
+            [string]$marker.product -ne 'MineGuard Platform State') {
+            throw '状态目录所有权标记不属于 MineGuard Platform。'
+        }
+    } else {
+        $marker = [ordered]@{
+            schemaVersion = 1
+            product = 'MineGuard Platform State'
+            initializedFor = $Root
+        }
+        [System.IO.File]::WriteAllText(
+            $markerPath,
+            ($marker | ConvertTo-Json -Depth 3),
+            $utf8NoBom
+        )
+    }
 }
 
 Assert-Administrator
-$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
-if ($InstallRoot.StartsWith('\\')) { throw '安装目录不能使用 UNC/SMB 网络路径。' }
+if ($PSVersionTable.PSVersion.Major -lt 5 -or
+    ($PSVersionTable.PSVersion.Major -eq 5 -and
+        $PSVersionTable.PSVersion.Minor -lt 1)) {
+    throw '需要 Windows PowerShell 5.1 或更高版本。'
+}
+$InstallRoot = Get-SafeLocalPath -Path $InstallRoot -Label '安装目录' `
+    -RequireFixedNtfs
 $configDirectory = Join-Path $InstallRoot 'config'
-$python = Join-Path (Join-Path $InstallRoot 'runtime') 'Scripts\python.exe'
 $settingsPath = Join-Path $configDirectory 'settings.json'
 $bootstrapPath = Join-Path $configDirectory 'bootstrap-admin-password.txt'
 $targetClientsPath = Join-Path $configDirectory 'clients.json'
-if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
-    throw "找不到已安装运行时：$python。请先运行 Install-MineGuardPlatform.ps1。"
+$resolverPath = Join-Path $PSScriptRoot 'Resolve-MineGuardPlatformExecutable.ps1'
+if (-not (Test-Path -LiteralPath $resolverPath -PathType Leaf)) {
+    throw "找不到运行时解析器：$resolverPath。请重新安装 MineGuard Platform。"
 }
 if (-not (Test-Path -LiteralPath $configDirectory -PathType Container)) {
     throw "找不到配置目录：$configDirectory。请先运行安装脚本。"
 }
+Assert-NoReparseTree -Path $configDirectory -Label '配置目录'
+. $resolverPath
+$runtime = Resolve-MineGuardPlatformExecutable -InstallRoot $InstallRoot
 
 if ($ClearBootstrapPassword) {
+    if ($AuditFailAfterFirstMutation) {
+        throw '-AuditFailAfterFirstMutation 不能用于 ClearBootstrapPassword。'
+    }
     if ($null -ne $AdminPassword) {
         throw '-ClearBootstrapPassword 不能与 -AdminPassword 同时使用。'
     }
@@ -84,19 +226,25 @@ if ($ClearBootstrapPassword) {
     }
     $currentSettings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 |
         ConvertFrom-Json
-    $authDatabase = Join-Path ([string]$currentSettings.stateDirectory) 'auth.db'
+    $currentState = Get-SafeLocalPath -Path ([string]$currentSettings.stateDirectory) `
+        -Label 'settings.json 状态目录' -RequireFixedNtfs
+    Assert-StateBoundary -Candidate $currentState -Root $InstallRoot
+    Assert-NoReparseTree -Path $currentState -Label '状态目录'
+    $authDatabase = Join-Path $currentState 'auth.db'
     if (-not (Test-Path -LiteralPath $authDatabase -PathType Leaf)) {
         throw 'auth.db 尚不存在；拒绝删除首次管理员密码，以免服务无法完成首启。'
     }
-    $userCountCode = @'
-import sqlite3, sys
-with sqlite3.connect(sys.argv[1], timeout=5) as connection:
-    print(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
-'@
-    $userCount = & $python '-c' $userCountCode $authDatabase
-    if ($LASTEXITCODE -ne 0 -or [int]$userCount -lt 1) {
+    $checkArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
+        -Arguments @('config-check', '--auth-database', $authDatabase)
+    $checkText = & $runtime.filePath @checkArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw 'auth.db 无法只读核验；拒绝删除首次管理员密码。'
+    }
+    $check = $checkText | Out-String | ConvertFrom-Json
+    if ([int]$check.auth_user_count -lt 1) {
         throw 'auth.db 中尚无管理员账号；拒绝删除首次管理员密码。'
     }
+    Set-ConfigAcl -Path $configDirectory
     if (Test-Path -LiteralPath $bootstrapPath -PathType Leaf) {
         Remove-Item -LiteralPath $bootstrapPath -Force
         Write-Host '首次管理员明文密码文件已删除；auth.db 中仅保留密码摘要。'
@@ -106,6 +254,14 @@ with sqlite3.connect(sys.argv[1], timeout=5) as connection:
     exit 0
 }
 
+$service = Get-Service -Name 'MineGuardPlatform' -ErrorAction SilentlyContinue
+if ($null -ne $service -and $service.Status -ne 'Stopped') {
+    throw '修改 Platform 配置或状态目录前必须停止 MineGuardPlatform 服务。'
+}
+if ($AuditFailAfterFirstMutation -and
+    $env:MINEGUARD_RELEASE_AUDIT_MODE -ne 'configuration-rollback-test') {
+    throw 'AuditFailAfterFirstMutation 仅允许 Windows 发布流水线的配置回滚测试使用。'
+}
 if ($DemoWithoutClientRegistry -and -not [string]::IsNullOrWhiteSpace($ClientsFile)) {
     throw '-DemoWithoutClientRegistry 不能与 -ClientsFile 同时使用。'
 }
@@ -119,20 +275,19 @@ if ([string]::IsNullOrWhiteSpace($AdminUsername) -or $AdminUsername.Length -gt 1
     throw '管理员用户名必须包含 1-128 个字符。'
 }
 
-$installedClientsPath = ''
+$sourceClientsPath = $null
+$validatedCount = 0
 if (-not $DemoWithoutClientRegistry) {
-    $sourceClientsPath = [System.IO.Path]::GetFullPath($ClientsFile)
-    if ($sourceClientsPath.StartsWith('\\')) {
-        throw '客户端注册表不能从 UNC/SMB 网络路径读取。'
-    }
+    $sourceClientsPath = Get-SafeLocalPath -Path $ClientsFile `
+        -Label '客户端注册表'
     if (-not (Test-Path -LiteralPath $sourceClientsPath -PathType Leaf)) {
         throw "客户端注册表不存在：$sourceClientsPath"
     }
-    if (Test-ReparsePoint -Path $sourceClientsPath) {
+    $sourceItem = Get-Item -LiteralPath $sourceClientsPath -Force
+    if (($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw '客户端注册表不能是符号链接、junction 或其他 reparse point。'
     }
-    $length = (Get-Item -LiteralPath $sourceClientsPath).Length
-    if ($length -gt (4 * 1024 * 1024)) {
+    if ($sourceItem.Length -gt (4 * 1024 * 1024)) {
         throw '客户端注册表超过 4 MiB 安全上限。'
     }
     $sourceText = Get-Content -LiteralPath $sourceClientsPath -Raw -Encoding UTF8
@@ -140,118 +295,82 @@ if (-not $DemoWithoutClientRegistry) {
         throw '客户端注册表仍含示例/占位秘密；请生成独立随机密钥后再配置。'
     }
     $sourceText = $null
-
-    $validateCode = @'
-import sys
-from mineguard.exchange_v2 import load_exchange_clients
-clients = load_exchange_clients(None, sys.argv[1])
-if not clients:
-    raise SystemExit("客户端注册表至少需要一座煤矿")
-print(len(clients))
-'@
-    $temporaryClients = Join-Path $configDirectory (
-        '.clients.{0}.tmp' -f [Guid]::NewGuid().ToString('N')
-    )
-    try {
-        [System.IO.File]::WriteAllBytes(
-            $temporaryClients,
-            [System.IO.File]::ReadAllBytes($sourceClientsPath)
-        )
-        $validatedCount = & $python '-c' $validateCode $temporaryClients
-        if ($LASTEXITCODE -ne 0) {
-            throw '复制后的客户端注册表未通过 MineGuard 完整校验。'
-        }
-        if (Test-Path -LiteralPath $targetClientsPath -PathType Leaf) {
-            [System.IO.File]::Replace($temporaryClients, $targetClientsPath, $null)
-        } else {
-            Move-Item -LiteralPath $temporaryClients -Destination $targetClientsPath
-        }
-    } finally {
-        if (Test-Path -LiteralPath $temporaryClients) {
-            Remove-Item -LiteralPath $temporaryClients -Force
-        }
-    }
-    $installedClientsPath = $targetClientsPath
-    Write-Host "客户端注册表已校验：$validatedCount 座煤矿。"
-} elseif (Test-Path -LiteralPath $targetClientsPath -PathType Leaf) {
-    Remove-Item -LiteralPath $targetClientsPath -Force
+    $checkArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
+        -Arguments @('config-check', '--clients-file', $sourceClientsPath)
+    $checkText = & $runtime.filePath @checkArguments
+    if ($LASTEXITCODE -ne 0) { throw '客户端注册表未通过 MineGuard 完整校验。' }
+    $validated = $checkText | Out-String | ConvertFrom-Json
+    $validatedCount = [int]$validated.client_count
 }
 
+$defaultStateDirectory = Join-Path $InstallRoot 'state'
 if ([string]::IsNullOrWhiteSpace($StateDirectory)) {
-    $stateDirectory = Join-Path $InstallRoot 'state'
+    $stateDirectory = $defaultStateDirectory
 } else {
-    $stateDirectory = [System.IO.Path]::GetFullPath($StateDirectory)
-    if ($stateDirectory.StartsWith('\\')) {
-        throw '状态目录不能使用 UNC/SMB 网络路径。'
-    }
-    $stateRoot = [System.IO.Path]::GetPathRoot($stateDirectory)
-    if ($stateDirectory.TrimEnd('\') -eq $stateRoot.TrimEnd('\')) {
-        throw '状态目录不能是磁盘根目录。'
-    }
-    $stateDrive = New-Object -TypeName System.IO.DriveInfo -ArgumentList $stateRoot
-    if ($stateDrive.DriveType -eq [System.IO.DriveType]::Network) {
-        throw '状态目录不能位于映射网络盘。'
-    }
-    if (-not (Test-Path -LiteralPath $stateDirectory -PathType Container)) {
-        New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
-    }
+    $stateDirectory = $StateDirectory
 }
+$stateDirectory = Get-SafeLocalPath -Path $stateDirectory -Label '状态目录' `
+    -RequireFixedNtfs
+Assert-StateBoundary -Candidate $stateDirectory -Root $InstallRoot
+Assert-NoReparseTree -Path $stateDirectory -Label '状态目录'
+
 $authDatabase = Join-Path $stateDirectory 'auth.db'
 $hasAuthUser = $false
 if (Test-Path -LiteralPath $authDatabase -PathType Leaf) {
-    $authUserCountCode = @'
-import sqlite3, sys
-with sqlite3.connect(sys.argv[1], timeout=5) as connection:
-    print(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
-'@
-    $authUserCount = & $python '-c' $authUserCountCode $authDatabase
+    $checkArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
+        -Arguments @('config-check', '--auth-database', $authDatabase)
+    $checkText = & $runtime.filePath @checkArguments
     if ($LASTEXITCODE -ne 0) {
         throw 'auth.db 无法只读核验；拒绝覆盖管理员首启配置。'
     }
-    $hasAuthUser = ([int]$authUserCount -ge 1)
+    $check = $checkText | Out-String | ConvertFrom-Json
+    $hasAuthUser = ([int]$check.auth_user_count -ge 1)
 }
-if ($null -eq $AdminPassword -and
-    -not $hasAuthUser -and
+if ($null -eq $AdminPassword -and -not $hasAuthUser -and
     -not $AllowDemoDefaultPassword) {
     if ($NonInteractive) {
         throw '全新状态库需要 -AdminPassword；非交互模式不会回退到演示默认密码。'
     }
-    $AdminPassword = Read-Host '请输入首次管理员密码（至少 8 个字符）' -AsSecureString
+    $AdminPassword = Read-Host '请输入首次管理员密码（至少 8 个字符）' `
+        -AsSecureString
 }
+
+$plainPassword = $null
 if ($null -ne $AdminPassword) {
-    $temporaryPassword = $null
-    $plainPassword = $null
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($AdminPassword)
     try {
         $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-        if ($plainPassword.Length -lt 8 -or
-            $plainPassword.IndexOfAny([char[]]"`r`n`0") -ge 0) {
-            throw '首次管理员密码至少 8 个字符，且不得包含换行或 NUL。'
-        }
-        if ($plainPassword -match '(?i)REPLACE(?:[_-]|\b)|CHANGE[_-]?ME|DEMO[_-]?ONLY|NOT[_-]?FOR[_-]?PRODUCTION') {
-            throw '首次管理员密码不能使用示例或占位文本。'
-        }
-        $temporaryPassword = Join-Path $configDirectory (
-            '.bootstrap-password.{0}.tmp' -f [Guid]::NewGuid().ToString('N')
-        )
-        [System.IO.File]::WriteAllText($temporaryPassword, $plainPassword, $utf8NoBom)
-        if (Test-Path -LiteralPath $bootstrapPath -PathType Leaf) {
-            [System.IO.File]::Replace($temporaryPassword, $bootstrapPath, $null)
-        } else {
-            Move-Item -LiteralPath $temporaryPassword -Destination $bootstrapPath
-        }
     } finally {
         if ($null -ne $bstr) {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         }
+    }
+    if ($plainPassword.Length -lt 8 -or
+        $plainPassword.IndexOfAny([char[]]"`r`n`0") -ge 0) {
         $plainPassword = $null
-        if ($null -ne $temporaryPassword -and
-            (Test-Path -LiteralPath $temporaryPassword)) {
-            Remove-Item -LiteralPath $temporaryPassword -Force
-        }
+        throw '首次管理员密码至少 8 个字符，且不得包含换行或 NUL。'
+    }
+    if ($plainPassword -match '(?i)REPLACE(?:[_-]|\b)|CHANGE[_-]?ME|DEMO[_-]?ONLY|NOT[_-]?FOR[_-]?PRODUCTION') {
+        $plainPassword = $null
+        throw '首次管理员密码不能使用示例或占位文本。'
     }
 }
 
+if (-not (Test-Path -LiteralPath $stateDirectory -PathType Container)) {
+    New-Item -ItemType Directory -Path $stateDirectory | Out-Null
+}
+$stateDirectory = Get-SafeLocalPath -Path $stateDirectory -Label '状态目录' `
+    -RequireFixedNtfs
+Assert-NoReparseTree -Path $stateDirectory -Label '状态目录'
+Initialize-StateOwnership -Path $stateDirectory -Root $InstallRoot
+Assert-NoReparseTree -Path $stateDirectory -Label '状态目录'
+
+Set-ConfigAcl -Path $configDirectory
+Set-StateAcl -Path $stateDirectory
+
+$installedClientsPath = if ($DemoWithoutClientRegistry) { '' } else {
+    $targetClientsPath
+}
 $settings = [ordered]@{
     schemaVersion = 1
     host = '127.0.0.1'
@@ -265,29 +384,128 @@ $settings = [ordered]@{
     platformPartyId = $PlatformPartyId
     platformKeyId = $PlatformKeyId
 }
-$temporarySettings = Join-Path $configDirectory (
-    '.settings.{0}.tmp' -f [Guid]::NewGuid().ToString('N')
+
+$transactionRoot = Join-Path $configDirectory (
+    '.configuration-transaction.{0}' -f [Guid]::NewGuid().ToString('N')
 )
+$stagedRoot = Join-Path $transactionRoot 'staged'
+$rollbackRoot = Join-Path $transactionRoot 'rollback'
+$operations = @()
+$transactionComplete = $false
+$rollbackComplete = $false
+$mutationCount = 0
 try {
+    New-Item -ItemType Directory -Path $stagedRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $rollbackRoot -Force | Out-Null
+
+    if ($DemoWithoutClientRegistry) {
+        $operations += [pscustomobject]@{
+            Name = 'clients'; Target = $targetClientsPath; Stage = ''
+            Backup = (Join-Path $rollbackRoot 'clients.json')
+            Action = 'remove'; Started = $false; HadOriginal = $false
+        }
+    } else {
+        $stagedClients = Join-Path $stagedRoot 'clients.json'
+        [System.IO.File]::WriteAllBytes(
+            $stagedClients,
+            [System.IO.File]::ReadAllBytes($sourceClientsPath)
+        )
+        $checkArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
+            -Arguments @('config-check', '--clients-file', $stagedClients)
+        & $runtime.filePath @checkArguments | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw '事务暂存的客户端注册表未通过 MineGuard 完整校验。'
+        }
+        $operations += [pscustomobject]@{
+            Name = 'clients'; Target = $targetClientsPath; Stage = $stagedClients
+            Backup = (Join-Path $rollbackRoot 'clients.json')
+            Action = 'write'; Started = $false; HadOriginal = $false
+        }
+    }
+
+    if ($null -ne $plainPassword) {
+        $stagedPassword = Join-Path $stagedRoot 'bootstrap-admin-password.txt'
+        [System.IO.File]::WriteAllText($stagedPassword, $plainPassword, $utf8NoBom)
+        $plainPassword = $null
+        $operations += [pscustomobject]@{
+            Name = 'bootstrap-password'; Target = $bootstrapPath
+            Stage = $stagedPassword
+            Backup = (Join-Path $rollbackRoot 'bootstrap-admin-password.txt')
+            Action = 'write'; Started = $false; HadOriginal = $false
+        }
+    }
+
+    $stagedSettings = Join-Path $stagedRoot 'settings.json'
     [System.IO.File]::WriteAllText(
-        $temporarySettings,
+        $stagedSettings,
         ($settings | ConvertTo-Json -Depth 5),
         $utf8NoBom
     )
-    if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
-        [System.IO.File]::Replace($temporarySettings, $settingsPath, $null)
-    } else {
-        Move-Item -LiteralPath $temporarySettings -Destination $settingsPath
+    $operations += [pscustomobject]@{
+        Name = 'settings'; Target = $settingsPath; Stage = $stagedSettings
+        Backup = (Join-Path $rollbackRoot 'settings.json')
+        Action = 'write'; Started = $false; HadOriginal = $false
     }
+
+    foreach ($operation in $operations) {
+        $operation.Started = $true
+        if (Test-Path -LiteralPath $operation.Target -PathType Leaf) {
+            Move-Item -LiteralPath $operation.Target -Destination $operation.Backup
+            $operation.HadOriginal = $true
+        }
+        if ($operation.Action -eq 'write') {
+            Move-Item -LiteralPath $operation.Stage -Destination $operation.Target
+        }
+        $mutationCount++
+        if ($AuditFailAfterFirstMutation -and $mutationCount -eq 1) {
+            throw '发布审计故障注入：验证 clients/password/settings 配置事务回滚。'
+        }
+    }
+    Set-ConfigAcl -Path $configDirectory
+    $transactionComplete = $true
+} catch {
+    $configurationError = $_
+    $rollbackErrors = @()
+    for ($index = $operations.Count - 1; $index -ge 0; $index--) {
+        $operation = $operations[$index]
+        if (-not $operation.Started) { continue }
+        try {
+            if (Test-Path -LiteralPath $operation.Target -PathType Leaf) {
+                Remove-Item -LiteralPath $operation.Target -Force
+            }
+            if ($operation.HadOriginal -and
+                (Test-Path -LiteralPath $operation.Backup -PathType Leaf)) {
+                Move-Item -LiteralPath $operation.Backup -Destination $operation.Target
+            }
+        } catch {
+            $rollbackErrors += ('{0}: {1}' -f `
+                $operation.Name, $_.Exception.Message)
+        }
+    }
+    if ($rollbackErrors.Count -gt 0) {
+        throw ((
+            'Platform 配置失败且自动回滚不完整；为避免丢失旧配置，已保留事务目录 {0}。' +
+            '请停止操作并由管理员恢复 rollback 子目录。原始错误：{1}；回滚错误：{2}'
+        ) -f `
+                $transactionRoot, $configurationError.Exception.Message,
+                ($rollbackErrors -join ' | ')
+        )
+    }
+    $rollbackComplete = $true
+    throw $configurationError
 } finally {
-    if (Test-Path -LiteralPath $temporarySettings) {
-        Remove-Item -LiteralPath $temporarySettings -Force
+    $plainPassword = $null
+    if (($transactionComplete -or $rollbackComplete) -and
+        (Test-Path -LiteralPath $transactionRoot)) {
+        Remove-Item -LiteralPath $transactionRoot -Recurse -Force
     }
 }
-Set-ConfigAcl -Path $configDirectory
-Set-StateAcl -Path $stateDirectory
+if (-not $transactionComplete) { throw 'Platform 配置事务未完成。' }
 
-Write-Host 'MineGuard Platform 配置已保存；秘密未写入 WinSW XML 或命令行。'
+if (-not $DemoWithoutClientRegistry) {
+    Write-Host "客户端注册表已校验：$validatedCount 座煤矿。"
+}
+Write-Host 'MineGuard Platform 配置已原子保存；秘密未写入 WinSW XML 或命令行。'
 if (-not $HttpOnlyDemo) {
     Write-Host '会话 Cookie 已启用 Secure；必须通过 HTTPS 反向代理访问。'
 } else {

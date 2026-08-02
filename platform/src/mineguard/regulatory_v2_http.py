@@ -67,6 +67,7 @@ from .regulatory_v2_store import (
     RegulatoryV2Store,
     ResponseBatchReceipt,
 )
+from .resources import read_package_resource
 
 
 _SESSION_COOKIE = "mineguard_session"
@@ -2678,10 +2679,9 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             "/assets/app.js": "app.js",
             "/assets/styles.css": "styles.css",
         }[path]
-        resource = Path(__file__).with_name("regulatory_web") / name
         try:
-            body = resource.read_bytes()
-        except FileNotFoundError as error:
+            body = read_package_resource("regulatory_web", name)
+        except (FileNotFoundError, ModuleNotFoundError) as error:
             raise RegulatoryV2NotFoundError("frontend asset not found") from error
         content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
         self._send_bytes(

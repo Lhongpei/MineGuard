@@ -1,0 +1,7 @@
+# Build-time tools only.  These packages are not copied as Python source into
+# the MineGuard Enterprise Agent runtime directory.
+Nuitka==4.1.3
+ordered-set==4.1.0
+zstandard==0.23.0
+setuptools==80.9.0
+wheel==0.45.1

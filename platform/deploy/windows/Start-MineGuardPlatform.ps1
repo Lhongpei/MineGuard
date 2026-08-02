@@ -22,36 +22,119 @@ function Get-RequiredProperty {
     return $property.Value
 }
 
-function Get-LocalAbsolutePath {
+function Get-SafeFixedNtfsPath {
     param(
         [Parameter(Mandatory = $true)] [string] $Value,
         [Parameter(Mandatory = $true)] [string] $Label
     )
     if ([string]::IsNullOrWhiteSpace($Value) -or
-        -not [System.IO.Path]::IsPathRooted($Value)) {
-        throw "$Label 必须是本机绝对路径。"
+        $Value -notmatch '^[A-Za-z]:\\') {
+        throw "$Label 必须是 X:\\... 形式的本机完整绝对路径。"
     }
     $fullPath = [System.IO.Path]::GetFullPath($Value)
-    if ($fullPath.StartsWith('\\')) {
-        throw "$Label 不能使用 UNC/SMB 网络路径。"
-    }
     $root = [System.IO.Path]::GetPathRoot($fullPath)
     if ($fullPath.TrimEnd('\') -eq $root.TrimEnd('\')) {
         throw "$Label 不能是磁盘根目录。"
     }
     try {
         $drive = New-Object -TypeName System.IO.DriveInfo -ArgumentList $root
-        if ($drive.DriveType -eq [System.IO.DriveType]::Network) {
-            throw "$Label 不能位于映射网络盘。"
+        if ($drive.DriveType -ne [System.IO.DriveType]::Fixed -or
+            -not $drive.IsReady -or $drive.DriveFormat -ne 'NTFS') {
+            throw "$Label 必须位于已就绪的本机固定 NTFS 磁盘。"
         }
     } catch [System.ArgumentException] {
         throw "$Label 所在磁盘无法识别。"
     }
+    $current = $fullPath
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Label 及其现有祖先目录不能包含符号链接、junction 或挂载点：$current"
+            }
+        }
+        if ($current.TrimEnd('\') -eq $root.TrimEnd('\')) { break }
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) { break }
+        $current = $parent
+    }
     return $fullPath
 }
 
-$InstallRoot = Get-LocalAbsolutePath -Value $InstallRoot -Label '安装目录'
-$settingsPath = Join-Path (Join-Path $InstallRoot 'config') 'settings.json'
+function Test-PathEqualOrChild {
+    param([string] $Candidate, [string] $Parent)
+    $candidateFull = [System.IO.Path]::GetFullPath($Candidate).TrimEnd('\')
+    $parentFull = [System.IO.Path]::GetFullPath($Parent).TrimEnd('\')
+    return $candidateFull.Equals($parentFull, [StringComparison]::OrdinalIgnoreCase) -or
+        $candidateFull.StartsWith(
+            $parentFull + '\', [StringComparison]::OrdinalIgnoreCase
+        )
+}
+
+function Assert-NoReparseTree {
+    param([string] $Path, [string] $Label)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $rootItem = Get-Item -LiteralPath $Path -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Label 不能是符号链接、junction 或挂载点：$Path"
+    }
+    if (-not $rootItem.PSIsContainer) { return }
+    $pending = New-Object System.Collections.Queue
+    $pending.Enqueue($rootItem)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Dequeue()
+        foreach ($child in Get-ChildItem -LiteralPath $directory.FullName -Force) {
+            if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Label 不能包含 reparse point：$($child.FullName)"
+            }
+            if ($child.PSIsContainer) { $pending.Enqueue($child) }
+        }
+    }
+}
+
+function Assert-StateBoundary {
+    param([string] $Candidate, [string] $Root)
+    $defaultState = Join-Path $Root 'state'
+    if (Test-PathEqualOrChild -Candidate $Candidate -Parent $Root) {
+        if (-not (Test-PathEqualOrChild -Candidate $Candidate -Parent $defaultState)) {
+            throw '状态目录位于安装目录内时，只允许使用 Platform\state 或其专用子目录。'
+        }
+    } elseif (Test-PathEqualOrChild -Candidate $Root -Parent $Candidate) {
+        throw '状态目录不能等于安装目录，也不能是安装目录的祖先。'
+    }
+}
+
+function Assert-StateOwnership {
+    param([string] $Path)
+    $markerPath = Get-SafeFixedNtfsPath `
+        -Value (Join-Path $Path '.mineguard-platform-state.json') `
+        -Label '状态目录所有权标记'
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+        throw '状态目录缺少 MineGuard 所有权标记；请先运行 Set-MineGuardPlatformConfiguration.ps1。'
+    }
+    try {
+        $marker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+    } catch {
+        throw "状态目录所有权标记无效：$($_.Exception.Message)"
+    }
+    if ([int]$marker.schemaVersion -ne 1 -or
+        [string]$marker.product -ne 'MineGuard Platform State') {
+        throw '状态目录所有权标记不属于 MineGuard Platform。'
+    }
+}
+
+if ($PSVersionTable.PSVersion.Major -lt 5 -or
+    ($PSVersionTable.PSVersion.Major -eq 5 -and
+        $PSVersionTable.PSVersion.Minor -lt 1)) {
+    throw '需要 Windows PowerShell 5.1 或更高版本。'
+}
+$InstallRoot = Get-SafeFixedNtfsPath -Value $InstallRoot -Label '安装目录'
+$configDirectory = Get-SafeFixedNtfsPath `
+    -Value (Join-Path $InstallRoot 'config') -Label '配置目录'
+Assert-NoReparseTree -Path $configDirectory -Label '配置目录'
+$settingsPath = Get-SafeFixedNtfsPath `
+    -Value (Join-Path $configDirectory 'settings.json') -Label 'settings.json'
 if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
     throw "找不到配置文件：$settingsPath。请先运行 Set-MineGuardPlatformConfiguration.ps1。"
 }
@@ -74,9 +157,10 @@ $port = [int](Get-RequiredProperty -Object $settings -Name 'port')
 if ($port -lt 1 -or $port -gt 65535) {
     throw '监听端口必须在 1-65535 之间。'
 }
-$stateDirectory = Get-LocalAbsolutePath `
+$stateDirectory = Get-SafeFixedNtfsPath `
     -Value ([string](Get-RequiredProperty -Object $settings -Name 'stateDirectory')) `
     -Label '状态目录'
+Assert-StateBoundary -Candidate $stateDirectory -Root $InstallRoot
 $clientsFile = [string](Get-RequiredProperty -Object $settings -Name 'clientsFile')
 $adminUsername = [string](Get-RequiredProperty -Object $settings -Name 'adminUsername')
 if ([string]::IsNullOrWhiteSpace($adminUsername)) {
@@ -87,13 +171,21 @@ if ($secureCookieValue -isnot [bool]) {
     throw 'settings.json 的 secureCookie 必须是 JSON 布尔值。'
 }
 
-$python = Join-Path (Join-Path $InstallRoot 'runtime') 'Scripts\python.exe'
-if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
-    throw "找不到隔离运行时：$python。请重新运行安装脚本。"
+$resolverPath = Get-SafeFixedNtfsPath `
+    -Value (Join-Path $PSScriptRoot 'Resolve-MineGuardPlatformExecutable.ps1') `
+    -Label '运行时解析器'
+if (-not (Test-Path -LiteralPath $resolverPath -PathType Leaf)) {
+    throw "找不到运行时解析器：$resolverPath。请重新安装 MineGuard Platform。"
 }
+. $resolverPath
+$runtime = Resolve-MineGuardPlatformExecutable -InstallRoot $InstallRoot
+$runtime.filePath = Get-SafeFixedNtfsPath `
+    -Value ([string]$runtime.filePath) -Label 'MineGuard Platform 运行时'
 if (-not (Test-Path -LiteralPath $stateDirectory -PathType Container)) {
-    New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
+    throw '状态目录不存在；请先运行 Set-MineGuardPlatformConfiguration.ps1。'
 }
+Assert-NoReparseTree -Path $stateDirectory -Label '状态目录'
+Assert-StateOwnership -Path $stateDirectory
 
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
@@ -102,7 +194,7 @@ Remove-Item Env:MINEGUARD_V2_CLIENTS_FILE -ErrorAction SilentlyContinue
 Remove-Item Env:MINEGUARD_ADMIN_PASSWORD -ErrorAction SilentlyContinue
 
 if (-not [string]::IsNullOrWhiteSpace($clientsFile)) {
-    $clientsFile = Get-LocalAbsolutePath -Value $clientsFile -Label '煤矿客户端注册表'
+    $clientsFile = Get-SafeFixedNtfsPath -Value $clientsFile -Label '煤矿客户端注册表'
     if (-not (Test-Path -LiteralPath $clientsFile -PathType Leaf)) {
         throw "煤矿客户端注册表不存在：$clientsFile"
     }
@@ -134,16 +226,14 @@ if ($null -eq $demoProperty -or $demoProperty.Value -isnot [bool]) {
 $allowDemoDefault = [bool]$demoProperty.Value
 $hasAuthUser = $false
 if (Test-Path -LiteralPath $authDatabase -PathType Leaf) {
-    $authUserCountCode = @'
-import sqlite3, sys
-with sqlite3.connect(sys.argv[1], timeout=5) as connection:
-    print(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
-'@
-    $authUserCount = & $python '-c' $authUserCountCode $authDatabase
+    $checkArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
+        -Arguments @('config-check', '--auth-database', $authDatabase)
+    $checkText = & $runtime.filePath @checkArguments
     if ($LASTEXITCODE -ne 0) {
         throw 'auth.db 无法只读核验；拒绝在不确定管理员状态时启动。'
     }
-    $hasAuthUser = ([int]$authUserCount -ge 1)
+    $check = $checkText | Out-String | ConvertFrom-Json
+    $hasAuthUser = ([int]$check.auth_user_count -ge 1)
 }
 if (-not $hasAuthUser) {
     if (Test-Path -LiteralPath $bootstrapSecret -PathType Leaf) {
@@ -165,8 +255,8 @@ if (-not $hasAuthUser) {
     }
 }
 
-$arguments = @(
-    '-m', 'mineguard', 'serve',
+$arguments = Join-MineGuardPlatformArguments -Runtime $runtime -Arguments @(
+    'serve',
     '--host', $hostAddress,
     '--port', [string]$port,
     '--state-directory', $stateDirectory,
@@ -179,7 +269,7 @@ if ([bool]$secureCookieValue) {
 $exitCode = 1
 Push-Location $InstallRoot
 try {
-    & $python @arguments
+    & $runtime.filePath @arguments
     $exitCode = $LASTEXITCODE
 } finally {
     Pop-Location

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from datetime import date
 import getpass
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ import shutil
 import sqlite3
 import sys
 from typing import Sequence
+from zoneinfo import ZoneInfo
 
 from . import __version__
 from .auth import AuthError, LocalAuthStore, Role
@@ -30,6 +32,8 @@ from .regulatory_v2_demo import (
     seed_v2_demo_state,
 )
 from .regulatory_v2_http import serve
+from .resources import read_package_resource
+from .runtime_manifest import build_runtime_manifest
 
 
 class ProductConfigurationError(ValueError):
@@ -123,6 +127,18 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("--backup-directory", required=True)
     restore.add_argument("--key-file", required=True)
     restore.add_argument("--key-id", default="mineguard-v2-backup-key")
+
+    config_check = commands.add_parser(
+        "config-check",
+        help="只读校验客户端注册表或管理员账号库，供冻结运行时运维脚本使用",
+    )
+    config_check.add_argument("--clients-file")
+    config_check.add_argument("--auth-database")
+
+    commands.add_parser(
+        "self-check",
+        help="验证前端资源、时区、数值求解器和版本元数据是否完整",
+    )
 
     users = commands.add_parser(
         "user",
@@ -616,6 +632,92 @@ def _restore(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _config_check(args: argparse.Namespace) -> dict[str, object]:
+    if not args.clients_file and not args.auth_database:
+        raise ProductConfigurationError(
+            "config-check 至少需要 --clients-file 或 --auth-database"
+        )
+    result: dict[str, object] = {"status": "ok"}
+    if args.clients_file:
+        from .exchange_v2 import load_exchange_clients
+
+        clients = load_exchange_clients(None, args.clients_file)
+        if not clients:
+            raise ProductConfigurationError("客户端注册表至少需要一座煤矿")
+        result["client_count"] = len(clients)
+    if args.auth_database:
+        database = Path(args.auth_database).expanduser().resolve()
+        if not database.is_file():
+            raise ProductConfigurationError(f"管理员账号库不存在：{database}")
+        try:
+            with sqlite3.connect(
+                f"{database.as_uri()}?mode=ro", uri=True, timeout=5
+            ) as connection:
+                row = connection.execute("SELECT COUNT(*) FROM users").fetchone()
+        except sqlite3.Error as error:
+            raise ProductConfigurationError(
+                "管理员账号库无法只读核验或缺少 users 表"
+            ) from error
+        result["auth_user_count"] = int(row[0]) if row is not None else 0
+    return result
+
+
+def _self_check() -> dict[str, object]:
+    assets: dict[str, dict[str, object]] = {}
+    for directory, filename in (
+        ("regulatory_web", "index.html"),
+        ("regulatory_web", "app.js"),
+        ("regulatory_web", "styles.css"),
+        ("web", "index.html"),
+        ("web", "app.js"),
+        ("web", "styles.css"),
+    ):
+        payload = read_package_resource(directory, filename)
+        if not payload:
+            raise ProductConfigurationError(
+                f"冻结运行时前端资源为空：{directory}/{filename}"
+            )
+        assets[f"{directory}/{filename}"] = {
+            "bytes": len(payload),
+            "sha256": sha256(payload).hexdigest(),
+        }
+
+    try:
+        from scipy.optimize import linprog
+
+        solver = linprog([1.0], bounds=[(1.0, None)], method="highs")
+    except (ImportError, RuntimeError) as error:
+        raise ProductConfigurationError(
+            "SciPy/HiGHS 数值求解器无法加载"
+        ) from error
+    if not solver.success or solver.x is None or abs(float(solver.x[0]) - 1.0) > 1e-8:
+        raise ProductConfigurationError("SciPy/HiGHS 数值求解器自检失败")
+    manifest = build_runtime_manifest()
+    missing = [
+        name
+        for name, value in dict(manifest["dependencies"]).items()
+        if value == "not-installed"
+    ]
+    if missing:
+        raise ProductConfigurationError(
+            "冻结运行时缺少依赖版本元数据：" + "、".join(missing)
+        )
+    try:
+        timezone = ZoneInfo("Asia/Shanghai").key
+    except (KeyError, OSError) as error:
+        raise ProductConfigurationError(
+            "冻结运行时缺少 Asia/Shanghai 时区数据"
+        ) from error
+    return {
+        "status": "ok",
+        "timezone": timezone,
+        "solver": "scipy.optimize.linprog/highs",
+        "solver_objective": float(solver.fun),
+        "assets": assets,
+        "runtime": manifest,
+    }
+
+
 def _print(value: dict[str, object]) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
 
@@ -642,6 +744,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print(_verify(args))
         elif args.command == "restore-backup":
             _print(_restore(args))
+        elif args.command == "config-check":
+            _print(_config_check(args))
+        elif args.command == "self-check":
+            _print(_self_check())
         elif args.command == "user":
             _print(_user_operation(args))
         return 0
