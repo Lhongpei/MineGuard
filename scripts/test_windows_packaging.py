@@ -176,6 +176,10 @@ def test_child_toolchain_pins() -> None:
 def test_inno_scripts() -> None:
     platform = read("packaging/windows/inno/MineGuardPlatform.iss")
     agent = read("packaging/windows/inno/MineGuardEnterpriseAgent.iss")
+    assert '#define ApplicationId "{{8B391CBD-E234-46D7-9946-E9D37F2649C1}"' in (
+        platform
+    ), "the production Platform AppId default must remain stable"
+    assert "AppId={#ApplicationId}" in platform
     app_ids = []
     for name, script, executable in (
         ("platform", platform, "MineGuardPlatform.exe"),
@@ -474,6 +478,13 @@ def test_audit_and_lifecycle() -> None:
         "$ExitCode -ne 37",
         "$Stopwatch.ElapsedMilliseconds -lt 900",
         "completed marker.txt",
+        "MineGuardPlatform.iss",
+        '"/DApplicationId=$FixtureAppId"',
+        '"/DIR=$FixtureInstallRoot"',
+        "$FailureExitCode -ne 1001",
+        "afterinstall-root.txt",
+        "Real Platform Inno /DIR, AfterInstall, exit-code and uninstall",
+        'Get-ChildItem -LiteralPath $FixtureInstallRoot `\n        -Filter "unins*.exe"',
     ):
         assert token in wait_probe, f"fast GUI wait probe contract missing: {token}"
     final_uninstall = lifecycle.rindex(

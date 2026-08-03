@@ -16,12 +16,15 @@
 #ifndef ArtifactFileName
   #error ArtifactFileName is required.
 #endif
+#ifndef ApplicationId
+  #define ApplicationId "{{8B391CBD-E234-46D7-9946-E9D37F2649C1}"
+#endif
 
 #define ProductName "MineGuard Platform"
 #define ProductPublisher "MineGuard Delivery Team"
 
 [Setup]
-AppId={{8B391CBD-E234-46D7-9946-E9D37F2649C1}
+AppId={#ApplicationId}
 AppName={#ProductName}
 AppVersion={#AppVersion}
 AppVerName={#ProductName} {#AppVersion}

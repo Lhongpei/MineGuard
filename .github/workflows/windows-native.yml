@@ -145,7 +145,7 @@ jobs:
           }
           Write-Host ("Parsed {0} PowerShell deployment scripts." -f $files.Count)
 
-      - name: Verify GUI installer process waiting
+      - name: Verify GUI wait and real Platform Inno contract
         shell: powershell
         run: .\scripts\Test-WindowsGuiProcessWait.ps1
 
