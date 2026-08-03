@@ -106,12 +106,24 @@ jobs:
               'ADMIN_PASSWORD = "hard-coded-release-secret"',
               (New-Object Text.UTF8Encoding($false))
             )
-            $negativeOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-              -File .\scripts\Test-WindowsBinaryRelease.ps1 `
-              -SecretAuditRoots $negativeRoot 2>&1
-            $negativeExitCode = $LASTEXITCODE
+            $previousErrorActionPreference = $ErrorActionPreference
+            try {
+              $ErrorActionPreference = 'Continue'
+              $negativeOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+                -File .\scripts\Test-WindowsBinaryRelease.ps1 `
+                -SecretAuditRoots $negativeRoot 2>&1
+              $negativeExitCode = $LASTEXITCODE
+            }
+            finally {
+              $ErrorActionPreference = $previousErrorActionPreference
+            }
             if ($negativeExitCode -eq 0) {
               throw 'Release text safety scanner accepted a hard-coded password fixture.'
+            }
+            $negativeText = $negativeOutput | Out-String
+            if ($negativeText -notmatch
+                'non-placeholder value for ADMIN_PASSWORD') {
+              throw 'Release text safety scanner negative fixture failed for an unexpected reason.'
             }
             Write-Host 'Release text safety scanner rejected the negative fixture as expected.'
           }

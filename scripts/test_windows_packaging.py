@@ -597,6 +597,9 @@ def test_workflow() -> None:
         "-SecretAuditRoots $auditRoots",
         "hard-coded-release-secret",
         "accepted a hard-coded password fixture",
+        "$ErrorActionPreference = 'Continue'",
+        "non-placeholder value for ADMIN_PASSWORD",
+        "negative fixture failed for an unexpected reason",
     ):
         assert token in workflow, f"release workflow missing: {token}"
     lowered = workflow.lower()
