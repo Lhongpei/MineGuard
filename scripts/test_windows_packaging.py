@@ -350,6 +350,34 @@ def test_audit_and_lifecycle() -> None:
         "sk-",
     ):
         assert token in audit, f"release audit contract missing: {token}"
+    for token in (
+        'DefaultParameterSetName = "Release"',
+        'ParameterSetName = "SecretAudit"',
+        "$SecretAuditRoots",
+        '$SensitiveName.Equals(',
+        '"allowDemoDefaultPassword"',
+        "[StringComparison]::OrdinalIgnoreCase",
+        "'^\\[(?i:bool)\\]\\s*\\$[A-Za-z_][A-Za-z0-9_]*$'",
+        "[regex]::IsMatch(",
+        'Release contains a non-placeholder value for ${SensitiveName}',
+        "Windows release text safety preflight passed",
+    ):
+        assert token in audit, f"release secret scanner regression guard missing: {token}"
+    assert '$Value.StartsWith("[")' not in audit, (
+        "release secret scanning must not broadly allow arbitrary typed expressions"
+    )
+
+    platform_configuration = read(
+        "platform/deploy/windows/Set-MineGuardPlatformConfiguration.ps1"
+    )
+    boolean_switch = re.search(
+        r"(?m)^\s*allowDemoDefaultPassword\s*=\s*(.+?)\s*$",
+        platform_configuration,
+    )
+    assert boolean_switch and re.fullmatch(
+        r"\[(?i:bool)\]\s*\$[A-Za-z_][A-Za-z0-9_]*",
+        boolean_switch.group(1),
+    ), "the audited demo-password setting must remain a typed boolean variable"
     failure_probe = read("scripts/Test-WindowsInstallerFailurePropagation.ps1")
     assert "deliberately-tampered" in failure_probe
     assert "ProbeExitCode -eq 0" in failure_probe
@@ -565,6 +593,10 @@ def test_workflow() -> None:
         "ExpectedInnoCompilerSha256",
         "ExpectedSignToolSha256",
         "WINDOWS_RELEASE_OUTPUT",
+        "Preflight release text safety scanner",
+        "-SecretAuditRoots $auditRoots",
+        "hard-coded-release-secret",
+        "accepted a hard-coded password fixture",
     ):
         assert token in workflow, f"release workflow missing: {token}"
     lowered = workflow.lower()

@@ -1,12 +1,14 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = "Release")]
 param(
-    [Parameter(Mandatory = $true)][string]$PlatformStage,
-    [Parameter(Mandatory = $true)][string]$AgentStage,
-    [string]$ArtifactDirectory = "",
-    [switch]$RequireSigned,
-    [switch]$ExpectUnsignedTestOnly,
-    [switch]$SkipRuntimeSmoke,
-    [switch]$TestInstallerLifecycle
+    [Parameter(Mandatory = $true, ParameterSetName = "Release")][string]$PlatformStage,
+    [Parameter(Mandatory = $true, ParameterSetName = "Release")][string]$AgentStage,
+    [Parameter(ParameterSetName = "Release")][string]$ArtifactDirectory = "",
+    [Parameter(ParameterSetName = "Release")][switch]$RequireSigned,
+    [Parameter(ParameterSetName = "Release")][switch]$ExpectUnsignedTestOnly,
+    [Parameter(ParameterSetName = "Release")][switch]$SkipRuntimeSmoke,
+    [Parameter(ParameterSetName = "Release")][switch]$TestInstallerLifecycle,
+    [Parameter(Mandatory = $true, ParameterSetName = "SecretAudit")]
+    [ValidateNotNullOrEmpty()][string[]]$SecretAuditRoots
 )
 
 Set-StrictMode -Version 2.0
@@ -103,14 +105,27 @@ function Assert-NoDevelopmentOrSecretMaterial {
             }
             foreach ($Line in ($Text -split "`r?`n")) {
                 if ($Line -match '(?i)^\s*["'']?([A-Z0-9_]*(?:API_KEY|PASSWORD|HMAC_SECRET|PRIVATE_KEY)[A-Z0-9_]*)["'']?\s*[:=]\s*["'']?([^"''#,}\s][^"''#,}]*)') {
+                    $SensitiveName = [string]$Matches[1]
                     $Value = $Matches[2].Trim()
+                    $IsKnownBooleanSwitchExpression = (
+                        $SensitiveName.Equals(
+                            "allowDemoDefaultPassword",
+                            [StringComparison]::OrdinalIgnoreCase
+                        ) -and
+                        ($LowerExtension -eq ".ps1" -or $LowerExtension -eq ".psm1") -and
+                        [regex]::IsMatch(
+                            $Value,
+                            '^\[(?i:bool)\]\s*\$[A-Za-z_][A-Za-z0-9_]*$'
+                        )
+                    )
                     $IsPlaceholder = (
                         $Value.StartsWith("<") -or $Value.StartsWith("__") -or
                         $Value.StartsWith("$") -or $Value.StartsWith("%") -or
+                        $IsKnownBooleanSwitchExpression -or
                         $Value -match '^(?i:REPLACE|CHANGE[_-]?ME|NOT[_-]?CONFIGURED|NULL|NONE|FALSE|TRUE)'
                     )
                     if (-not $IsPlaceholder) {
-                        throw "Release contains a non-placeholder value for $($Matches[1]): $Relative"
+                        throw "Release contains a non-placeholder value for ${SensitiveName}: $Relative"
                     }
                 }
             }
@@ -991,6 +1006,17 @@ function Invoke-InstallerLifecycleTest {
             Remove-Item -LiteralPath $FullVerificationRoot -Recurse -Force
         }
     }
+}
+
+if ($PSCmdlet.ParameterSetName -eq "SecretAudit") {
+    foreach ($SecretAuditRoot in $SecretAuditRoots) {
+        $ResolvedAuditRoot = Get-FullExistingDirectory `
+            -PathValue $SecretAuditRoot -Label "SecretAuditRoot"
+        Assert-OrdinaryTree -Root $ResolvedAuditRoot
+        Assert-NoDevelopmentOrSecretMaterial -Root $ResolvedAuditRoot
+    }
+    Write-Host "MineGuard Windows release text safety preflight passed."
+    return
 }
 
 $PlatformStage = Get-FullExistingDirectory -PathValue $PlatformStage -Label "PlatformStage"

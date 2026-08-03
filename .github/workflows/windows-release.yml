@@ -86,6 +86,41 @@ jobs:
           }
           Write-Host "PowerShell 5.1 parsed $($files.Count) release/deployment scripts."
 
+      - name: Preflight release text safety scanner
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $auditRoots = @(
+            "$pwd\platform\deploy\windows",
+            "$pwd\agent\deploy\windows"
+          )
+          .\scripts\Test-WindowsBinaryRelease.ps1 -SecretAuditRoots $auditRoots
+
+          $negativeRoot = Join-Path $env:RUNNER_TEMP (
+            'mineguard-release-secret-negative-' + [Guid]::NewGuid().ToString('N')
+          )
+          New-Item -ItemType Directory -Path $negativeRoot | Out-Null
+          try {
+            [IO.File]::WriteAllText(
+              (Join-Path $negativeRoot 'hard-coded-secret.ps1'),
+              'ADMIN_PASSWORD = "hard-coded-release-secret"',
+              (New-Object Text.UTF8Encoding($false))
+            )
+            $negativeOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+              -File .\scripts\Test-WindowsBinaryRelease.ps1 `
+              -SecretAuditRoots $negativeRoot 2>&1
+            $negativeExitCode = $LASTEXITCODE
+            if ($negativeExitCode -eq 0) {
+              throw 'Release text safety scanner accepted a hard-coded password fixture.'
+            }
+            Write-Host 'Release text safety scanner rejected the negative fixture as expected.'
+          }
+          finally {
+            if (Test-Path -LiteralPath $negativeRoot) {
+              Remove-Item -LiteralPath $negativeRoot -Recurse -Force
+            }
+          }
+
       - name: Locate the preinstalled Inno Setup compiler
         shell: pwsh
         run: |
