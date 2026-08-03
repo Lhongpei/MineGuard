@@ -71,6 +71,10 @@ try {
 
     $RootAllowSids = Get-AllowSids -Path $ProbeRoot
     $ChildAllowSids = Get-AllowSids -Path $Executable
+    Write-Host ("Root allow SIDs: " + (($RootAllowSids.Keys | Sort-Object) -join ", "))
+    Write-Host ("Child allow SIDs: " + (($ChildAllowSids.Keys | Sort-Object) -join ", "))
+    & "$env:SystemRoot\System32\icacls.exe" $ProbeRoot | Out-Host
+    & "$env:SystemRoot\System32\icacls.exe" $Executable | Out-Host
     foreach ($RequiredSid in @("S-1-5-18", "S-1-5-32-544", "S-1-5-19")) {
         if (-not $RootAllowSids.ContainsKey($RequiredSid)) {
             throw "Canonical root ACL is missing trustee $RequiredSid."
