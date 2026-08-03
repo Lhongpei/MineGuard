@@ -600,6 +600,7 @@ def test_workflow() -> None:
         "$ErrorActionPreference = 'Continue'",
         "non-placeholder value for ADMIN_PASSWORD",
         "negative fixture failed for an unexpected reason",
+        "$global:LASTEXITCODE = 0",
     ):
         assert token in workflow, f"release workflow missing: {token}"
     lowered = workflow.lower()

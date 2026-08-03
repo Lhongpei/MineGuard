@@ -125,6 +125,7 @@ jobs:
                 'non-placeholder value for ADMIN_PASSWORD') {
               throw 'Release text safety scanner negative fixture failed for an unexpected reason.'
             }
+            $global:LASTEXITCODE = 0
             Write-Host 'Release text safety scanner rejected the negative fixture as expected.'
           }
           finally {
