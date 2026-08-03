@@ -706,6 +706,108 @@ function Remove-ServiceStateProbe {
     throw "Lifecycle probe service registration did not disappear: $ServiceName"
 }
 
+function Get-InnoUninstallerResidue {
+    param([string]$InstallRoot)
+    if (-not (Test-Path -LiteralPath $InstallRoot -PathType Container `
+            -ErrorAction SilentlyContinue)) {
+        return @()
+    }
+    return @(
+        Get-ChildItem -LiteralPath $InstallRoot -File -Force `
+            -ErrorAction SilentlyContinue | Where-Object {
+                $_.Name -match '^unins.*\.(?:exe|dat|msg)$'
+            }
+    )
+}
+
+function Wait-InnoUninstallerSelfCleanup {
+    param(
+        [string]$Product,
+        [string]$InstallRoot,
+        [ValidateRange(1, 60)][int]$TimeoutSeconds = 60
+    )
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $Residue = @(Get-InnoUninstallerResidue -InstallRoot $InstallRoot)
+        if ($Residue.Count -eq 0) { return }
+        if ([DateTime]::UtcNow -ge $Deadline) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $Deadline)
+
+    $RemainingNames = ($Residue | ForEach-Object { $_.Name }) -join ", "
+    throw "$Product uninstaller self-cleanup timed out with Inno files still present: $RemainingNames"
+}
+
+function Remove-VerificationRootWithRetry {
+    param(
+        [string]$VerificationRoot,
+        [string]$VerificationParent,
+        [ValidateRange(1, 30)][int]$TimeoutSeconds = 30
+    )
+    try {
+        $FullVerificationRoot = [IO.Path]::GetFullPath($VerificationRoot).TrimEnd('\')
+        $FullParent = [IO.Path]::GetFullPath($VerificationParent).TrimEnd('\')
+        $ParentPrefix = $FullParent + '\'
+        $RelativeRoot = if ($FullVerificationRoot.StartsWith(
+                $ParentPrefix,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            $FullVerificationRoot.Substring($ParentPrefix.Length)
+        }
+        else {
+            ""
+        }
+        $ParsedVerificationId = [Guid]::Empty
+        $IsDirectGuidChild = (
+            -not [string]::IsNullOrWhiteSpace($RelativeRoot) -and
+            -not $RelativeRoot.Contains('\') -and
+            [Guid]::TryParseExact($RelativeRoot, "N", [ref]$ParsedVerificationId)
+        )
+        if (-not $IsDirectGuidChild) {
+            Write-Warning -WarningAction Continue `
+                "Refusing unsafe lifecycle cleanup path: $FullVerificationRoot"
+            return
+        }
+    }
+    catch {
+        Write-Warning -WarningAction Continue `
+            "Unable to validate lifecycle cleanup path; leaving it in place: $($_.Exception.Message)"
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $FullVerificationRoot `
+            -ErrorAction SilentlyContinue)) {
+        return
+    }
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $LastCleanupError = ""
+    do {
+        try {
+            Remove-Item -LiteralPath $FullVerificationRoot -Recurse -Force `
+                -ErrorAction Stop
+            $LastCleanupError = ""
+        }
+        catch {
+            $LastCleanupError = $_.Exception.Message
+        }
+        if (-not (Test-Path -LiteralPath $FullVerificationRoot `
+                -ErrorAction SilentlyContinue)) {
+            return
+        }
+        if ([DateTime]::UtcNow -ge $Deadline) { break }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $Deadline)
+
+    $FailureDetail = if ([string]::IsNullOrWhiteSpace($LastCleanupError)) {
+        "path remained present"
+    }
+    else {
+        $LastCleanupError
+    }
+    Write-Warning -WarningAction Continue `
+        "Lifecycle cleanup timed out after $TimeoutSeconds seconds; leaving $FullVerificationRoot in place ($FailureDetail)."
+}
+
 function Invoke-InstallerLifecycleTest {
     param([string]$Product, [string]$Installer)
     $Identity = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -723,6 +825,7 @@ function Invoke-InstallerLifecycleTest {
         "MineGuardEnterpriseAgent-ci-" + [Guid]::NewGuid().ToString("N").Substring(0, 10)
     }
     New-Item -ItemType Directory -Path $VerificationRoot -Force | Out-Null
+    $LifecycleAuditError = $null
     try {
         $ProbeService = New-ServiceStateProbe -ServiceName $ServiceName -ProbeRoot $VerificationRoot
         $InstallArguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$InstallRoot", "/LOG=$(Join-Path $VerificationRoot 'install.log')")
@@ -970,6 +1073,8 @@ function Invoke-InstallerLifecycleTest {
         if ($LASTEXITCODE -ne 0) {
             throw "$Product uninstaller returned $LASTEXITCODE."
         }
+        Wait-InnoUninstallerSelfCleanup -Product $Product `
+            -InstallRoot $InstallRoot -TimeoutSeconds 60
         $PathsExpectedRemoved = @(
             (Join-Path $InstallRoot "runtime"),
             (Join-Path $InstallRoot "deploy"),
@@ -995,15 +1100,36 @@ function Invoke-InstallerLifecycleTest {
         }
         Write-Host "$Product silent install, health and state-preserving uninstall passed."
     }
+    catch {
+        $LifecycleAuditError = $_
+        throw
+    }
     finally {
-        Remove-ServiceStateProbe -ServiceName $ServiceName
-        if (Test-Path -LiteralPath $VerificationRoot) {
-            $FullVerificationRoot = [IO.Path]::GetFullPath($VerificationRoot)
-            $FullParent = [IO.Path]::GetFullPath($VerificationParent).TrimEnd('\') + '\'
-            if (-not $FullVerificationRoot.StartsWith($FullParent, [StringComparison]::OrdinalIgnoreCase)) {
-                throw "Refusing unsafe lifecycle cleanup path: $FullVerificationRoot"
+        $ServiceCleanupError = $null
+        try {
+            Remove-ServiceStateProbe -ServiceName $ServiceName
+        }
+        catch {
+            $ServiceCleanupError = $_
+        }
+        try {
+            Remove-VerificationRootWithRetry `
+                -VerificationRoot $VerificationRoot `
+                -VerificationParent $VerificationParent `
+                -TimeoutSeconds 30
+        }
+        catch {
+            Write-Warning -WarningAction Continue `
+                "Unexpected lifecycle directory cleanup failure: $($_.Exception.Message)"
+        }
+        if ($null -ne $ServiceCleanupError) {
+            if ($null -ne $LifecycleAuditError) {
+                Write-Warning -WarningAction Continue `
+                    "Service cleanup also failed; preserving the original lifecycle audit error: $($ServiceCleanupError.Exception.Message)"
             }
-            Remove-Item -LiteralPath $FullVerificationRoot -Recurse -Force
+            else {
+                throw $ServiceCleanupError
+            }
         }
     }
 }

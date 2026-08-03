@@ -153,6 +153,48 @@ jobs:
           )
           "INNO_COMPILER=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Prepare isolated unsigned Nuitka compiler cache
+        shell: pwsh
+        run: |
+          $cacheRoot = Join-Path $env:RUNNER_TEMP 'mineguard-nuitka-clcache'
+          $readyMarker = Join-Path ([IO.Path]::GetTempPath()) (
+            "mineguard-clcache-ready-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.txt"
+          )
+          New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
+          if (Test-Path -LiteralPath $readyMarker) {
+            Remove-Item -LiteralPath $readyMarker -Force
+          }
+          $pythonVersion = (& python -c 'import platform; print(platform.python_version())' |
+            Select-Object -Last 1).Trim()
+          if ($LASTEXITCODE -ne 0 -or $pythonVersion -notmatch '^3\.12\.\d+$') {
+            throw 'Unable to identify the unsigned compiler-cache Python patch.'
+          }
+          $inputsHash = '${{ hashFiles('platform/packaging/windows/requirements-build.txt', 'platform/constraints.txt', 'platform/packaging/windows/Build-MineGuardPlatform.ps1', 'agent/packaging/windows/build-requirements.txt', 'agent/constraints.txt', 'agent/packaging/windows/Build-EnterpriseAgentBinary.ps1') }}'
+          if ($inputsHash -notmatch '^[a-f0-9]{64}$') {
+            throw 'Unable to hash the unsigned compiler-cache inputs.'
+          }
+          $imageIdentity = "$env:ImageOS-$env:ImageVersion" -replace '[^A-Za-z0-9_.-]', '-'
+          $cachePrefix = (
+            "mineguard-nuitka-clcache-v1-$imageIdentity-py$pythonVersion-$inputsHash-"
+          )
+          $cacheKey = $cachePrefix + $env:GITHUB_SHA
+          foreach ($entry in @(
+            "NUITKA_CACHE_DIR_CLCACHE=$cacheRoot",
+            "MINEGUARD_NUITKA_CLCACHE_PREFIX=$cachePrefix",
+            "MINEGUARD_NUITKA_CLCACHE_KEY=$cacheKey",
+            "MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER=$readyMarker"
+          )) {
+            $entry | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
+      - name: Restore unsigned Nuitka compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.NUITKA_CACHE_DIR_CLCACHE }}
+          key: ${{ env.MINEGUARD_NUITKA_CLCACHE_KEY }}
+          restore-keys: |
+            ${{ env.MINEGUARD_NUITKA_CLCACHE_PREFIX }}
+
       - name: Build, audit, compile, install, health-check and uninstall
         shell: powershell
         run: |
@@ -160,8 +202,31 @@ jobs:
             -OutputDirectory "$pwd\release\windows" `
             -InnoCompiler $env:INNO_COMPILER `
             -AllowNuitkaToolDownloads `
+            -UnsignedCompilerCacheReadyMarker $env:MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER `
             -TestInstallerFailurePropagation `
             -TestInstallerLifecycle
+
+      - name: Qualify complete unsigned compiler cache
+        id: nuitka_cache_ready
+        if: ${{ always() && !cancelled() }}
+        shell: pwsh
+        run: |
+          $ready = $false
+          if (Test-Path -LiteralPath $env:MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER `
+              -PathType Leaf) {
+            $marker = Get-Content -LiteralPath `
+              $env:MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER -Raw -Encoding UTF8
+            $ready = $marker -match '^Both child compilers completed for source '
+          }
+          "ready=$($ready.ToString().ToLowerInvariant())" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Save complete unsigned Nuitka compiler cache
+        if: ${{ always() && !cancelled() && steps.nuitka_cache_ready.outputs.ready == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.NUITKA_CACHE_DIR_CLCACHE }}
+          key: ${{ env.MINEGUARD_NUITKA_CLCACHE_KEY }}
 
       - name: Upload explicit unsigned test media
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

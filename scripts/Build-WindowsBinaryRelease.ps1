@@ -11,6 +11,7 @@ param(
     [string]$InnoCompiler = "",
     [string]$ExpectedInnoCompilerSha256 = "",
     [switch]$AllowNuitkaToolDownloads,
+    [string]$UnsignedCompilerCacheReadyMarker = "",
     [switch]$AllowDirtySource,
     [string]$SignToolPath = "",
     [string]$ExpectedSignToolSha256 = "",
@@ -627,6 +628,22 @@ Write-Host "Using x64 CPython $($PythonIdentity.version) at $ResolvedPythonExecu
 
 $SafeTempRoot = Get-SafeLocalNtfsPath -Name 'TemporaryDirectory' `
     -PathValue ([IO.Path]::GetTempPath().TrimEnd('\'))
+$ResolvedCompilerCacheReadyMarker = $null
+if ($UnsignedCompilerCacheReadyMarker) {
+    if ($SigningEnabled -or $RequireSigned) {
+        throw "UnsignedCompilerCacheReadyMarker is forbidden for signed production candidates."
+    }
+    $ResolvedCompilerCacheReadyMarker = Get-SafeLocalNtfsPath `
+        -Name 'UnsignedCompilerCacheReadyMarker' `
+        -PathValue $UnsignedCompilerCacheReadyMarker
+    if (-not (Test-PathAtOrBelow `
+            -Candidate $ResolvedCompilerCacheReadyMarker -Root $SafeTempRoot)) {
+        throw "UnsignedCompilerCacheReadyMarker must be located under the process temporary directory."
+    }
+    if (Test-Path -LiteralPath $ResolvedCompilerCacheReadyMarker) {
+        throw "UnsignedCompilerCacheReadyMarker must not exist before compilation."
+    }
+}
 $WorkParent = Join-Path $SafeTempRoot "MineGuardWindowsReleaseBuild"
 $WorkRoot = Join-Path $WorkParent ([Guid]::NewGuid().ToString("N"))
 $PlatformOutput = Join-Path $WorkRoot "platform-output"
@@ -695,6 +712,15 @@ try {
     Invoke-NativeChecked -FilePath "powershell.exe" -ArgumentList (@(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $AgentBuild
     ) + $AgentArguments) -Label "Enterprise Agent standalone build"
+
+    if ($ResolvedCompilerCacheReadyMarker) {
+        $MarkerText = "Both child compilers completed for source $SourceRevision."
+        [IO.File]::WriteAllText(
+            $ResolvedCompilerCacheReadyMarker,
+            ($MarkerText + [Environment]::NewLine),
+            (New-Object Text.UTF8Encoding($false))
+        )
+    }
 
     if ($null -ne $WheelhouseEvidence) {
         $WheelhouseEvidence = Test-WheelhouseSupplyChainManifest `

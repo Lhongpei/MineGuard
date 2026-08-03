@@ -33,6 +33,122 @@ function Invoke-NativeChecked {
     }
 }
 
+function ConvertTo-WindowsCommandLineArgument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
+    }
+    $Builder = New-Object -TypeName System.Text.StringBuilder
+    [void]$Builder.Append([char]'"')
+    $BackslashCount = 0
+    foreach ($Character in $Value.ToCharArray()) {
+        if ($Character -eq [char]'\') {
+            $BackslashCount += 1
+            continue
+        }
+        if ($Character -eq [char]'"') {
+            [void]$Builder.Append([char]'\', (($BackslashCount * 2) + 1))
+            [void]$Builder.Append([char]'"')
+            $BackslashCount = 0
+            continue
+        }
+        if ($BackslashCount -gt 0) {
+            [void]$Builder.Append([char]'\', $BackslashCount)
+            $BackslashCount = 0
+        }
+        [void]$Builder.Append($Character)
+    }
+    if ($BackslashCount -gt 0) {
+        [void]$Builder.Append([char]'\', ($BackslashCount * 2))
+    }
+    [void]$Builder.Append([char]'"')
+    return $Builder.ToString()
+}
+
+function Test-IsTransientAccessDenied {
+    param([Exception]$Exception)
+    $CurrentException = $Exception
+    while ($null -ne $CurrentException) {
+        if ($CurrentException -is [UnauthorizedAccessException] -or
+            ($CurrentException -is [ComponentModel.Win32Exception] -and
+                $CurrentException.NativeErrorCode -eq 5) -or
+            $CurrentException.HResult -eq -2147024891) {
+            return $true
+        }
+        $CurrentException = $CurrentException.InnerException
+    }
+    return $Exception.Message -match '(?i)access (?:is )?denied'
+}
+
+function Invoke-ProcessTreeWithTransientAccessRetry {
+    param(
+        [string]$FilePath,
+        [object[]]$ArgumentList,
+        [ValidateRange(1, 120)][int]$TimeoutSeconds = 30
+    )
+    $SerializedArguments = @(foreach ($Argument in $ArgumentList) {
+        if ($null -eq $Argument) {
+            throw "Native process contains a null argument: $FilePath"
+        }
+        ConvertTo-WindowsCommandLineArgument -Value ([string]$Argument)
+    }) -join " "
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($true) {
+        $Process = $null
+        try {
+            $Process = Start-Process -FilePath $FilePath `
+                -ArgumentList $SerializedArguments -Wait -PassThru `
+                -ErrorAction Stop
+            return [int]$Process.ExitCode
+        }
+        catch {
+            if (-not (Test-IsTransientAccessDenied -Exception $_.Exception) -or
+                [DateTime]::UtcNow -ge $Deadline) {
+                throw
+            }
+            Start-Sleep -Milliseconds 250
+        }
+        finally {
+            if ($null -ne $Process) { $Process.Dispose() }
+        }
+    }
+}
+
+function Remove-DirectoryWithRetry {
+    param(
+        [string]$PathValue,
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 30
+    )
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $LastCleanupError = $null
+    while ($true) {
+        if (-not (Test-Path -LiteralPath $PathValue)) { return }
+        try {
+            Remove-Item -LiteralPath $PathValue -Recurse -Force -ErrorAction Stop
+        }
+        catch {
+            $LastCleanupError = $_
+        }
+        if (-not (Test-Path -LiteralPath $PathValue)) { return }
+        if ([DateTime]::UtcNow -ge $Deadline) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    $FailureDetail = if ($null -eq $LastCleanupError) {
+        "the directory still exists"
+    }
+    else {
+        $LastCleanupError.Exception.Message
+    }
+    throw (
+        "Failure-probe cleanup did not finish within $TimeoutSeconds seconds: " +
+        "$PathValue. Last error: $FailureDetail"
+    )
+}
+
 function Test-OneFailureProbe {
     param(
         [ValidateSet("platform", "agent")][string]$Product,
@@ -85,8 +201,9 @@ function Test-OneFailureProbe {
     if ($Product -eq "agent") {
         $InstallArguments += "/STATE_ROOT=$(Join-Path $ProbeRoot 'agent-state')"
     }
-    & $ProbeInstaller @InstallArguments
-    $ProbeExitCode = $LASTEXITCODE
+    $ProbeExitCode = Invoke-ProcessTreeWithTransientAccessRetry `
+        -FilePath $ProbeInstaller -ArgumentList $InstallArguments `
+        -TimeoutSeconds 30
     if ($ProbeExitCode -eq 0) {
         throw "$Product corrupted staging was incorrectly accepted by the installer."
     }
@@ -401,6 +518,7 @@ function Test-OneTransactionalRollbackAndDowngrade {
 $ProbeParent = Join-Path ([IO.Path]::GetTempPath()) "MineGuardInstallerFailureProbes"
 $ProbeRoot = Join-Path $ProbeParent ([Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $ProbeRoot -Force | Out-Null
+$FailurePropagationCompleted = $false
 try {
     $PlatformVersion = (Get-Content -LiteralPath (Join-Path $PlatformStage "VERSION.txt") -Raw -Encoding UTF8).Trim()
     $AgentVersion = (Get-Content -LiteralPath (Join-Path $AgentStage "VERSION.txt") -Raw -Encoding UTF8).Trim()
@@ -418,15 +536,26 @@ try {
     Test-OneTransactionalRollbackAndDowngrade `
         -Product agent -OriginalStage $AgentStage `
         -Version $AgentVersion -ProbeRoot (Join-Path $ProbeRoot "agent-transaction")
+    $FailurePropagationCompleted = $true
 }
 finally {
-    if (Test-Path -LiteralPath $ProbeRoot) {
-        $FullProbeRoot = [IO.Path]::GetFullPath($ProbeRoot)
-        $FullProbeParent = [IO.Path]::GetFullPath($ProbeParent).TrimEnd('\') + '\'
-        if (-not $FullProbeRoot.StartsWith($FullProbeParent, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing unsafe failure-probe cleanup path: $FullProbeRoot"
+    try {
+        if (Test-Path -LiteralPath $ProbeRoot) {
+            $FullProbeRoot = [IO.Path]::GetFullPath($ProbeRoot)
+            $FullProbeParent = [IO.Path]::GetFullPath($ProbeParent).TrimEnd('\') + '\'
+            if (-not $FullProbeRoot.StartsWith($FullProbeParent, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Refusing unsafe failure-probe cleanup path: $FullProbeRoot"
+            }
+            Remove-DirectoryWithRetry `
+                -PathValue $FullProbeRoot -TimeoutSeconds 30
         }
-        Remove-Item -LiteralPath $FullProbeRoot -Recurse -Force
+    }
+    catch {
+        if ($FailurePropagationCompleted) { throw }
+        Write-Warning (
+            "Failure-probe cleanup also failed after the primary audit failure: " +
+            $_.Exception.Message
+        )
     }
 }
 

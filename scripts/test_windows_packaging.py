@@ -269,6 +269,10 @@ def test_root_build_orchestration() -> None:
         "ExpectedInnoCompilerSha256",
         "ExpectedSignToolSha256",
         "Assert-ApprovedFileSha256",
+        "UnsignedCompilerCacheReadyMarker",
+        "UnsignedCompilerCacheReadyMarker is forbidden for signed production candidates",
+        "UnsignedCompilerCacheReadyMarker must be located under the process temporary directory",
+        "Both child compilers completed for source",
         "ExpectedInnoChineseLanguageSha256",
         "ActualInnoChineseLanguageSha256",
         "inno_chinese_language_sha256",
@@ -335,6 +339,13 @@ def test_root_build_orchestration() -> None:
     assert build.count("Assert-PathsDoNotOverlap") >= 4
     assert build.count('"-PythonExecutable", $ResolvedPythonExecutable') == 2
     assert build.count('"/DStageRoot=$StageRoot"') == 1
+    platform_build = build.index('-Label "Platform standalone build"')
+    agent_build = build.index('-Label "Enterprise Agent standalone build"')
+    compiler_cache_marker = build.index('$MarkerText = "Both child compilers completed')
+    failure_audit = build.index('-Label "Installer failure-propagation audit"')
+    assert platform_build < agent_build < compiler_cache_marker < failure_audit, (
+        "the unsigned cache marker must be written only after both complete child builds"
+    )
     lowered = build.lower()
     assert "choco " not in lowered and "winget " not in lowered
     assert "invoke-webrequest" not in lowered, "root builder must never fetch Inno Setup"
@@ -387,6 +398,15 @@ def test_audit_and_lifecycle() -> None:
         "configuration-rollback-test",
         "Platform configuration rollback changed protected content",
         ".configuration-transaction.*",
+        "function Get-InnoUninstallerResidue",
+        "function Wait-InnoUninstallerSelfCleanup",
+        "^unins.*\\.(?:exe|dat|msg)$",
+        "uninstaller self-cleanup timed out",
+        "function Remove-VerificationRootWithRetry",
+        '[Guid]::TryParseExact($RelativeRoot, "N"',
+        "Lifecycle cleanup timed out after $TimeoutSeconds seconds",
+        "$LifecycleAuditError = $null",
+        "preserving the original lifecycle audit error",
         "-----BEGIN",
         "sk-",
     ):
@@ -407,6 +427,29 @@ def test_audit_and_lifecycle() -> None:
     assert '$Value.StartsWith("[")' not in audit, (
         "release secret scanning must not broadly allow arbitrary typed expressions"
     )
+    lifecycle = audit[
+        audit.index("function Invoke-InstallerLifecycleTest") : audit.index(
+            'if ($PSCmdlet.ParameterSetName -eq "SecretAudit")'
+        )
+    ]
+    final_uninstall = lifecycle.rindex(
+        "& $Uninstallers[0].FullName /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
+    )
+    uninstaller_wait = lifecycle.index(
+        "Wait-InnoUninstallerSelfCleanup -Product $Product"
+    )
+    assert lifecycle.count("Wait-InnoUninstallerSelfCleanup -Product $Product") == 1
+    assert final_uninstall < uninstaller_wait < lifecycle.index(
+        "$PathsExpectedRemoved", uninstaller_wait
+    ), "only the final successful uninstall may wait for Inno self-cleanup"
+    assert "-InstallRoot $InstallRoot -TimeoutSeconds 60" in lifecycle
+    lifecycle_finally = lifecycle[lifecycle.rindex("finally {") :]
+    assert "Remove-VerificationRootWithRetry" in lifecycle_finally
+    assert "-TimeoutSeconds 30" in lifecycle_finally
+    assert (
+        "Remove-Item -LiteralPath $FullVerificationRoot -Recurse -Force"
+        not in lifecycle_finally
+    ), "lifecycle cleanup must use bounded retry instead of a one-shot delete"
 
     platform_configuration = read(
         "platform/deploy/windows/Set-MineGuardPlatformConfiguration.ps1"
@@ -437,8 +480,56 @@ def test_audit_and_lifecycle() -> None:
         "Get-ProductTreeSnapshot",
         "Agent post-switch rollback",
         "Agent missing-metadata rejection",
+        "function Remove-DirectoryWithRetry",
+        "function Test-IsTransientAccessDenied",
+        "[ComponentModel.Win32Exception]",
+        "$CurrentException.NativeErrorCode -eq 5",
+        "$CurrentException.HResult -eq -2147024891",
+        "function ConvertTo-WindowsCommandLineArgument",
+        "function Invoke-ProcessTreeWithTransientAccessRetry",
+        "Start-Process -FilePath $FilePath",
+        "-ArgumentList $SerializedArguments -Wait -PassThru",
+        "return [int]$Process.ExitCode",
+        "$Process.Dispose()",
+        "-FilePath $ProbeInstaller -ArgumentList $InstallArguments",
+        "[DateTime]::UtcNow.AddSeconds($TimeoutSeconds)",
+        "Start-Sleep -Milliseconds 250",
+        "Failure-probe cleanup did not finish within $TimeoutSeconds seconds",
+        "$FailurePropagationCompleted = $false",
+        "$FailurePropagationCompleted = $true",
+        "Failure-probe cleanup also failed after the primary audit failure",
     ):
         assert token in failure_probe, f"failure audit misses: {token}"
+    final_cleanup = failure_probe[failure_probe.rindex("finally {") :]
+    assert "Remove-DirectoryWithRetry" in final_cleanup
+    assert "-PathValue $FullProbeRoot -TimeoutSeconds 30" in final_cleanup
+    assert "if ($FailurePropagationCompleted) { throw }" in final_cleanup
+    assert "Write-Warning" in final_cleanup
+    cleanup_try = final_cleanup.index("try {")
+    cleanup_catch = final_cleanup.index("catch {")
+    assert cleanup_try < final_cleanup.index(
+        "Refusing unsafe failure-probe cleanup path"
+    ) < final_cleanup.index("Remove-DirectoryWithRetry") < cleanup_catch, (
+        "all failure-probe cleanup errors must be handled without masking the "
+        "primary audit failure"
+    )
+    assert (
+        "Remove-Item -LiteralPath $FullProbeRoot -Recurse -Force"
+        not in final_cleanup
+    ), "failure-probe cleanup must use bounded retry instead of a one-shot delete"
+    assert "& $ProbeInstaller @InstallArguments" not in failure_probe, (
+        "Inno GUI probes must use Start-Process -Wait so their child process tree exits"
+    )
+    process_tree_retry = failure_probe[
+        failure_probe.index("function Invoke-ProcessTreeWithTransientAccessRetry") :
+        failure_probe.index("function Remove-DirectoryWithRetry")
+    ]
+    assert process_tree_retry.index("AddSeconds($TimeoutSeconds)") < (
+        process_tree_retry.index("Start-Process -FilePath $FilePath")
+    ) < process_tree_retry.index("return [int]$Process.ExitCode") < (
+        process_tree_retry.index("finally {")
+    ) < process_tree_retry.index("$Process.Dispose()")
+    assert "Start-Sleep -Milliseconds 250" in process_tree_retry
 
 
 def test_authenticode_interface() -> None:
@@ -642,6 +733,16 @@ def test_workflow() -> None:
         "non-placeholder value for ADMIN_PASSWORD",
         "negative fixture failed for an unexpected reason",
         "$global:LASTEXITCODE = 0",
+        "Prepare isolated unsigned Nuitka compiler cache",
+        "Restore unsigned Nuitka compiler cache",
+        "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+        "NUITKA_CACHE_DIR_CLCACHE",
+        "MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER",
+        "-UnsignedCompilerCacheReadyMarker",
+        "Qualify complete unsigned compiler cache",
+        "Save complete unsigned Nuitka compiler cache",
+        "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+        "steps.nuitka_cache_ready.outputs.ready == 'true'",
     ):
         assert token in workflow, f"release workflow missing: {token}"
     lowered = workflow.lower()
@@ -656,6 +757,27 @@ def test_workflow() -> None:
     assert unsigned_job.index("Validate packaging contracts statically") < (
         unsigned_job.index("Build, audit, compile, install, health-check and uninstall")
     ), "unsigned packaging checks must run before the long Nuitka build"
+    cache_prepare = unsigned_job.index("Prepare isolated unsigned Nuitka compiler cache")
+    cache_restore = unsigned_job.index("Restore unsigned Nuitka compiler cache")
+    unsigned_build = unsigned_job.index(
+        "Build, audit, compile, install, health-check and uninstall"
+    )
+    cache_qualify = unsigned_job.index("Qualify complete unsigned compiler cache")
+    cache_save = unsigned_job.index("Save complete unsigned Nuitka compiler cache")
+    upload = unsigned_job.index("Upload explicit unsigned test media")
+    assert cache_prepare < cache_restore < unsigned_build < cache_qualify < cache_save < upload
+    cache_prepare_block, _, _ = named_step_block(
+        unsigned_job, "Prepare isolated unsigned Nuitka compiler cache"
+    )
+    assert "$cacheRoot = Join-Path $env:RUNNER_TEMP" in cache_prepare_block
+    assert "$readyMarker = Join-Path ([IO.Path]::GetTempPath())" in cache_prepare_block, (
+        "the marker must share the Windows PowerShell process temporary root"
+    )
+    assert "github.sha" not in unsigned_job.split(
+        "Prepare isolated unsigned Nuitka compiler cache", 1
+    )[1].split("Restore unsigned Nuitka compiler cache", 1)[0], (
+        "the cache key must use GITHUB_SHA at runtime, not an unavailable expression context"
+    )
     signed_job = workflow.split("signed-production-candidate:", 1)[1]
     assert "actions/setup-python" not in signed_job, (
         "the controlled signing runner must use its approved preinstalled python.exe"
@@ -666,6 +788,9 @@ def test_workflow() -> None:
     assert signed_job.index("scripts/test_windows_packaging.py") < signed_job.index(
         "Build, sign, audit and lifecycle-test both installers"
     ), "signed packaging checks must run before the long Nuitka build"
+    assert "actions/cache/" not in signed_job
+    assert "NUITKA_CACHE_DIR_CLCACHE" not in signed_job
+    assert "UnsignedCompilerCacheReadyMarker" not in signed_job
 
 
 def test_workflow_context_availability() -> None:
@@ -689,6 +814,8 @@ def test_workflow_context_availability() -> None:
         "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
         "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+        "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
     }
     actual_official_actions = {
         match.group(1)
