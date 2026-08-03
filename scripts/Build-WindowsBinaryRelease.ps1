@@ -423,12 +423,21 @@ foreach ($Required in @(
     (Join-Path $RepositoryRoot "agent\packaging\windows\Build-EnterpriseAgentBinary.ps1"),
     (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardPlatform.iss"),
     (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardEnterpriseAgent.iss"),
+    (Join-Path $RepositoryRoot "packaging\windows\inno\languages\ChineseSimplified.isl"),
     (Join-Path $RepositoryRoot "scripts\Test-WindowsBinaryRelease.ps1")
 )) {
     if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
         throw "Release build input is missing: $Required"
     }
 }
+$InnoChineseLanguagePath = Join-Path $RepositoryRoot `
+    "packaging\windows\inno\languages\ChineseSimplified.isl"
+$ExpectedInnoChineseLanguageSha256 = `
+    "7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278"
+$ActualInnoChineseLanguageSha256 = Assert-ApprovedFileSha256 `
+    -Name 'Inno Simplified Chinese language input' `
+    -PathValue $InnoChineseLanguagePath `
+    -ExpectedSha256 $ExpectedInnoChineseLanguageSha256
 
 $Git = Get-Command "git.exe" -ErrorAction SilentlyContinue
 $SourceRevision = $null
@@ -823,6 +832,7 @@ try {
         toolchain = [ordered]@{
             inno_setup = [string]$InnoVersion
             inno_setup_path_sha256 = $ActualInnoCompilerSha256
+            inno_chinese_language_sha256 = $ActualInnoChineseLanguageSha256
             expected_inno_setup_path_sha256 = if ($ExpectedInnoCompilerSha256) {
                 $ExpectedInnoCompilerSha256.ToLowerInvariant()
             } else { $null }

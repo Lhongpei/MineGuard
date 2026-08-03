@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -61,6 +62,9 @@ def test_layout() -> None:
         ".gitattributes",
         "packaging/windows/inno/MineGuardPlatform.iss",
         "packaging/windows/inno/MineGuardEnterpriseAgent.iss",
+        "packaging/windows/inno/languages/ChineseSimplified.isl",
+        "packaging/windows/inno/languages/INNO-SETUP-LICENSE.txt",
+        "packaging/windows/inno/languages/README.md",
         "packaging/windows/assets/RELEASE-NOTICE.txt",
         "packaging/windows/assets/Windows-binary-release-guide.html",
         "scripts/Build-WindowsBinaryRelease.ps1",
@@ -82,6 +86,38 @@ def test_layout() -> None:
     assert not (ROOT / "packaging/windows/requirements-build.txt").exists(), (
         "root packaging must not maintain a duplicate Nuitka environment"
     )
+
+
+def test_pinned_inno_chinese_language() -> None:
+    relative = "packaging/windows/inno/languages/ChineseSimplified.isl"
+    body = (ROOT / relative).read_bytes()
+    expected_sha256 = (
+        "7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278"
+    )
+    assert hashlib.sha256(body).hexdigest() == expected_sha256, (
+        "the vendored Inno Setup translation must match the reviewed is-6_7_1 bytes"
+    )
+    assert not body.startswith(b"\xef\xbb\xbf"), "the reviewed translation has no BOM"
+    assert b"\r" not in body, "the pinned translation must retain upstream LF line endings"
+    language = body.decode("utf-8")
+    assert "LanguageName=简体中文" in language
+
+    attributes = read(".gitattributes")
+    assert (
+        "/packaging/windows/inno/languages/ChineseSimplified.isl text eol=lf "
+        "whitespace=-blank-at-eol"
+        in attributes
+    ), "checkout and whitespace cleanup must preserve the byte-audited translation"
+
+    provenance = read("packaging/windows/inno/languages/README.md")
+    for token in (
+        "is-6_7_1",
+        "Files/Languages/Unofficial/ChineseSimplified.isl",
+        "d6a11c4490de07dad443ade668289fc954dfa1ed",
+        expected_sha256,
+        "INNO-SETUP-LICENSE.txt",
+    ):
+        assert token in provenance, f"Inno language provenance misses: {token}"
 
 
 def test_contract_transport_vectors_keep_lf_bytes() -> None:
@@ -172,7 +208,7 @@ def test_inno_scripts() -> None:
             "SignedUninstaller=yes",
             "SignTool=release_signer",
             'Name: "chinesesimplified"',
-            "ChineseSimplified.isl",
+            'MessagesFile: "languages\\ChineseSimplified.isl"',
         )
         for token in required:
             assert token in script, f"{name} installer contract missing: {token}"
@@ -186,6 +222,7 @@ def test_inno_scripts() -> None:
             "SHA256SUMS.txt\"; DestDir: \"{tmp}"
         ), f"{name} guarded product transaction must be the final [Files] action"
         assert "example.invalid" not in script
+        assert "compiler:Languages\\ChineseSimplified.isl" not in script
         deletion_lines = [
             line.lower()
             for line in script.splitlines()
@@ -232,6 +269,10 @@ def test_root_build_orchestration() -> None:
         "ExpectedInnoCompilerSha256",
         "ExpectedSignToolSha256",
         "Assert-ApprovedFileSha256",
+        "ExpectedInnoChineseLanguageSha256",
+        "ActualInnoChineseLanguageSha256",
+        "inno_chinese_language_sha256",
+        "7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278",
         "Both child builders must use the same resolved root python.exe",
         "Signed child metadata does not match ExpectedPythonPatchVersion",
         "mineguard-wheelhouse-manifest-v1",
@@ -611,6 +652,10 @@ def test_workflow() -> None:
     assert "choco " not in lowered and "winget " not in lowered
     assert "curl " not in lowered and "invoke-webrequest" not in lowered
     assert "gh release" not in lowered and "softprops/action-gh-release" not in lowered
+    unsigned_job = workflow.split("signed-production-candidate:", 1)[0]
+    assert unsigned_job.index("Validate packaging contracts statically") < (
+        unsigned_job.index("Build, audit, compile, install, health-check and uninstall")
+    ), "unsigned packaging checks must run before the long Nuitka build"
     signed_job = workflow.split("signed-production-candidate:", 1)[1]
     assert "actions/setup-python" not in signed_job, (
         "the controlled signing runner must use its approved preinstalled python.exe"
@@ -618,6 +663,9 @@ def test_workflow() -> None:
     assert signed_job.index("Get-FileHash") < signed_job.index(
         "scripts/test_windows_packaging.py"
     )
+    assert signed_job.index("scripts/test_windows_packaging.py") < signed_job.index(
+        "Build, sign, audit and lifecycle-test both installers"
+    ), "signed packaging checks must run before the long Nuitka build"
 
 
 def test_workflow_context_availability() -> None:
@@ -738,6 +786,7 @@ def test_disclosure_and_documentation() -> None:
 def main() -> int:
     tests = (
         test_layout,
+        test_pinned_inno_chinese_language,
         test_contract_transport_vectors_keep_lf_bytes,
         test_child_toolchain_pins,
         test_inno_scripts,

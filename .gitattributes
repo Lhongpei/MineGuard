@@ -1,2 +1,5 @@
 # Contract examples include byte-exact transport-signature test vectors.
 /contracts/examples/*.json text eol=lf
+# The pinned upstream translation is byte-audited, including its one intentional
+# end-of-line space; keep LF and exempt that upstream byte from diff cleanup.
+/packaging/windows/inno/languages/ChineseSimplified.isl text eol=lf whitespace=-blank-at-eol
