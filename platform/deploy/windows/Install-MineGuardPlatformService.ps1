@@ -102,7 +102,7 @@ function Assert-NotBroadOrSystemInstallRoot {
     if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
         $windowsRoot = [IO.Path]::GetFullPath($env:SystemRoot).TrimEnd('\\')
         if ($candidate.Equals($windowsRoot, [StringComparison]::OrdinalIgnoreCase) -or
-            $candidate.StartsWith($windowsRoot + '\\', [StringComparison]::OrdinalIgnoreCase)) {
+            $candidate.StartsWith($windowsRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
             throw '安装目录不能位于 Windows 系统目录内。'
         }
     }
@@ -127,7 +127,7 @@ function Assert-PathBelowRoot {
     param([string] $Path, [string] $Root, [string] $Label)
     $candidate = [IO.Path]::GetFullPath($Path).TrimEnd('\\')
     $parent = [IO.Path]::GetFullPath($Root).TrimEnd('\\')
-    if (-not $candidate.StartsWith($parent + '\\', [StringComparison]::OrdinalIgnoreCase)) {
+    if (-not $candidate.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw "$Label 必须严格位于批准目录内。"
     }
 }
@@ -171,7 +171,7 @@ function Read-JsonObject {
 
 function Assert-SafeReleaseRelativePath {
     param([string] $Value)
-    if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Contains('\\') -or
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Contains('\') -or
         [IO.Path]::IsPathRooted($Value) -or $Value.Contains(':')) {
         throw "release-manifest.json 包含不安全路径：$Value"
     }
@@ -242,10 +242,10 @@ function Assert-PlatformReleaseIdentity {
             throw "release manifest 与 SHA256SUMS.txt 不一致：$relative"
         }
         if ($relative.StartsWith('runtime/', [StringComparison]::Ordinal)) {
-            $installedPath = Join-Path $Root $relative.Replace('/', '\\')
+            $installedPath = Join-Path $Root $relative.Replace('/', '\')
         } elseif ($relative.StartsWith('deploy/windows/', [StringComparison]::Ordinal)) {
             $installedPath = Join-Path (Join-Path $Root 'service') `
-                $relative.Substring('deploy/windows/'.Length).Replace('/', '\\')
+                $relative.Substring('deploy/windows/'.Length).Replace('/', '\')
         } elseif ($relative -in @('VERSION.txt', 'build-metadata.json')) {
             $installedPath = Join-Path $metadataRoot $relative
         } else {

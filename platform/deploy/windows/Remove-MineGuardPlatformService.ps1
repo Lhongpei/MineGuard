@@ -80,7 +80,7 @@ function Assert-NotBroadInstallRoot {
     }
     $windowsRoot = [IO.Path]::GetFullPath($env:SystemRoot).TrimEnd('\\')
     if ($candidate.Equals($windowsRoot, [StringComparison]::OrdinalIgnoreCase) -or
-        $candidate.StartsWith($windowsRoot + '\\', [StringComparison]::OrdinalIgnoreCase)) {
+        $candidate.StartsWith($windowsRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw 'InstallRoot 不能位于 Windows 系统目录内。'
     }
 }

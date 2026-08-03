@@ -77,7 +77,7 @@ function Test-PathEqualOrChild {
     $parentFull = [System.IO.Path]::GetFullPath($Parent).TrimEnd('\\')
     return $candidateFull.Equals($parentFull, [StringComparison]::OrdinalIgnoreCase) -or
         $candidateFull.StartsWith(
-            $parentFull + '\\', [StringComparison]::OrdinalIgnoreCase
+            $parentFull + '\', [StringComparison]::OrdinalIgnoreCase
         )
 }
 
@@ -323,7 +323,7 @@ function Set-MineGuardDirectoryAcl {
 
 function Test-MineGuardPlatformRuntimeProcess {
     param([string] $RuntimeRoot)
-    $runtimePrefix = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\\') + '\\'
+    $runtimePrefix = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\\') + '\'
     $running = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
             if ([string]::IsNullOrWhiteSpace([string]$_.ExecutablePath)) {
                 return $false

@@ -666,6 +666,22 @@ def test_powershell_interpolation_is_ps51_unambiguous() -> None:
         r"[A-Za-z_][A-Za-z0-9_]*:",
         re.IGNORECASE,
     )
+    doubled_concatenated_separator = re.compile(
+        r"\+\s*(?P<quote>['\"])\\\\(?P=quote)"
+    )
+    doubled_contains_separator = re.compile(
+        r"\.Contains\(\s*(?P<quote>['\"])\\\\(?P=quote)\s*\)"
+    )
+    doubled_replacement_separator = re.compile(
+        r"\.Replace\(\s*(?P<source>['\"])\/(?P=source)\s*,\s*"
+        r"(?P<replacement>['\"])\\\\(?P=replacement)\s*\)"
+    )
+    assert doubled_concatenated_separator.search(r"$prefix + '\\'")
+    assert not doubled_concatenated_separator.search(r"$prefix + '\'")
+    assert doubled_contains_separator.search(r"$value.Contains('\\')")
+    assert not doubled_contains_separator.search(r"$value.Contains('\')")
+    assert doubled_replacement_separator.search(r"$value.Replace('/', '\\')")
+    assert not doubled_replacement_separator.search(r"$value.Replace('/', '\')")
     roots = (
         ROOT / "platform/deploy/windows",
         ROOT / "platform/packaging/windows",
@@ -674,15 +690,34 @@ def test_powershell_interpolation_is_ps51_unambiguous() -> None:
         ROOT / "scripts",
     )
     failures: list[str] = []
+    separator_failures: list[str] = []
     for root in roots:
         for path in sorted(root.rglob("*.ps1")):
             source = path.read_text(encoding="utf-8-sig")
             for match in ambiguous_variable_before_colon.finditer(source):
                 line = source.count("\n", 0, match.start()) + 1
                 failures.append(f"{path.relative_to(ROOT)}:{line}: {match.group(0)}")
+            for match in doubled_concatenated_separator.finditer(source):
+                line = source.count("\n", 0, match.start()) + 1
+                separator_failures.append(
+                    f"{path.relative_to(ROOT)}:{line}: {match.group(0)}"
+                )
+            for pattern in (
+                doubled_contains_separator,
+                doubled_replacement_separator,
+            ):
+                for match in pattern.finditer(source):
+                    line = source.count("\n", 0, match.start()) + 1
+                    separator_failures.append(
+                        f"{path.relative_to(ROOT)}:{line}: {match.group(0)}"
+                    )
     assert not failures, (
         "PowerShell 5.1 requires ${name}: when a variable is followed by a colon: "
         + ", ".join(failures)
+    )
+    assert not separator_failures, (
+        "PowerShell strings do not escape backslashes; ordinary path operations "
+        "must use one separator, not two: " + ", ".join(separator_failures)
     )
 
 

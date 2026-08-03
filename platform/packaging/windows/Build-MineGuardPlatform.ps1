@@ -109,8 +109,8 @@ function Test-ReleaseDirectoryIntegrity {
     foreach ($entry in @($manifest.files)) {
         $relative = [string]$entry.path
         if ([string]::IsNullOrWhiteSpace($relative) -or
-            $relative.StartsWith('/') -or $relative.StartsWith('\\') -or
-            $relative -match '(^|/)\.\.(/|$)' -or $relative.Contains('\\') -or
+            $relative.StartsWith('/') -or $relative.StartsWith('\') -or
+            $relative -match '(^|/)\.\.(/|$)' -or $relative.Contains('\') -or
             $manifestExpected.ContainsKey($relative)) {
             throw "发布目录自验发现不安全或重复的清单路径：$relative"
         }
@@ -146,8 +146,8 @@ function Test-ReleaseDirectoryIntegrity {
             throw '发布目录自验发现 SHA256SUMS.txt 格式不正确。'
         }
         $relative = [string]$checksumMatch.Groups['path'].Value
-        if ($relative.StartsWith('/') -or $relative.StartsWith('\\') -or
-            $relative -match '(^|/)\.\.(/|$)' -or $relative.Contains('\\') -or
+        if ($relative.StartsWith('/') -or $relative.StartsWith('\') -or
+            $relative -match '(^|/)\.\.(/|$)' -or $relative.Contains('\') -or
             $checksumExpected.ContainsKey($relative)) {
             throw "发布目录自验发现不安全或重复的摘要路径：$relative"
         }
