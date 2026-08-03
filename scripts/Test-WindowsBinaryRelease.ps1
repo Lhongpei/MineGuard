@@ -270,9 +270,65 @@ function Get-FreeLoopbackPort {
 }
 
 function ConvertTo-QuotedNativeArgument {
-    param([string]$Value)
-    if ($Value.Length -eq 0) { return '""' }
-    return '"' + $Value.Replace('"', '\"') + '"'
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
+    }
+    $Builder = New-Object Text.StringBuilder
+    [void]$Builder.Append([char]'"')
+    $BackslashCount = 0
+    foreach ($Character in $Value.ToCharArray()) {
+        if ($Character -eq [char]'\') {
+            $BackslashCount += 1
+            continue
+        }
+        if ($Character -eq [char]'"') {
+            [void]$Builder.Append([char]'\', (($BackslashCount * 2) + 1))
+            [void]$Builder.Append([char]'"')
+            $BackslashCount = 0
+            continue
+        }
+        if ($BackslashCount -gt 0) {
+            [void]$Builder.Append([char]'\', $BackslashCount)
+            $BackslashCount = 0
+        }
+        [void]$Builder.Append($Character)
+    }
+    if ($BackslashCount -gt 0) {
+        [void]$Builder.Append([char]'\', ($BackslashCount * 2))
+    }
+    [void]$Builder.Append([char]'"')
+    return $Builder.ToString()
+}
+
+function Invoke-WindowsGuiProcessAndWait {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$FilePath,
+        [object[]]$ArgumentList = @()
+    )
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+        throw "GUI executable does not exist: $FilePath"
+    }
+    $SerializedArguments = @(foreach ($Argument in $ArgumentList) {
+        if ($null -eq $Argument) {
+            throw "GUI process contains a null argument: $FilePath"
+        }
+        ConvertTo-QuotedNativeArgument -Value ([string]$Argument)
+    }) -join " "
+    $Process = Start-Process -FilePath $FilePath `
+        -ArgumentList $SerializedArguments -Wait -PassThru -ErrorAction Stop
+    try {
+        return [int]$Process.ExitCode
+    }
+    finally {
+        $Process.Dispose()
+    }
 }
 
 function Invoke-ExecutableChecked {
@@ -832,9 +888,10 @@ function Invoke-InstallerLifecycleTest {
         if ($Product -eq "agent") {
             $InstallArguments += "/STATE_ROOT=$AgentStateRoot"
         }
-        & $Installer @InstallArguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "$Product installer rejected a registered but Stopped service with exit code $LASTEXITCODE."
+        $InstallExitCode = Invoke-WindowsGuiProcessAndWait `
+            -FilePath $Installer -ArgumentList $InstallArguments
+        if ($InstallExitCode -ne 0) {
+            throw "$Product installer rejected a registered but Stopped service with exit code $InstallExitCode."
         }
         $RuntimeExecutable = if ($Product -eq "platform") {
             Join-Path $InstallRoot "runtime\MineGuardPlatform.exe"
@@ -973,16 +1030,19 @@ function Invoke-InstallerLifecycleTest {
         $ProbeService.WaitForStatus("Running", [TimeSpan]::FromSeconds(20))
         $RunningUpgradeArguments = @($InstallArguments | Where-Object { $_ -notlike "/LOG=*" })
         $RunningUpgradeArguments += "/LOG=$(Join-Path $VerificationRoot 'running-upgrade-rejection.log')"
-        & $Installer @RunningUpgradeArguments
-        if ($LASTEXITCODE -eq 0) {
+        $RunningUpgradeExitCode = Invoke-WindowsGuiProcessAndWait `
+            -FilePath $Installer -ArgumentList $RunningUpgradeArguments
+        if ($RunningUpgradeExitCode -eq 0) {
             throw "$Product installer accepted an upgrade while its service was Running."
         }
         Stop-Service -Name $ServiceName -Force
         $ProbeService.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(20))
         $ProbeService.Dispose()
 
-        & $Uninstallers[0].FullName /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-        if ($LASTEXITCODE -eq 0) {
+        $RegisteredServiceUninstallExitCode = Invoke-WindowsGuiProcessAndWait `
+            -FilePath $Uninstallers[0].FullName `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+        if ($RegisteredServiceUninstallExitCode -eq 0) {
             throw "$Product uninstaller accepted a still-registered service."
         }
         if (-not (Test-Path -LiteralPath $RuntimeExecutable -PathType Leaf)) {
@@ -1046,12 +1106,15 @@ function Invoke-InstallerLifecycleTest {
 
             $ForegroundUpgradeArguments = @($InstallArguments | Where-Object { $_ -notlike "/LOG=*" })
             $ForegroundUpgradeArguments += "/LOG=$(Join-Path $VerificationRoot 'foreground-upgrade-rejection.log')"
-            & $Installer @ForegroundUpgradeArguments
-            if ($LASTEXITCODE -eq 0) {
+            $ForegroundUpgradeExitCode = Invoke-WindowsGuiProcessAndWait `
+                -FilePath $Installer -ArgumentList $ForegroundUpgradeArguments
+            if ($ForegroundUpgradeExitCode -eq 0) {
                 throw "$Product installer accepted an upgrade while its exact foreground runtime was active."
             }
-            & $Uninstallers[0].FullName /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-            if ($LASTEXITCODE -eq 0) {
+            $ForegroundUninstallExitCode = Invoke-WindowsGuiProcessAndWait `
+                -FilePath $Uninstallers[0].FullName `
+                -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+            if ($ForegroundUninstallExitCode -eq 0) {
                 throw "$Product uninstaller accepted an active foreground runtime."
             }
             if (-not (Test-Path -LiteralPath $RuntimeExecutable -PathType Leaf)) {
@@ -1069,9 +1132,11 @@ function Invoke-InstallerLifecycleTest {
             }
             $ForegroundProcess.Dispose()
         }
-        & $Uninstallers[0].FullName /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-        if ($LASTEXITCODE -ne 0) {
-            throw "$Product uninstaller returned $LASTEXITCODE."
+        $FinalUninstallExitCode = Invoke-WindowsGuiProcessAndWait `
+            -FilePath $Uninstallers[0].FullName `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+        if ($FinalUninstallExitCode -ne 0) {
+            throw "$Product uninstaller returned $FinalUninstallExitCode."
         }
         Wait-InnoUninstallerSelfCleanup -Product $Product `
             -InstallRoot $InstallRoot -TimeoutSeconds 60

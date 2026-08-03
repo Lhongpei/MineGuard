@@ -145,6 +145,10 @@ jobs:
           }
           Write-Host ("Parsed {0} PowerShell deployment scripts." -f $files.Count)
 
+      - name: Verify GUI installer process waiting
+        shell: powershell
+        run: .\scripts\Test-WindowsGuiProcessWait.ps1
+
       - name: Validate neutral exchange contracts
         shell: pwsh
         run: python contracts/scripts/validate_contracts.py

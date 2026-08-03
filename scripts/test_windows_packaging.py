@@ -69,6 +69,7 @@ def test_layout() -> None:
         "packaging/windows/assets/Windows-binary-release-guide.html",
         "scripts/Build-WindowsBinaryRelease.ps1",
         "scripts/Test-WindowsBinaryRelease.ps1",
+        "scripts/Test-WindowsGuiProcessWait.ps1",
         "scripts/Test-WindowsInstallerFailurePropagation.ps1",
         "scripts/Test-WindowsAclGrantSemantics.ps1",
         "scripts/Invoke-WindowsAuthenticodeSign.ps1",
@@ -452,8 +453,31 @@ def test_audit_and_lifecycle() -> None:
             'if ($PSCmdlet.ParameterSetName -eq "SecretAudit")'
         )
     ]
+    assert lifecycle.count("Invoke-WindowsGuiProcessAndWait") == 6, (
+        "all installer, upgrade and uninstaller lifecycle launches must wait for "
+        "the GUI process and read its actual exit code"
+    )
+    assert not re.search(r"(?m)^\s*&\s*\$Installer\b", lifecycle)
+    assert not re.search(r"(?m)^\s*&\s*\$Uninstallers\[", lifecycle)
+    gui_wait = audit[
+        audit.index("function Invoke-WindowsGuiProcessAndWait") : audit.index(
+            "function Invoke-ExecutableChecked"
+        )
+    ]
+    for token in ("Start-Process", "-Wait", "-PassThru", ".ExitCode"):
+        assert token in gui_wait, f"GUI wait helper contract missing: {token}"
+    wait_probe = read("scripts/Test-WindowsGuiProcessWait.ps1")
+    for token in (
+        "WindowsApplication",
+        "Thread.Sleep(1200)",
+        "Invoke-WindowsGuiProcessAndWait",
+        "$ExitCode -ne 37",
+        "$Stopwatch.ElapsedMilliseconds -lt 900",
+        "completed marker.txt",
+    ):
+        assert token in wait_probe, f"fast GUI wait probe contract missing: {token}"
     final_uninstall = lifecycle.rindex(
-        "& $Uninstallers[0].FullName /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
+        "$FinalUninstallExitCode = Invoke-WindowsGuiProcessAndWait"
     )
     uninstaller_wait = lifecycle.index(
         "Wait-InnoUninstallerSelfCleanup -Product $Product"
