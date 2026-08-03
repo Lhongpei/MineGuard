@@ -526,6 +526,9 @@ if ($binaryMode) {
     $installedVersionPath = Join-Path $installedMetadataRoot 'VERSION.txt'
     if ((Test-Path -LiteralPath $installedExecutablePath -PathType Leaf) -and
         -not (Test-Path -LiteralPath $installedVersionPath -PathType Leaf)) {
+        if ($env:MINEGUARD_RELEASE_AUDIT_MODE -eq 'installer-guard-test') {
+            Write-Host 'MINEGUARD_RELEASE_AUDIT_MARKER=platform-missing-metadata'
+        }
         throw '检测到已安装的编译运行时但缺少 VERSION.txt；拒绝覆盖，请先核查安装完整性。'
     }
     if (Test-Path -LiteralPath $installedVersionPath -PathType Leaf) {
@@ -567,6 +570,9 @@ if ($binaryMode) {
             }
         }
         if ([version]$candidateVersionText -lt [version]$installedVersionText) {
+            if ($env:MINEGUARD_RELEASE_AUDIT_MODE -eq 'installer-guard-test') {
+                Write-Host 'MINEGUARD_RELEASE_AUDIT_MARKER=platform-downgrade'
+            }
             throw (
                 '默认拒绝将 MineGuard Platform 从 {0} 降级到 {1}。' -f `
                     $installedVersionText, $candidateVersionText
@@ -644,6 +650,9 @@ if ($binaryMode) {
     }
     if ((Test-Path -LiteralPath $runtimeTarget -PathType Container) -and
         (Test-MineGuardPlatformRuntimeProcess -RuntimeRoot $runtimeTarget)) {
+        if ($env:MINEGUARD_RELEASE_AUDIT_MODE -eq 'installer-guard-test') {
+            Write-Host 'MINEGUARD_RELEASE_AUDIT_MARKER=platform-runtime-process'
+        }
         throw '切换 Platform 运行时前必须停止 runtime 目录中的全部前台进程（含旧 Python/venv）。'
     }
     if ($AuditFailAfterRuntimeSwitch -and

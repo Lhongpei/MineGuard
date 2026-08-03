@@ -330,7 +330,7 @@ function Invoke-ProductInstallerExpectFailure {
             $env:MINEGUARD_RELEASE_AUDIT_MODE = "installer-rollback-test"
         }
         else {
-            Remove-Item Env:MINEGUARD_RELEASE_AUDIT_MODE -ErrorAction SilentlyContinue
+            $env:MINEGUARD_RELEASE_AUDIT_MODE = "installer-guard-test"
         }
         $PreviousNativeErrorActionPreference = $ErrorActionPreference
         try {
@@ -572,18 +572,14 @@ function Test-OneTransactionalRollbackAndDowngrade {
         }
         Wait-ProcessExecutableVisible -ProcessId $LegacyProcess.Id `
             -ExecutablePath $LegacyProcessExecutable
-        $LegacyFailurePattern = if ($Product -eq "platform") {
-            "必须停止 runtime 目录中的全部前台进程"
-        }
-        else {
-            "Stop every process running from the installed Agent runtime"
-        }
         [void](Invoke-ProductInstallerExpectFailure `
             -Product $Product -InstallScript $InstallScript `
             -OriginalStage $OriginalStage -InstallRoot $InstallRoot `
             -StateRoot $StateRoot `
             -FailureKind "running legacy runtime process" `
-            -ExpectedOutputPattern ([regex]::Escape($LegacyFailurePattern)))
+            -ExpectedOutputPattern ([regex]::Escape(
+                "MINEGUARD_RELEASE_AUDIT_MARKER=$Product-runtime-process"
+            )))
     }
     finally {
         if ($null -ne $LegacyProcess -and -not $LegacyProcess.HasExited) {
@@ -604,18 +600,14 @@ function Test-OneTransactionalRollbackAndDowngrade {
     }
     Remove-Item -LiteralPath $InstalledVersion -Force
     try {
-        $MissingMetadataPattern = if ($Product -eq "platform") {
-            "检测到已安装的编译运行时但缺少 VERSION.txt"
-        }
-        else {
-            "An active compiled Agent runtime has incomplete release metadata"
-        }
         [void](Invoke-ProductInstallerExpectFailure `
             -Product $Product -InstallScript $InstallScript `
             -OriginalStage $OriginalStage -InstallRoot $InstallRoot `
             -StateRoot $StateRoot `
             -FailureKind "active binary with missing release metadata" `
-            -ExpectedOutputPattern ([regex]::Escape($MissingMetadataPattern)))
+            -ExpectedOutputPattern ([regex]::Escape(
+                "MINEGUARD_RELEASE_AUDIT_MARKER=$Product-missing-metadata"
+            )))
     }
     finally {
         if ($Product -eq "platform") {
@@ -638,7 +630,7 @@ function Test-OneTransactionalRollbackAndDowngrade {
             -OriginalStage $OriginalStage -InstallRoot $InstallRoot `
             -StateRoot $StateRoot -FailureKind "downgrade" `
             -ExpectedOutputPattern ([regex]::Escape(
-                "999.0.0 降级到 $Version"
+                "MINEGUARD_RELEASE_AUDIT_MARKER=platform-downgrade"
             ))
         foreach ($Sentinel in $Sentinels) {
             if (-not (Test-Path -LiteralPath $Sentinel -PathType Leaf)) {

@@ -282,6 +282,9 @@ function Assert-NoEnterpriseAgentRuntimeProcesses {
         $Descriptions = @($Running | ForEach-Object {
             "PID=$($_.ProcessId) Name=$($_.Name) Path=$($_.ExecutablePath)"
         }) -join "; "
+        if ($env:MINEGUARD_RELEASE_AUDIT_MODE -eq "installer-guard-test") {
+            Write-Host "MINEGUARD_RELEASE_AUDIT_MARKER=agent-runtime-process"
+        }
         throw "Stop every process running from the installed Agent runtime before replacement: $Descriptions"
     }
 }
@@ -724,6 +727,9 @@ function Test-InstalledBinaryRuntime {
         $BuildMetadataPath, $ChecksumsPath
     )) {
         if (-not (Test-Path -LiteralPath $Required)) {
+            if ($env:MINEGUARD_RELEASE_AUDIT_MODE -eq "installer-guard-test") {
+                Write-Host "MINEGUARD_RELEASE_AUDIT_MARKER=agent-missing-metadata"
+            }
             throw "An active compiled Agent runtime has incomplete release metadata: $Required"
         }
     }
