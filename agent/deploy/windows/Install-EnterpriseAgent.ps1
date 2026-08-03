@@ -38,6 +38,175 @@ function Invoke-NativeChecked {
     }
 }
 
+function Assert-EAOwnedPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedParent,
+        [Parameter(Mandatory = $true)][string]$AllowedLeafPattern
+    )
+    $FullPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $FullParent = [IO.Path]::GetFullPath($ExpectedParent).TrimEnd('\')
+    $ActualParent = [IO.Path]::GetDirectoryName($FullPath)
+    $Leaf = [IO.Path]::GetFileName($FullPath)
+    if (-not $ActualParent.Equals(
+            $FullParent, [StringComparison]::OrdinalIgnoreCase
+        ) -or -not [regex]::IsMatch(
+            $Leaf,
+            $AllowedLeafPattern,
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )) {
+        throw "Refusing to operate on a path not owned by this transaction: $FullPath"
+    }
+    if (Test-Path -LiteralPath $FullPath) {
+        $Item = Get-Item -LiteralPath $FullPath -Force
+        if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing to operate on a reparse point: $FullPath"
+        }
+    }
+}
+
+function Remove-EAOwnedPathWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedParent,
+        [Parameter(Mandatory = $true)][string]$AllowedLeafPattern,
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 60
+    )
+    Assert-EAOwnedPath -Path $Path -ExpectedParent $ExpectedParent `
+        -AllowedLeafPattern $AllowedLeafPattern
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $LastError = $null
+    while ($true) {
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        try {
+            $Item = Get-Item -LiteralPath $Path -Force
+            if ($Item.PSIsContainer) {
+                Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            }
+            else {
+                Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+            }
+        }
+        catch {
+            $LastError = $_
+        }
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        if ([DateTime]::UtcNow -ge $Deadline) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    $Detail = if ($null -eq $LastError) {
+        "the path still exists"
+    }
+    else {
+        $LastError.Exception.Message
+    }
+    throw "Unable to remove transaction path within $TimeoutSeconds seconds: $Path. Last error: $Detail"
+}
+
+function Move-EAOwnedPathWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$SourceParent,
+        [Parameter(Mandatory = $true)][string]$SourceLeafPattern,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][string]$DestinationParent,
+        [Parameter(Mandatory = $true)][string]$DestinationLeafPattern,
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 60
+    )
+    Assert-EAOwnedPath -Path $SourcePath -ExpectedParent $SourceParent `
+        -AllowedLeafPattern $SourceLeafPattern
+    Assert-EAOwnedPath -Path $DestinationPath `
+        -ExpectedParent $DestinationParent `
+        -AllowedLeafPattern $DestinationLeafPattern
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
+        throw "Transaction source does not exist: $SourcePath"
+    }
+    if (Test-Path -LiteralPath $DestinationPath) {
+        throw "Transaction destination already exists; refusing overwrite: $DestinationPath"
+    }
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $LastError = $null
+    $MoveAttempted = $false
+    while ($true) {
+        if (-not (Test-Path -LiteralPath $SourcePath)) {
+            if ($MoveAttempted -and
+                (Test-Path -LiteralPath $DestinationPath)) { return }
+            throw "Transaction source and destination are both absent: $SourcePath -> $DestinationPath"
+        }
+        if (Test-Path -LiteralPath $DestinationPath) {
+            throw "Transaction destination already exists; refusing overwrite: $DestinationPath"
+        }
+        try {
+            $MoveAttempted = $true
+            Move-Item -LiteralPath $SourcePath -Destination $DestinationPath `
+                -ErrorAction Stop
+        }
+        catch {
+            $LastError = $_
+        }
+        if (-not (Test-Path -LiteralPath $SourcePath) -and
+            (Test-Path -LiteralPath $DestinationPath)) {
+            return
+        }
+        if ([DateTime]::UtcNow -ge $Deadline) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    $Detail = if ($null -eq $LastError) {
+        "the move did not complete"
+    }
+    else {
+        $LastError.Exception.Message
+    }
+    throw "Unable to move transaction path within $TimeoutSeconds seconds: $SourcePath. Last error: $Detail"
+}
+
+function Assert-EABinaryInstallPathBudget {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][object]$Manifest,
+        [ValidateRange(200, 259)][int]$MaximumPathLength = 240
+    )
+    $SyntheticGuid = "f" * 32
+    $LongestPath = $Root
+    foreach ($Entry in @($Manifest.files)) {
+        $Relative = ([string]$Entry.path).Replace('\', '/')
+        $TransactionLeaf = $null
+        $TransactionRelative = $null
+        if ($Relative.StartsWith(
+                "runtime/", [StringComparison]::OrdinalIgnoreCase
+            )) {
+            $TransactionLeaf = ".runtime-rollback-" + $SyntheticGuid
+            $TransactionRelative = $Relative.Substring("runtime/".Length)
+        }
+        elseif ($Relative.StartsWith(
+                "deploy/windows/", [StringComparison]::OrdinalIgnoreCase
+            )) {
+            $TransactionLeaf = ".deploy-rollback-" + $SyntheticGuid
+            $TransactionRelative = $Relative.Substring("deploy/windows/".Length)
+        }
+        elseif ($Relative -in @(
+                "VERSION.txt", "build-metadata.json", "release-manifest.json",
+                "SHA256SUMS.txt"
+            )) {
+            $TransactionLeaf = ".release-metadata-rollback-" + $SyntheticGuid
+            $TransactionRelative = $Relative
+        }
+        if ($null -eq $TransactionLeaf) { continue }
+        $Projected = Join-Path (Join-Path $Root $TransactionLeaf) `
+            $TransactionRelative.Replace('/', '\')
+        if ($Projected.Length -gt $LongestPath.Length) {
+            $LongestPath = $Projected
+        }
+    }
+    if ($LongestPath.Length -gt $MaximumPathLength) {
+        throw (
+            "InstallRoot is too deep: this release needs a transaction path of " +
+            "$($LongestPath.Length) characters, above the safe limit of " +
+            "$MaximumPathLength. Choose a shorter InstallRoot."
+        )
+    }
+}
+
 function Assert-LocalFixedPath {
     param([string]$Name, [string]$PathValue)
     if ([string]::IsNullOrWhiteSpace($PathValue)) { throw "$Name cannot be empty." }
@@ -733,6 +902,7 @@ if (-not $BuildFromSource) {
     $Manifest = $ReleaseContract.Manifest
     $CandidateBuildMetadata = $ReleaseContract.BuildMetadata
     $CandidateVersionText = [string]$ReleaseContract.Version
+    Assert-EABinaryInstallPathBudget -Root $InstallRoot -Manifest $Manifest
     $ExistingVersionText = Test-InstalledBinaryRuntime `
         -ApplicationRoot $InstallRoot -RuntimeDirectory $RuntimeRoot
     if ($null -ne $ExistingVersionText -and
@@ -800,9 +970,15 @@ if (-not $BuildFromSource) {
     $RollbackMetadata = Join-Path $InstallRoot (".release-metadata-rollback-" + [Guid]::NewGuid().ToString("N"))
     $StagedDeploy = Join-Path $InstallRoot (".deploy-stage-" + [Guid]::NewGuid().ToString("N"))
     $RollbackDeploy = Join-Path $InstallRoot (".deploy-rollback-" + [Guid]::NewGuid().ToString("N"))
+    $DeployParent = Split-Path -Parent $DeployTarget
+    $TransactionLeafPattern = `
+        '^\.(?:runtime|deploy|release-metadata)-(?:stage|rollback)-[a-f0-9]{32}$'
     $RuntimeSwitched = $false
     $MetadataSwitched = $false
     $DeploySwitched = $false
+    $TransactionError = $null
+    $RollbackErrors = New-Object System.Collections.Generic.List[string]
+    $CleanupErrors = New-Object System.Collections.Generic.List[string]
     try {
         New-Item -ItemType Directory -Path $StagedRuntime | Out-Null
         foreach ($Item in Get-ChildItem -LiteralPath $BinaryRuntime -Force) {
@@ -859,20 +1035,37 @@ if (-not $BuildFromSource) {
         }
         Assert-NoEnterpriseAgentRuntimeProcesses -RuntimeDirectory $RuntimeRoot
         if (Test-Path -LiteralPath $RuntimeRoot) {
-            Move-Item -LiteralPath $RuntimeRoot -Destination $RollbackRuntime
+            Move-EAOwnedPathWithRetry `
+                -SourcePath $RuntimeRoot -SourceParent $InstallRoot `
+                -SourceLeafPattern '^runtime$' `
+                -DestinationPath $RollbackRuntime `
+                -DestinationParent $InstallRoot `
+                -DestinationLeafPattern $TransactionLeafPattern
         }
-        Move-Item -LiteralPath $StagedRuntime -Destination $RuntimeRoot
+        Move-EAOwnedPathWithRetry `
+            -SourcePath $StagedRuntime -SourceParent $InstallRoot `
+            -SourceLeafPattern $TransactionLeafPattern `
+            -DestinationPath $RuntimeRoot -DestinationParent $InstallRoot `
+            -DestinationLeafPattern '^runtime$'
         $RuntimeSwitched = $true
         $InstalledVersion = (& $InstalledExecutable --version | Select-Object -Last 1).Trim()
         if ($LASTEXITCODE -ne 0 -or $InstalledVersion -ne $StagedVersion) {
             throw "Installed binary failed post-install version verification."
         }
-        $DeployParent = Split-Path -Parent $DeployTarget
         New-Item -ItemType Directory -Path $DeployParent -Force | Out-Null
         if (Test-Path -LiteralPath $DeployTarget) {
-            Move-Item -LiteralPath $DeployTarget -Destination $RollbackDeploy
+            Move-EAOwnedPathWithRetry `
+                -SourcePath $DeployTarget -SourceParent $DeployParent `
+                -SourceLeafPattern '^windows$' `
+                -DestinationPath $RollbackDeploy `
+                -DestinationParent $InstallRoot `
+                -DestinationLeafPattern $TransactionLeafPattern
         }
-        Move-Item -LiteralPath $StagedDeploy -Destination $DeployTarget
+        Move-EAOwnedPathWithRetry `
+            -SourcePath $StagedDeploy -SourceParent $InstallRoot `
+            -SourceLeafPattern $TransactionLeafPattern `
+            -DestinationPath $DeployTarget -DestinationParent $DeployParent `
+            -DestinationLeafPattern '^windows$'
         $DeploySwitched = $true
         New-Item -ItemType Directory -Path $StagedMetadata | Out-Null
         foreach ($MetadataName in @("VERSION.txt", "build-metadata.json", "release-manifest.json", "SHA256SUMS.txt")) {
@@ -918,9 +1111,19 @@ if (-not $BuildFromSource) {
             "/T", "/C"
         )
         if (Test-Path -LiteralPath $ReleaseMetadata) {
-            Move-Item -LiteralPath $ReleaseMetadata -Destination $RollbackMetadata
+            Move-EAOwnedPathWithRetry `
+                -SourcePath $ReleaseMetadata -SourceParent $InstallRoot `
+                -SourceLeafPattern '^release-metadata$' `
+                -DestinationPath $RollbackMetadata `
+                -DestinationParent $InstallRoot `
+                -DestinationLeafPattern $TransactionLeafPattern
         }
-        Move-Item -LiteralPath $StagedMetadata -Destination $ReleaseMetadata
+        Move-EAOwnedPathWithRetry `
+            -SourcePath $StagedMetadata -SourceParent $InstallRoot `
+            -SourceLeafPattern $TransactionLeafPattern `
+            -DestinationPath $ReleaseMetadata `
+            -DestinationParent $InstallRoot `
+            -DestinationLeafPattern '^release-metadata$'
         $MetadataSwitched = $true
         $PostInstallVersion = Test-InstalledBinaryRuntime `
             -ApplicationRoot $InstallRoot -RuntimeDirectory $RuntimeRoot
@@ -928,44 +1131,171 @@ if (-not $BuildFromSource) {
             throw "Post-install release verification returned an unexpected Agent version."
         }
         if ($AuditFailAfterRuntimeSwitch) {
+            Write-Host "MINEGUARD_RELEASE_AUDIT_MARKER=agent-post-switch"
             throw "Release audit fault injection: verify complete rollback after the Agent runtime switch."
         }
     }
     catch {
-        if ($DeploySwitched -and (Test-Path -LiteralPath $DeployTarget)) {
-            Remove-Item -LiteralPath $DeployTarget -Recurse -Force
+        $TransactionError = $_
+        if ($DeploySwitched) {
+            try {
+                Move-EAOwnedPathWithRetry `
+                    -SourcePath $DeployTarget -SourceParent $DeployParent `
+                    -SourceLeafPattern '^windows$' `
+                    -DestinationPath $StagedDeploy `
+                    -DestinationParent $InstallRoot `
+                    -DestinationLeafPattern $TransactionLeafPattern
+                $DeploySwitched = $false
+            }
+            catch {
+                $RollbackErrors.Add(
+                    "Unable to quarantine candidate deployment scripts: $($_.Exception.Message)"
+                )
+            }
         }
         if (Test-Path -LiteralPath $RollbackDeploy) {
-            Move-Item -LiteralPath $RollbackDeploy -Destination $DeployTarget
+            if ($DeploySwitched) {
+                $RollbackErrors.Add(
+                    "Candidate deployment scripts remain active; prior scripts cannot be restored."
+                )
+            }
+            else {
+                try {
+                    Move-EAOwnedPathWithRetry `
+                        -SourcePath $RollbackDeploy `
+                        -SourceParent $InstallRoot `
+                        -SourceLeafPattern $TransactionLeafPattern `
+                        -DestinationPath $DeployTarget `
+                        -DestinationParent $DeployParent `
+                        -DestinationLeafPattern '^windows$'
+                }
+                catch {
+                    $RollbackErrors.Add(
+                        "Unable to restore prior deployment scripts: $($_.Exception.Message)"
+                    )
+                }
+            }
         }
-        if ($MetadataSwitched -and (Test-Path -LiteralPath $ReleaseMetadata)) {
-            Remove-Item -LiteralPath $ReleaseMetadata -Recurse -Force
+        if ($MetadataSwitched) {
+            try {
+                Move-EAOwnedPathWithRetry `
+                    -SourcePath $ReleaseMetadata -SourceParent $InstallRoot `
+                    -SourceLeafPattern '^release-metadata$' `
+                    -DestinationPath $StagedMetadata `
+                    -DestinationParent $InstallRoot `
+                    -DestinationLeafPattern $TransactionLeafPattern
+                $MetadataSwitched = $false
+            }
+            catch {
+                $RollbackErrors.Add(
+                    "Unable to quarantine candidate release metadata: $($_.Exception.Message)"
+                )
+            }
         }
         if (Test-Path -LiteralPath $RollbackMetadata) {
-            Move-Item -LiteralPath $RollbackMetadata -Destination $ReleaseMetadata
+            if ($MetadataSwitched) {
+                $RollbackErrors.Add(
+                    "Candidate release metadata remains active; prior metadata cannot be restored."
+                )
+            }
+            else {
+                try {
+                    Move-EAOwnedPathWithRetry `
+                        -SourcePath $RollbackMetadata `
+                        -SourceParent $InstallRoot `
+                        -SourceLeafPattern $TransactionLeafPattern `
+                        -DestinationPath $ReleaseMetadata `
+                        -DestinationParent $InstallRoot `
+                        -DestinationLeafPattern '^release-metadata$'
+                }
+                catch {
+                    $RollbackErrors.Add(
+                        "Unable to restore prior release metadata: $($_.Exception.Message)"
+                    )
+                }
+            }
         }
-        if ($RuntimeSwitched -and (Test-Path -LiteralPath $RuntimeRoot)) {
-            Remove-Item -LiteralPath $RuntimeRoot -Recurse -Force
+        if ($RuntimeSwitched) {
+            try {
+                Move-EAOwnedPathWithRetry `
+                    -SourcePath $RuntimeRoot -SourceParent $InstallRoot `
+                    -SourceLeafPattern '^runtime$' `
+                    -DestinationPath $StagedRuntime `
+                    -DestinationParent $InstallRoot `
+                    -DestinationLeafPattern $TransactionLeafPattern
+                $RuntimeSwitched = $false
+            }
+            catch {
+                $RollbackErrors.Add(
+                    "Unable to quarantine candidate runtime: $($_.Exception.Message)"
+                )
+            }
         }
         if (Test-Path -LiteralPath $RollbackRuntime) {
-            Move-Item -LiteralPath $RollbackRuntime -Destination $RuntimeRoot
+            if ($RuntimeSwitched) {
+                $RollbackErrors.Add(
+                    "Candidate runtime remains active; prior runtime cannot be restored."
+                )
+            }
+            else {
+                try {
+                    Move-EAOwnedPathWithRetry `
+                        -SourcePath $RollbackRuntime `
+                        -SourceParent $InstallRoot `
+                        -SourceLeafPattern $TransactionLeafPattern `
+                        -DestinationPath $RuntimeRoot `
+                        -DestinationParent $InstallRoot `
+                        -DestinationLeafPattern '^runtime$'
+                }
+                catch {
+                    $RollbackErrors.Add(
+                        "Unable to restore prior runtime: $($_.Exception.Message)"
+                    )
+                }
+            }
         }
-        throw
     }
     finally {
-        if (Test-Path -LiteralPath $StagedRuntime) {
-            Remove-Item -LiteralPath $StagedRuntime -Recurse -Force
+        foreach ($StagedPath in @(
+            $StagedRuntime, $StagedMetadata, $StagedDeploy
+        )) {
+            try {
+                Remove-EAOwnedPathWithRetry -Path $StagedPath `
+                    -ExpectedParent $InstallRoot `
+                    -AllowedLeafPattern $TransactionLeafPattern
+            }
+            catch {
+                $CleanupErrors.Add(
+                    "Unable to clean candidate transaction path ${StagedPath}: $($_.Exception.Message)"
+                )
+            }
         }
-        if (Test-Path -LiteralPath $StagedMetadata) {
-            Remove-Item -LiteralPath $StagedMetadata -Recurse -Force
+    }
+    if ($null -ne $TransactionError) {
+        $AllRecoveryErrors = @($RollbackErrors) + @($CleanupErrors)
+        if ($AllRecoveryErrors.Count -gt 0) {
+            $Message = (
+                "Enterprise Agent installation failed and rollback was incomplete. " +
+                "Original error: $($TransactionError.Exception.Message); " +
+                "rollback errors: $($AllRecoveryErrors -join ' | ')"
+            )
+            throw [System.Exception]::new(
+                $Message, $TransactionError.Exception
+            )
         }
-        if (Test-Path -LiteralPath $StagedDeploy) {
-            Remove-Item -LiteralPath $StagedDeploy -Recurse -Force
-        }
+        $PSCmdlet.ThrowTerminatingError($TransactionError)
+    }
+    if ($CleanupErrors.Count -gt 0) {
+        throw (
+            "Enterprise Agent transaction cleanup did not complete: " +
+            ($CleanupErrors -join " | ")
+        )
     }
     if (Test-Path -LiteralPath $RollbackRuntime) {
         try {
-            Remove-Item -LiteralPath $RollbackRuntime -Recurse -Force
+            Remove-EAOwnedPathWithRetry -Path $RollbackRuntime `
+                -ExpectedParent $InstallRoot `
+                -AllowedLeafPattern $TransactionLeafPattern
         }
         catch {
             Write-Warning "Installation succeeded, but the old runtime is locked and remains at $RollbackRuntime. Remove it after confirming no process uses it."
@@ -973,7 +1303,9 @@ if (-not $BuildFromSource) {
     }
     if (Test-Path -LiteralPath $RollbackMetadata) {
         try {
-            Remove-Item -LiteralPath $RollbackMetadata -Recurse -Force
+            Remove-EAOwnedPathWithRetry -Path $RollbackMetadata `
+                -ExpectedParent $InstallRoot `
+                -AllowedLeafPattern $TransactionLeafPattern
         }
         catch {
             Write-Warning "Installation succeeded, but old release metadata remains at $RollbackMetadata. It is not active and may be removed later."
@@ -981,7 +1313,9 @@ if (-not $BuildFromSource) {
     }
     if (Test-Path -LiteralPath $RollbackDeploy) {
         try {
-            Remove-Item -LiteralPath $RollbackDeploy -Recurse -Force
+            Remove-EAOwnedPathWithRetry -Path $RollbackDeploy `
+                -ExpectedParent $InstallRoot `
+                -AllowedLeafPattern $TransactionLeafPattern
         }
         catch {
             Write-Warning "Installation succeeded, but old deployment scripts remain at $RollbackDeploy. They are not active and may be removed later."

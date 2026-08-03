@@ -149,6 +149,62 @@ function Remove-DirectoryWithRetry {
     )
 }
 
+function Remove-FileWithRetry {
+    param(
+        [string]$PathValue,
+        [ValidateRange(1, 120)][int]$TimeoutSeconds = 30
+    )
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $LastCleanupError = $null
+    while ($true) {
+        if (-not (Test-Path -LiteralPath $PathValue)) { return }
+        try {
+            Remove-Item -LiteralPath $PathValue -Force -ErrorAction Stop
+        }
+        catch {
+            $LastCleanupError = $_
+        }
+        if (-not (Test-Path -LiteralPath $PathValue)) { return }
+        if ([DateTime]::UtcNow -ge $Deadline) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    $FailureDetail = if ($null -eq $LastCleanupError) {
+        "the file still exists"
+    }
+    else {
+        $LastCleanupError.Exception.Message
+    }
+    throw (
+        "Failure-probe file cleanup did not finish within $TimeoutSeconds " +
+        "seconds: $PathValue. Last error: $FailureDetail"
+    )
+}
+
+function Wait-ProcessExecutableVisible {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][string]$ExecutablePath,
+        [ValidateRange(1, 60)][int]$TimeoutSeconds = 10
+    )
+    $ExpectedPath = [IO.Path]::GetFullPath($ExecutablePath)
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $Deadline) {
+        $Process = Get-CimInstance Win32_Process `
+            -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+        if ($null -ne $Process -and
+            -not [string]::IsNullOrWhiteSpace([string]$Process.ExecutablePath)) {
+            $ActualPath = [IO.Path]::GetFullPath([string]$Process.ExecutablePath)
+            if ($ActualPath.Equals(
+                    $ExpectedPath, [StringComparison]::OrdinalIgnoreCase
+                )) {
+                return
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "Process $ProcessId was not visible through CIM at $ExpectedPath."
+}
+
 function Write-FailureProbeLog {
     param([string]$Product, [string]$LogPath)
     if (-not (Test-Path -LiteralPath $LogPath)) {
@@ -168,10 +224,10 @@ function Test-OneFailureProbe {
         [string]$Version,
         [string]$ProbeRoot
     )
-    $CorruptStage = Join-Path $ProbeRoot "$Product-corrupt-stage"
-    $ProbeOutput = Join-Path $ProbeRoot "$Product-output"
-    $InstallRoot = Join-Path $ProbeRoot "$Product-install"
-    $ProbeLog = Join-Path $ProbeRoot "$Product-failure.log"
+    $CorruptStage = Join-Path $ProbeRoot "c"
+    $ProbeOutput = Join-Path $ProbeRoot "o"
+    $InstallRoot = Join-Path $ProbeRoot "i"
+    $ProbeLog = Join-Path $ProbeRoot "f.log"
     New-Item -ItemType Directory -Path $ProbeRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $CorruptStage | Out-Null
     New-Item -ItemType Directory -Path $ProbeOutput | Out-Null
@@ -211,7 +267,7 @@ function Test-OneFailureProbe {
         "/DIR=$InstallRoot", "/LOG=$ProbeLog"
     )
     if ($Product -eq "agent") {
-        $InstallArguments += "/STATE_ROOT=$(Join-Path $ProbeRoot 'agent-state')"
+        $InstallArguments += "/STATE_ROOT=$(Join-Path $ProbeRoot 's')"
     }
     $ProbeExitCode = Invoke-ProcessTreeWithTransientAccessRetry `
         -FilePath $ProbeInstaller -ArgumentList $InstallArguments `
@@ -247,7 +303,8 @@ function Invoke-ProductInstallerExpectFailure {
         [string]$InstallRoot,
         [string]$StateRoot,
         [switch]$InjectAfterSwitch,
-        [string]$FailureKind = "guarded failure"
+        [string]$FailureKind = "guarded failure",
+        [string]$ExpectedOutputPattern = ""
     )
     $Arguments = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $InstallScript
@@ -266,6 +323,8 @@ function Invoke-ProductInstallerExpectFailure {
         $Arguments += "-AuditFailAfterRuntimeSwitch"
     }
     $PreviousAuditMode = $env:MINEGUARD_RELEASE_AUDIT_MODE
+    $ChildOutput = @()
+    $ExitCode = $null
     try {
         if ($InjectAfterSwitch) {
             $env:MINEGUARD_RELEASE_AUDIT_MODE = "installer-rollback-test"
@@ -273,8 +332,18 @@ function Invoke-ProductInstallerExpectFailure {
         else {
             Remove-Item Env:MINEGUARD_RELEASE_AUDIT_MODE -ErrorAction SilentlyContinue
         }
-        & powershell.exe @Arguments
-        $ExitCode = $LASTEXITCODE
+        $PreviousNativeErrorActionPreference = $ErrorActionPreference
+        try {
+            # Windows PowerShell 5.1 can promote redirected native stderr when
+            # ErrorActionPreference is Stop. Capture this expected failing child
+            # under Continue, then make the decision solely from its exit code.
+            $ErrorActionPreference = "Continue"
+            $ChildOutput = @(& powershell.exe @Arguments 2>&1)
+            $ExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $PreviousNativeErrorActionPreference
+        }
     }
     finally {
         if ($null -eq $PreviousAuditMode) {
@@ -284,8 +353,24 @@ function Invoke-ProductInstallerExpectFailure {
             $env:MINEGUARD_RELEASE_AUDIT_MODE = $PreviousAuditMode
         }
     }
+    foreach ($Line in $ChildOutput) {
+        Write-Host ([string]$Line)
+    }
+    if ($null -eq $ExitCode) {
+        throw "$Product product installer did not produce an exit code for the $FailureKind probe."
+    }
     if ($ExitCode -eq 0) {
         throw "$Product product installer incorrectly accepted the $FailureKind probe."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedOutputPattern)) {
+        $ChildOutputText = ($ChildOutput | Out-String)
+        if ($ChildOutputText -notmatch $ExpectedOutputPattern) {
+            throw (
+                "$Product product installer failed before reaching the expected " +
+                "$FailureKind checkpoint. Required output pattern: " +
+                $ExpectedOutputPattern
+            )
+        }
     }
     return $ExitCode
 }
@@ -298,6 +383,17 @@ function Get-ProductTreeSnapshot {
         [pscustomobject]@{ Prefix = "operations"; Root = $OperationsRoot },
         [pscustomobject]@{ Prefix = "metadata"; Root = $MetadataRoot }
     )) {
+        foreach ($Directory in Get-ChildItem -LiteralPath $Definition.Root `
+            -Directory -Recurse -Force) {
+            $Relative = ($Directory.FullName.Substring(
+                $Definition.Root.Length
+            )).TrimStart('\').Replace('\', '/')
+            $Key = "$($Definition.Prefix)/$Relative/"
+            if ($Snapshot.ContainsKey($Key)) {
+                throw "Duplicate rollback snapshot path: $Key"
+            }
+            $Snapshot[$Key] = "<directory>"
+        }
         foreach ($File in Get-ChildItem -LiteralPath $Definition.Root `
             -File -Recurse -Force) {
             $Relative = ($File.FullName.Substring(
@@ -341,8 +437,8 @@ function Test-OneTransactionalRollbackAndDowngrade {
         [string]$Version,
         [string]$ProbeRoot
     )
-    $InstallRoot = Join-Path $ProbeRoot "$Product-installed"
-    $StateRoot = Join-Path $ProbeRoot "$Product-state"
+    $InstallRoot = Join-Path $ProbeRoot "i"
+    $StateRoot = Join-Path $ProbeRoot "s"
     $RuntimeRoot = Join-Path $InstallRoot "runtime"
     $MetadataRoot = Join-Path $InstallRoot "release-metadata"
     $OperationsRoot = if ($Product -eq "platform") {
@@ -385,6 +481,8 @@ function Test-OneTransactionalRollbackAndDowngrade {
             Copy-Item -LiteralPath (Join-Path $OriginalStage $MetadataName) `
                 -Destination $MetadataRoot
         }
+        New-Item -ItemType Directory `
+            -Path (Join-Path $RuntimeRoot ".prior-install-identity") | Out-Null
         $PriorSnapshot = Get-ProductTreeSnapshot -RuntimeRoot $RuntimeRoot `
             -OperationsRoot $OperationsRoot -MetadataRoot $MetadataRoot
     }
@@ -402,6 +500,8 @@ function Test-OneTransactionalRollbackAndDowngrade {
             ($Version + [Environment]::NewLine),
             (New-Object Text.UTF8Encoding($false))
         )
+        $PriorSnapshot = Get-ProductTreeSnapshot -RuntimeRoot $RuntimeRoot `
+            -OperationsRoot $OperationsRoot -MetadataRoot $MetadataRoot
     }
     $InstallScriptName = if ($Product -eq "platform") {
         "Install-MineGuardPlatform.ps1"
@@ -414,7 +514,10 @@ function Test-OneTransactionalRollbackAndDowngrade {
         -Product $Product -InstallScript $InstallScript `
         -OriginalStage $OriginalStage -InstallRoot $InstallRoot `
         -StateRoot $StateRoot -InjectAfterSwitch `
-        -FailureKind "post-switch audit fault"
+        -FailureKind "post-switch audit fault" `
+        -ExpectedOutputPattern ([regex]::Escape(
+            "MINEGUARD_RELEASE_AUDIT_MARKER=$Product-post-switch"
+        ))
 
     $NewExecutable = if ($Product -eq "platform") {
         Join-Path $RuntimeRoot "MineGuardPlatform.exe"
@@ -423,6 +526,9 @@ function Test-OneTransactionalRollbackAndDowngrade {
         Join-Path $RuntimeRoot "MineGuardEnterpriseAgent.exe"
     }
     if ($Product -eq "platform") {
+        Assert-ProductTreeSnapshot -Expected $PriorSnapshot `
+            -RuntimeRoot $RuntimeRoot -OperationsRoot $OperationsRoot `
+            -MetadataRoot $MetadataRoot -Label "Platform post-switch rollback"
         foreach ($Sentinel in $Sentinels) {
             if (-not (Test-Path -LiteralPath $Sentinel -PathType Leaf)) {
                 throw "$Product post-switch rollback did not restore prior content: $Sentinel"
@@ -461,23 +567,30 @@ function Test-OneTransactionalRollbackAndDowngrade {
     try {
         $LegacyProcess = Start-Process -FilePath $LegacyProcessExecutable `
             -ArgumentList @("-t", "127.0.0.1") -WindowStyle Hidden -PassThru
-        Start-Sleep -Milliseconds 500
         if ($LegacyProcess.HasExited) {
             throw "$Product legacy-runtime process probe exited before the installer check."
+        }
+        Wait-ProcessExecutableVisible -ProcessId $LegacyProcess.Id `
+            -ExecutablePath $LegacyProcessExecutable
+        $LegacyFailurePattern = if ($Product -eq "platform") {
+            "必须停止 runtime 目录中的全部前台进程"
+        }
+        else {
+            "Stop every process running from the installed Agent runtime"
         }
         [void](Invoke-ProductInstallerExpectFailure `
             -Product $Product -InstallScript $InstallScript `
             -OriginalStage $OriginalStage -InstallRoot $InstallRoot `
             -StateRoot $StateRoot `
-            -FailureKind "running legacy runtime process")
+            -FailureKind "running legacy runtime process" `
+            -ExpectedOutputPattern ([regex]::Escape($LegacyFailurePattern)))
     }
     finally {
         if ($null -ne $LegacyProcess -and -not $LegacyProcess.HasExited) {
             Stop-Process -Id $LegacyProcess.Id -Force
             $LegacyProcess.WaitForExit()
         }
-        Remove-Item -LiteralPath $LegacyProcessExecutable -Force `
-            -ErrorAction SilentlyContinue
+        Remove-FileWithRetry -PathValue $LegacyProcessExecutable
     }
 
     $CandidateExecutable = if ($Product -eq "platform") {
@@ -491,11 +604,18 @@ function Test-OneTransactionalRollbackAndDowngrade {
     }
     Remove-Item -LiteralPath $InstalledVersion -Force
     try {
+        $MissingMetadataPattern = if ($Product -eq "platform") {
+            "检测到已安装的编译运行时但缺少 VERSION.txt"
+        }
+        else {
+            "An active compiled Agent runtime has incomplete release metadata"
+        }
         [void](Invoke-ProductInstallerExpectFailure `
             -Product $Product -InstallScript $InstallScript `
             -OriginalStage $OriginalStage -InstallRoot $InstallRoot `
             -StateRoot $StateRoot `
-            -FailureKind "active binary with missing release metadata")
+            -FailureKind "active binary with missing release metadata" `
+            -ExpectedOutputPattern ([regex]::Escape($MissingMetadataPattern)))
     }
     finally {
         if ($Product -eq "platform") {
@@ -516,7 +636,10 @@ function Test-OneTransactionalRollbackAndDowngrade {
         $DowngradeExit = Invoke-ProductInstallerExpectFailure `
             -Product $Product -InstallScript $InstallScript `
             -OriginalStage $OriginalStage -InstallRoot $InstallRoot `
-            -StateRoot $StateRoot -FailureKind "downgrade"
+            -StateRoot $StateRoot -FailureKind "downgrade" `
+            -ExpectedOutputPattern ([regex]::Escape(
+                "999.0.0 降级到 $Version"
+            ))
         foreach ($Sentinel in $Sentinels) {
             if (-not (Test-Path -LiteralPath $Sentinel -PathType Leaf)) {
                 throw "$Product downgrade rejection changed prior content: $Sentinel"
@@ -541,9 +664,12 @@ function Test-OneTransactionalRollbackAndDowngrade {
     }
 }
 
-$ProbeParent = Join-Path ([IO.Path]::GetTempPath()) "MineGuardInstallerFailureProbes"
-$ProbeRoot = Join-Path $ProbeParent ([Guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path $ProbeRoot -Force | Out-Null
+$ProbeParent = Join-Path ([IO.Path]::GetTempPath()) "mgfp"
+New-Item -ItemType Directory -Path $ProbeParent -Force | Out-Null
+$ProbeRoot = Join-Path $ProbeParent (
+    "p-" + [Guid]::NewGuid().ToString("N").Substring(0, 16)
+)
+New-Item -ItemType Directory -Path $ProbeRoot | Out-Null
 $FailurePropagationCompleted = $false
 try {
     $PlatformVersion = (Get-Content -LiteralPath (Join-Path $PlatformStage "VERSION.txt") -Raw -Encoding UTF8).Trim()
@@ -551,17 +677,17 @@ try {
     Test-OneFailureProbe `
         -Product platform -OriginalStage $PlatformStage `
         -InnoScript (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardPlatform.iss") `
-        -Version $PlatformVersion -ProbeRoot (Join-Path $ProbeRoot "platform")
+        -Version $PlatformVersion -ProbeRoot (Join-Path $ProbeRoot "pf")
     Test-OneFailureProbe `
         -Product agent -OriginalStage $AgentStage `
         -InnoScript (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardEnterpriseAgent.iss") `
-        -Version $AgentVersion -ProbeRoot (Join-Path $ProbeRoot "agent")
+        -Version $AgentVersion -ProbeRoot (Join-Path $ProbeRoot "af")
     Test-OneTransactionalRollbackAndDowngrade `
         -Product platform -OriginalStage $PlatformStage `
-        -Version $PlatformVersion -ProbeRoot (Join-Path $ProbeRoot "platform-transaction")
+        -Version $PlatformVersion -ProbeRoot (Join-Path $ProbeRoot "pt")
     Test-OneTransactionalRollbackAndDowngrade `
         -Product agent -OriginalStage $AgentStage `
-        -Version $AgentVersion -ProbeRoot (Join-Path $ProbeRoot "agent-transaction")
+        -Version $AgentVersion -ProbeRoot (Join-Path $ProbeRoot "at")
     $FailurePropagationCompleted = $true
 }
 finally {

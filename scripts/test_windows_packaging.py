@@ -466,6 +466,54 @@ def test_audit_and_lifecycle() -> None:
         r"\[(?i:bool)\]\s*\$[A-Za-z_][A-Za-z0-9_]*",
         boolean_switch.group(1),
     ), "the audited demo-password setting must remain a typed boolean variable"
+
+    platform_installer = read(
+        "platform/deploy/windows/Install-MineGuardPlatform.ps1"
+    )
+    agent_installer = read("agent/deploy/windows/Install-EnterpriseAgent.ps1")
+    for name, installer, tokens in (
+        (
+            "platform",
+            platform_installer,
+            (
+                "function Remove-MineGuardOwnedPathWithRetry",
+                "function Move-MineGuardOwnedPathWithRetry",
+                "function Assert-MineGuardBinaryInstallPathBudget",
+                "MINEGUARD_RELEASE_AUDIT_MARKER=platform-post-switch",
+                "$PSCmdlet.ThrowTerminatingError($transactionError)",
+                "Platform 安装失败且回滚不完整",
+                "隔离候选 runtime",
+                "恢复原 runtime",
+            ),
+        ),
+        (
+            "agent",
+            agent_installer,
+            (
+                "function Remove-EAOwnedPathWithRetry",
+                "function Move-EAOwnedPathWithRetry",
+                "function Assert-EABinaryInstallPathBudget",
+                "MINEGUARD_RELEASE_AUDIT_MARKER=agent-post-switch",
+                "$PSCmdlet.ThrowTerminatingError($TransactionError)",
+                "installation failed and rollback was incomplete",
+                "quarantine candidate runtime",
+                "restore prior runtime",
+            ),
+        ),
+    ):
+        for token in tokens:
+            assert token in installer, f"{name} transactional installer misses: {token}"
+        assert "[ValidateRange(1, 300)]" in installer
+        assert "Start-Sleep -Milliseconds 250" in installer
+        assert "[ValidateRange(200, 259)]" in installer
+        assert "MaximumPathLength = 240" in installer
+    assert "Remove-Item -LiteralPath $runtimeTarget -Recurse -Force" not in (
+        platform_installer
+    ), "platform rollback must quarantine the active candidate before restoration"
+    assert "Remove-Item -LiteralPath $RuntimeRoot -Recurse -Force" not in (
+        agent_installer
+    ), "agent rollback must quarantine the active candidate before restoration"
+
     failure_probe = read("scripts/Test-WindowsInstallerFailurePropagation.ps1")
     assert "deliberately-tampered" in failure_probe
     assert "ProbeExitCode -eq 0" in failure_probe
@@ -489,7 +537,17 @@ def test_audit_and_lifecycle() -> None:
         "Get-ProductTreeSnapshot",
         "Agent post-switch rollback",
         "Agent missing-metadata rejection",
+        "ExpectedOutputPattern",
+        "MINEGUARD_RELEASE_AUDIT_MARKER=$Product-post-switch",
+        ".prior-install-identity",
+        'Join-Path ([IO.Path]::GetTempPath()) "mgfp"',
         "function Remove-DirectoryWithRetry",
+        "function Remove-FileWithRetry",
+        "function Wait-ProcessExecutableVisible",
+        "Get-CimInstance Win32_Process",
+        "if ($null -eq $ExitCode)",
+        "$LegacyFailurePattern",
+        "$MissingMetadataPattern",
         "function Write-FailureProbeLog",
         "failure-probe Inno log (diagnostic only)",
         "function Test-IsTransientAccessDenied",

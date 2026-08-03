@@ -132,6 +132,168 @@ function Invoke-CheckedNative {
     }
 }
 
+function Assert-MineGuardOwnedPath {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $ExpectedParent,
+        [Parameter(Mandatory = $true)] [string] $AllowedLeafPattern
+    )
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $fullParent = [System.IO.Path]::GetFullPath($ExpectedParent).TrimEnd('\')
+    $actualParent = [System.IO.Path]::GetDirectoryName($fullPath)
+    $leaf = [System.IO.Path]::GetFileName($fullPath)
+    if (-not $actualParent.Equals(
+            $fullParent, [StringComparison]::OrdinalIgnoreCase
+        ) -or -not [regex]::IsMatch(
+            $leaf,
+            $AllowedLeafPattern,
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )) {
+        throw "拒绝操作非本事务拥有的路径：$fullPath"
+    }
+    if (Test-Path -LiteralPath $fullPath) {
+        $item = Get-Item -LiteralPath $fullPath -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "拒绝操作 reparse point：$fullPath"
+        }
+    }
+}
+
+function Remove-MineGuardOwnedPathWithRetry {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $ExpectedParent,
+        [Parameter(Mandatory = $true)] [string] $AllowedLeafPattern,
+        [ValidateRange(1, 300)] [int] $TimeoutSeconds = 60
+    )
+    Assert-MineGuardOwnedPath -Path $Path -ExpectedParent $ExpectedParent `
+        -AllowedLeafPattern $AllowedLeafPattern
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastError = $null
+    while ($true) {
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        try {
+            $item = Get-Item -LiteralPath $Path -Force
+            if ($item.PSIsContainer) {
+                Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            } else {
+                Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+            }
+        } catch {
+            $lastError = $_
+        }
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    $detail = if ($null -eq $lastError) {
+        '路径仍然存在'
+    } else {
+        $lastError.Exception.Message
+    }
+    throw "在 $TimeoutSeconds 秒内无法清理事务路径 $Path。最后错误：$detail"
+}
+
+function Move-MineGuardOwnedPathWithRetry {
+    param(
+        [Parameter(Mandatory = $true)] [string] $SourcePath,
+        [Parameter(Mandatory = $true)] [string] $SourceParent,
+        [Parameter(Mandatory = $true)] [string] $SourceLeafPattern,
+        [Parameter(Mandatory = $true)] [string] $DestinationPath,
+        [Parameter(Mandatory = $true)] [string] $DestinationParent,
+        [Parameter(Mandatory = $true)] [string] $DestinationLeafPattern,
+        [ValidateRange(1, 300)] [int] $TimeoutSeconds = 60
+    )
+    Assert-MineGuardOwnedPath -Path $SourcePath -ExpectedParent $SourceParent `
+        -AllowedLeafPattern $SourceLeafPattern
+    Assert-MineGuardOwnedPath -Path $DestinationPath `
+        -ExpectedParent $DestinationParent `
+        -AllowedLeafPattern $DestinationLeafPattern
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
+        throw "事务源路径不存在：$SourcePath"
+    }
+    if (Test-Path -LiteralPath $DestinationPath) {
+        throw "事务目标路径已存在，拒绝覆盖：$DestinationPath"
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastError = $null
+    $moveAttempted = $false
+    while ($true) {
+        if (-not (Test-Path -LiteralPath $SourcePath)) {
+            if ($moveAttempted -and
+                (Test-Path -LiteralPath $DestinationPath)) { return }
+            throw "事务源路径和目标路径均不存在：$SourcePath -> $DestinationPath"
+        }
+        if (Test-Path -LiteralPath $DestinationPath) {
+            throw "事务目标路径已存在，拒绝覆盖：$DestinationPath"
+        }
+        try {
+            $moveAttempted = $true
+            Move-Item -LiteralPath $SourcePath -Destination $DestinationPath `
+                -ErrorAction Stop
+        } catch {
+            $lastError = $_
+        }
+        if (-not (Test-Path -LiteralPath $SourcePath) -and
+            (Test-Path -LiteralPath $DestinationPath)) {
+            return
+        }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    $detail = if ($null -eq $lastError) {
+        '移动未完成'
+    } else {
+        $lastError.Exception.Message
+    }
+    throw "在 $TimeoutSeconds 秒内无法移动事务路径 $SourcePath。最后错误：$detail"
+}
+
+function Assert-MineGuardBinaryInstallPathBudget {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Root,
+        [Parameter(Mandatory = $true)] [object] $Manifest,
+        [ValidateRange(200, 259)] [int] $MaximumPathLength = 240
+    )
+    $syntheticGuid = 'f' * 32
+    $longestPath = $Root
+    foreach ($entry in @($Manifest.files)) {
+        $relative = ([string]$entry.path).Replace('\', '/')
+        $transactionLeaf = $null
+        $transactionRelative = $null
+        if ($relative.StartsWith(
+                'runtime/', [StringComparison]::OrdinalIgnoreCase
+            )) {
+            $transactionLeaf = '.runtime.incoming.' + $syntheticGuid
+            $transactionRelative = $relative.Substring('runtime/'.Length)
+        } elseif ($relative.StartsWith(
+                'deploy/windows/', [StringComparison]::OrdinalIgnoreCase
+            )) {
+            $transactionLeaf = '.service.incoming.' + $syntheticGuid
+            $transactionRelative = $relative.Substring('deploy/windows/'.Length)
+        } elseif ($relative -in @(
+                'VERSION.txt', 'build-metadata.json', 'release-manifest.json',
+                'SHA256SUMS.txt'
+            )) {
+            $transactionLeaf = '.release-metadata.incoming.' + $syntheticGuid
+            $transactionRelative = $relative
+        }
+        if ($null -eq $transactionLeaf) { continue }
+        $projected = Join-Path (Join-Path $Root $transactionLeaf) `
+            $transactionRelative.Replace('/', '\')
+        if ($projected.Length -gt $longestPath.Length) {
+            $longestPath = $projected
+        }
+    }
+    if ($longestPath.Length -gt $MaximumPathLength) {
+        throw (
+            '安装目录过深：当前发布包的事务暂存路径最长将达到 {0} 个字符，' +
+            '安全上限为 {1}。请改用更短的安装目录。' -f `
+                $longestPath.Length, $MaximumPathLength
+        )
+    }
+}
+
 function Set-MineGuardDirectoryAcl {
     param(
         [string] $Path,
@@ -354,6 +516,8 @@ if ($binaryMode) {
         }
         Write-Warning '当前为未签名内部测试版，不是生产可信发布。'
     }
+    Assert-MineGuardBinaryInstallPathBudget -Root $InstallRoot `
+        -Manifest $manifest
     Invoke-CheckedNative -Command $binarySource -Arguments @('self-check') `
         -Label '校验发布包冻结运行时'
 
@@ -513,6 +677,13 @@ if ($binaryMode) {
     $transactionComplete = $false
     $settingsCreated = $false
     $settingsPath = Join-Path (Join-Path $InstallRoot 'config') 'settings.json'
+    $incomingLeafPattern = `
+        '^\.(?:runtime|service|release-metadata)\.incoming\.[a-f0-9]{32}$'
+    $previousLeafPattern = `
+        '^\.(?:runtime|service|release-metadata)\.previous\.[a-f0-9]{32}$'
+    $transactionError = $null
+    $rollbackErrors = New-Object System.Collections.Generic.List[string]
+    $cleanupErrors = New-Object System.Collections.Generic.List[string]
     try {
         New-Item -ItemType Directory -Path $runtimeIncoming | Out-Null
         New-Item -ItemType Directory -Path $serviceIncoming | Out-Null
@@ -648,17 +819,41 @@ if ($binaryMode) {
         if (Test-MineGuardPlatformRuntimeProcess -RuntimeRoot $runtimeTarget) {
             throw '运行时切换前复检发现 runtime 目录中仍有前台进程。'
         }
-        Move-Item -LiteralPath $runtimeTarget -Destination $runtimePrevious
+        Move-MineGuardOwnedPathWithRetry `
+            -SourcePath $runtimeTarget -SourceParent $InstallRoot `
+            -SourceLeafPattern '^runtime$' `
+            -DestinationPath $runtimePrevious -DestinationParent $InstallRoot `
+            -DestinationLeafPattern $previousLeafPattern
         $runtimePreviousMoved = $true
-        Move-Item -LiteralPath $runtimeIncoming -Destination $runtimeTarget
+        Move-MineGuardOwnedPathWithRetry `
+            -SourcePath $runtimeIncoming -SourceParent $InstallRoot `
+            -SourceLeafPattern $incomingLeafPattern `
+            -DestinationPath $runtimeTarget -DestinationParent $InstallRoot `
+            -DestinationLeafPattern '^runtime$'
         $runtimeActivated = $true
-        Move-Item -LiteralPath $serviceTarget -Destination $servicePrevious
+        Move-MineGuardOwnedPathWithRetry `
+            -SourcePath $serviceTarget -SourceParent $InstallRoot `
+            -SourceLeafPattern '^service$' `
+            -DestinationPath $servicePrevious -DestinationParent $InstallRoot `
+            -DestinationLeafPattern $previousLeafPattern
         $servicePreviousMoved = $true
-        Move-Item -LiteralPath $serviceIncoming -Destination $serviceTarget
+        Move-MineGuardOwnedPathWithRetry `
+            -SourcePath $serviceIncoming -SourceParent $InstallRoot `
+            -SourceLeafPattern $incomingLeafPattern `
+            -DestinationPath $serviceTarget -DestinationParent $InstallRoot `
+            -DestinationLeafPattern '^service$'
         $serviceActivated = $true
-        Move-Item -LiteralPath $metadataTarget -Destination $metadataPrevious
+        Move-MineGuardOwnedPathWithRetry `
+            -SourcePath $metadataTarget -SourceParent $InstallRoot `
+            -SourceLeafPattern '^release-metadata$' `
+            -DestinationPath $metadataPrevious -DestinationParent $InstallRoot `
+            -DestinationLeafPattern $previousLeafPattern
         $metadataPreviousMoved = $true
-        Move-Item -LiteralPath $metadataIncoming -Destination $metadataTarget
+        Move-MineGuardOwnedPathWithRetry `
+            -SourcePath $metadataIncoming -SourceParent $InstallRoot `
+            -SourceLeafPattern $incomingLeafPattern `
+            -DestinationPath $metadataTarget -DestinationParent $InstallRoot `
+            -DestinationLeafPattern '^release-metadata$'
         $metadataActivated = $true
 
         $installedExecutable = Join-Path $runtimeTarget 'MineGuardPlatform.exe'
@@ -680,47 +875,163 @@ if ($binaryMode) {
             throw '切换后的 release-metadata 缺少发布清单。'
         }
         if ($AuditFailAfterRuntimeSwitch) {
+            Write-Host 'MINEGUARD_RELEASE_AUDIT_MARKER=platform-post-switch'
             throw '发布审计故障注入：验证二进制切换后的完整回滚。'
         }
         $transactionComplete = $true
     } catch {
-        if ($metadataActivated -and (Test-Path -LiteralPath $metadataTarget)) {
-            Remove-Item -LiteralPath $metadataTarget -Recurse -Force
-            $metadataActivated = $false
+        $transactionError = $_
+        if ($settingsCreated) {
+            try {
+                Remove-MineGuardOwnedPathWithRetry -Path $settingsPath `
+                    -ExpectedParent (Join-Path $InstallRoot 'config') `
+                    -AllowedLeafPattern '^settings\.json$'
+                $settingsCreated = $false
+            } catch {
+                $rollbackErrors.Add(
+                    "清理本次新建 settings.json 失败：$($_.Exception.Message)"
+                )
+            }
         }
-        if ($serviceActivated -and (Test-Path -LiteralPath $serviceTarget)) {
-            Remove-Item -LiteralPath $serviceTarget -Recurse -Force
-            $serviceActivated = $false
+
+        if ($metadataActivated) {
+            try {
+                Move-MineGuardOwnedPathWithRetry `
+                    -SourcePath $metadataTarget -SourceParent $InstallRoot `
+                    -SourceLeafPattern '^release-metadata$' `
+                    -DestinationPath $metadataIncoming `
+                    -DestinationParent $InstallRoot `
+                    -DestinationLeafPattern $incomingLeafPattern
+                $metadataActivated = $false
+            } catch {
+                $rollbackErrors.Add(
+                    "隔离候选 release-metadata 失败：$($_.Exception.Message)"
+                )
+            }
         }
-        if ($runtimeActivated -and (Test-Path -LiteralPath $runtimeTarget)) {
-            Remove-Item -LiteralPath $runtimeTarget -Recurse -Force
-            $runtimeActivated = $false
+        if ($metadataPreviousMoved) {
+            if ($metadataActivated) {
+                $rollbackErrors.Add(
+                    '候选 release-metadata 未能隔离，无法恢复原目录。'
+                )
+            } else {
+                try {
+                    Move-MineGuardOwnedPathWithRetry `
+                        -SourcePath $metadataPrevious `
+                        -SourceParent $InstallRoot `
+                        -SourceLeafPattern $previousLeafPattern `
+                        -DestinationPath $metadataTarget `
+                        -DestinationParent $InstallRoot `
+                        -DestinationLeafPattern '^release-metadata$'
+                    $metadataPreviousMoved = $false
+                } catch {
+                    $rollbackErrors.Add(
+                        "恢复原 release-metadata 失败：$($_.Exception.Message)"
+                    )
+                }
+            }
         }
-        if ($metadataPreviousMoved -and (Test-Path -LiteralPath $metadataPrevious)) {
-            Move-Item -LiteralPath $metadataPrevious -Destination $metadataTarget
-            $metadataPreviousMoved = $false
+
+        if ($serviceActivated) {
+            try {
+                Move-MineGuardOwnedPathWithRetry `
+                    -SourcePath $serviceTarget -SourceParent $InstallRoot `
+                    -SourceLeafPattern '^service$' `
+                    -DestinationPath $serviceIncoming `
+                    -DestinationParent $InstallRoot `
+                    -DestinationLeafPattern $incomingLeafPattern
+                $serviceActivated = $false
+            } catch {
+                $rollbackErrors.Add(
+                    "隔离候选 service 失败：$($_.Exception.Message)"
+                )
+            }
         }
-        if ($servicePreviousMoved -and (Test-Path -LiteralPath $servicePrevious)) {
-            Move-Item -LiteralPath $servicePrevious -Destination $serviceTarget
-            $servicePreviousMoved = $false
+        if ($servicePreviousMoved) {
+            if ($serviceActivated) {
+                $rollbackErrors.Add('候选 service 未能隔离，无法恢复原目录。')
+            } else {
+                try {
+                    Move-MineGuardOwnedPathWithRetry `
+                        -SourcePath $servicePrevious -SourceParent $InstallRoot `
+                        -SourceLeafPattern $previousLeafPattern `
+                        -DestinationPath $serviceTarget `
+                        -DestinationParent $InstallRoot `
+                        -DestinationLeafPattern '^service$'
+                    $servicePreviousMoved = $false
+                } catch {
+                    $rollbackErrors.Add(
+                        "恢复原 service 失败：$($_.Exception.Message)"
+                    )
+                }
+            }
         }
-        if ($runtimePreviousMoved -and (Test-Path -LiteralPath $runtimePrevious)) {
-            Move-Item -LiteralPath $runtimePrevious -Destination $runtimeTarget
-            $runtimePreviousMoved = $false
+
+        if ($runtimeActivated) {
+            try {
+                Move-MineGuardOwnedPathWithRetry `
+                    -SourcePath $runtimeTarget -SourceParent $InstallRoot `
+                    -SourceLeafPattern '^runtime$' `
+                    -DestinationPath $runtimeIncoming `
+                    -DestinationParent $InstallRoot `
+                    -DestinationLeafPattern $incomingLeafPattern
+                $runtimeActivated = $false
+            } catch {
+                $rollbackErrors.Add(
+                    "隔离候选 runtime 失败：$($_.Exception.Message)"
+                )
+            }
         }
-        if ($settingsCreated -and (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
-            Remove-Item -LiteralPath $settingsPath -Force
-            $settingsCreated = $false
+        if ($runtimePreviousMoved) {
+            if ($runtimeActivated) {
+                $rollbackErrors.Add('候选 runtime 未能隔离，无法恢复原目录。')
+            } else {
+                try {
+                    Move-MineGuardOwnedPathWithRetry `
+                        -SourcePath $runtimePrevious -SourceParent $InstallRoot `
+                        -SourceLeafPattern $previousLeafPattern `
+                        -DestinationPath $runtimeTarget `
+                        -DestinationParent $InstallRoot `
+                        -DestinationLeafPattern '^runtime$'
+                    $runtimePreviousMoved = $false
+                } catch {
+                    $rollbackErrors.Add(
+                        "恢复原 runtime 失败：$($_.Exception.Message)"
+                    )
+                }
+            }
         }
-        throw
     } finally {
         foreach ($incomingPath in @(
             $runtimeIncoming, $serviceIncoming, $metadataIncoming
         )) {
-            if (Test-Path -LiteralPath $incomingPath) {
-                Remove-Item -LiteralPath $incomingPath -Recurse -Force
+            try {
+                Remove-MineGuardOwnedPathWithRetry -Path $incomingPath `
+                    -ExpectedParent $InstallRoot `
+                    -AllowedLeafPattern $incomingLeafPattern
+            } catch {
+                $cleanupErrors.Add(
+                    "清理候选事务目录 $incomingPath 失败：$($_.Exception.Message)"
+                )
             }
         }
+    }
+    if ($null -ne $transactionError) {
+        $allRecoveryErrors = @($rollbackErrors) + @($cleanupErrors)
+        if ($allRecoveryErrors.Count -gt 0) {
+            $message = (
+                'Platform 安装失败且回滚不完整。原始错误：{0}；回滚错误：{1}' -f `
+                    $transactionError.Exception.Message,
+                    ($allRecoveryErrors -join ' | ')
+            )
+            throw [System.Exception]::new(
+                $message, $transactionError.Exception
+            )
+        }
+        $PSCmdlet.ThrowTerminatingError($transactionError)
+    }
+    if ($cleanupErrors.Count -gt 0) {
+        throw ('Platform 事务清理未完成：' + ($cleanupErrors -join ' | '))
     }
     if (-not $transactionComplete) {
         throw 'Platform 二进制切换未完成。'
@@ -729,7 +1040,9 @@ if ($binaryMode) {
         $runtimePrevious, $servicePrevious, $metadataPrevious
     )) {
         try {
-            Remove-Item -LiteralPath $oldPath -Recurse -Force
+            Remove-MineGuardOwnedPathWithRetry -Path $oldPath `
+                -ExpectedParent $InstallRoot `
+                -AllowedLeafPattern $previousLeafPattern
         } catch {
             Write-Warning "新版本已完整生效，但旧目录待人工清理：$oldPath"
         }
