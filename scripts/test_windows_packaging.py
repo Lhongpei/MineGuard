@@ -318,6 +318,21 @@ def test_root_build_orchestration() -> None:
         "the optional signing-parameter pipeline must be array-wrapped so an "
         "unsigned PowerShell 5.1 build receives an empty array instead of null"
     )
+    native_checked = build[
+        build.index("function Invoke-NativeChecked") : build.index(
+            "function Assert-CleanGitSnapshot"
+        )
+    ]
+    assert re.search(
+        r"&\s*\$FilePath\s+@ArgumentList\s*\|\s*Out-Host", native_checked
+    ), (
+        "native diagnostic output must go directly to the host; otherwise an "
+        "assigned Invoke-InnoCompile call treats compiler output (including empty "
+        "lines) as installer paths"
+    )
+    assert not re.search(
+        r"(?m)^\s*&\s*\$FilePath\s+@ArgumentList\s*$", native_checked
+    ), "Invoke-NativeChecked must not leak native stdout into the success pipeline"
     inno_version_probe = build[
         build.index("function Get-InnoCompilerVersion") : build.index(
             "function Get-SemanticVersionFromStage"

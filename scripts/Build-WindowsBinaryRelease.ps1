@@ -42,7 +42,10 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 
 function Invoke-NativeChecked {
     param([string]$FilePath, [object[]]$ArgumentList, [string]$Label)
-    & $FilePath @ArgumentList
+    # Native stdout is diagnostic output, not a PowerShell return value.  Send it
+    # to the host so callers that assign this function's result receive only
+    # their own explicit return values (for example, an installer path).
+    & $FilePath @ArgumentList | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "$Label failed with exit code $LASTEXITCODE."
     }
