@@ -149,6 +149,17 @@ function Remove-DirectoryWithRetry {
     )
 }
 
+function Write-FailureProbeLog {
+    param([string]$Product, [string]$LogPath)
+    if (-not (Test-Path -LiteralPath $LogPath)) {
+        Write-Warning "$Product failure-probe Inno log was not created: $LogPath"
+        return
+    }
+    Write-Host "--- $Product failure-probe Inno log (diagnostic only) ---"
+    Get-Content -LiteralPath $LogPath | ForEach-Object { Write-Host $_ }
+    Write-Host "--- end $Product failure-probe Inno log ---"
+}
+
 function Test-OneFailureProbe {
     param(
         [ValidateSet("platform", "agent")][string]$Product,
@@ -160,6 +171,7 @@ function Test-OneFailureProbe {
     $CorruptStage = Join-Path $ProbeRoot "$Product-corrupt-stage"
     $ProbeOutput = Join-Path $ProbeRoot "$Product-output"
     $InstallRoot = Join-Path $ProbeRoot "$Product-install"
+    $ProbeLog = Join-Path $ProbeRoot "$Product-failure.log"
     New-Item -ItemType Directory -Path $ProbeRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $CorruptStage | Out-Null
     New-Item -ItemType Directory -Path $ProbeOutput | Out-Null
@@ -196,7 +208,7 @@ function Test-OneFailureProbe {
     $ProbeInstaller = Join-Path $ProbeOutput ($ArtifactBase + ".exe")
     $InstallArguments = @(
         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
-        "/DIR=$InstallRoot", "/LOG=$(Join-Path $ProbeRoot "$Product-failure.log")"
+        "/DIR=$InstallRoot", "/LOG=$ProbeLog"
     )
     if ($Product -eq "agent") {
         $InstallArguments += "/STATE_ROOT=$(Join-Path $ProbeRoot 'agent-state')"
@@ -205,10 +217,24 @@ function Test-OneFailureProbe {
         -FilePath $ProbeInstaller -ArgumentList $InstallArguments `
         -TimeoutSeconds 30
     if ($ProbeExitCode -eq 0) {
+        Write-FailureProbeLog -Product $Product -LogPath $ProbeLog
         throw "$Product corrupted staging was incorrectly accepted by the installer."
     }
-    if (Test-Path -LiteralPath (Join-Path $InstallRoot "runtime")) {
-        throw "$Product failed setup left an installed runtime after manifest rejection."
+    if ($ProbeExitCode -ne 1001) {
+        Write-FailureProbeLog -Product $Product -LogPath $ProbeLog
+        throw (
+            "$Product corrupted staging returned unexpected installer exit code " +
+            "$ProbeExitCode instead of guarded product failure code 1001."
+        )
+    }
+    foreach ($ImmutableDirectory in @("runtime", "release-metadata", "deploy", "service")) {
+        if (Test-Path -LiteralPath (Join-Path $InstallRoot $ImmutableDirectory)) {
+            Write-FailureProbeLog -Product $Product -LogPath $ProbeLog
+            throw (
+                "$Product failed setup left installed product directory " +
+                "$ImmutableDirectory after manifest rejection."
+            )
+        }
     }
     Write-Host "$Product installer propagated the guarded product-installer failure (exit $ProbeExitCode)."
 }

@@ -198,6 +198,10 @@ def test_inno_scripts() -> None:
             "ExecAndLogOutput",
             "ResultCode <> 0",
             "RaiseException",
+            "ProductInstallFailureExitCode = 1001",
+            "ProductInstallFailed := True",
+            "function GetCustomSetupExitCode: Integer",
+            "Result := ProductInstallFailureExitCode",
             "PrepareToInstall",
             "InitializeUninstall",
             "Get-CimInstance Win32_Process",
@@ -465,7 +469,12 @@ def test_audit_and_lifecycle() -> None:
     failure_probe = read("scripts/Test-WindowsInstallerFailurePropagation.ps1")
     assert "deliberately-tampered" in failure_probe
     assert "ProbeExitCode -eq 0" in failure_probe
-    assert "left an installed runtime" in failure_probe
+    assert "ProbeExitCode -ne 1001" in failure_probe
+    assert (
+        'foreach ($ImmutableDirectory in @('
+        '"runtime", "release-metadata", "deploy", "service"))'
+        in failure_probe
+    )
     for token in (
         "AuditFailAfterRuntimeSwitch",
         "installer-rollback-test",
@@ -481,6 +490,8 @@ def test_audit_and_lifecycle() -> None:
         "Agent post-switch rollback",
         "Agent missing-metadata rejection",
         "function Remove-DirectoryWithRetry",
+        "function Write-FailureProbeLog",
+        "failure-probe Inno log (diagnostic only)",
         "function Test-IsTransientAccessDenied",
         "[ComponentModel.Win32Exception]",
         "$CurrentException.NativeErrorCode -eq 5",

@@ -91,8 +91,12 @@ Filename: "{app}\docs\Windows-binary-release-guide.html"; Description: "Open the
 Type: filesandordirs; Name: "{app}\uninstall-tools"
 
 [Code]
+const
+  ProductInstallFailureExitCode = 1001;
+
 var
   RuntimeRemovalCompleted: Boolean;
+  ProductInstallFailed: Boolean;
 
 function HasMineGuardPlatformService(): Boolean;
 begin
@@ -158,9 +162,26 @@ begin
   PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
   Parameters := ExpandConstant('-NoProfile -ExecutionPolicy Bypass -File "{tmp}\MineGuardPlatformRelease\deploy\windows\Install-MineGuardPlatform.ps1" -SourceDirectory "{tmp}\MineGuardPlatformRelease" -InstallRoot "{app}"');
   if not ExecAndLogOutput(PowerShellPath, Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode, nil) then
+  begin
+    ProductInstallFailed := True;
     RaiseException('Failed to launch the guarded MineGuard Platform product installer.');
+  end;
   if ResultCode <> 0 then
-    RaiseException(Format('The guarded MineGuard Platform product installer failed with exit code %d. Setup has been aborted.', [ResultCode]));
+  begin
+    ProductInstallFailed := True;
+    RaiseException(Format('The guarded MineGuard Platform product transaction failed with exit code %d. The runtime switch was aborted.', [ResultCode]));
+  end;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  { Inno deliberately catches exceptions raised by BeforeInstall/AfterInstall.
+    Preserve the visible error above while still returning a deterministic
+    non-zero code to deployment automation and parent processes. }
+  if ProductInstallFailed then
+    Result := ProductInstallFailureExitCode
+  else
+    Result := 0;
 end;
 
 procedure RemoveProductRuntimeTransactionally();
