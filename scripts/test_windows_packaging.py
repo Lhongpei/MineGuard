@@ -70,6 +70,7 @@ def test_layout() -> None:
         "scripts/Build-WindowsBinaryRelease.ps1",
         "scripts/Test-WindowsBinaryRelease.ps1",
         "scripts/Test-WindowsInstallerFailurePropagation.ps1",
+        "scripts/Test-WindowsAclGrantSemantics.ps1",
         "scripts/Invoke-WindowsAuthenticodeSign.ps1",
         "scripts/New-WindowsWheelhouseManifest.ps1",
         ".github/actionlint.yaml",
@@ -602,6 +603,30 @@ def test_audit_and_lifecycle() -> None:
     ) < process_tree_retry.index("$Process.Dispose()")
     assert "Start-Sleep -Milliseconds 250" in process_tree_retry
 
+    acl_probe = read("scripts/Test-WindowsAclGrantSemantics.ps1")
+    for token in (
+        '"/inheritance:r", "/T", "/C"',
+        '"/grant:r", "*S-1-5-18:(OI)(CI)F"',
+        '"/grant:r", "*S-1-5-32-544:(OI)(CI)F"',
+        '(Join-Path $ProbeRoot "*"), "/reset", "/T", "/C"',
+        "function Assert-AclContract",
+        "ACL is missing trustee",
+        "Stale explicit ACL fixture",
+        "Empty directory ACL fixture",
+        "Empty-tree descendant reset",
+        "MineGuard canonical NTFS ACL grant semantics passed",
+    ):
+        assert token in acl_probe, f"Windows ACL regression probe misses: {token}"
+    for name, installer, helper in (
+        ("platform", platform_installer, "Set-MineGuardDirectoryAcl"),
+        ("agent", agent_installer, "Set-EACanonicalProductTreeAcl"),
+    ):
+        assert f"function {helper}" in installer
+        assert "/reset" in installer and "/T" in installer and "/C" in installer
+        assert installer.count("'/grant:r'") >= 3 or installer.count('"/grant:r"') >= 3, (
+            f"{name} ACL helper must give every trustee an explicit grant switch"
+        )
+
 
 def test_authenticode_interface() -> None:
     signing = read("scripts/Invoke-WindowsAuthenticodeSign.ps1")
@@ -770,6 +795,10 @@ def test_ps51_native_argument_roundtrip_guards() -> None:
 
 
 def test_workflow() -> None:
+    native_workflow = read(".github/workflows/windows-native.yml")
+    assert "Verify elevated NTFS ACL grant semantics" in native_workflow
+    assert ".\\scripts\\Test-WindowsAclGrantSemantics.ps1" in native_workflow
+
     workflow = read(".github/workflows/windows-release.yml")
     for token in (
         "windows-2022",

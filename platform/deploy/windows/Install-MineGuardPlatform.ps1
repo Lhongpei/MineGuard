@@ -301,13 +301,24 @@ function Set-MineGuardDirectoryAcl {
         [switch] $Recurse
     )
     $serviceGrant = ('*{0}:(OI)(CI){1}' -f $ServiceSid, $ServicePermission)
+    & "$env:SystemRoot\System32\icacls.exe" $Path '/reset' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "重置 NTFS 根目录 ACL 失败：$Path" }
     $aclArguments = @(
-        $Path, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F',
-        '*S-1-5-32-544:(OI)(CI)F', $serviceGrant
+        $Path, '/inheritance:r',
+        '/grant:r', '*S-1-5-18:(OI)(CI)F',
+        '/grant:r', '*S-1-5-32-544:(OI)(CI)F',
+        '/grant:r', $serviceGrant
     )
-    if ($Recurse) { $aclArguments += @('/T', '/C') }
     & "$env:SystemRoot\System32\icacls.exe" @aclArguments | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "设置 NTFS ACL 失败：$Path" }
+    if ($LASTEXITCODE -ne 0) { throw "设置 NTFS 根目录 ACL 失败：$Path" }
+    if ($Recurse) {
+        $descendantPattern = Join-Path $Path '*'
+        $resetArguments = @($descendantPattern, '/reset') + @('/T', '/C')
+        & "$env:SystemRoot\System32\icacls.exe" @resetArguments | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "重置 NTFS 子项 ACL 继承失败：$Path"
+        }
+    }
 }
 
 function Test-MineGuardPlatformRuntimeProcess {

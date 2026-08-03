@@ -211,8 +211,9 @@ def test_binary_install_validates_then_atomically_switches_runtime() -> None:
         "'.runtime.previous.'",
         "'.service.incoming.'",
         "'.release-metadata.incoming.'",
-        "Move-Item -LiteralPath $runtimeTarget",
-        "Move-Item -LiteralPath $runtimePrevious",
+        "Move-MineGuardOwnedPathWithRetry",
+        "-SourcePath $runtimeTarget -SourceParent $InstallRoot",
+        "-SourcePath $runtimePrevious -SourceParent $InstallRoot",
         "MineGuardPlatform 服务",
         "Test-MineGuardPlatformRuntimeProcess",
         "Get-CimInstance Win32_Process",
@@ -245,7 +246,7 @@ def test_binary_install_validates_then_atomically_switches_runtime() -> None:
         "$runtimePrevious, $servicePrevious, $metadataPrevious"
     )
     assert install.index("Set-MineGuardDirectoryAcl -Path $InstallRoot") < install.index(
-        "Move-Item -LiteralPath $runtimeTarget"
+        "-SourcePath $runtimeTarget -SourceParent $InstallRoot"
     )
     assert "二进制发布包不接受 PythonExecutable 或 Wheelhouse" in install
 

@@ -206,21 +206,25 @@ try {
     )
 
     if (-not $SkipAcl) {
-        Invoke-EAIcaclsChecked -ArgumentList @($StageRoot, "/inheritance:r")
-        Invoke-EAIcaclsChecked -ArgumentList @(
-            $StageRoot, "/grant:r", "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-19:(OI)(CI)RX", "/T", "/C"
-        )
-        foreach ($Writable in @($StageDataDirectory, $StageLogDirectory)) {
-            Invoke-EAIcaclsChecked -ArgumentList @(
-                $Writable, "/grant:r", "*S-1-5-19:(OI)(CI)M", "/T", "/C"
+        Set-EACanonicalInheritedTreeAcl -Root $StageRoot `
+            -Name "Staged Agent instance" -RootGrants @(
+                "*S-1-5-18:(OI)(CI)F",
+                "*S-1-5-32-544:(OI)(CI)F",
+                "*S-1-5-19:(OI)(CI)RX"
             )
+        foreach ($Writable in @($StageDataDirectory, $StageLogDirectory)) {
+            Set-EACanonicalInheritedTreeAcl -Root $Writable `
+                -Name "Writable Agent instance directory" -RootGrants @(
+                    "*S-1-5-18:(OI)(CI)F",
+                    "*S-1-5-32-544:(OI)(CI)F",
+                    "*S-1-5-19:(OI)(CI)M"
+                )
         }
-        Invoke-EAIcaclsChecked -ArgumentList @($StageBackupDirectory, "/inheritance:r")
-        Invoke-EAIcaclsChecked -ArgumentList @(
-            $StageBackupDirectory, "/grant:r", "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F", "/T", "/C"
-        )
+        Set-EACanonicalInheritedTreeAcl -Root $StageBackupDirectory `
+            -Name "Agent backup directory" -RootGrants @(
+                "*S-1-5-18:(OI)(CI)F",
+                "*S-1-5-32-544:(OI)(CI)F"
+            )
         if (-not $UsingDefaultInbox -and $GrantWatchReadAcl) {
             foreach ($WatchDirectory in $ResolvedWatchDirectories) {
                 $ExternalAclBackups[$WatchDirectory] = Get-Acl -LiteralPath $WatchDirectory

@@ -445,7 +445,8 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     assert "BuildFromSource" in installer
     assert "Set-StrictMode -Version 2.0" in installer
     assert "Windows PowerShell 5.1 or later is required." in installer
-    assert '@($InstallRoot, "/inheritance:r")' in installer
+    assert "function Set-EACanonicalProductTreeAcl" in installer
+    assert "Set-EACanonicalProductTreeAcl -Path $InstallRoot" in installer
     assert "AuditFailAfterRuntimeSwitch" in installer
     assert "installer-rollback-test" in installer
     assert "Agent downgrade from" in installer
@@ -496,7 +497,7 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     )
     assert release_validation < candidate_version_check < first_state_claim
     runtime_move = installer.index(
-        "Move-Item -LiteralPath $RuntimeRoot -Destination $RollbackRuntime"
+        "-SourcePath $RuntimeRoot -SourceParent $InstallRoot"
     )
     assert installer.rfind(
         "Assert-NoEnterpriseAgentRuntimeProcesses", 0, runtime_move
@@ -505,9 +506,9 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
         "if (Test-Path -LiteralPath $RollbackRuntime)"
     )
     assert installer.index(
-        'Invoke-IcaclsChecked -ArgumentList @($StagedMetadata, "/inheritance:r")'
+        "Set-EACanonicalProductTreeAcl -Path $StagedMetadata"
     ) < installer.index(
-        'Move-Item -LiteralPath $StagedMetadata -Destination $ReleaseMetadata'
+        "-SourcePath $StagedMetadata -SourceParent $InstallRoot"
     )
     binary_cleanup = installer.index(
         'if (Test-Path -LiteralPath $RollbackRuntime)'

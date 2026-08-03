@@ -40,19 +40,37 @@ function Assert-Administrator {
 function Set-ConfigAcl {
     param([string] $Path)
     $serviceGrant = ('*{0}:(OI)(CI)RX' -f $ServiceSid)
+    & "$env:SystemRoot\System32\icacls.exe" $Path '/reset' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "重置配置根目录 NTFS ACL 失败：$Path" }
     & "$env:SystemRoot\System32\icacls.exe" $Path '/inheritance:r' `
-        '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
-        $serviceGrant '/T' '/C' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "设置配置目录 NTFS ACL 失败：$Path" }
+        '/grant:r' '*S-1-5-18:(OI)(CI)F' `
+        '/grant:r' '*S-1-5-32-544:(OI)(CI)F' `
+        '/grant:r' $serviceGrant | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "设置配置根目录 NTFS ACL 失败：$Path" }
+    $descendantPattern = Join-Path $Path '*'
+    $resetArguments = @($descendantPattern, '/reset') + @('/T', '/C')
+    & "$env:SystemRoot\System32\icacls.exe" @resetArguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "重置配置目录子项 NTFS ACL 继承失败：$Path"
+    }
 }
 
 function Set-StateAcl {
     param([string] $Path)
     $serviceGrant = ('*{0}:(OI)(CI)M' -f $ServiceSid)
+    & "$env:SystemRoot\System32\icacls.exe" $Path '/reset' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "重置状态根目录 NTFS ACL 失败：$Path" }
     & "$env:SystemRoot\System32\icacls.exe" $Path '/inheritance:r' `
-        '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
-        $serviceGrant '/T' '/C' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "设置状态目录 NTFS ACL 失败：$Path" }
+        '/grant:r' '*S-1-5-18:(OI)(CI)F' `
+        '/grant:r' '*S-1-5-32-544:(OI)(CI)F' `
+        '/grant:r' $serviceGrant | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "设置状态根目录 NTFS ACL 失败：$Path" }
+    $descendantPattern = Join-Path $Path '*'
+    $resetArguments = @($descendantPattern, '/reset') + @('/T', '/C')
+    & "$env:SystemRoot\System32\icacls.exe" @resetArguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "重置状态目录子项 NTFS ACL 继承失败：$Path"
+    }
 }
 
 function Test-PathEqualOrChild {

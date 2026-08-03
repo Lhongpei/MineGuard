@@ -499,6 +499,44 @@ function Invoke-EAIcaclsChecked {
     if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE" }
 }
 
+function Set-EACanonicalInheritedTreeAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string[]]$RootGrants,
+        [string]$Name = "Protected directory tree"
+    )
+    if ($RootGrants.Count -eq 0) {
+        throw "$Name must define at least one canonical root grant."
+    }
+    foreach ($Grant in $RootGrants) {
+        if ([string]::IsNullOrWhiteSpace($Grant) -or
+            $Grant -match '(?i)^/(?:T|C|Q|L)$') {
+            throw "$Name contains an invalid root ACL grant."
+        }
+    }
+    Assert-EAOrdinaryTree -Root $Root -Name $Name
+
+    # Canonical permissions belong only on the protected tree root. Applying
+    # inheritable (OI)(CI) entries recursively can protect a leaf while leaving
+    # it with no effective access rule. Reset each descendant instead so it
+    # inherits the root's effective ACL.
+    Invoke-EAIcaclsChecked -ArgumentList @($Root, "/reset")
+    $CanonicalArguments = @($Root, "/inheritance:r")
+    foreach ($Grant in $RootGrants) {
+        $CanonicalArguments += @("/grant:r", $Grant)
+    }
+    # Removing inherited access and publishing every replacement grant must be
+    # one native ACL operation; otherwise the caller can lock itself out of the
+    # tree between commands. Each trustee deliberately receives its own
+    # /grant:r switch for Windows PowerShell 5.1/icacls argument compatibility.
+    Invoke-EAIcaclsChecked -ArgumentList $CanonicalArguments
+    # Do not enumerate first: a descendant left with an empty DACL cannot be
+    # read by the caller. icacls can reset the owned wildcard tree directly.
+    Invoke-EAIcaclsChecked -ArgumentList @(
+        (Join-Path $Root "*"), "/reset", "/T", "/C"
+    )
+}
+
 function Remove-EAOwnedTemporaryTree {
     param(
         [string]$Path,
@@ -522,22 +560,37 @@ function Remove-EAOwnedTemporaryTree {
 
 function Assert-EAProtectedSnapshotAcl {
     param([string]$SnapshotRoot)
-    foreach ($Item in @((Get-Item -LiteralPath $SnapshotRoot -Force)) + @(
+    $RootItem = Get-Item -LiteralPath $SnapshotRoot -Force
+    foreach ($Item in @($RootItem) + @(
         Get-ChildItem -LiteralPath $SnapshotRoot -Force -Recurse
     )) {
         $Acl = Get-Acl -LiteralPath $Item.FullName
+        if ($Item.FullName.Equals(
+                $RootItem.FullName, [StringComparison]::OrdinalIgnoreCase
+            ) -and -not $Acl.AreAccessRulesProtected) {
+            throw "Snapshot root ACL must disable inherited access rules."
+        }
+        $AllowedSids = @("S-1-5-18", "S-1-5-32-544")
+        $FullControlSids = @{}
         foreach ($Rule in $Acl.Access) {
             $Sid = try { $Rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }
                 catch { [string]$Rule.IdentityReference }
-            $UnsafeRights = [Security.AccessControl.FileSystemRights]::Write -bor
-                [Security.AccessControl.FileSystemRights]::Modify -bor
-                [Security.AccessControl.FileSystemRights]::FullControl -bor
-                [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-                [Security.AccessControl.FileSystemRights]::TakeOwnership
-            if ($Rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-                $Sid -in @("S-1-1-0", "S-1-5-11", "S-1-5-32-545") -and
-                (($Rule.FileSystemRights -band $UnsafeRights) -ne 0)) {
-                throw "Snapshot ACL permits broad modification: $($Item.FullName)"
+            if ($Rule.AccessControlType -ne
+                    [Security.AccessControl.AccessControlType]::Allow -or
+                $AllowedSids -notcontains $Sid) {
+                throw "Snapshot ACL is not exclusively administrative: $($Item.FullName)"
+            }
+            $FullControl = [Security.AccessControl.FileSystemRights]::FullControl
+            if (($Rule.FileSystemRights -band $FullControl) -eq $FullControl) {
+                $FullControlSids[$Sid] = $true
+            }
+        }
+        foreach ($RequiredSid in $AllowedSids) {
+            if (-not $FullControlSids.ContainsKey($RequiredSid)) {
+                throw (
+                    "Snapshot ACL does not grant effective FullControl to " +
+                    "SYSTEM and Administrators: $($Item.FullName)"
+                )
             }
         }
     }

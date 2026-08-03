@@ -868,6 +868,29 @@ function Invoke-IcaclsChecked {
     }
 }
 
+function Set-EACanonicalProductTreeAcl {
+    param(
+        [string]$Path,
+        [ValidateSet("RX", "M")][string]$ServicePermission,
+        [switch]$Recurse
+    )
+    $ServiceGrant = "*S-1-5-19:(OI)(CI)$ServicePermission"
+    Invoke-IcaclsChecked -ArgumentList @($Path, "/reset")
+    Invoke-IcaclsChecked -ArgumentList @(
+        $Path, "/inheritance:r",
+        "/grant:r", "*S-1-5-18:(OI)(CI)F",
+        "/grant:r", "*S-1-5-32-544:(OI)(CI)F",
+        "/grant:r", $ServiceGrant
+    )
+    if ($Recurse) {
+        # Never combine /inheritance:r with /T: that protects every existing
+        # child before the root ACEs can propagate and can produce empty DACLs.
+        Invoke-IcaclsChecked -ArgumentList @(
+            (Join-Path $Path "*"), "/reset", "/T", "/C"
+        )
+    }
+}
+
 Assert-LocalFixedPath -Name "InstallRoot" -PathValue $InstallRoot
 Assert-LocalFixedPath -Name "StateRoot" -PathValue $StateRoot
 Assert-LocalFixedPath -Name "SourceRoot" -PathValue $SourceRoot
@@ -998,27 +1021,17 @@ if (-not $BuildFromSource) {
         Test-ManifestSubtree -Root $StagedDeploy -ManifestPrefix "deploy/windows/" -Manifest $Manifest
         Assert-LocalFixedPath -Name "InstallRoot" -PathValue $InstallRoot
         Assert-NotBroadProductRoot -Name "InstallRoot" -PathValue $InstallRoot
-        Invoke-IcaclsChecked -ArgumentList @($InstallRoot, "/inheritance:r")
-        Invoke-IcaclsChecked -ArgumentList @(
-            $InstallRoot, "/grant:r", "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-19:(OI)(CI)RX"
-        )
+        Set-EACanonicalProductTreeAcl -Path $InstallRoot `
+            -ServicePermission "RX"
         Assert-LocalFixedPath -Name "StateRoot" -PathValue $StateRoot
         Assert-NotBroadProductRoot -Name "StateRoot" -PathValue $StateRoot
         Assert-StateRootOrdinary -Root $StateRoot
         Assert-StateRootMarker -Root $StateRoot
-        Invoke-IcaclsChecked -ArgumentList @($StateRoot, "/inheritance:r")
-        Invoke-IcaclsChecked -ArgumentList @(
-            $StateRoot, "/grant:r", "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-19:(OI)(CI)RX"
-        )
+        Set-EACanonicalProductTreeAcl -Path $StateRoot `
+            -ServicePermission "RX"
         foreach ($StagedReadOnlyTree in @($StagedRuntime, $StagedDeploy)) {
-            Invoke-IcaclsChecked -ArgumentList @($StagedReadOnlyTree, "/inheritance:r")
-            Invoke-IcaclsChecked -ArgumentList @(
-                $StagedReadOnlyTree, "/grant:r", "*S-1-5-18:(OI)(CI)F",
-                "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-19:(OI)(CI)RX",
-                "/T", "/C"
-            )
+            Set-EACanonicalProductTreeAcl -Path $StagedReadOnlyTree `
+                -ServicePermission "RX" -Recurse
         }
         $StagedExecutable = Join-Path $StagedRuntime "MineGuardEnterpriseAgent.exe"
         Test-ReleaseSignatureContract -Manifest $Manifest `
@@ -1110,12 +1123,8 @@ if (-not $BuildFromSource) {
                 throw "Installed release metadata verification failed: $VerifiedMetadataName"
             }
         }
-        Invoke-IcaclsChecked -ArgumentList @($StagedMetadata, "/inheritance:r")
-        Invoke-IcaclsChecked -ArgumentList @(
-            $StagedMetadata, "/grant:r", "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-19:(OI)(CI)RX",
-            "/T", "/C"
-        )
+        Set-EACanonicalProductTreeAcl -Path $StagedMetadata `
+            -ServicePermission "RX" -Recurse
         if (Test-Path -LiteralPath $ReleaseMetadata) {
             Move-EAOwnedPathWithRetry `
                 -SourcePath $ReleaseMetadata -SourceParent $InstallRoot `
@@ -1392,21 +1401,14 @@ if (-not $DeployInstalled) {
 if ($BuildFromSource) {
     Assert-LocalFixedPath -Name "InstallRoot" -PathValue $InstallRoot
     Assert-NotBroadProductRoot -Name "InstallRoot" -PathValue $InstallRoot
-    Invoke-IcaclsChecked -ArgumentList @($InstallRoot, "/inheritance:r")
-    Invoke-IcaclsChecked -ArgumentList @(
-        $InstallRoot, "/grant:r", "*S-1-5-18:(OI)(CI)F",
-        "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-19:(OI)(CI)RX",
-        "/T", "/C"
-    )
+    Set-EACanonicalProductTreeAcl -Path $InstallRoot `
+        -ServicePermission "RX" -Recurse
     Assert-LocalFixedPath -Name "StateRoot" -PathValue $StateRoot
     Assert-NotBroadProductRoot -Name "StateRoot" -PathValue $StateRoot
     Assert-StateRootOrdinary -Root $StateRoot
     Assert-StateRootMarker -Root $StateRoot
-    Invoke-IcaclsChecked -ArgumentList @($StateRoot, "/inheritance:r")
-    Invoke-IcaclsChecked -ArgumentList @(
-        $StateRoot, "/grant:r", "*S-1-5-18:(OI)(CI)F",
-        "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-19:(OI)(CI)RX"
-    )
+    Set-EACanonicalProductTreeAcl -Path $StateRoot `
+        -ServicePermission "RX"
 }
 
 Write-Host "Enterprise Agent runtime installed."

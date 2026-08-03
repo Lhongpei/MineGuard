@@ -194,11 +194,11 @@ try {
         (($SnapshotManifest | ConvertTo-Json -Depth 8) + [Environment]::NewLine),
         $Utf8NoBom
     )
-    Invoke-EAIcaclsChecked -ArgumentList @($TemporarySnapshot, "/inheritance:r")
-    Invoke-EAIcaclsChecked -ArgumentList @(
-        $TemporarySnapshot, "/grant:r", "*S-1-5-18:(OI)(CI)F",
-        "*S-1-5-32-544:(OI)(CI)F", "/T", "/C"
-    )
+    Set-EACanonicalInheritedTreeAcl -Root $TemporarySnapshot `
+        -Name "Temporary Agent snapshot" -RootGrants @(
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F"
+        )
     Assert-EAProtectedSnapshotAcl -SnapshotRoot $TemporarySnapshot
     Move-Item -LiteralPath $TemporarySnapshot -Destination $FinalSnapshot
     $Completed = $true

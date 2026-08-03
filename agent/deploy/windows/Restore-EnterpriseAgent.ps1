@@ -277,11 +277,11 @@ if ($PSCmdlet.ShouldProcess(
         -PathValue $TransactionParent -MustExist -RequiredType Container)
     New-Item -ItemType Directory -Path $TransactionRoot | Out-Null
     New-Item -ItemType Directory -Path $StagedQuarantine | Out-Null
-    Invoke-EAIcaclsChecked -ArgumentList @($TransactionRoot, "/inheritance:r")
-    Invoke-EAIcaclsChecked -ArgumentList @(
-        $TransactionRoot, "/grant:r", "*S-1-5-18:(OI)(CI)F",
-        "*S-1-5-32-544:(OI)(CI)F", "/T", "/C"
-    )
+    Set-EACanonicalInheritedTreeAcl -Root $TransactionRoot `
+        -Name "Agent restore transaction" -RootGrants @(
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F"
+        )
     foreach ($EvidenceFile in Get-ChildItem -LiteralPath $SnapshotQuarantine -File -Force) {
         Copy-Item -LiteralPath $EvidenceFile.FullName -Destination $StagedQuarantine
     }

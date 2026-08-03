@@ -257,10 +257,19 @@ Initialize-StateOwnership -Path $TargetStateDirectory -Root $InstallRoot
 Assert-NoReparseTree -Path $TargetStateDirectory -Label '恢复目标'
 
 $serviceGrant = ('*{0}:(OI)(CI)M' -f $ServiceSid)
+& "$env:SystemRoot\System32\icacls.exe" $TargetStateDirectory '/reset' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw '恢复成功，但重置恢复根目录 NTFS ACL 失败。' }
 & "$env:SystemRoot\System32\icacls.exe" $TargetStateDirectory '/inheritance:r' `
-    '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
-    $serviceGrant '/T' '/C' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw '恢复成功，但设置恢复目录 NTFS ACL 失败。' }
+    '/grant:r' '*S-1-5-18:(OI)(CI)F' `
+    '/grant:r' '*S-1-5-32-544:(OI)(CI)F' `
+    '/grant:r' $serviceGrant | Out-Null
+if ($LASTEXITCODE -ne 0) { throw '恢复成功，但设置恢复根目录 NTFS ACL 失败。' }
+$descendantPattern = Join-Path $TargetStateDirectory '*'
+& "$env:SystemRoot\System32\icacls.exe" $descendantPattern `
+    '/reset' '/T' '/C' | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw '恢复成功，但重置恢复目录子项 NTFS ACL 继承失败。'
+}
 
 [pscustomobject]@{
     status = 'restored_to_new_directory'
