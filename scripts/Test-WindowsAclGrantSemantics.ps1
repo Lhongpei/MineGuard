@@ -58,15 +58,21 @@ Copy-Item -LiteralPath "$env:SystemRoot\System32\PING.EXE" `
     -Destination $Executable
 
 try {
-    # Repeat /grant:r for every trustee. This avoids depending on ambiguous
-    # multi-trustee parsing and is the exact shape used by product installers.
-    Invoke-IcaclsChecked -Label "Canonical ACL grant" -ArgumentList @(
+    # Canonicalize the root itself, then reset descendants so they inherit the
+    # protected root. Applying /inheritance:r with /T protects every child and
+    # can leave existing files with an empty DACL.
+    Invoke-IcaclsChecked -Label "Canonical ACL reset" -ArgumentList @(
+        $ProbeRoot, "/reset"
+    )
+    Invoke-IcaclsChecked -Label "Canonical ACL root grant" -ArgumentList @(
         $ProbeRoot,
         "/inheritance:r",
         "/grant:r", "*S-1-5-18:(OI)(CI)F",
         "/grant:r", "*S-1-5-32-544:(OI)(CI)F",
-        "/grant:r", "*S-1-5-19:(OI)(CI)RX",
-        "/T", "/C"
+        "/grant:r", "*S-1-5-19:(OI)(CI)RX"
+    )
+    Invoke-IcaclsChecked -Label "Canonical ACL descendant reset" -ArgumentList @(
+        (Join-Path $ProbeRoot "*"), "/reset", "/T", "/C"
     )
 
     $RootAllowSids = Get-AllowSids -Path $ProbeRoot
