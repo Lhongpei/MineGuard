@@ -402,6 +402,14 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     assert '".pdb", ".ilk", ".map"' in build
     assert "/api/v1/health" in smoke
     assert "<!doctype html" in smoke
+    assert "-UseNewEnvironment" not in smoke
+    assert 'Name = "SystemRoot"' in smoke
+    assert 'Name = "windir"' in smoke
+    assert 'Name = "ComSpec"' in smoke
+    assert "$EnvironmentVariablesToClear" in smoke
+    assert "[EnvironmentVariableTarget]::Process" in smoke
+    assert "[IO.File]::ReadAllText" in smoke
+    assert "$Process.WaitForExit()" in smoke
     source_guard = build.index(
         'Assert-SafeLocalFixedPath -Name "SourceRoot" -PathValue $SourceRoot'
     )

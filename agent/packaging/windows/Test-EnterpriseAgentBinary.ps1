@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONUNBUFFERED = "1"
 
 $RuntimeRoot = [IO.Path]::GetFullPath($RuntimeRoot)
@@ -33,6 +34,22 @@ if ($LASTEXITCODE -ne 0 -or $VersionOutput -notmatch '^enterprise-agent [0-9]+\.
     throw "Standalone executable did not report a valid Enterprise Agent version."
 }
 
+foreach ($RequiredEnvironment in @(
+    [pscustomobject]@{ Name = "SystemRoot"; PathType = "Container" },
+    [pscustomobject]@{ Name = "windir"; PathType = "Container" },
+    [pscustomobject]@{ Name = "ComSpec"; PathType = "Leaf" }
+)) {
+    $EnvironmentValue = [Environment]::GetEnvironmentVariable(
+        $RequiredEnvironment.Name,
+        [EnvironmentVariableTarget]::Process
+    )
+    if ([string]::IsNullOrWhiteSpace($EnvironmentValue) -or
+        -not (Test-Path -LiteralPath $EnvironmentValue `
+            -PathType $RequiredEnvironment.PathType)) {
+        throw "Windows smoke-test environment is missing $($RequiredEnvironment.Name)."
+    }
+}
+
 $Listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
 $Listener.Start()
 $Port = ([Net.IPEndPoint]$Listener.LocalEndpoint).Port
@@ -47,21 +64,69 @@ $QuotedDatabase = '"' + $DatabasePath.Replace('"', '\"') + '"'
 $Arguments = "--db $QuotedDatabase serve --host 127.0.0.1 --port $Port"
 $Process = $null
 try {
-    $Process = Start-Process `
-        -FilePath $Executable `
-        -ArgumentList $Arguments `
-        -WorkingDirectory $RuntimeRoot `
-        -RedirectStandardOutput $StdoutPath `
-        -RedirectStandardError $StderrPath `
-        -UseNewEnvironment `
-        -PassThru
+    # Start-Process must inherit the live Windows process environment.
+    # Starting from a freshly reconstructed environment drops process/user-
+    # scoped values on Windows and can leave Winsock unable to expand or load
+    # a catalog provider DLL.
+    # Remove only application credentials and Python host-environment hints
+    # while the child process is created, then restore the build process.
+    $SavedEnvironment = @{}
+    $EnvironmentVariablesToClear = @(
+        Get-ChildItem Env: |
+            Where-Object {
+                $_.Name -in @(
+                    "PYTHONHOME",
+                    "PYTHONPATH",
+                    "VIRTUAL_ENV",
+                    "VIRTUAL_ENV_PROMPT"
+                ) -or
+                $_.Name -match `
+                    '^(ENTERPRISE_|PLATFORM_|DEEPSEEK_|OPENAI_|COAL_NEWS_)' -or
+                $_.Name -match '(?i)(API_KEY|SECRET|TOKEN|PASSWORD)$'
+            } |
+            ForEach-Object { $_.Name } |
+            Sort-Object -Unique
+    )
+    try {
+        foreach ($Name in $EnvironmentVariablesToClear) {
+            $SavedEnvironment[$Name] = [Environment]::GetEnvironmentVariable(
+                $Name,
+                [EnvironmentVariableTarget]::Process
+            )
+            [Environment]::SetEnvironmentVariable(
+                $Name,
+                $null,
+                [EnvironmentVariableTarget]::Process
+            )
+        }
+        $Process = Start-Process `
+            -FilePath $Executable `
+            -ArgumentList $Arguments `
+            -WorkingDirectory $RuntimeRoot `
+            -RedirectStandardOutput $StdoutPath `
+            -RedirectStandardError $StderrPath `
+            -PassThru
+    }
+    finally {
+        foreach ($Name in $EnvironmentVariablesToClear) {
+            [Environment]::SetEnvironmentVariable(
+                $Name,
+                $SavedEnvironment[$Name],
+                [EnvironmentVariableTarget]::Process
+            )
+        }
+    }
     $Deadline = [DateTime]::UtcNow.AddSeconds(30)
     $Healthy = $false
     while ([DateTime]::UtcNow -lt $Deadline) {
         $Process.Refresh()
         if ($Process.HasExited) {
-            $ErrorText = Get-Content -LiteralPath $StderrPath -Raw -ErrorAction SilentlyContinue
-            throw "Standalone Agent exited during smoke test with code $($Process.ExitCode): $ErrorText"
+            $Process.WaitForExit()
+            $ExitCode = [int]$Process.ExitCode
+            $ErrorText = if (Test-Path -LiteralPath $StderrPath -PathType Leaf) {
+                [IO.File]::ReadAllText($StderrPath, [Text.Encoding]::UTF8)
+            } else { "" }
+            throw "Standalone Agent exited during smoke test with code ${ExitCode}: $ErrorText"
         }
         try {
             $Health = Invoke-WebRequest `

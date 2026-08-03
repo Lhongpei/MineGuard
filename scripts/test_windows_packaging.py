@@ -120,6 +120,20 @@ def test_child_toolchain_pins() -> None:
         ):
             assert token in builder, f"{relative} misses approved tool gate: {token}"
 
+    agent_smoke = read("agent/packaging/windows/Test-EnterpriseAgentBinary.ps1")
+    assert "-UseNewEnvironment" not in agent_smoke
+    for token in (
+        '$env:PYTHONIOENCODING = "utf-8"',
+        'Name = "SystemRoot"',
+        'Name = "windir"',
+        'Name = "ComSpec"',
+        "$EnvironmentVariablesToClear",
+        "[EnvironmentVariableTarget]::Process",
+        "[IO.File]::ReadAllText",
+        "$Process.WaitForExit()",
+    ):
+        assert token in agent_smoke, f"agent smoke environment guard missing: {token}"
+
 
 def test_inno_scripts() -> None:
     platform = read("packaging/windows/inno/MineGuardPlatform.iss")
