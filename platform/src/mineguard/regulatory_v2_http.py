@@ -1894,6 +1894,10 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             for response in item.responses
         ]
         result = report.result if report is not None else None
+        source_disclosure = self._submission_source_disclosure(
+            mine_id,
+            str(latest_submission.get("submission_id") or ""),
+        )
         return {
             "mine": {
                 "mine_id": detail.overview.mine_id,
@@ -1913,6 +1917,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 **latest_submission,
                 "report_month": str(latest_submission.get("period_end", ""))[:7],
                 "data_as_of": latest_submission.get("period_end"),
+                "source_disclosure": source_disclosure,
             },
             "latest_analysis": {
                 "status": result.decision.value if result else None,
@@ -1980,6 +1985,65 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 }
                 for item in reversed(detail.audit_events)
             ],
+        }
+
+    def _submission_source_disclosure(
+        self,
+        mine_id: str,
+        submission_id: str,
+    ) -> dict[str, Any]:
+        """Expose a safe source label without returning the exchange body."""
+
+        if not submission_id:
+            return {
+                "data_origin": "unknown",
+                "demo": False,
+                "label": "来源详情未提供",
+            }
+        messages = self.server.store.list_exchange_messages(
+            mine_id=mine_id,
+            direction="inbound",
+            limit=100,
+        )
+        message = next(
+            (
+                item
+                for item in reversed(messages)
+                if item.body.get("submission_id") == submission_id
+            ),
+            None,
+        )
+        if message is None:
+            return {
+                "data_origin": "enterprise_exchange",
+                "demo": False,
+                "label": "企业交换报送",
+            }
+        body = message.body
+        if body.get("workbook_example") is True:
+            return {
+                "data_origin": "bundled_workbook_values",
+                "demo": True,
+                "label": "ET样表原值（未企业签名）",
+                "source_filename": str(body.get("original_filename") or ""),
+                "source_sha256": str(body.get("source_sha256") or ""),
+                "source_report_month": str(body.get("source_report_month") or ""),
+                "source_value_policy": str(body.get("source_value_policy") or ""),
+                "units_verified": False,
+                "identity_verified": False,
+                "regulatory_use": "prohibited",
+            }
+        if body.get("synthetic_demo") is True:
+            return {
+                "data_origin": "synthetic_generated",
+                "demo": True,
+                "label": "程序合成教学场景",
+                "regulatory_use": "prohibited",
+            }
+        return {
+            "data_origin": "enterprise_exchange",
+            "demo": False,
+            "label": "企业交换报送",
         }
 
     def _finding_rows(

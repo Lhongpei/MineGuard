@@ -1,0 +1,34 @@
+[Unit]
+Description=Enterprise Five-Quantity Read-Only Connector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=enterprise-connector
+Group=enterprise-connector
+EnvironmentFile=/etc/enterprise-connector/connector.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/enterprise-connector/venv/bin/enterprise-connector run --config /etc/enterprise-connector/config.toml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+StateDirectory=enterprise-connector
+StateDirectoryMode=0700
+# Add exact upstream file-drop/SQLite/CA paths in a local drop-in, for example:
+# ReadOnlyPaths=/srv/mine-readonly/drop /srv/mine-readonly/source.sqlite3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

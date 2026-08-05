@@ -84,6 +84,16 @@ const draftDetail = {
     approved_event_codes: [],
   },
   field_provenance: {
+    "/enterprise_name": [
+      {
+        source_name: "ERP 企业主数据",
+        source_kind: "json",
+        locator: "$.enterprise_name",
+        extraction_method: "deterministic_json_import",
+        confidence: 0.98,
+        recorded_at: "2026-07-29T08:00:00Z",
+      },
+    ],
     "/operational_context/approved_event_codes": [
       {
         source_name: "监管事件查询结果",
@@ -95,6 +105,34 @@ const draftDetail = {
     ],
   },
   sources: [],
+  autofill_proposal: {
+    proposal_only: true,
+    candidates: [
+      {
+        candidate_id: "history-1",
+        path: "/operational_context/shift_code",
+        evidence_class: "historical_suggestion",
+        evidence_label: "历史数据建议",
+        status: "selected",
+        method: "historical_mode",
+        rationale: "同类生产日通常采用日班口径，仅供核对。",
+        source_refs: ["history-snapshot-1"],
+        confidence: { effective: 0.72 },
+      },
+      {
+        candidate_id: "physical-1",
+        path: "/observations/0/value",
+        evidence_class: "physical_inference",
+        evidence_label: "物理关系推断",
+        status: "analysis_only",
+        method: "mass_balance",
+        rationale: "煤流平衡复算结果，仅用于发现不闭合。",
+        source_refs: ["source-a", "source-b"],
+        confidence: { effective: 0.81 },
+      },
+    ],
+    conflicts: [],
+  },
   observations: [],
   questions: [],
   approval_events: [],
@@ -156,6 +194,28 @@ function createScenario(principal) {
           all_reviewed: false,
           observations: [],
         },
+      });
+    }
+    if (
+      url.pathname === "/api/v1/drafts/draft-simple-1/ingestions" &&
+      method === "GET"
+    ) {
+      return jsonResponse({
+        items: [
+          {
+            source_name: "生产日报自动抓取",
+            source_system: "ERP",
+            format: "json",
+            status: "completed",
+            event_id: "event-autofill-20260729",
+            request_sha256: "b".repeat(64),
+            processed_at: "2026-07-29T08:01:00Z",
+            flow_id: "flow-health-20260729",
+            content: "DO_NOT_RENDER_RAW_CONTENT",
+            signature: "DO_NOT_RENDER_SIGNATURE",
+            connector_secret: "DO_NOT_RENDER_SECRET",
+          },
+        ],
       });
     }
     if (
@@ -401,10 +461,69 @@ async function testReadOnlyModeCannotUpgradePermissions() {
   }
 }
 
+async function testReadOnlyAutofillEvidenceIsSafeAndUseful() {
+  const scenario = createScenario({
+    actor_id: "evidence-viewer-1",
+    name: "自动填报依据查看人",
+    role: "企业复核",
+    permissions: ["read"],
+    authentication_method: "password_session",
+    must_change_password: false,
+    temporary_demo: false,
+  });
+  const { dom, document, requests, runtimeErrors } = scenario;
+  try {
+    await openSuggestedDraft(scenario);
+    const writesBefore = requests.filter((item) =>
+      /^(POST|PATCH|DELETE) /.test(item),
+    ).length;
+    const button = document.getElementById("autofillEvidenceButton");
+    assert.equal(button.disabled, false);
+    button.click();
+    await waitFor(
+      () =>
+        document.getElementById("autofillIngestionList").textContent.includes(
+          "生产日报自动抓取",
+        ),
+      "autofill evidence ingestion metadata",
+    );
+    assert.equal(document.getElementById("autofillEvidenceDialog").open, true);
+    assert.equal(document.getElementById("autofillIngestionCount").textContent, "1");
+    assert.equal(document.getElementById("autofillRawFieldCount").textContent, "2");
+    assert.equal(document.getElementById("autofillHistoryCount").textContent, "1");
+    assert.equal(document.getElementById("autofillPhysicalCount").textContent, "1");
+    assert.match(document.getElementById("autofillRawList").textContent, /企业名称/);
+    assert.match(
+      document.getElementById("autofillHistoryList").textContent,
+      /同类生产日通常采用日班口径/,
+    );
+    assert.match(
+      document.getElementById("autofillPhysicalList").textContent,
+      /仅分析/,
+    );
+    const dialogText = document.getElementById("autofillEvidenceDialog").textContent;
+    for (const forbidden of [
+      "DO_NOT_RENDER_RAW_CONTENT",
+      "DO_NOT_RENDER_SIGNATURE",
+      "DO_NOT_RENDER_SECRET",
+    ]) {
+      assert(!dialogText.includes(forbidden));
+    }
+    const writesAfter = requests.filter((item) =>
+      /^(POST|PATCH|DELETE) /.test(item),
+    ).length;
+    assert.equal(writesAfter, writesBefore, "evidence preview must stay read-only");
+    assert.equal(runtimeErrors.length, 0, String(runtimeErrors[0] || ""));
+  } finally {
+    dom.window.close();
+  }
+}
+
 async function main() {
   await testAutofillShortcutOpensSourceStep();
   await testOperatorModeSwitchAndSteps();
   await testReadOnlyModeCannotUpgradePermissions();
+  await testReadOnlyAutofillEvidenceIsSafeAndUseful();
   console.log("JSDOM enterprise mode checks passed");
 }
 

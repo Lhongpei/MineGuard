@@ -143,6 +143,44 @@ class ParsedSheet:
     rows: list[list[Any]]
 
 
+def _strict_json_loads(value: str) -> Any:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ImportContentError(f"JSON 包含重复字段：{key}")
+            result[key] = item
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ImportContentError(f"JSON 包含非标准数值：{value}")
+
+    try:
+        parsed = json.loads(
+            value,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
+    except ImportContentError:
+        raise
+    except (RecursionError, ValueError) as error:
+        raise ImportContentError("JSON 结构非法或嵌套层级过深") from error
+    stack: list[tuple[Any, int]] = [(parsed, 1)]
+    node_count = 0
+    while stack:
+        item, depth = stack.pop()
+        node_count += 1
+        if node_count > 500_000:
+            raise ImportContentError("JSON 结构节点过多")
+        if depth > 64:
+            raise ImportContentError("JSON 嵌套层级不能超过 64")
+        if isinstance(item, dict):
+            stack.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item)
+    return parsed
+
+
 def _safe_filename(value: str) -> str:
     if not isinstance(value, str):
         raise ImportContentError("文件名必须是字符串")
@@ -748,7 +786,7 @@ def _json_payload(
     source_sheet: str = "JSON",
 ) -> dict[str, Any] | None:
     try:
-        parsed = json.loads(_decode_text(content))
+        parsed = _strict_json_loads(_decode_text(content))
     except json.JSONDecodeError as error:
         raise ImportContentError("JSON 文件格式非法") from error
     candidate = parsed.get("payload") if isinstance(parsed, dict) else None
@@ -838,7 +876,7 @@ def _jsonl_payload(
         if line_number > MAX_ROWS:
             raise ImportContentError(f"JSONL 行数不得超过 {MAX_ROWS}")
         try:
-            item = json.loads(line)
+            item = _strict_json_loads(line)
         except json.JSONDecodeError as error:
             raise ImportContentError(
                 f"JSONL 第 {line_number} 行不是有效 JSON"

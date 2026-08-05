@@ -12,7 +12,7 @@ from importlib.resources import files
 from pathlib import PurePosixPath
 
 
-_RESOURCE_DIRECTORIES = frozenset({"regulatory_web", "web"})
+_RESOURCE_DIRECTORIES = frozenset({"demo_samples", "regulatory_web", "web"})
 
 
 def read_package_resource(directory: str, filename: str) -> bytes:

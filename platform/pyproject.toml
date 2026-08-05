@@ -30,6 +30,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 mineguard = [
+  "demo_samples/*.et",
   "web/*.html",
   "web/*.css",
   "web/*.js",

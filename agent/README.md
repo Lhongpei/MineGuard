@@ -18,9 +18,11 @@
 原因 + 证据索引 + 措施 → 人工确认 → 风险回执 ─→ 政府留痕 / 必要时重算
 ```
 
-固定目录和以后增加的受控连接器都属于本 Agent，不再部署第三个 `edge-agent`
-产品。旧 `enterprise-submission-v1`、通用任务中心和新闻对话代码只作 Legacy
-迁移兼容，不在默认界面、V2 配置或部署流程中使用。
+固定目录和受控连接器都属于本 Agent 的采集能力，不再部署第三个 `edge-agent`
+业务产品。简单目录监听内置于本进程；需要隔离访问企业 HTTP/SQLite 时，可在同一
+矿区部署 `../connector-service/` 伴随进程，它只通过最小权限 HMAC 接口建待复核稿，
+不能确认、报送或访问政府端。旧 `enterprise-submission-v1`、通用任务中心和新闻
+对话代码只作 Legacy 迁移兼容，不在默认界面、V2 配置或部署流程中使用。
 
 ## 已实现能力
 
@@ -132,10 +134,11 @@ export ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS=/srv/mine-readonly/five-quantity-inbo
 大小和修改时间连续稳定后再读取，按内容摘要去重。解析失败文件会复制到数据库同级的
 `five-quantity-quarantine/`，不会写回来源目录，也不会删除来源原件。
 
-目前没有开放“任意 URL 定时 GET”连接器。通用 GET 容易形成 SSRF、越权取数和来源
-混淆；确有设备接口时，应增加逐来源 allowlist、固定 HTTPS origin、自定义 CA、响应
-上限、超时、内容类型、身份密钥、健康状态和隔离队列后再启用，而不是让用户填写任意
-URL。
+主页面和通用 API 不开放“任意 URL 定时 GET”。需要设备接口时使用仓库中的受控
+`connector-service/`：每个 URL 固定 HTTPS origin、主机/端口 allowlist、私有 CA、
+响应上限、超时、内容类型和仅从环境变量读取的身份凭据；页面用户不能临时改 URL。
+它也支持只读 SQLite 和稳定文件投递，完整配置见
+[企业数据自动采集连接器](../connector-service/README.md)。
 
 ## 企业 HTTP API
 
@@ -150,6 +153,7 @@ URL。
 | `POST` | `/api/v2/watch/scan` | 立即扫描固定目录 |
 | `GET` | `/api/v2/drafts` | 月报复核稿列表；`include_discarded=true` 可追溯已放弃项 |
 | `GET/PATCH/DELETE` | `/api/v2/drafts/{id}` | 读取 / 保存 / 带修订号和原因软放弃未确认稿 |
+| `GET` | `/api/v2/drafts/{id}/ingestions` | 查看机器导入批次、来源、拒绝原因和数据就绪预检 |
 | `POST` | `/api/v2/drafts/{id}/confirm` | 人工确认并可靠入队；同时需要 `confirm` 和 `submit` |
 | `POST` | `/api/v2/drafts/{id}/send-now` | 手工触发一次 outbox 重试 |
 | `GET` | `/api/v2/risks`、`/{id}` | 风险收件箱 / 已验签报告 |

@@ -40,6 +40,11 @@ class RequestTooLargeError(AgentError):
     status = 413
 
 
+class ConnectorQuotaExceededError(AgentError):
+    code = "connector_quota_exceeded"
+    status = 429
+
+
 class ProviderError(AgentError):
     code = "llm_provider_failed"
     status = 502

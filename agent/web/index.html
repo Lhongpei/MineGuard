@@ -152,10 +152,16 @@
           </form>
           <article class="fq-card">
             <span class="fq-card-icon" aria-hidden="true">↻</span>
-            <h3>固定目录 / 设备直采</h3>
+            <h3>固定目录 / 自动连接器</h3>
             <p id="fqWatchSummary">正在读取已配置目录…</p>
+            <p class="fq-connector-summary" id="fqConnectorSummary">
+              正在检查企业系统自动采集接口…
+            </p>
             <button class="button button-secondary" id="fqScanWatch" type="button">立即扫描一次</button>
-            <small>系统会等待文件写入稳定、按内容去重；异常文件复制到隔离区，原件不删除。</small>
+            <small>
+              系统会等待文件写入稳定、按内容去重；外部连接器只读访问白名单来源。
+              所有自动数据先进入草稿，仍需企业人员复核确认。
+            </small>
           </article>
         </div>
 
@@ -1635,7 +1641,16 @@
               <div class="source-list-section">
                 <div class="subheading">
                   <h4>已导入来源</h4>
-                  <span id="sourceCount">0 个</span>
+                  <div class="button-row autofill-evidence-heading-actions">
+                    <span id="sourceCount">0 个</span>
+                    <button
+                      class="button button-secondary"
+                      id="autofillEvidenceButton"
+                      type="button"
+                    >
+                      查看自动填报依据
+                    </button>
+                  </div>
                 </div>
                 <div class="source-list" id="sourceList"></div>
               </div>
@@ -1945,6 +1960,92 @@
       <div class="modal-actions">
         <button class="button button-primary" data-close-dialog="sourceDialog" type="button">
           我已查看
+        </button>
+      </div>
+    </dialog>
+
+    <dialog
+      class="modal autofill-evidence-dialog"
+      id="autofillEvidenceDialog"
+      aria-labelledby="autofillEvidenceDialogTitle"
+    >
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">自动填报 · 证据分层预览</p>
+          <h2 id="autofillEvidenceDialogTitle">这份草稿是怎样自动形成的</h2>
+        </div>
+        <button
+          class="icon-button"
+          data-close-dialog="autofillEvidenceDialog"
+          type="button"
+          aria-label="关闭"
+        >
+          ×
+        </button>
+      </div>
+      <div class="alert alert-warning autofill-evidence-boundary" role="note">
+        <span class="alert-icon" aria-hidden="true">界</span>
+        <div>
+          <strong>自动写入不等于企业确认</strong>
+          <p>
+            原始来源字段可写入草稿；历史数据只提供建议，物理关系只用于分析。
+            智能体不能生成来源签名，也不能替人确认或提交。
+          </p>
+        </div>
+      </div>
+      <p class="autofill-evidence-status" id="autofillEvidenceStatus" role="status">
+        打开后读取当前草稿的自动导入记录和字段来源。
+      </p>
+      <div class="autofill-evidence-summary" aria-label="自动填报证据统计">
+        <article>
+          <small>机器导入批次</small>
+          <strong id="autofillIngestionCount">0</strong>
+        </article>
+        <article>
+          <small>来源字段</small>
+          <strong id="autofillRawFieldCount">0</strong>
+        </article>
+        <article>
+          <small>历史建议</small>
+          <strong id="autofillHistoryCount">0</strong>
+        </article>
+        <article>
+          <small>物理推断</small>
+          <strong id="autofillPhysicalCount">0</strong>
+        </article>
+      </div>
+      <div class="autofill-evidence-sections">
+        <section aria-labelledby="autofillIngestionTitle">
+          <h3 id="autofillIngestionTitle">自动抓取与导入记录</h3>
+          <div id="autofillIngestionList" class="autofill-evidence-list"></div>
+        </section>
+        <section aria-labelledby="autofillRawTitle">
+          <h3 id="autofillRawTitle">原始来源字段</h3>
+          <p>这些字段已有来源定位；仍需经办人对照原系统核实。</p>
+          <div id="autofillRawList" class="autofill-evidence-list"></div>
+        </section>
+        <section aria-labelledby="autofillHistoryTitle">
+          <h3 id="autofillHistoryTitle">历史数据建议</h3>
+          <p>历史只能补充空白上下文，不能代替本期观测。</p>
+          <div id="autofillHistoryList" class="autofill-evidence-list"></div>
+        </section>
+        <section aria-labelledby="autofillPhysicalTitle">
+          <h3 id="autofillPhysicalTitle">物理关系推断</h3>
+          <p>仅用于发现不闭合或异常，不会自动写成报送事实。</p>
+          <div id="autofillPhysicalList" class="autofill-evidence-list"></div>
+        </section>
+        <section aria-labelledby="autofillConflictTitle">
+          <h3 id="autofillConflictTitle">冲突与未采用项</h3>
+          <div id="autofillConflictList" class="autofill-evidence-list"></div>
+        </section>
+      </div>
+      <div class="modal-actions">
+        <button
+          class="button button-primary"
+          data-close-dialog="autofillEvidenceDialog"
+          type="button"
+        >
+          我已了解，继续人工核对
         </button>
       </div>
     </dialog>

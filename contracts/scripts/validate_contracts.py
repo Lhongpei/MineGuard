@@ -23,6 +23,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 CONTRACT_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = {
+    "enterprise-autofill-ingestion-v1.json": (
+        "enterprise-autofill-ingestion-v1.schema.json"
+    ),
+    "enterprise-source-health-v1.json": "enterprise-source-health-v1.schema.json",
     "enterprise-submission-v1.json": "enterprise-submission-v1.schema.json",
     "submission-receipt-v1.json": "submission-receipt-v1.schema.json",
     "error-v1.json": "error-v1.schema.json",
@@ -53,6 +57,25 @@ EXPECTED_BODY_SHA256 = (
 )
 EXPECTED_TRANSPORT_SIGNATURE = (
     "1f26b2f2541ddefd388dba69fb9d601fb25a7d2448c2f0b021c198edba97795e"
+)
+EXPECTED_CONNECTOR_VECTORS = {
+    "enterprise-autofill-ingestion-v1.json": (
+        "/api/v1/machine/autofill",
+        "1785475200",
+        "creq_example_autofill_001",
+        "6ac2d11c104e876dfb9167f5bc48f07ed27ba369ba312ffc17455e827bae2b48",
+        "0cb4651311da338f912185efded84d35d427af29d509e439b4163f0f082dad86",
+    ),
+    "enterprise-source-health-v1.json": (
+        "/api/v1/machine/source-health",
+        "1785475260",
+        "creq_example_health_001",
+        "6a39402c350186ba63d1e6505d8b8161894eea2d42d227b5290a15d9ab1bda4e",
+        "0e968a5eeb8817be737e890a049fb5617f22bb3569711273b65c706ce832af4c",
+    ),
+}
+CONNECTOR_EXAMPLE_SECRET = (
+    b"example-enterprise-connector-secret-not-for-production"
 )
 EXPECTED_EDGE_BODY_SHA256 = (
     "f289284d73836288cae3191eeac928b62d78c8988418e1016e4f956c08af2aab"
@@ -389,6 +412,42 @@ def _check_edge_fixed_vectors(
         ) and observation.get("location_code") != observation.get("source_id"):
             raise ContractValidationError(
                 f"observations[{index}] source health location is ambiguous"
+            )
+
+
+def _check_connector_fixed_vectors() -> None:
+    for filename, (
+        path,
+        timestamp,
+        request_id,
+        expected_body_sha256,
+        expected_signature,
+    ) in EXPECTED_CONNECTOR_VECTORS.items():
+        body = (CONTRACT_ROOT / "examples" / filename).read_bytes()
+        body_sha256 = hashlib.sha256(body).hexdigest()
+        if body_sha256 != expected_body_sha256:
+            raise ContractValidationError(
+                f"{filename}: connector raw-body vector changed; "
+                "update its fixed HMAC vector"
+            )
+        material = "\n".join(
+            (
+                "ENTERPRISE-CONNECTOR-HMAC-SHA256-V1",
+                "POST",
+                path,
+                timestamp,
+                request_id,
+                body_sha256,
+            )
+        ).encode("utf-8")
+        signature = hmac.new(
+            CONNECTOR_EXAMPLE_SECRET,
+            material,
+            hashlib.sha256,
+        ).hexdigest()
+        if signature != expected_signature:
+            raise ContractValidationError(
+                f"{filename}: connector transport signature vector changed"
             )
 
 
@@ -829,6 +888,7 @@ def main() -> int:
         documents[edge_batch_path],
         documents[CONTRACT_ROOT / "examples" / "edge-telemetry-receipt-v1.json"],
     )
+    _check_connector_fixed_vectors()
     v2_messages = {
         filename: documents[CONTRACT_ROOT / "examples" / filename]
         for filename in EXPECTED_V2_VECTORS

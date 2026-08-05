@@ -21,6 +21,11 @@ def test_resource_reader_is_cwd_independent_and_rejects_traversal(
     monkeypatch.chdir(tmp_path)
     assert b"MineGuard" in read_package_resource("regulatory_web", "index.html")
     assert b"<!doctype html" in read_package_resource("web", "index.html").lower()
+    assert len(read_package_resource("demo_samples", "taiyue-2026-07.et")) == 27_648
+    assert (
+        len(read_package_resource("demo_samples", "gengyang-2026-07.et"))
+        == 27_648
+    )
     with pytest.raises(ValueError):
         read_package_resource("regulatory_web", "../index.html")
     with pytest.raises(ValueError):
@@ -58,6 +63,7 @@ def test_platform_nuitka_build_surface_has_a_pinned_traceable_contract() -> None
         "--deployment",
         "--msvc=latest",
         "--output-filename=MineGuardPlatform.exe",
+        "mineguard/demo_samples",
         "--include-package-data=tzdata",
         "--include-distribution-metadata=numpy",
         "--include-distribution-metadata=scipy",
@@ -303,6 +309,7 @@ def test_pyproject_packages_all_frontend_binary_assets() -> None:
     assert "regulatory_web/*.html" in package_data
     assert "regulatory_web/*.css" in package_data
     assert "regulatory_web/*.js" in package_data
+    assert "demo_samples/*.et" in package_data
 
 
 def test_clients_example_remains_json_after_release_copy() -> None:

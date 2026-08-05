@@ -147,6 +147,15 @@ tbody tr { cursor: pointer; transition: .18s; } tbody tr:hover { background: rgb
 .mine-summary-grid { display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 12px; margin-bottom: 12px; }
 .mine-summary-grid > article { padding: 17px; min-height: 145px; }
 .mine-identity > p:not(.panel-kicker) { color: var(--muted); font-size: 12px; }
+.mine-identity .mine-source-notice {
+  margin: 10px 0 0;
+  padding: 9px 10px;
+  border: 1px solid #e8c778;
+  border-radius: 8px;
+  background: #fff8df;
+  color: #765216;
+  line-height: 1.55;
+}
 dl { display: grid; grid-template-columns: auto 1fr; gap: 7px 12px; margin: 12px 0 0; font-size: 11px; } dt { color: var(--muted); } dd { margin: 0; color: var(--text); text-align: right; overflow-wrap: anywhere; }
 .chart-panel { margin-bottom: 12px; }
 .chart-panel-header { margin-bottom: 10px; }

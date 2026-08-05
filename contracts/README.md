@@ -38,6 +38,14 @@ V2 的完整跨字段、签名、幂等、修订、求解器/时序模块和风�
 旧 V1 和 edge telemetry 文件仅作为迁移期历史兼容材料保留，不定义新的目标运行
 软件，也不得让独立 edge 服务绕过企业智能体直接进入 V2 主线。
 
+企业 Agent 的可选伴随连接器使用独立的
+[`enterprise-autofill-ingestion/v1`](specs/enterprise-autofill-hmac-v1.md) 协议。它只在
+企业内部形成待复核稿，不是企业到政府的交换消息；机器 principal 没有确认或报送
+权限。该协议放在中立目录是为了让 connector 与 Agent 独立实现和做固定向量校验，
+二者运行时仍不得 import 本目录。内容不变、空结果、采集错误和文件稳定等待使用同一
+规范中的 `enterprise-source-health/v1` 状态消息；健康消息没有业务值，不能改草稿或
+把“没看到记录”解释成删除。
+
 ## 文件
 
 ```text
@@ -50,6 +58,8 @@ contracts/
 │   ├── risk-delivery-ack-v2.schema.json
 │   ├── enterprise-risk-response-v2.schema.json
 │   ├── response-receipt-v2.schema.json
+│   ├── enterprise-autofill-ingestion-v1.schema.json
+│   ├── enterprise-source-health-v1.schema.json
 │   ├── enterprise-submission-v1.schema.json
 │   ├── submission-receipt-v1.schema.json
 │   ├── error-v1.schema.json
@@ -63,6 +73,7 @@ contracts/
 │   └── edge-telemetry-v1.openapi.json
 ├── specs/
 │   ├── five-quantity-exchange-v2.md
+│   ├── enterprise-autofill-hmac-v1.md
 │   ├── hmac-transport-auth-v1.md
 │   ├── edge-telemetry-hmac-v1.md
 │   └── governed-observation-signature-v1.md

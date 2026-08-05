@@ -7,16 +7,877 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from .errors import ConflictError, NotFoundError, ValidationBlockedError
+from .errors import (
+    ConflictError,
+    ConnectorQuotaExceededError,
+    NotFoundError,
+    ValidationBlockedError,
+)
 from .security import observation_review_fingerprint
-from .util import canonical_json, parse_aware_datetime, sha256_json, utc_text
+from .util import canonical_json, parse_aware_datetime, sha256_json, utc_now, utc_text
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 8
+_CONNECTOR_EVENTS_PER_TEN_MINUTES = 240
+_CONNECTOR_EVENTS_PER_DAY = 5_000
+_CONNECTOR_MAX_MONTH_BINDINGS = 240
+_CONNECTOR_MAX_SOURCES_PER_DRAFT = 32
+_CONNECTOR_HEALTH_EVENTS_PER_TEN_MINUTES = 1_000
+_CONNECTOR_HEALTH_EVENTS_PER_DAY = 20_000
+_CONNECTOR_HEALTH_EVENT_RETENTION_DAYS = 90
+
+
+_CONNECTOR_BINDING_COLUMNS = frozenset(
+    {
+        "client_id",
+        "draft_key",
+        "draft_id",
+        "reporting_month",
+        "last_machine_revision",
+        "last_machine_payload_sha256",
+        "created_at",
+    }
+)
+_CONNECTOR_INGESTION_COLUMNS = frozenset(
+    {
+        "ingestion_id",
+        "client_id",
+        "event_id",
+        "request_sha256",
+        "draft_key",
+        "draft_id",
+        "source_id",
+        "source_revision",
+        "source_name",
+        "source_system",
+        "source_format",
+        "original_filename",
+        "source_observed_at",
+        "source_coverage_as_of",
+        "truth_statement",
+        "trigger_workflow",
+        "workflow_name",
+        "status",
+        "import_summary_json",
+        "draft_revision",
+        "draft_payload_sha256",
+        "workflow_result_json",
+        "failure_json",
+        "result_json",
+        "lease_owner",
+        "lease_expires_at",
+        "created_at",
+        "updated_at",
+        "completed_at",
+    }
+)
+
+
+def _sqlite_table_exists(db: sqlite3.Connection, table: str) -> bool:
+    return (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _sqlite_columns(db: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row["name"])
+        for row in db.execute(f'PRAGMA table_info("{table}")').fetchall()
+    }
+
+
+def _connector_legacy_tables(
+    db: sqlite3.Connection, prefix: str
+) -> list[str]:
+    rows = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ? "
+        "ORDER BY name",
+        (f"{prefix}_v5_legacy%",),
+    ).fetchall()
+    return [
+        str(row["name"])
+        for row in rows
+        if str(row["name"]).replace("_", "").isalnum()
+    ]
+
+
+def _next_connector_legacy_table(db: sqlite3.Connection, prefix: str) -> str:
+    base = f"{prefix}_v5_legacy"
+    candidate = base
+    suffix = 1
+    while _sqlite_table_exists(db, candidate):
+        suffix += 1
+        candidate = f"{base}_{suffix}"
+    return candidate
+
+
+def _create_connector_v6_tables(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS connector_draft_bindings (
+            client_id TEXT NOT NULL,
+            draft_key TEXT NOT NULL,
+            draft_id TEXT NOT NULL UNIQUE,
+            reporting_month TEXT NOT NULL,
+            last_machine_revision INTEGER NOT NULL CHECK (
+                last_machine_revision >= 1
+            ),
+            last_machine_payload_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (client_id, draft_key)
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS connector_ingestions (
+            ingestion_id TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            request_sha256 TEXT NOT NULL,
+            draft_key TEXT NOT NULL,
+            draft_id TEXT,
+            source_id TEXT NOT NULL,
+            source_revision INTEGER NOT NULL CHECK (source_revision >= 1),
+            source_name TEXT NOT NULL,
+            source_system TEXT NOT NULL,
+            source_format TEXT NOT NULL CHECK (source_format IN ('json', 'csv')),
+            original_filename TEXT,
+            source_observed_at TEXT NOT NULL,
+            source_coverage_as_of TEXT,
+            truth_statement INTEGER NOT NULL CHECK (truth_statement = 1),
+            trigger_workflow INTEGER NOT NULL CHECK (trigger_workflow IN (0, 1)),
+            workflow_name TEXT NOT NULL CHECK (
+                workflow_name = 'daily_coal_health'
+            ),
+            status TEXT NOT NULL CHECK (
+                status IN ('bound', 'imported', 'completed', 'rejected')
+            ),
+            import_summary_json TEXT,
+            draft_revision INTEGER,
+            draft_payload_sha256 TEXT,
+            workflow_result_json TEXT,
+            failure_json TEXT,
+            result_json TEXT,
+            lease_owner TEXT,
+            lease_expires_at REAL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            UNIQUE (client_id, event_id)
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_connector_ingestions_draft
+            ON connector_ingestions(draft_id, created_at DESC)
+        """
+    )
+    db.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_binding_month
+            ON connector_draft_bindings(reporting_month)
+        """
+    )
+
+
+def _create_connector_health_tables(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS connector_source_health_events (
+            client_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            request_sha256 TEXT NOT NULL,
+            draft_key TEXT NOT NULL,
+            reporting_month TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_system TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK(outcome IN (
+                'success_nonempty','success_empty','error','stability_wait'
+            )),
+            attempted_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            record_count INTEGER NOT NULL CHECK(record_count >= 0),
+            coverage_as_of TEXT,
+            error_code TEXT,
+            snapshot_sha256 TEXT,
+            autofill_event_id TEXT,
+            source_revision INTEGER,
+            applied INTEGER NOT NULL CHECK(applied IN (0,1)),
+            result_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(client_id,event_id)
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_connector_health_events_created
+            ON connector_source_health_events(client_id,created_at)
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS connector_source_health (
+            client_id TEXT NOT NULL,
+            draft_key TEXT NOT NULL,
+            reporting_month TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_system TEXT NOT NULL,
+            required INTEGER NOT NULL CHECK(required IN (0,1)),
+            freshness_max_seconds INTEGER NOT NULL CHECK(
+                freshness_max_seconds BETWEEN 300 AND 2592000
+            ),
+            outcome TEXT NOT NULL CHECK(outcome IN (
+                'success_nonempty','success_empty','error','stability_wait'
+            )),
+            attempted_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            last_success_at TEXT,
+            last_nonempty_at TEXT,
+            record_count INTEGER NOT NULL CHECK(record_count >= 0),
+            coverage_as_of TEXT,
+            error_code TEXT,
+            snapshot_sha256 TEXT,
+            autofill_event_id TEXT,
+            source_revision INTEGER,
+            last_event_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(client_id,draft_key,source_id)
+        )
+        """
+    )
+
+
+def _apply_connector_source_health(
+    db: sqlite3.Connection,
+    *,
+    client_id: str,
+    draft_key: str,
+    reporting_month: str,
+    source_id: str,
+    source_system: str,
+    required: bool,
+    freshness_max_seconds: int,
+    outcome: str,
+    attempted_at: str,
+    completed_at: str,
+    record_count: int,
+    coverage_as_of: str | None,
+    error_code: str | None,
+    snapshot_sha256: str | None,
+    autofill_event_id: str | None,
+    source_revision: int | None,
+    event_id: str,
+    updated_at: str,
+) -> bool:
+    current = db.execute(
+        """
+        SELECT * FROM connector_source_health
+        WHERE client_id=? AND draft_key=? AND source_id=?
+        """,
+        (client_id, draft_key, source_id),
+    ).fetchone()
+    if current is not None and str(current["completed_at"]) >= completed_at:
+        return False
+    last_success_at = (
+        completed_at
+        if outcome in {"success_nonempty", "success_empty"}
+        else current["last_success_at"]
+        if current is not None
+        else None
+    )
+    last_nonempty_at = (
+        completed_at
+        if outcome == "success_nonempty"
+        else current["last_nonempty_at"]
+        if current is not None
+        else None
+    )
+    db.execute(
+        """
+        INSERT INTO connector_source_health(
+            client_id,draft_key,reporting_month,source_id,source_system,
+            required,freshness_max_seconds,outcome,attempted_at,completed_at,
+            last_success_at,last_nonempty_at,record_count,coverage_as_of,
+            error_code,snapshot_sha256,autofill_event_id,source_revision,
+            last_event_id,updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(client_id,draft_key,source_id) DO UPDATE SET
+            reporting_month=excluded.reporting_month,
+            source_system=excluded.source_system,
+            required=excluded.required,
+            freshness_max_seconds=excluded.freshness_max_seconds,
+            outcome=excluded.outcome,
+            attempted_at=excluded.attempted_at,
+            completed_at=excluded.completed_at,
+            last_success_at=excluded.last_success_at,
+            last_nonempty_at=excluded.last_nonempty_at,
+            record_count=excluded.record_count,
+            coverage_as_of=excluded.coverage_as_of,
+            error_code=excluded.error_code,
+            snapshot_sha256=excluded.snapshot_sha256,
+            autofill_event_id=excluded.autofill_event_id,
+            source_revision=excluded.source_revision,
+            last_event_id=excluded.last_event_id,
+            updated_at=excluded.updated_at
+        """,
+        (
+            client_id,
+            draft_key,
+            reporting_month,
+            source_id,
+            source_system,
+            int(required),
+            freshness_max_seconds,
+            outcome,
+            attempted_at,
+            completed_at,
+            last_success_at,
+            last_nonempty_at,
+            record_count,
+            coverage_as_of,
+            error_code,
+            snapshot_sha256,
+            autofill_event_id,
+            source_revision,
+            event_id,
+            updated_at,
+        ),
+    )
+    return True
+
+
+def _evaluate_connector_source_health(
+    *,
+    draft_payload_json: str,
+    rows: list[sqlite3.Row],
+    contribution_rows: list[sqlite3.Row],
+    policies: tuple[dict[str, Any], ...],
+    current_epoch: float,
+) -> dict[str, Any]:
+    """Build the dynamic source-health view from one database snapshot."""
+
+    row_by_source = {str(row["source_id"]): row for row in rows}
+    contribution_by_source = {
+        str(row["source_id"]): row for row in contribution_rows
+    }
+    active_policy_configured = bool(policies)
+    effective_policies = policies
+    if effective_policies:
+        configured_source_ids = {
+            str(policy["source_id"]) for policy in effective_policies
+        }
+        missing_contributions = tuple(
+            row
+            for row in contribution_rows
+            if str(row["source_id"]) not in configured_source_ids
+        )
+        effective_policies = effective_policies + tuple(
+            {
+                "source_id": str(row["source_id"]),
+                "source_system": str(
+                    row["ingestion_source_system"] or "unknown"
+                ),
+                "required": True,
+                "freshness_max_seconds": int(
+                    row_by_source[str(row["source_id"])][
+                        "freshness_max_seconds"
+                    ]
+                    if str(row["source_id"]) in row_by_source
+                    else 3600
+                ),
+                "_policy_missing": True,
+            }
+            for row in missing_contributions
+        )
+    if not effective_policies and contribution_rows:
+        effective_policies = tuple(
+            {
+                "source_id": str(row["source_id"]),
+                "source_system": str(
+                    row["ingestion_source_system"] or "unknown"
+                ),
+                "required": True,
+                "freshness_max_seconds": int(
+                    row_by_source.get(str(row["source_id"]))[
+                        "freshness_max_seconds"
+                    ]
+                    if row_by_source.get(str(row["source_id"])) is not None
+                    else 3600
+                ),
+            }
+            for row in contribution_rows
+        )
+    if not effective_policies:
+        effective_policies = tuple(
+            {
+                "source_id": str(row["source_id"]),
+                "source_system": str(row["source_system"]),
+                "required": True,
+                "freshness_max_seconds": int(row["freshness_max_seconds"]),
+            }
+            for row in rows
+        )
+    period_end = str(json.loads(draft_payload_json)["period_end"])
+    items: list[dict[str, Any]] = []
+    stale_required: list[str] = []
+    for policy in sorted(
+        effective_policies, key=lambda value: value["source_id"]
+    ):
+        source_id = str(policy["source_id"])
+        row = row_by_source.get(source_id)
+        contribution = contribution_by_source.get(source_id)
+        source_name = (
+            str(contribution["ingestion_source_name"])
+            if contribution is not None
+            and contribution["ingestion_source_name"] is not None
+            else None
+        )
+        required = bool(policy["required"])
+        maximum_age = int(policy["freshness_max_seconds"])
+        age_seconds: int | None = None
+        if row is None or row["source_system"] != policy["source_system"]:
+            state = "unknown"
+            outcome = None
+            completed_at = None
+            last_nonempty_at = None
+            last_success_at = None
+            coverage_as_of = None
+            error_code = None
+        else:
+            outcome = str(row["outcome"])
+            completed_at = str(row["completed_at"])
+            completed_epoch = parse_aware_datetime(
+                completed_at, "completed_at"
+            ).timestamp()
+            age_seconds = max(0, int(current_epoch - completed_epoch))
+            last_nonempty_at = row["last_nonempty_at"]
+            last_success_at = row["last_success_at"]
+            coverage_as_of = row["coverage_as_of"]
+            error_code = row["error_code"]
+            snapshot_matches = bool(
+                contribution is not None
+                and row["snapshot_sha256"] == contribution["content_sha256"]
+                and row["autofill_event_id"] == contribution["event_id"]
+                and row["source_revision"]
+                == contribution["source_revision"]
+                and contribution["ingestion_status"] == "completed"
+            )
+            if outcome == "error":
+                state = "error"
+            elif (
+                outcome in {"success_empty", "stability_wait"}
+                or not snapshot_matches
+                or coverage_as_of is None
+                or str(coverage_as_of) < period_end
+            ):
+                state = "waiting"
+            elif age_seconds >= maximum_age:
+                state = "stale"
+            else:
+                state = "fresh"
+        if not active_policy_configured or policy.get("_policy_missing"):
+            state = "unknown"
+            error_code = "policy_missing"
+        if required and state != "fresh":
+            stale_required.append(source_id)
+        items.append(
+            {
+                "source_id": source_id,
+                "source_system": str(policy["source_system"]),
+                "source_name": source_name,
+                "required": required,
+                "outcome": outcome,
+                "completed_at": completed_at,
+                "last_nonempty_at": last_nonempty_at,
+                "last_success_at": last_success_at,
+                "coverage_as_of": coverage_as_of,
+                "freshness_max_seconds": maximum_age,
+                "age_seconds": age_seconds,
+                "freshness_state": state,
+                "error_code": error_code,
+            }
+        )
+    return {
+        "source_health": items,
+        "freshness": {
+            "overall_state": "fresh" if not stale_required else "stale",
+            "stale_required_source_ids": sorted(stale_required),
+        },
+    }
+
+
+def _valid_json_text(value: Any, *, object_only: bool = False) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if object_only and not isinstance(parsed, dict):
+        return None
+    return canonical_json(parsed)
+
+
+def _recover_machine_baseline(
+    db: sqlite3.Connection,
+    *,
+    draft_id: str,
+    ingestion_tables: list[str],
+) -> tuple[int, str] | None:
+    """Recover the last trusted machine revision, not the current human state."""
+
+    if _sqlite_table_exists(db, "fq_audit"):
+        rows = db.execute(
+            "SELECT details_json FROM fq_audit "
+            "WHERE event_type='five_quantity_machine_autofilled' "
+            "ORDER BY sequence DESC"
+        ).fetchall()
+        for row in rows:
+            try:
+                details = json.loads(row["details_json"])
+                revision = int(details.get("draft_revision"))
+                payload_hash = str(details.get("payload_sha256"))
+            except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                details.get("draft_id") == draft_id
+                and revision >= 1
+                and len(payload_hash) == 64
+                and all(character in "0123456789abcdef" for character in payload_hash)
+            ):
+                return revision, payload_hash
+    for table in ingestion_tables:
+        columns = _sqlite_columns(db, table)
+        required = {
+            "draft_id",
+            "draft_revision",
+            "draft_payload_sha256",
+        }
+        if not required.issubset(columns):
+            continue
+        rows = db.execute(
+            f'SELECT draft_revision,draft_payload_sha256 FROM "{table}" '
+            "WHERE draft_id=? AND draft_revision IS NOT NULL "
+            "AND draft_payload_sha256 IS NOT NULL ORDER BY rowid DESC",
+            (draft_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                revision = int(row["draft_revision"])
+                payload_hash = str(row["draft_payload_sha256"])
+            except (TypeError, ValueError):
+                continue
+            if (
+                revision >= 1
+                and len(payload_hash) == 64
+                and all(character in "0123456789abcdef" for character in payload_hash)
+            ):
+                return revision, payload_hash
+    return None
+
+
+def _migrate_connector_bindings(
+    db: sqlite3.Connection,
+    *,
+    binding_tables: list[str],
+    ingestion_tables: list[str],
+) -> None:
+    """Restore only bindings whose complete V2 source state is recoverable."""
+
+    required_v2_tables = {
+        "fq_drafts",
+        "fq_machine_source_contributions",
+    }
+    if not all(_sqlite_table_exists(db, table) for table in required_v2_tables):
+        return
+    for table in binding_tables:
+        columns = _sqlite_columns(db, table)
+        if not {"client_id", "draft_key", "draft_id"}.issubset(columns):
+            continue
+        rows = db.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
+        for legacy in rows:
+            client_id = str(legacy["client_id"] or "")
+            draft_key = str(legacy["draft_key"] or "")
+            draft_id = str(legacy["draft_id"] or "")
+            if not client_id or not draft_key or not draft_id:
+                continue
+            draft = db.execute(
+                "SELECT revision,payload_json,created_at FROM fq_drafts "
+                "WHERE draft_id=?",
+                (draft_id,),
+            ).fetchone()
+            if draft is None:
+                continue
+            contribution = db.execute(
+                "SELECT 1 FROM fq_machine_source_contributions "
+                "WHERE client_id=? AND draft_key=? AND draft_id=? LIMIT 1",
+                (client_id, draft_key, draft_id),
+            ).fetchone()
+            if contribution is None:
+                continue
+            try:
+                payload = json.loads(draft["payload_json"])
+                reporting_month = str(payload["reporting_month"])
+            except (KeyError, TypeError, json.JSONDecodeError):
+                continue
+            if (
+                len(reporting_month) != 7
+                or reporting_month[4] != "-"
+                or not reporting_month.replace("-", "").isdigit()
+            ):
+                continue
+            baseline = _recover_machine_baseline(
+                db,
+                draft_id=draft_id,
+                ingestion_tables=ingestion_tables,
+            )
+            if baseline is None or baseline[0] > int(draft["revision"]):
+                continue
+            created_at = (
+                str(legacy["created_at"])
+                if "created_at" in columns and legacy["created_at"]
+                else str(draft["created_at"])
+            )
+            db.execute(
+                """
+                INSERT OR IGNORE INTO connector_draft_bindings(
+                    client_id,draft_key,draft_id,reporting_month,
+                    last_machine_revision,last_machine_payload_sha256,created_at
+                ) VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    client_id,
+                    draft_key,
+                    draft_id,
+                    reporting_month,
+                    baseline[0],
+                    baseline[1],
+                    created_at,
+                ),
+            )
+
+
+def _migrate_connector_ingestions(
+    db: sqlite3.Connection, ingestion_tables: list[str]
+) -> None:
+    """Preserve event idempotency; fail closed when V1 state cannot resume."""
+
+    migration_time = utc_text()
+    for table in ingestion_tables:
+        columns = _sqlite_columns(db, table)
+        essentials = {
+            "ingestion_id",
+            "client_id",
+            "event_id",
+            "request_sha256",
+            "draft_key",
+        }
+        if not essentials.issubset(columns):
+            continue
+        rows = db.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
+        for row in rows:
+            row_keys = row.keys()
+            legacy = {key: row[key] for key in row_keys}
+            identifiers = [
+                str(legacy.get(key) or "")
+                for key in (
+                    "ingestion_id",
+                    "client_id",
+                    "event_id",
+                    "request_sha256",
+                    "draft_key",
+                )
+            ]
+            if not all(identifiers):
+                continue
+            ingestion_id, client_id, event_id, request_hash, draft_key = identifiers
+            legacy_draft_id = str(legacy.get("draft_id") or "")
+            binding = db.execute(
+                "SELECT draft_id FROM connector_draft_bindings "
+                "WHERE client_id=? AND draft_key=?",
+                (client_id, draft_key),
+            ).fetchone()
+            compatible = (
+                binding is not None
+                and legacy_draft_id
+                and str(binding["draft_id"]) == legacy_draft_id
+            )
+            raw_revision = legacy.get("source_revision", 1)
+            try:
+                source_revision = max(1, int(raw_revision))
+            except (TypeError, ValueError):
+                source_revision = 1
+            source_id = str(legacy.get("source_id") or "")
+            if not source_id:
+                source_id = "legacy-" + sha256_json(
+                    {"client_id": client_id, "event_id": event_id}
+                )[:24]
+            source_format = str(legacy.get("source_format") or "json")
+            if source_format not in {"json", "csv"}:
+                source_format = "json"
+            source_name = str(
+                legacy.get("source_name") or f"{source_id}.{source_format}"
+            )[:255]
+            source_system = str(
+                legacy.get("source_system") or "legacy-connector-migration"
+            )[:128]
+            original_filename = legacy.get("original_filename")
+            if original_filename is not None:
+                original_filename = str(original_filename)[:255]
+
+            legacy_status = str(legacy.get("status") or "")
+            result_json = _valid_json_text(
+                legacy.get("result_json"), object_only=True
+            )
+            failure_json = _valid_json_text(
+                legacy.get("failure_json"), object_only=True
+            )
+            resumable = compatible and {
+                "source_id",
+                "source_revision",
+            }.issubset(columns)
+            if legacy_status == "completed" and result_json is not None:
+                status = "completed"
+            elif legacy_status == "rejected" and failure_json is not None:
+                status = "rejected"
+            elif legacy_status in {"bound", "imported"} and resumable:
+                status = legacy_status
+            else:
+                status = "rejected"
+                result_json = None
+                failure_json = canonical_json(
+                    {
+                        "code": "connector_migration_review_required",
+                        "http_status": 409,
+                        "message": (
+                            "旧版机器填报事件缺少可安全恢复的 V2 来源状态；"
+                            "已保留幂等记录，请使用新的 event_id 重新采集"
+                        ),
+                        "ingestion_id": ingestion_id,
+                        "source_id": source_id,
+                        "source_revision": source_revision,
+                        "recorded_at": migration_time,
+                    }
+                )
+            created_at = str(legacy.get("created_at") or migration_time)
+            updated_at = str(legacy.get("updated_at") or created_at)
+            completed_at = legacy.get("completed_at")
+            if status in {"completed", "rejected"} and completed_at is None:
+                completed_at = updated_at
+            db.execute(
+                """
+                INSERT OR IGNORE INTO connector_ingestions(
+                    ingestion_id,client_id,event_id,request_sha256,draft_key,
+                    draft_id,source_id,source_revision,source_name,source_system,
+                    source_format,original_filename,source_observed_at,
+                    source_coverage_as_of,truth_statement,
+                    trigger_workflow,workflow_name,status,import_summary_json,
+                    draft_revision,draft_payload_sha256,workflow_result_json,
+                    failure_json,result_json,lease_owner,lease_expires_at,
+                    created_at,updated_at,completed_at
+                ) VALUES (
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,
+                    NULL,NULL,?,?,?
+                )
+                """,
+                (
+                    ingestion_id,
+                    client_id,
+                    event_id,
+                    request_hash,
+                    draft_key,
+                    legacy_draft_id if compatible else None,
+                    source_id,
+                    source_revision,
+                    source_name,
+                    source_system,
+                    source_format,
+                    original_filename,
+                    str(legacy.get("source_observed_at") or created_at),
+                    legacy.get("source_coverage_as_of"),
+                    int(bool(legacy.get("trigger_workflow", 0))),
+                    "daily_coal_health",
+                    status,
+                    _valid_json_text(
+                        legacy.get("import_summary_json"), object_only=True
+                    ),
+                    legacy.get("draft_revision") if compatible else None,
+                    (
+                        legacy.get("draft_payload_sha256")
+                        if compatible
+                        else None
+                    ),
+                    _valid_json_text(
+                        legacy.get("workflow_result_json"), object_only=True
+                    ),
+                    failure_json,
+                    result_json,
+                    created_at,
+                    updated_at,
+                    completed_at,
+                ),
+            )
+
+
+def _migrate_connector_schema_v6(db: sqlite3.Connection) -> None:
+    """Upgrade V5 safely while retaining source rows for manual recovery."""
+
+    ingestion_columns = _sqlite_columns(db, "connector_ingestions")
+    binding_columns = _sqlite_columns(db, "connector_draft_bindings")
+    ingestion_sql_row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='connector_ingestions'"
+    ).fetchone()
+    ingestion_sql = str(ingestion_sql_row["sql"] or "")
+    ingestion_complete = (
+        _CONNECTOR_INGESTION_COLUMNS.issubset(ingestion_columns)
+        and "'rejected'" in ingestion_sql
+    )
+    binding_complete = _CONNECTOR_BINDING_COLUMNS.issubset(binding_columns)
+
+    if not ingestion_complete:
+        db.execute("DROP INDEX IF EXISTS idx_connector_ingestions_draft")
+        legacy_name = _next_connector_legacy_table(
+            db, "connector_ingestions"
+        )
+        db.execute(
+            f'ALTER TABLE connector_ingestions RENAME TO "{legacy_name}"'
+        )
+    if not binding_complete:
+        legacy_name = _next_connector_legacy_table(
+            db, "connector_draft_bindings"
+        )
+        db.execute(
+            f'ALTER TABLE connector_draft_bindings RENAME TO "{legacy_name}"'
+        )
+    _create_connector_v6_tables(db)
+    _create_connector_health_tables(db)
+
+    ingestion_tables = _connector_legacy_tables(db, "connector_ingestions")
+    binding_tables = _connector_legacy_tables(
+        db, "connector_draft_bindings"
+    )
+    if not ingestion_tables and not binding_tables:
+        return
+    _migrate_connector_bindings(
+        db,
+        binding_tables=binding_tables,
+        ingestion_tables=ingestion_tables,
+    )
+    _migrate_connector_ingestions(db, ingestion_tables)
 
 
 def _install_schema_guards(db: sqlite3.Connection) -> None:
@@ -774,6 +1635,79 @@ class Repository:
                             REFERENCES agent_trigger_events(event_id)
                     );
 
+                    CREATE TABLE IF NOT EXISTS connector_request_nonces (
+                        client_id TEXT NOT NULL,
+                        request_id TEXT NOT NULL,
+                        request_sha256 TEXT NOT NULL,
+                        request_timestamp INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (client_id, request_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_connector_nonces_created
+                        ON connector_request_nonces(created_at);
+
+                    CREATE TABLE IF NOT EXISTS connector_draft_bindings (
+                        client_id TEXT NOT NULL,
+                        draft_key TEXT NOT NULL,
+                        draft_id TEXT NOT NULL UNIQUE,
+                        reporting_month TEXT NOT NULL,
+                        last_machine_revision INTEGER NOT NULL CHECK (
+                            last_machine_revision >= 1
+                        ),
+                        last_machine_payload_sha256 TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (client_id, draft_key)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS connector_ingestions (
+                        ingestion_id TEXT PRIMARY KEY,
+                        client_id TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        request_sha256 TEXT NOT NULL,
+                        draft_key TEXT NOT NULL,
+                        draft_id TEXT,
+                        source_id TEXT NOT NULL,
+                        source_revision INTEGER NOT NULL CHECK (
+                            source_revision >= 1
+                        ),
+                        source_name TEXT NOT NULL,
+                        source_system TEXT NOT NULL,
+                        source_format TEXT NOT NULL CHECK (
+                            source_format IN ('json', 'csv')
+                        ),
+                        original_filename TEXT,
+                        source_observed_at TEXT NOT NULL,
+                        source_coverage_as_of TEXT,
+                        truth_statement INTEGER NOT NULL CHECK (
+                            truth_statement = 1
+                        ),
+                        trigger_workflow INTEGER NOT NULL CHECK (
+                            trigger_workflow IN (0, 1)
+                        ),
+                        workflow_name TEXT NOT NULL CHECK (
+                            workflow_name = 'daily_coal_health'
+                        ),
+                        status TEXT NOT NULL CHECK (
+                            status IN ('bound', 'imported', 'completed', 'rejected')
+                        ),
+                        import_summary_json TEXT,
+                        draft_revision INTEGER,
+                        draft_payload_sha256 TEXT,
+                        workflow_result_json TEXT,
+                        failure_json TEXT,
+                        result_json TEXT,
+                        lease_owner TEXT,
+                        lease_expires_at REAL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        UNIQUE (client_id, event_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_connector_ingestions_draft
+                        ON connector_ingestions(draft_id, created_at DESC);
+
                     """
                 )
                 # Re-check while holding the cross-process migration lock.  A
@@ -793,6 +1727,7 @@ class Repository:
                         "数据库 schema 版本高于当前程序支持版本；"
                         "拒绝由旧程序降级打开"
                     )
+                _migrate_connector_schema_v6(db)
                 submission_columns = {
                     str(row["name"])
                     for row in db.execute("PRAGMA table_info(submissions)").fetchall()
@@ -1220,6 +2155,738 @@ class Repository:
             ).fetchone()
         assert row is not None
         return self._row(row)
+
+    def register_connector_request(
+        self,
+        *,
+        client_id: str,
+        request_id: str,
+        request_sha256: str,
+        request_timestamp: int,
+    ) -> None:
+        """Persist replay protection before interpreting connector payloads.
+
+        ``request_id`` is a per-attempt nonce, while the payload ``event_id`` is
+        the durable business idempotency key. Even byte-identical HTTP replays
+        are rejected; a lost-response retry uses a fresh signed request ID.
+        """
+
+        now = utc_text()
+        retention_cutoff = utc_text(utc_now() - timedelta(days=30))
+        with self._transaction() as db:
+            # Replay checks need to outlive the largest accepted clock window,
+            # while bounded retention prevents an authenticated noisy client
+            # from growing this narrow security table forever. Event IDs remain
+            # durable without expiry in connector_ingestions.
+            db.execute(
+                "DELETE FROM connector_request_nonces WHERE created_at < ?",
+                (retention_cutoff,),
+            )
+            previous = db.execute(
+                """
+                SELECT request_sha256, request_timestamp
+                FROM connector_request_nonces
+                WHERE client_id = ? AND request_id = ?
+                """,
+                (client_id, request_id),
+            ).fetchone()
+            if previous is not None:
+                raise ConflictError("机器请求编号已使用，请以新 request_id 重试")
+            db.execute(
+                """
+                INSERT INTO connector_request_nonces (
+                    client_id, request_id, request_sha256,
+                    request_timestamp, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    client_id,
+                    request_id,
+                    request_sha256,
+                    request_timestamp,
+                    now,
+                ),
+            )
+
+    def record_connector_source_health(
+        self,
+        *,
+        client_id: str,
+        request_sha256: str,
+        payload: dict[str, Any],
+        source_required: bool,
+        freshness_max_seconds: int,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist one status-only event and monotonically update current health."""
+
+        now = utc_text()
+        retention_cutoff = utc_text(
+            utc_now() - timedelta(days=_CONNECTOR_HEALTH_EVENT_RETENTION_DAYS)
+        )
+        ten_minute_cutoff = utc_text(utc_now() - timedelta(minutes=10))
+        day_cutoff = utc_text(utc_now() - timedelta(days=1))
+        with self._transaction() as db:
+            existing = db.execute(
+                """
+                SELECT request_sha256,result_json
+                FROM connector_source_health_events
+                WHERE client_id=? AND event_id=?
+                """,
+                (client_id, payload["event_id"]),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["request_sha256"]) != request_sha256:
+                    raise ConflictError("health event_id 已用于不同请求")
+                result = json.loads(existing["result_json"])
+                result["idempotent_replay"] = True
+                return result, False
+            recent = db.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN created_at>=? THEN 1 ELSE 0 END)
+                        AS ten_minute_count,
+                    COUNT(*) AS day_count
+                FROM connector_source_health_events
+                WHERE client_id=? AND created_at>=?
+                """,
+                (ten_minute_cutoff, client_id, day_cutoff),
+            ).fetchone()
+            if (
+                int(recent["ten_minute_count"] or 0)
+                >= _CONNECTOR_HEALTH_EVENTS_PER_TEN_MINUTES
+                or int(recent["day_count"] or 0)
+                >= _CONNECTOR_HEALTH_EVENTS_PER_DAY
+            ):
+                raise ConnectorQuotaExceededError(
+                    "机器来源健康事件速率超过受控配额，请稍后重试"
+                )
+            current_key = db.execute(
+                """
+                SELECT 1 FROM connector_source_health
+                WHERE client_id=? AND draft_key=? AND source_id=?
+                """,
+                (client_id, payload["draft_key"], payload["source_id"]),
+            ).fetchone()
+            if current_key is None:
+                key_count = db.execute(
+                    """
+                    SELECT COUNT(DISTINCT draft_key) AS value
+                    FROM connector_source_health WHERE client_id=?
+                    """,
+                    (client_id,),
+                ).fetchone()
+                if int(key_count["value"] or 0) >= _CONNECTOR_MAX_MONTH_BINDINGS:
+                    raise ConnectorQuotaExceededError(
+                        "机器来源健康历史月份数量超过受控配额"
+                    )
+            applied = _apply_connector_source_health(
+                db,
+                client_id=client_id,
+                draft_key=payload["draft_key"],
+                reporting_month=payload["reporting_month"],
+                source_id=payload["source_id"],
+                source_system=payload["source_system"],
+                required=source_required,
+                freshness_max_seconds=freshness_max_seconds,
+                outcome=payload["outcome"],
+                attempted_at=payload["attempted_at"],
+                completed_at=payload["completed_at"],
+                record_count=payload["record_count"],
+                coverage_as_of=payload["coverage_as_of"],
+                error_code=payload["error_code"],
+                snapshot_sha256=payload["snapshot_sha256"],
+                autofill_event_id=payload["autofill_event_id"],
+                source_revision=payload["source_revision"],
+                event_id=payload["event_id"],
+                updated_at=now,
+            )
+            result = {
+                "contract_version": "enterprise-source-health-result/v1",
+                "event_id": payload["event_id"],
+                "source_id": payload["source_id"],
+                "outcome": payload["outcome"],
+                "completed_at": payload["completed_at"],
+                "status": "recorded",
+                "applied": applied,
+                "idempotent_replay": False,
+            }
+            db.execute(
+                """
+                INSERT INTO connector_source_health_events(
+                    client_id,event_id,request_sha256,draft_key,
+                    reporting_month,source_id,source_system,outcome,
+                    attempted_at,completed_at,record_count,coverage_as_of,
+                    error_code,snapshot_sha256,autofill_event_id,
+                    source_revision,applied,result_json,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    client_id,
+                    payload["event_id"],
+                    request_sha256,
+                    payload["draft_key"],
+                    payload["reporting_month"],
+                    payload["source_id"],
+                    payload["source_system"],
+                    payload["outcome"],
+                    payload["attempted_at"],
+                    payload["completed_at"],
+                    payload["record_count"],
+                    payload["coverage_as_of"],
+                    payload["error_code"],
+                    payload["snapshot_sha256"],
+                    payload["autofill_event_id"],
+                    payload["source_revision"],
+                    int(applied),
+                    canonical_json(result),
+                    now,
+                ),
+            )
+            db.execute(
+                "DELETE FROM connector_source_health_events "
+                "WHERE created_at<? AND NOT (client_id=? AND event_id=?)",
+                (retention_cutoff, client_id, payload["event_id"]),
+            )
+        return result, True
+
+    @staticmethod
+    def apply_connector_snapshot_health_in_transaction(
+        db: sqlite3.Connection,
+        *,
+        client_id: str,
+        draft_key: str,
+        reporting_month: str,
+        source_id: str,
+        source_system: str,
+        source_required: bool,
+        freshness_max_seconds: int,
+        completed_at: str,
+        record_count: int,
+        coverage_as_of: str,
+        snapshot_sha256: str,
+        autofill_event_id: str,
+        source_revision: int,
+        ingestion_id: str,
+        received_at: str,
+    ) -> bool:
+        return _apply_connector_source_health(
+            db,
+            client_id=client_id,
+            draft_key=draft_key,
+            reporting_month=reporting_month,
+            source_id=source_id,
+            source_system=source_system,
+            required=source_required,
+            freshness_max_seconds=freshness_max_seconds,
+            outcome="success_nonempty",
+            attempted_at=completed_at,
+            completed_at=completed_at,
+            record_count=record_count,
+            coverage_as_of=coverage_as_of,
+            error_code=None,
+            snapshot_sha256=snapshot_sha256,
+            autofill_event_id=autofill_event_id,
+            source_revision=source_revision,
+            event_id=f"autofill:{ingestion_id}",
+            updated_at=received_at,
+        )
+
+    def connector_source_health_for_draft(
+        self,
+        draft_id: str,
+        *,
+        policies: tuple[dict[str, Any], ...],
+        now_epoch: float | None = None,
+    ) -> dict[str, Any]:
+        """Calculate dynamic freshness from controlled TTLs at read time."""
+
+        current_epoch = time.time() if now_epoch is None else float(now_epoch)
+        with self._read() as db:
+            return self.connector_source_health_for_draft_in_transaction(
+                db,
+                draft_id,
+                policies=policies,
+                now_epoch=current_epoch,
+            )
+
+    @staticmethod
+    def connector_source_health_for_draft_in_transaction(
+        db: sqlite3.Connection,
+        draft_id: str,
+        *,
+        policies: tuple[dict[str, Any], ...],
+        now_epoch: float,
+    ) -> dict[str, Any]:
+        """Evaluate source health inside an existing consistency boundary."""
+
+        draft = db.execute(
+            "SELECT payload_json FROM fq_drafts WHERE draft_id=?",
+            (draft_id,),
+        ).fetchone()
+        if draft is None:
+            raise NotFoundError("五量草稿不存在")
+        binding = db.execute(
+            "SELECT * FROM connector_draft_bindings WHERE draft_id=?",
+            (draft_id,),
+        ).fetchone()
+        if binding is None:
+            return {
+                "source_health": [],
+                "freshness": {
+                    "overall_state": "not_applicable",
+                    "stale_required_source_ids": [],
+                },
+            }
+        rows = db.execute(
+            """
+            SELECT * FROM connector_source_health
+            WHERE client_id=? AND draft_key=?
+            """,
+            (binding["client_id"], binding["draft_key"]),
+        ).fetchall()
+        contribution_rows = db.execute(
+            """
+            SELECT contribution.*,ingestion.status AS ingestion_status,
+                ingestion.source_system AS ingestion_source_system,
+                ingestion.source_name AS ingestion_source_name
+            FROM fq_machine_source_contributions AS contribution
+            LEFT JOIN connector_ingestions AS ingestion
+                ON ingestion.ingestion_id=contribution.ingestion_id
+            WHERE contribution.client_id=?
+                AND contribution.draft_key=?
+                AND contribution.draft_id=?
+            """,
+            (binding["client_id"], binding["draft_key"], draft_id),
+        ).fetchall()
+        return _evaluate_connector_source_health(
+            draft_payload_json=str(draft["payload_json"]),
+            rows=rows,
+            contribution_rows=contribution_rows,
+            policies=policies,
+            current_epoch=now_epoch,
+        )
+
+    @staticmethod
+    def _connector_ingestion_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "ingestion_id": str(row["ingestion_id"]),
+            "client_id": str(row["client_id"]),
+            "event_id": str(row["event_id"]),
+            "request_sha256": str(row["request_sha256"]),
+            "draft_key": str(row["draft_key"]),
+            "draft_id": str(row["draft_id"]) if row["draft_id"] else None,
+            "source_id": str(row["source_id"]),
+            "source_revision": int(row["source_revision"]),
+            "source_name": str(row["source_name"]),
+            "source_system": str(row["source_system"]),
+            "format": str(row["source_format"]),
+            "original_filename": row["original_filename"],
+            "source_observed_at": str(row["source_observed_at"]),
+            "source_coverage_as_of": row["source_coverage_as_of"],
+            "truth_statement": bool(row["truth_statement"]),
+            "trigger_workflow": bool(row["trigger_workflow"]),
+            "workflow_name": str(row["workflow_name"]),
+            "status": str(row["status"]),
+            "import_summary": (
+                json.loads(row["import_summary_json"])
+                if row["import_summary_json"] is not None
+                else None
+            ),
+            "draft_revision": row["draft_revision"],
+            "draft_payload_sha256": row["draft_payload_sha256"],
+            "workflow_result": (
+                json.loads(row["workflow_result_json"])
+                if row["workflow_result_json"] is not None
+                else None
+            ),
+            "failure": (
+                json.loads(row["failure_json"])
+                if row["failure_json"] is not None
+                else None
+            ),
+            "result": (
+                json.loads(row["result_json"])
+                if row["result_json"] is not None
+                else None
+            ),
+            "lease_owner": row["lease_owner"],
+            "lease_expires_at": row["lease_expires_at"],
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "completed_at": row["completed_at"],
+        }
+
+    def claim_connector_ingestion(
+        self,
+        *,
+        client_id: str,
+        event_id: str,
+        request_sha256: str,
+        draft_key: str,
+        source: dict[str, Any],
+        trigger_workflow: bool,
+        workflow_name: str,
+        lease_owner: str,
+        lease_seconds: int = 120,
+    ) -> tuple[dict[str, Any], bool, bool]:
+        """Create/bind once and lease one ingestion stage across processes."""
+
+        now_text = utc_text()
+        now_epoch = time.time()
+        expires_at = now_epoch + lease_seconds
+        ingestion_id = str(uuid.uuid4())
+        created = False
+        acquired = False
+        with self._transaction() as db:
+            row = db.execute(
+                """
+                SELECT * FROM connector_ingestions
+                WHERE client_id = ? AND event_id = ?
+                """,
+                (client_id, event_id),
+            ).fetchone()
+            if row is not None:
+                if str(row["request_sha256"]) != request_sha256:
+                    raise ConflictError("event_id 已用于不同自动填报请求")
+                if str(row["status"]) in {"completed", "rejected"}:
+                    return self._connector_ingestion_row(row), False, False
+                lease_expired = (
+                    row["lease_owner"] is None
+                    or row["lease_expires_at"] is None
+                    or float(row["lease_expires_at"]) <= now_epoch
+                )
+                if lease_expired:
+                    db.execute(
+                        """
+                        UPDATE connector_ingestions
+                        SET lease_owner = ?, lease_expires_at = ?, updated_at = ?
+                        WHERE ingestion_id = ?
+                        """,
+                        (lease_owner, expires_at, now_text, row["ingestion_id"]),
+                    )
+                    acquired = True
+            else:
+                ten_minute_cutoff = utc_text(
+                    utc_now() - timedelta(minutes=10)
+                )
+                day_cutoff = utc_text(utc_now() - timedelta(days=1))
+                recent = db.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END)
+                            AS ten_minute_count,
+                        COUNT(*) AS day_count
+                    FROM connector_ingestions
+                    WHERE client_id = ? AND created_at >= ?
+                    """,
+                    (ten_minute_cutoff, client_id, day_cutoff),
+                ).fetchone()
+                if (
+                    int(recent["ten_minute_count"] or 0)
+                    >= _CONNECTOR_EVENTS_PER_TEN_MINUTES
+                    or int(recent["day_count"] or 0)
+                    >= _CONNECTOR_EVENTS_PER_DAY
+                ):
+                    raise ConnectorQuotaExceededError(
+                        "机器连接器新事件速率超过受控配额，请稍后重试"
+                    )
+                binding = db.execute(
+                    """
+                    SELECT 1 FROM connector_draft_bindings
+                    WHERE client_id = ? AND draft_key = ?
+                    """,
+                    (client_id, draft_key),
+                ).fetchone()
+                if binding is None:
+                    binding_count = db.execute(
+                        "SELECT COUNT(*) AS value "
+                        "FROM connector_draft_bindings WHERE client_id = ?",
+                        (client_id,),
+                    ).fetchone()
+                    if (
+                        int(binding_count["value"])
+                        >= _CONNECTOR_MAX_MONTH_BINDINGS
+                    ):
+                        raise ConnectorQuotaExceededError(
+                            "机器连接器历史月份草稿数量超过受控配额"
+                        )
+                if _sqlite_table_exists(
+                    db, "fq_machine_source_contributions"
+                ):
+                    existing_source = db.execute(
+                        """
+                        SELECT 1 FROM fq_machine_source_contributions
+                        WHERE client_id = ? AND draft_key = ? AND source_id = ?
+                        """,
+                        (client_id, draft_key, source["source_id"]),
+                    ).fetchone()
+                    if existing_source is None:
+                        source_count = db.execute(
+                            """
+                            SELECT COUNT(*) AS value
+                            FROM fq_machine_source_contributions
+                            WHERE client_id = ? AND draft_key = ?
+                            """,
+                            (client_id, draft_key),
+                        ).fetchone()
+                        if (
+                            int(source_count["value"])
+                            >= _CONNECTOR_MAX_SOURCES_PER_DRAFT
+                        ):
+                            raise ConnectorQuotaExceededError(
+                                "该月机器草稿的唯一来源数量超过受控配额"
+                            )
+                db.execute(
+                    """
+                    INSERT INTO connector_ingestions (
+                        ingestion_id, client_id, event_id, request_sha256,
+                        draft_key, source_id, source_revision,
+                        source_name, source_system, source_format,
+                        original_filename, source_observed_at,
+                        source_coverage_as_of, truth_statement,
+                        trigger_workflow, workflow_name, status,
+                        lease_owner, lease_expires_at, created_at, updated_at
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'bound',
+                        ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        ingestion_id,
+                        client_id,
+                        event_id,
+                        request_sha256,
+                        draft_key,
+                        source["source_id"],
+                        source["revision"],
+                        source["source_name"],
+                        source["source_system"],
+                        source["format"],
+                        source["original_filename"],
+                        source["observed_at"],
+                        source["coverage_as_of"],
+                        int(trigger_workflow),
+                        workflow_name,
+                        lease_owner,
+                        expires_at,
+                        now_text,
+                        now_text,
+                    ),
+                )
+                created = True
+                acquired = True
+            selected = db.execute(
+                """
+                SELECT * FROM connector_ingestions
+                WHERE client_id = ? AND event_id = ?
+                """,
+                (client_id, event_id),
+            ).fetchone()
+        assert selected is not None
+        return self._connector_ingestion_row(selected), acquired, created
+
+    def get_connector_ingestion(self, ingestion_id: str) -> dict[str, Any]:
+        with self._read() as db:
+            row = db.execute(
+                "SELECT * FROM connector_ingestions WHERE ingestion_id = ?",
+                (ingestion_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("机器自动填报事件不存在")
+        return self._connector_ingestion_row(row)
+
+    def complete_connector_ingestion(
+        self,
+        ingestion_id: str,
+        *,
+        lease_owner: str,
+        result: dict[str, Any],
+    ) -> None:
+        now = utc_text()
+        with self._transaction() as db:
+            updated = db.execute(
+                """
+                UPDATE connector_ingestions
+                SET status = 'completed', result_json = ?,
+                    lease_owner = NULL, lease_expires_at = NULL,
+                    updated_at = ?, completed_at = ?
+                WHERE ingestion_id = ? AND status = 'imported'
+                    AND lease_owner = ?
+                """,
+                (
+                    canonical_json(result),
+                    now,
+                    now,
+                    ingestion_id,
+                    lease_owner,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ConflictError("机器自动填报租约已失效，请重试")
+
+    def release_connector_ingestion(
+        self,
+        ingestion_id: str,
+        *,
+        lease_owner: str,
+    ) -> None:
+        with self._transaction() as db:
+            db.execute(
+                """
+                UPDATE connector_ingestions
+                SET lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+                WHERE ingestion_id = ? AND lease_owner = ?
+                    AND status != 'completed'
+                """,
+                (utc_text(), ingestion_id, lease_owner),
+            )
+
+    def reject_connector_ingestion(
+        self,
+        ingestion_id: str,
+        *,
+        lease_owner: str,
+        failure: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a safe terminal business rejection without changing a draft."""
+
+        now = utc_text()
+        with self._transaction() as db:
+            row = db.execute(
+                "SELECT * FROM connector_ingestions WHERE ingestion_id = ?",
+                (ingestion_id,),
+            ).fetchone()
+            if row is None or row["lease_owner"] != lease_owner:
+                raise ConflictError("机器自动填报租约已失效")
+            binding = db.execute(
+                """
+                SELECT draft_id FROM connector_draft_bindings
+                WHERE client_id = ? AND draft_key = ?
+                """,
+                (row["client_id"], row["draft_key"]),
+            ).fetchone()
+            draft_id = str(binding["draft_id"]) if binding is not None else None
+            updated = db.execute(
+                """
+                UPDATE connector_ingestions
+                SET status = 'rejected', draft_id = ?, failure_json = ?,
+                    lease_owner = NULL, lease_expires_at = NULL,
+                    updated_at = ?, completed_at = ?
+                WHERE ingestion_id = ? AND lease_owner = ?
+                    AND status IN ('bound', 'imported')
+                """,
+                (
+                    draft_id,
+                    canonical_json(failure),
+                    now,
+                    now,
+                    ingestion_id,
+                    lease_owner,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ConflictError("机器自动填报状态已变化")
+            selected = db.execute(
+                "SELECT * FROM connector_ingestions WHERE ingestion_id = ?",
+                (ingestion_id,),
+            ).fetchone()
+        assert selected is not None
+        return self._connector_ingestion_row(selected)
+
+    def connector_ingestions_for_draft(
+        self,
+        draft_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        bounded = min(max(int(limit), 1), 200)
+        with self._read() as db:
+            draft = db.execute(
+                "SELECT 1 FROM fq_drafts WHERE draft_id = ?",
+                (draft_id,),
+            ).fetchone()
+            if draft is None:
+                raise NotFoundError("五量草稿不存在")
+            rows = db.execute(
+                """
+                SELECT * FROM connector_ingestions
+                WHERE draft_id = ?
+                ORDER BY created_at DESC, ingestion_id DESC
+                LIMIT ?
+                """,
+                (draft_id, bounded),
+            ).fetchall()
+        return [
+            {
+                "ingestion_id": str(row["ingestion_id"]),
+                "client_id": str(row["client_id"]),
+                "event_id": str(row["event_id"]),
+                "source_id": str(row["source_id"]),
+                "source_revision": int(row["source_revision"]),
+                "source_name": str(row["source_name"]),
+                "source_system": str(row["source_system"]),
+                "format": str(row["source_format"]),
+                "original_filename": row["original_filename"],
+                "observed_at": str(row["source_observed_at"]),
+                "coverage_as_of": row["source_coverage_as_of"],
+                "status": str(row["status"]),
+                "request_sha256_prefix": str(row["request_sha256"])[:12],
+                "request_hash": str(row["request_sha256"])[:12],
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+                "imported_at": str(row["updated_at"]),
+                "completed_at": row["completed_at"],
+                "processed_at": row["completed_at"],
+                "trigger_workflow": bool(row["trigger_workflow"]),
+                "workflow_name": str(row["workflow_name"]),
+                "draft_revision": row["draft_revision"],
+                "preflight": (
+                    self._public_connector_preflight(row["workflow_result_json"])
+                ),
+                "rejection": (
+                    self._public_connector_failure(row["failure_json"])
+                ),
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _public_connector_preflight(raw: str | None) -> dict[str, Any] | None:
+        if raw is None:
+            return None
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            return None
+        return {
+            "status": value.get("status"),
+            "bound_revision": value.get("bound_revision"),
+            "payload_sha256_prefix": str(value.get("payload_sha256", ""))[:12],
+            "missing_count": value.get("missing_count"),
+            "missing_day_count": value.get("missing_day_count"),
+            "calendar_coverage": value.get("calendar_coverage"),
+            "arithmetic_mismatch_count": value.get(
+                "arithmetic_mismatch_count"
+            ),
+            "source_count": value.get("source_count"),
+            "checked_at": value.get("checked_at"),
+            "warnings": list(value.get("warnings", []))[:20],
+        }
+
+    @staticmethod
+    def _public_connector_failure(raw: str | None) -> dict[str, Any] | None:
+        if raw is None:
+            return None
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            return None
+        return {
+            "code": value.get("code"),
+            "message": value.get("message"),
+            "http_status": value.get("http_status"),
+            "source_id": value.get("source_id"),
+            "source_revision": value.get("source_revision"),
+            "recorded_at": value.get("recorded_at"),
+        }
 
     def list_drafts(
         self,

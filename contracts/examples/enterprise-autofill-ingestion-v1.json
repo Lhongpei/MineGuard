@@ -1,0 +1,19 @@
+{
+  "contract_version": "enterprise-autofill-ingestion/v1",
+  "event_id": "cevt_51d5c5ddf36b4b09b1ca45fceae2c6a1",
+  "draft_key": "draft:operator-qy-001:five-quantity:monthly:2026-07",
+  "source": {
+    "source_id": "production-http",
+    "revision": 7,
+    "format": "csv",
+    "content": "date,scope,production_t\n2026-07-31,daily_total,2630\n",
+    "source_name": "生产计量只读接口",
+    "source_system": "production-mes",
+    "original_filename": "connector-production-http-2026-07.csv",
+    "observed_at": "2026-07-31T23:58:30+08:00",
+    "coverage_as_of": "2026-07-31",
+    "truth_statement": true
+  },
+  "trigger_workflow": true,
+  "workflow_name": "daily_coal_health"
+}

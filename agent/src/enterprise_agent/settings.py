@@ -16,6 +16,7 @@ from .auth import UserAccount, parse_users_json
 from .client import PlatformClientConfig
 from .five_quantity_exchange import FiveQuantityPlatformConfig, MineIdentity
 from .llm import LLMConfig
+from .machine_ingestion import ConnectorClient, parse_connector_clients_json
 from .skills import CoalNewsConfig
 
 
@@ -111,6 +112,8 @@ class Settings:
     five_quantity_poll_seconds: float
     five_quantity_stable_seconds: float
     five_quantity_demo_secret: bool
+    connector_clients: tuple[ConnectorClient, ...]
+    connector_max_clock_skew_seconds: int
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -454,4 +457,13 @@ class Settings:
                 "ENTERPRISE_FIVE_QUANTITY_STABLE_SECONDS", 2.0, 0.5, 60.0
             ),
             five_quantity_demo_secret=five_quantity_demo_secret,
+            connector_clients=parse_connector_clients_json(
+                os.environ.get("ENTERPRISE_AGENT_CONNECTOR_CLIENTS_JSON")
+            ),
+            connector_max_clock_skew_seconds=_integer(
+                "ENTERPRISE_AGENT_CONNECTOR_MAX_CLOCK_SKEW_SECONDS",
+                300,
+                30,
+                900,
+            ),
         )

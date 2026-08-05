@@ -28,6 +28,7 @@
     submit: (draftId) => `/drafts/${encodeURIComponent(draftId)}/submit`,
     audit: (draftId) => `/drafts/${encodeURIComponent(draftId)}/audit`,
     submissions: (draftId) => `/drafts/${encodeURIComponent(draftId)}/submissions`,
+    ingestions: (draftId) => `/drafts/${encodeURIComponent(draftId)}/ingestions`,
     agentTools: () => "/agent/tools",
     agentRuns: (limit = 20, offset = 0) =>
       `/agent/runs?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
@@ -473,6 +474,13 @@
       auditIntegrity: null,
       error: "",
     },
+    autofillEvidence: {
+      draftId: "",
+      loading: false,
+      loaded: false,
+      ingestions: [],
+      error: "",
+    },
   };
 
   const statusLabels = Object.freeze({
@@ -727,6 +735,7 @@
       "downloadCsvTemplateButton",
       "sourceCount",
       "sourceList",
+      "autofillEvidenceButton",
       "runAssistButton",
       "measurementBody",
       "measurementPagination",
@@ -766,6 +775,17 @@
       "sourceDialog",
       "sourceDialogTitle",
       "sourceDialogBody",
+      "autofillEvidenceDialog",
+      "autofillEvidenceStatus",
+      "autofillIngestionCount",
+      "autofillRawFieldCount",
+      "autofillHistoryCount",
+      "autofillPhysicalCount",
+      "autofillIngestionList",
+      "autofillRawList",
+      "autofillHistoryList",
+      "autofillPhysicalList",
+      "autofillConflictList",
       "deleteDialog",
       "deleteConfirmation",
       "confirmDeleteButton",
@@ -1011,6 +1031,9 @@
       () => downloadImportTemplate("csv"),
     );
     els.runAssistButton.addEventListener("click", () => void runAssistant());
+    els.autofillEvidenceButton.addEventListener("click", () =>
+      void openAutofillEvidenceDialog(),
+    );
     els.previousMeasurementPageButton.addEventListener("click", () => {
       state.measurementPage = Math.max(1, state.measurementPage - 1);
       renderMeasurements();
@@ -1043,7 +1066,12 @@
     document.querySelectorAll("[data-close-dialog]").forEach((button) => {
       button.addEventListener("click", () => closeDialog(button.dataset.closeDialog));
     });
-    [els.sourceDialog, els.deleteDialog, els.submitDialog].forEach((dialog) => {
+    [
+      els.sourceDialog,
+      els.autofillEvidenceDialog,
+      els.deleteDialog,
+      els.submitDialog,
+    ].forEach((dialog) => {
       dialog.addEventListener("click", (event) => {
         if (event.target === dialog) dialog.close();
       });
@@ -2712,6 +2740,12 @@
               suggestions: [],
               accepted_field_paths: [],
             },
+      autofill_proposal:
+        source.autofill_proposal && typeof source.autofill_proposal === "object"
+          ? clone(source.autofill_proposal)
+          : source.autofill_preview && typeof source.autofill_preview === "object"
+            ? clone(source.autofill_preview)
+            : {},
       sources: normalizeSources(rawSources),
       measurements: Array.isArray(measurementRows)
         ? measurementRows.map((row, index) => {
@@ -4362,6 +4396,10 @@
 
   function renderSources() {
     const rows = state.activeDraft.sources;
+    els.autofillEvidenceButton.disabled = !hasPermission("read");
+    els.autofillEvidenceButton.title = hasPermission("read")
+      ? "查看自动抓取批次、字段来源、历史建议和物理推断"
+      : "当前账号没有查看权限";
     els.sourceCount.textContent = `${rows.length} 个`;
     if (!rows.length) {
       els.sourceList.replaceChildren(
@@ -4392,6 +4430,378 @@
       fragment.append(item);
     });
     els.sourceList.replaceChildren(fragment);
+  }
+
+  function autofillRawEvidence(draft) {
+    const result = [];
+    Object.entries((draft && draft.field_provenance) || {}).forEach(
+      ([path, records]) => {
+        if (!Array.isArray(records)) return;
+        records.forEach((record) => {
+          if (!record || typeof record !== "object") return;
+          const sourceKind = String(record.source_kind || "").toLowerCase();
+          const method = String(record.extraction_method || "").toLowerCase();
+          if (sourceKind === "manual" && method === "human_entry") return;
+          result.push({
+            path: String(path || ""),
+            source_name: String(record.source_name || "未命名来源"),
+            source_kind: String(record.source_kind || "未标注类型"),
+            locator: String(record.locator || "未提供来源位置"),
+            extraction_method: String(record.extraction_method || "未标注方法"),
+            confidence: normalizeConfidence(record.confidence),
+            recorded_at: String(record.recorded_at || ""),
+          });
+        });
+      },
+    );
+    return result.slice(0, 200);
+  }
+
+  function currentAutofillProposal(draft) {
+    const direct = draft && draft.autofill_proposal;
+    if (direct && typeof direct === "object" && Object.keys(direct).length) {
+      return direct;
+    }
+    const detail = state.agentV2 && state.agentV2.detail;
+    const flowState = detail && detail.state;
+    if (
+      detail &&
+      String(detail.draft_id || "") === String((draft && draft.id) || "") &&
+      flowState &&
+      flowState.autofill_proposal &&
+      typeof flowState.autofill_proposal === "object"
+    ) {
+      return flowState.autofill_proposal;
+    }
+    return {};
+  }
+
+  function autofillCandidates(proposal, evidenceClass) {
+    return Array.isArray(proposal && proposal.candidates)
+      ? proposal.candidates.filter(
+          (candidate) =>
+            candidate && candidate.evidence_class === evidenceClass,
+        )
+      : [];
+  }
+
+  async function openAutofillEvidenceDialog() {
+    const draft = state.activeDraft;
+    if (!draft || !hasPermission("read")) {
+      showToast("当前账号不能查看自动填报依据。", "error");
+      return;
+    }
+    renderAutofillEvidence();
+    if (!els.autofillEvidenceDialog.open) {
+      els.autofillEvidenceDialog.showModal();
+    }
+    await loadAutofillEvidence();
+  }
+
+  async function loadAutofillEvidence(force = false) {
+    const draft = state.activeDraft;
+    if (!draft || !hasPermission("read")) return;
+    const draftId = draft.id;
+    const sessionGeneration = state.sessionGeneration;
+    if (
+      !force &&
+      state.autofillEvidence.draftId === draftId &&
+      state.autofillEvidence.loaded
+    ) {
+      renderAutofillEvidence();
+      return;
+    }
+    state.autofillEvidence = {
+      draftId,
+      loading: true,
+      loaded: false,
+      ingestions: [],
+      error: "",
+    };
+    renderAutofillEvidence();
+    try {
+      const payload = await api(endpoints.ingestions(draftId));
+      if (
+        sessionRequestIsStale(sessionGeneration) ||
+        !state.activeDraft ||
+        state.activeDraft.id !== draftId
+      ) {
+        return;
+      }
+      state.autofillEvidence.ingestions = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload && payload.ingestions)
+          ? payload.ingestions
+          : Array.isArray(payload && payload.items)
+            ? payload.items
+            : [];
+      state.autofillEvidence.loaded = true;
+    } catch (error) {
+      if (sessionRequestIsStale(sessionGeneration, error)) return;
+      if (!state.activeDraft || state.activeDraft.id !== draftId) return;
+      state.autofillEvidence.loaded = true;
+      state.autofillEvidence.error =
+        error.status === 404
+          ? "当前服务版本尚未提供机器导入批次；字段来源仍可正常查看。"
+          : `自动导入记录读取失败：${error.message}`;
+    } finally {
+      if (
+        !sessionRequestIsStale(sessionGeneration) &&
+        state.activeDraft &&
+        state.activeDraft.id === draftId
+      ) {
+        state.autofillEvidence.loading = false;
+        renderAutofillEvidence();
+      }
+    }
+  }
+
+  function autofillEmpty(text) {
+    return el("p", "autofill-evidence-empty", text);
+  }
+
+  function appendAutofillMeta(card, values) {
+    const meta = el("p", "autofill-evidence-meta");
+    meta.textContent = values.filter(Boolean).join(" · ");
+    card.append(meta);
+  }
+
+  function renderAutofillIngestions(rows) {
+    if (!rows.length) {
+      els.autofillIngestionList.replaceChildren(
+        autofillEmpty("当前草稿没有可展示的机器导入批次。"),
+      );
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    rows.slice(0, 100).forEach((raw, index) => {
+      const row = raw && typeof raw === "object" ? raw : {};
+      const card = el("article", "autofill-evidence-item");
+      const heading = el("div", "autofill-evidence-item-head");
+      heading.append(
+        el(
+          "strong",
+          "",
+          String(
+            row.source_name ||
+              row.original_filename ||
+              row.source_system ||
+              `自动导入批次 ${index + 1}`,
+          ),
+        ),
+        el(
+          "span",
+          `mini-status ${String(row.status || "received").toLowerCase()}`,
+          autofillIngestionStatus(row.status),
+        ),
+      );
+      card.append(heading);
+      appendAutofillMeta(card, [
+        row.source_system,
+        row.format ? String(row.format).toUpperCase() : "",
+        row.imported_at || row.processed_at || row.created_at
+          ? formatDateTime(row.imported_at || row.processed_at || row.created_at)
+          : "",
+      ]);
+      appendAutofillMeta(card, [
+        row.event_id ? `事件 ${shortDigest(row.event_id)}` : "",
+        row.flow_id ? `体检 ${shortDigest(row.flow_id)}` : "",
+        row.request_sha256 || row.request_hash
+          ? `请求摘要 ${shortDigest(row.request_sha256 || row.request_hash)}`
+          : "",
+      ]);
+      fragment.append(card);
+    });
+    els.autofillIngestionList.replaceChildren(fragment);
+  }
+
+  function autofillIngestionStatus(value) {
+    const status = String(value || "received").toLowerCase();
+    const labels = {
+      accepted: "已导入",
+      applied: "已写入草稿",
+      completed: "已完成",
+      duplicate: "幂等重放",
+      failed: "失败",
+      received: "已接收",
+      rejected: "已拒绝",
+    };
+    return labels[status] || status;
+  }
+
+  function renderAutofillRaw(rows) {
+    if (!rows.length) {
+      els.autofillRawList.replaceChildren(
+        autofillEmpty("尚无带来源定位的自动填报字段。"),
+      );
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    rows.forEach((row) => {
+      const card = el("article", "autofill-evidence-item");
+      card.append(el("strong", "", friendlySuggestionPath(row.path)));
+      appendAutofillMeta(card, [row.source_name, row.source_kind]);
+      appendAutofillMeta(card, [
+        `位置：${row.locator}`,
+        `提取：${row.extraction_method}`,
+        row.confidence === null ? "" : confidenceText(row.confidence),
+        row.recorded_at ? formatDateTime(row.recorded_at) : "",
+      ]);
+      fragment.append(card);
+    });
+    els.autofillRawList.replaceChildren(fragment);
+  }
+
+  function autofillCandidateStatus(candidate) {
+    const status = String((candidate && candidate.status) || "pending");
+    const labels = {
+      analysis_only: "仅分析",
+      blocked: "已阻断",
+      conflict: "有冲突",
+      eligible: "待人工采用",
+      pending: "待核对",
+      selected: "进入核对提案",
+      would_overwrite: "未覆盖已有值",
+    };
+    return labels[status] || status;
+  }
+
+  function renderAutofillCandidates(target, rows, emptyText) {
+    if (!rows.length) {
+      target.replaceChildren(autofillEmpty(emptyText));
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    rows.slice(0, 100).forEach((candidate) => {
+      const card = el("article", "autofill-evidence-item");
+      const heading = el("div", "autofill-evidence-item-head");
+      heading.append(
+        el("strong", "", friendlySuggestionPath(candidate.path)),
+        el(
+          "span",
+          `autofill-evidence-status-badge status-${String(candidate.status || "pending")}`,
+          autofillCandidateStatus(candidate),
+        ),
+      );
+      card.append(heading);
+      if (candidate.rationale) {
+        card.append(el("p", "autofill-evidence-reason", candidate.rationale));
+      }
+      appendAutofillMeta(card, [
+        candidate.method ? `方法：${candidate.method}` : "",
+        candidate.confidence && Number.isFinite(candidate.confidence.effective)
+          ? `有效置信度 ${Math.round(candidate.confidence.effective * 100)}%`
+          : "",
+        Array.isArray(candidate.source_refs) && candidate.source_refs.length
+          ? `证据引用 ${candidate.source_refs.length} 项`
+          : "",
+      ]);
+      if (candidate.reason) {
+        card.append(el("p", "autofill-evidence-reason is-warning", candidate.reason));
+      }
+      fragment.append(card);
+    });
+    target.replaceChildren(fragment);
+  }
+
+  function renderAutofillConflicts(proposal, candidates) {
+    const conflictRows = Array.isArray(proposal && proposal.conflicts)
+      ? proposal.conflicts
+      : [];
+    const blocked = candidates.filter((candidate) =>
+      ["blocked", "conflict", "would_overwrite"].includes(
+        String(candidate.status || ""),
+      ),
+    );
+    if (!conflictRows.length && !blocked.length) {
+      els.autofillConflictList.replaceChildren(
+        autofillEmpty("当前没有证据冲突或被阻断的候选项。"),
+      );
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    conflictRows.slice(0, 100).forEach((conflict) => {
+      const card = el("article", "autofill-evidence-item is-conflict");
+      card.append(
+        el("strong", "", friendlySuggestionPath(conflict.path)),
+        el(
+          "p",
+          "autofill-evidence-reason is-warning",
+          "存在相互矛盾的证据，系统没有替人选择数值。",
+        ),
+      );
+      appendAutofillMeta(card, [
+        Array.isArray(conflict.evidence_classes)
+          ? `证据类别：${conflict.evidence_classes.join("、")}`
+          : "",
+        Array.isArray(conflict.candidate_ids)
+          ? `候选 ${conflict.candidate_ids.length} 项`
+          : "",
+      ]);
+      fragment.append(card);
+    });
+    blocked.slice(0, Math.max(0, 100 - conflictRows.length)).forEach((candidate) => {
+      const card = el("article", "autofill-evidence-item is-conflict");
+      card.append(
+        el("strong", "", friendlySuggestionPath(candidate.path)),
+        el(
+          "p",
+          "autofill-evidence-reason is-warning",
+          candidate.reason || "该候选未进入核对提案。",
+        ),
+      );
+      appendAutofillMeta(card, [
+        candidate.evidence_label,
+        autofillCandidateStatus(candidate),
+      ]);
+      fragment.append(card);
+    });
+    els.autofillConflictList.replaceChildren(fragment);
+  }
+
+  function renderAutofillEvidence() {
+    const draft = state.activeDraft;
+    if (!draft) return;
+    const rawEvidence = autofillRawEvidence(draft);
+    const proposal = currentAutofillProposal(draft);
+    const history = autofillCandidates(proposal, "historical_suggestion");
+    const physical = autofillCandidates(proposal, "physical_inference");
+    const allCandidates = Array.isArray(proposal.candidates)
+      ? proposal.candidates
+      : [];
+    const ingestionRows =
+      state.autofillEvidence.draftId === draft.id
+        ? state.autofillEvidence.ingestions
+        : [];
+
+    els.autofillIngestionCount.textContent = String(ingestionRows.length);
+    els.autofillRawFieldCount.textContent = String(rawEvidence.length);
+    els.autofillHistoryCount.textContent = String(history.length);
+    els.autofillPhysicalCount.textContent = String(physical.length);
+    if (state.autofillEvidence.loading) {
+      els.autofillEvidenceStatus.textContent = "正在读取机器导入记录…";
+      els.autofillEvidenceStatus.className = "autofill-evidence-status is-loading";
+    } else if (state.autofillEvidence.error) {
+      els.autofillEvidenceStatus.textContent = state.autofillEvidence.error;
+      els.autofillEvidenceStatus.className = "autofill-evidence-status is-warning";
+    } else {
+      els.autofillEvidenceStatus.textContent =
+        "证据预览为只读页面；这里只展示核对所需元数据，不展示原文、签名或连接密钥。";
+      els.autofillEvidenceStatus.className = "autofill-evidence-status is-ready";
+    }
+    renderAutofillIngestions(ingestionRows);
+    renderAutofillRaw(rawEvidence);
+    renderAutofillCandidates(
+      els.autofillHistoryList,
+      history,
+      "当前没有绑定到本草稿快照的历史建议。",
+    );
+    renderAutofillCandidates(
+      els.autofillPhysicalList,
+      physical,
+      "当前没有物理关系推断；这不影响原始来源字段核对。",
+    );
+    renderAutofillConflicts(proposal, allCandidates);
   }
 
   function renderMeasurements() {
@@ -12326,6 +12736,7 @@
     els.addEventButton.disabled = submitted || !hasPermission("write");
     els.importButton.disabled = submitted || !hasPermission("write");
     els.runAssistButton.disabled = submitted || !hasPermission("write");
+    els.autofillEvidenceButton.disabled = !hasPermission("read");
     els.validateButton.disabled = submitted || !hasPermission("read");
     els.confirmDraftButton.disabled =
       submitted ||

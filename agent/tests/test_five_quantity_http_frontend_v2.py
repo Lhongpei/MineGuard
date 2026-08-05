@@ -335,3 +335,22 @@ def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
     assert "mine_entry_persons" in script
     assert "逐日核对六项" not in html
     assert '["labor_persons", "用工量"' not in script
+
+
+def test_frontend_v2_autofill_evidence_behavior_in_jsdom() -> None:
+    import subprocess
+
+    script = ROOT / "tests" / "frontend_five_quantity_autofill_dom.test.js"
+    completed = subprocess.run(
+        ["node", str(script)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert (
+        "JSDOM five-quantity autofill evidence checks passed"
+        in completed.stdout
+    )

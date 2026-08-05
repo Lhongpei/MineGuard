@@ -28,6 +28,7 @@ from .instance_lock import StateInstanceLock
 from .operations import BackupManager, OperationsError
 from .regulatory_v2_demo import (
     DEFAULT_V2_DEMO_STATE_DIRECTORY,
+    V2_WORKBOOK_DEMO_MINES,
     V2DemoSeedError,
     seed_v2_demo_state,
 )
@@ -96,7 +97,8 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     demo = commands.add_parser(
-        "seed-v2-demo", help="生成隔离的多矿三个月合成演示数据"
+        "seed-v2-demo",
+        help="生成隔离演示库（8个合成场景 + 太岳/梗阳7月样表原值）",
     )
     demo.add_argument(
         "--state-directory", default=DEFAULT_V2_DEMO_STATE_DIRECTORY
@@ -680,6 +682,19 @@ def _self_check() -> dict[str, object]:
         assets[f"{directory}/{filename}"] = {
             "bytes": len(payload),
             "sha256": sha256(payload).hexdigest(),
+        }
+    for mine in V2_WORKBOOK_DEMO_MINES:
+        assert mine.bundled_filename is not None
+        assert mine.expected_source_sha256 is not None
+        payload = read_package_resource("demo_samples", mine.bundled_filename)
+        digest = sha256(payload).hexdigest()
+        if digest != mine.expected_source_sha256:
+            raise ProductConfigurationError(
+                f"冻结运行时演示样表完整性失败：{mine.bundled_filename}"
+            )
+        assets[f"demo_samples/{mine.bundled_filename}"] = {
+            "bytes": len(payload),
+            "sha256": digest,
         }
 
     try:

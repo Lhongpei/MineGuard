@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:enterprise-autofill-ingestion:v1",
+  "title": "Enterprise Agent Machine Autofill Ingestion V1",
+  "description": "Authenticated connector event that may only create or update an unconfirmed five-quantity review draft. Byte-size and cross-field identity checks are additionally enforced by the Agent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "event_id",
+    "draft_key",
+    "source",
+    "trigger_workflow",
+    "workflow_name"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "enterprise-autofill-ingestion/v1"
+    },
+    "event_id": {
+      "$ref": "#/$defs/eventIdentifier"
+    },
+    "draft_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^draft:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}:five-quantity:monthly:[0-9]{4}-(?:0[1-9]|1[0-2])$",
+      "description": "The operator identifier and month must exactly match the receiving one-mine Agent identity and normalized source content."
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "revision",
+        "format",
+        "content",
+        "source_name",
+        "source_system",
+        "original_filename",
+        "observed_at",
+        "coverage_as_of",
+        "truth_statement"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/eventIdentifier"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "format": {
+          "enum": [
+            "json",
+            "csv"
+          ]
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2097152,
+          "description": "Non-empty valid UTF-8 source snapshot. The authoritative runtime limit is 2 MiB after UTF-8 encoding; JSON string escaping may make the outer HTTP body larger."
+        },
+        "source_name": {
+          "$ref": "#/$defs/safeName"
+        },
+        "source_system": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+        },
+        "original_filename": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/safeName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time",
+          "minLength": 20,
+          "maxLength": 40,
+          "description": "Timezone-aware time when this exact upstream snapshot was successfully observed. The Agent independently bounds future timestamps and derives expiry from its own source policy."
+        },
+        "coverage_as_of": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])$",
+          "description": "Business-date coverage asserted by the deterministic connector. It is evidence metadata, not permission to invent missing values."
+        },
+        "truth_statement": {
+          "const": true,
+          "description": "Acknowledges that the event is a source snapshot, not a regulatory conclusion. It does not raise trust level or waive human review."
+        }
+      }
+    },
+    "trigger_workflow": {
+      "type": "boolean",
+      "description": "Requests the deterministic data-readiness preflight after the connector has observed the configured source generation. It never triggers confirmation or submission."
+    },
+    "workflow_name": {
+      "const": "daily_coal_health",
+      "description": "Compatibility wire identifier. In V1 its only permitted execution is the five-quantity data-readiness preflight, not a health or regulatory determination."
+    }
+  },
+  "$defs": {
+    "eventIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "safeName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001F\\u007F]+$"
+    }
+  }
+}

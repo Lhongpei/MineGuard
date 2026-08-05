@@ -335,6 +335,12 @@ def validate_five_quantity_payload(
         raise ValueError("days 必须按日期升序且不得重复")
     if dates[0] != start or dates[-1] != end:
         raise ValueError("period_start/end 必须等于首尾日报日期")
+    expected_dates = [
+        start + timedelta(days=offset)
+        for offset in range((end - start).days + 1)
+    ]
+    if dates != expected_dates:
+        raise ValueError("days 必须无间断覆盖 period_start 至 period_end")
     processing = _object(payload["agent_processing"], "agent_processing")
     required_processing = {
         "normalization_performed",
@@ -388,6 +394,220 @@ def _audit_hash(
             }
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _json_copy(value: Any) -> Any:
+    return json.loads(jcs_json(value))
+
+
+def _merge_machine_measurement(
+    previous: dict[str, Any],
+    incoming: dict[str, Any],
+    *,
+    location: str,
+) -> dict[str, Any]:
+    for field in ("metric_code", "unit", "aggregation"):
+        if previous.get(field) != incoming.get(field):
+            raise ConflictError(f"多来源数据结构冲突：{location}.{field}")
+    previous_value = previous.get("value")
+    incoming_value = incoming.get("value")
+    if previous_value is None and incoming_value is not None:
+        return _json_copy(incoming)
+    if previous_value is not None and incoming_value is None:
+        return _json_copy(previous)
+    result = _json_copy(previous)
+    if (
+        previous_value is not None
+        and incoming_value is not None
+        and float(previous_value) != float(incoming_value)
+    ):
+        raise ConflictError(f"不同来源对 {location} 提供了冲突数值")
+    result["quality_flags"] = sorted(
+        set(previous.get("quality_flags", []))
+        | set(incoming.get("quality_flags", []))
+    )
+    result["source_refs"] = sorted(
+        set(previous.get("source_refs", []))
+        | set(incoming.get("source_refs", []))
+    )
+    return result
+
+
+def _merge_machine_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    """Rebuild a V2 month draft from every source's latest contribution."""
+
+    if not payloads:
+        raise ValueError("机器来源贡献不能为空")
+    result = _json_copy(payloads[0])
+    source_by_id = {
+        str(source["source_id"]): _json_copy(source)
+        for source in result["sources"]
+    }
+    day_by_date = {str(day["date"]): _json_copy(day) for day in result["days"]}
+    for payload in payloads[1:]:
+        for field in ("mine", "reporting_month", "timezone", "comparison_context"):
+            if sha256_jcs(payload.get(field)) != sha256_jcs(result.get(field)):
+                raise ConflictError(f"draft_key 的五量身份或月份冲突：{field}")
+        for source in payload["sources"]:
+            source_id = str(source["source_id"])
+            previous_source = source_by_id.get(source_id)
+            if previous_source is not None and sha256_jcs(
+                previous_source
+            ) != sha256_jcs(source):
+                raise ConflictError("不同贡献包含冲突的 V2 source_id")
+            source_by_id[source_id] = _json_copy(source)
+        for incoming_day in payload["days"]:
+            day_text = str(incoming_day["date"])
+            previous_day = day_by_date.get(day_text)
+            if previous_day is None:
+                day_by_date[day_text] = _json_copy(incoming_day)
+                continue
+            old_state = previous_day["operating_state"]
+            new_state = incoming_day["operating_state"]
+            if old_state == "unknown":
+                previous_day["operating_state"] = new_state
+            elif new_state != "unknown" and old_state != new_state:
+                raise ConflictError(f"不同来源对 {day_text} 运行状态存在冲突")
+            old_quantity = previous_day["reported_quantity"]
+            new_quantity = incoming_day["reported_quantity"]
+            for metric in METRICS:
+                old_quantity["daily_total"][metric] = _merge_machine_measurement(
+                    old_quantity["daily_total"][metric],
+                    new_quantity["daily_total"][metric],
+                    location=f"{day_text}.daily_total.{metric}",
+                )
+            for shift_key in SHIFT_KEYS:
+                old_shift = old_quantity["shifts"][shift_key]
+                new_shift = new_quantity["shifts"][shift_key]
+                for field in ("shift_code", "start_at", "end_at"):
+                    if old_shift[field] != new_shift[field]:
+                        raise ConflictError(
+                            f"不同来源对 {day_text}.{shift_key}.{field} 存在冲突"
+                        )
+                for metric in METRICS:
+                    old_shift["measurements"][metric] = (
+                        _merge_machine_measurement(
+                            old_shift["measurements"][metric],
+                            new_shift["measurements"][metric],
+                            location=f"{day_text}.{shift_key}.{metric}",
+                        )
+                    )
+    days = [day_by_date[key] for key in sorted(day_by_date)]
+    result["days"] = days
+    result["period_start"] = days[0]["date"]
+    result["period_end"] = days[-1]["date"]
+    result["sources"] = [source_by_id[key] for key in sorted(source_by_id)]
+    result["closed_at"] = max(
+        (str(payload["closed_at"]) for payload in payloads),
+        key=lambda value: parse_aware_datetime(value, "closed_at"),
+    )
+    processing_record = {
+        "kind": "machine_latest_source_snapshot_merge/v1",
+        "contribution_payload_sha256": sorted(
+            sha256_jcs(payload) for payload in payloads
+        ),
+        "day_count": len(days),
+        "source_count": len(result["sources"]),
+    }
+    result["agent_processing"] = {
+        "normalization_performed": True,
+        "model_assistance_used": False,
+        "processing_record_sha256": sha256_jcs(processing_record),
+    }
+    return result
+
+
+def _v2_machine_preflight(
+    payload: dict[str, Any],
+    *,
+    revision: int,
+) -> dict[str, Any]:
+    """Deterministic enterprise-side pre-submission check, not a ruling."""
+
+    missing_count = 0
+    mismatches: list[str] = []
+    period_start = date.fromisoformat(str(payload["period_start"]))
+    period_end = date.fromisoformat(str(payload["period_end"]))
+    expected_day_count = (period_end - period_start).days + 1
+    missing_day_count = max(0, expected_day_count - len(payload["days"]))
+    month_start = date.fromisoformat(f"{payload['reporting_month']}-01")
+    following_month = (month_start.replace(day=28) + timedelta(days=4)).replace(
+        day=1
+    )
+    month_end = following_month - timedelta(days=1)
+    leading_days = max(0, (period_start - month_start).days)
+    trailing_days = max(0, (month_end - period_end).days)
+    calendar_coverage = {
+        "kind": (
+            "full_month"
+            if leading_days == 0 and trailing_days == 0
+            else "partial_window"
+        ),
+        "reporting_month": payload["reporting_month"],
+        "month_start": month_start.isoformat(),
+        "month_end": month_end.isoformat(),
+        "declared_period_start": period_start.isoformat(),
+        "declared_period_end": period_end.isoformat(),
+        "declared_day_count": len(payload["days"]),
+        "calendar_day_count": month_end.day,
+        "leading_days_outside_window": leading_days,
+        "trailing_days_outside_window": trailing_days,
+    }
+    sum_metrics = tuple(metric for metric in METRICS if metric != "ventilation_m3_min")
+    for day in payload["days"]:
+        quantity = day["reported_quantity"]
+        sets = [quantity["daily_total"]] + [
+            quantity["shifts"][key]["measurements"] for key in SHIFT_KEYS
+        ]
+        missing_count += sum(
+            measurement["value"] is None
+            for measurements in sets
+            for measurement in measurements.values()
+        )
+        for metric in sum_metrics:
+            daily_value = quantity["daily_total"][metric]["value"]
+            shift_values = [
+                quantity["shifts"][key]["measurements"][metric]["value"]
+                for key in SHIFT_KEYS
+            ]
+            if daily_value is None or any(value is None for value in shift_values):
+                continue
+            shift_sum = sum(float(value) for value in shift_values)
+            tolerance = max(1e-6, abs(float(daily_value)) * 1e-6)
+            if abs(float(daily_value) - shift_sum) > tolerance:
+                mismatches.append(f"{day['date']} {metric} 日合计与三班合计不一致")
+    payload_sha256 = sha256_jcs(payload)
+    warnings: list[str] = []
+    if missing_count:
+        warnings.append(f"仍有 {missing_count} 个明确缺失或不可用测量值")
+    if missing_day_count:
+        warnings.append(f"统计期间缺少 {missing_day_count} 个完整日报日期")
+    if calendar_coverage["kind"] == "partial_window":
+        warnings.append(
+            "当前声明的是月内部分统计窗口，并非整月日历覆盖；"
+            "报送前请核对采集截止日"
+        )
+    warnings.extend(mismatches[:19])
+    return {
+        "contract_version": "five-quantity-machine-preflight/v1",
+        "status": (
+            "attention_required"
+            if missing_count or missing_day_count or mismatches
+            else "ready_for_human_review"
+        ),
+        "bound_revision": revision,
+        "payload_sha256": payload_sha256,
+        "missing_count": missing_count,
+        "missing_day_count": missing_day_count,
+        "calendar_coverage": calendar_coverage,
+        "arithmetic_mismatch_count": len(mismatches),
+        "source_count": len(payload["sources"]),
+        "checked_at": utc_text(),
+        "warnings": warnings[:20],
+        "scope": "enterprise_pre_submission_check",
+        "regulatory_determination": False,
+        "read_only": True,
+    }
 
 
 class FiveQuantityStore:
@@ -488,6 +708,38 @@ class FiveQuantityStore:
                 setting_value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )""",
+            """CREATE TABLE IF NOT EXISTS fq_machine_source_contributions (
+                client_id TEXT NOT NULL,
+                draft_key TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                source_revision INTEGER NOT NULL CHECK(source_revision >= 1),
+                event_id TEXT NOT NULL,
+                ingestion_id TEXT NOT NULL UNIQUE,
+                import_id TEXT NOT NULL,
+                draft_id TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                source_observed_at TEXT,
+                source_coverage_as_of TEXT,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(client_id,draft_key,source_id),
+                FOREIGN KEY(import_id) REFERENCES fq_imports(import_id),
+                FOREIGN KEY(draft_id) REFERENCES fq_drafts(draft_id)
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_fq_machine_contribution_draft
+                ON fq_machine_source_contributions(draft_id,source_id)""",
+            """CREATE TABLE IF NOT EXISTS fq_machine_source_artifacts (
+                client_id TEXT NOT NULL,
+                draft_key TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                import_id TEXT NOT NULL,
+                first_ingestion_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(client_id,draft_key,source_id,content_sha256),
+                FOREIGN KEY(import_id) REFERENCES fq_imports(import_id)
+            )""",
             """CREATE TABLE IF NOT EXISTS fq_audit (
                 sequence INTEGER PRIMARY KEY,
                 event_type TEXT NOT NULL,
@@ -509,6 +761,33 @@ class FiveQuantityStore:
         with self.repository._transaction() as db:
             for statement in statements:
                 db.execute(statement)
+            contribution_columns = {
+                str(row["name"])
+                for row in db.execute(
+                    "PRAGMA table_info(fq_machine_source_contributions)"
+                ).fetchall()
+            }
+            if "source_observed_at" not in contribution_columns:
+                db.execute(
+                    "ALTER TABLE fq_machine_source_contributions "
+                    "ADD COLUMN source_observed_at TEXT"
+                )
+            if "source_coverage_as_of" not in contribution_columns:
+                db.execute(
+                    "ALTER TABLE fq_machine_source_contributions "
+                    "ADD COLUMN source_coverage_as_of TEXT"
+                )
+            db.execute(
+                """
+                INSERT OR IGNORE INTO fq_machine_source_artifacts(
+                    client_id,draft_key,source_id,content_sha256,import_id,
+                    first_ingestion_id,created_at
+                )
+                SELECT client_id,draft_key,source_id,content_sha256,import_id,
+                    ingestion_id,created_at
+                FROM fq_machine_source_contributions
+                """
+            )
             db.execute(
                 "UPDATE fq_outbox SET status='failed', "
                 "last_error='recovered_after_restart' WHERE status='sending'"
@@ -607,6 +886,480 @@ class FiveQuantityStore:
                 "duplicate": False,
             }
 
+    def create_or_update_machine_import(
+        self,
+        imported: dict[str, Any],
+        *,
+        ingestion_id: str,
+        lease_owner: str,
+        client_id: str,
+        draft_key: str,
+        source_id: str,
+        source_revision: int,
+        source_observed_at: str,
+        source_coverage_as_of: str,
+        source_required: bool,
+        freshness_max_seconds: int,
+        actor: str,
+        identity: MineIdentity,
+    ) -> dict[str, Any]:
+        """Atomically replace one source snapshot and rebuild the V2 draft."""
+
+        now = utc_text()
+        with self.repository._transaction() as db:
+            ingestion = db.execute(
+                "SELECT * FROM connector_ingestions WHERE ingestion_id = ?",
+                (ingestion_id,),
+            ).fetchone()
+            if (
+                ingestion is None
+                or ingestion["status"] != "bound"
+                or ingestion["lease_owner"] != lease_owner
+                or ingestion["client_id"] != client_id
+                or ingestion["draft_key"] != draft_key
+                or ingestion["source_id"] != source_id
+                or int(ingestion["source_revision"]) != source_revision
+                or ingestion["source_observed_at"] != source_observed_at
+                or ingestion["source_coverage_as_of"] != source_coverage_as_of
+            ):
+                raise ConflictError("机器自动填报租约或来源快照已变化")
+
+            previous = db.execute(
+                """
+                SELECT * FROM fq_machine_source_contributions
+                WHERE client_id = ? AND draft_key = ? AND source_id = ?
+                """,
+                (client_id, draft_key, source_id),
+            ).fetchone()
+            if previous is not None:
+                previous_revision = int(previous["source_revision"])
+                if source_revision < previous_revision:
+                    raise ConflictError("机器来源 revision 倒退")
+                if (
+                    source_revision == previous_revision
+                    and imported["content_sha256"] != previous["content_sha256"]
+                ):
+                    raise ConflictError("同一机器来源 revision 的内容发生冲突")
+
+            binding = db.execute(
+                """
+                SELECT * FROM connector_draft_bindings
+                WHERE client_id = ? AND draft_key = ?
+                """,
+                (client_id, draft_key),
+            ).fetchone()
+            draft_id = (
+                str(binding["draft_id"])
+                if binding is not None
+                else str(uuid.uuid4())
+            )
+            draft_row = db.execute(
+                "SELECT * FROM fq_drafts WHERE draft_id = ?",
+                (draft_id,),
+            ).fetchone()
+            if binding is not None and draft_row is None:
+                raise ConflictError("机器 draft_key 绑定记录损坏")
+            replacement_of: str | None = None
+            if draft_row is not None:
+                if draft_row["status"] == "discarded":
+                    replacement_of = draft_id
+                    draft_id = str(uuid.uuid4())
+                    draft_row = None
+                else:
+                    current_payload = json.loads(draft_row["payload_json"])
+                    if (
+                        int(draft_row["revision"])
+                        != int(binding["last_machine_revision"])
+                        or sha256_jcs(current_payload)
+                        != str(binding["last_machine_payload_sha256"])
+                    ):
+                        raise ConflictError(
+                            "草稿已有人工编辑；机器来源不能覆盖；"
+                            "请由具名用户审计后恢复自动同步"
+                        )
+                    pending = db.execute(
+                        """
+                        SELECT 1 FROM fq_outbox
+                        WHERE aggregate_id = ? AND message_kind = 'submission'
+                        LIMIT 1
+                        """,
+                        (draft_id,),
+                    ).fetchone()
+                    if (
+                        draft_row["status"] != "ready_review"
+                        or draft_row["confirmation_json"] is not None
+                        or draft_row["submission_message_id"] is not None
+                        or pending is not None
+                    ):
+                        raise ConflictError(
+                            "已确认或已发送的五量草稿不能自动改写"
+                        )
+
+            same_content = (
+                previous is not None
+                and imported["content_sha256"] == previous["content_sha256"]
+            )
+            repeated_snapshot = (
+                same_content
+                and previous is not None
+                and source_revision == int(previous["source_revision"])
+            )
+            effective_payload = (
+                json.loads(previous["payload_json"])
+                if repeated_snapshot and previous is not None
+                else imported["payload"]
+            )
+            contribution_rows = db.execute(
+                """
+                SELECT * FROM fq_machine_source_contributions
+                WHERE client_id = ? AND draft_key = ? AND source_id != ?
+                ORDER BY source_id
+                """,
+                (client_id, draft_key, source_id),
+            ).fetchall()
+            contribution_payloads = [
+                json.loads(row["payload_json"]) for row in contribution_rows
+            ]
+            contribution_payloads.append(effective_payload)
+            merged = _merge_machine_payloads(contribution_payloads)
+            validate_five_quantity_payload(merged, identity=identity, confirmed=False)
+            reporting_month = str(merged["reporting_month"])
+            expected_draft_key = (
+                f"draft:{identity.operator_id}:five-quantity:monthly:"
+                f"{reporting_month}"
+            )
+            if draft_key != expected_draft_key:
+                raise ConflictError(
+                    "draft_key 必须等于当前经营主体和月份的权威五量草稿键"
+                )
+            if binding is not None and binding["reporting_month"] != reporting_month:
+                raise ConflictError("draft_key 已绑定其他五量月份")
+
+            content_row = db.execute(
+                "SELECT * FROM fq_imports WHERE content_sha256 = ?",
+                (imported["content_sha256"],),
+            ).fetchone()
+            content_owned_by_binding = False
+            if content_row is not None:
+                content_owned_by_binding = (
+                    db.execute(
+                        """
+                        SELECT 1 FROM fq_machine_source_artifacts
+                        WHERE client_id=? AND draft_key=? AND source_id=?
+                            AND content_sha256=? AND import_id=?
+                        LIMIT 1
+                        """,
+                        (
+                            client_id,
+                            draft_key,
+                            source_id,
+                            imported["content_sha256"],
+                            content_row["import_id"],
+                        ),
+                    ).fetchone()
+                    is not None
+                )
+            if (
+                content_row is not None
+                and content_row["draft_id"] != draft_id
+                and not content_owned_by_binding
+            ):
+                raise ConflictError("相同来源文件已绑定其他五量草稿")
+            duplicate_content = content_row is not None
+            draft_import_id: str
+            if content_row is None:
+                import_id = str(uuid.uuid4())
+                draft_import_id = import_id
+                db.execute(
+                    """
+                    INSERT INTO fq_imports(
+                        import_id,content_sha256,filename,acquisition_mode,
+                        source_path,status,error_message,draft_id,
+                        suggestions_json,created_at
+                    ) VALUES (?,?,?,'direct_collection',?,'ready_review',
+                        NULL,?,?,?)
+                    """,
+                    (
+                        import_id,
+                        imported["content_sha256"],
+                        imported["filename"],
+                        f"connector:{source_id}"[:1000],
+                        draft_id,
+                        jcs_json(imported["suggestions"]),
+                        now,
+                    ),
+                )
+            elif replacement_of is not None:
+                import_id = str(content_row["import_id"])
+                draft_import_id = str(uuid.uuid4())
+                replacement_hash = hashlib.sha256(
+                    (
+                        "machine-replacement-snapshot-v1\n"
+                        f"{replacement_of}\n{draft_id}\n{jcs_json(merged)}"
+                    ).encode()
+                ).hexdigest()
+                db.execute(
+                    """
+                    INSERT INTO fq_imports(
+                        import_id,content_sha256,filename,acquisition_mode,
+                        source_path,status,error_message,draft_id,
+                        suggestions_json,created_at
+                    ) VALUES (?,?,?,'direct_collection',?,'ready_review',
+                        NULL,?,?,?)
+                    """,
+                    (
+                        draft_import_id,
+                        replacement_hash,
+                        f"machine-replacement-{reporting_month}.json",
+                        f"connector:replacement:{replacement_of}"[:1000],
+                        draft_id,
+                        jcs_json(imported["suggestions"]),
+                        now,
+                    ),
+                )
+            else:
+                import_id = str(content_row["import_id"])
+                draft_import_id = import_id
+
+            if draft_row is None:
+                draft_revision = 1
+                db.execute(
+                    """
+                    INSERT INTO fq_drafts(
+                        draft_id,import_id,revision,submission_revision,status,
+                        payload_json,created_at,updated_at
+                    ) VALUES (?,?,1,1,'ready_review',?,?,?)
+                    """,
+                    (
+                        draft_id,
+                        draft_import_id,
+                        jcs_json(merged),
+                        now,
+                        now,
+                    ),
+                )
+                if binding is None:
+                    db.execute(
+                        """
+                        INSERT INTO connector_draft_bindings(
+                            client_id,draft_key,draft_id,reporting_month,
+                            last_machine_revision,last_machine_payload_sha256,
+                            created_at
+                        ) VALUES (?,?,?,?,?,?,?)
+                        """,
+                        (
+                            client_id,
+                            draft_key,
+                            draft_id,
+                            reporting_month,
+                            draft_revision,
+                            sha256_jcs(merged),
+                            now,
+                        ),
+                    )
+                else:
+                    db.execute(
+                        """
+                        UPDATE connector_draft_bindings
+                        SET draft_id=?,reporting_month=?,
+                            last_machine_revision=?,
+                            last_machine_payload_sha256=?
+                        WHERE client_id=? AND draft_key=?
+                        """,
+                        (
+                            draft_id,
+                            reporting_month,
+                            draft_revision,
+                            sha256_jcs(merged),
+                            client_id,
+                            draft_key,
+                        ),
+                    )
+            else:
+                changed = sha256_jcs(current_payload) != sha256_jcs(merged)
+                draft_revision = int(draft_row["revision"]) + int(changed)
+                if changed:
+                    db.execute(
+                        """
+                        UPDATE fq_drafts
+                        SET revision = ?, payload_json = ?, updated_at = ?
+                        WHERE draft_id = ?
+                        """,
+                        (draft_revision, jcs_json(merged), now, draft_id),
+                    )
+
+            db.execute(
+                """
+                INSERT OR IGNORE INTO fq_machine_source_artifacts(
+                    client_id,draft_key,source_id,content_sha256,import_id,
+                    first_ingestion_id,created_at
+                ) VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    client_id,
+                    draft_key,
+                    source_id,
+                    imported["content_sha256"],
+                    import_id,
+                    ingestion_id,
+                    now,
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO fq_machine_source_contributions(
+                    client_id,draft_key,source_id,source_revision,event_id,
+                    ingestion_id,import_id,draft_id,content_sha256,
+                    source_observed_at,source_coverage_as_of,payload_json,
+                    created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(client_id,draft_key,source_id) DO UPDATE SET
+                    source_revision=excluded.source_revision,
+                    event_id=excluded.event_id,
+                    ingestion_id=excluded.ingestion_id,
+                    import_id=excluded.import_id,
+                    content_sha256=excluded.content_sha256,
+                    source_observed_at=excluded.source_observed_at,
+                    source_coverage_as_of=excluded.source_coverage_as_of,
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    client_id,
+                    draft_key,
+                    source_id,
+                    source_revision,
+                    ingestion["event_id"],
+                    ingestion_id,
+                    import_id,
+                    draft_id,
+                    imported["content_sha256"],
+                    source_observed_at,
+                    source_coverage_as_of,
+                    jcs_json(effective_payload),
+                    now,
+                    now,
+                ),
+            )
+            if replacement_of is not None:
+                db.execute(
+                    """
+                    UPDATE fq_machine_source_contributions SET draft_id=?
+                    WHERE client_id=? AND draft_key=?
+                    """,
+                    (draft_id, client_id, draft_key),
+                )
+            self.repository.apply_connector_snapshot_health_in_transaction(
+                db,
+                client_id=client_id,
+                draft_key=draft_key,
+                reporting_month=reporting_month,
+                source_id=source_id,
+                source_system=str(ingestion["source_system"]),
+                source_required=source_required,
+                freshness_max_seconds=freshness_max_seconds,
+                completed_at=source_observed_at,
+                record_count=len(effective_payload["days"]),
+                coverage_as_of=source_coverage_as_of,
+                snapshot_sha256=imported["content_sha256"],
+                autofill_event_id=str(ingestion["event_id"]),
+                source_revision=source_revision,
+                ingestion_id=ingestion_id,
+                received_at=now,
+            )
+            payload_sha256 = sha256_jcs(merged)
+            if binding is not None:
+                db.execute(
+                    """
+                    UPDATE connector_draft_bindings
+                    SET last_machine_revision = ?,
+                        last_machine_payload_sha256 = ?
+                    WHERE client_id = ? AND draft_key = ?
+                    """,
+                    (draft_revision, payload_sha256, client_id, draft_key),
+                )
+            # Always persist the deterministic check.  trigger_workflow only
+            # controls whether the caller requested the broader workflow; a
+            # quiet ingestion still needs a revision/hash-bound safety record.
+            preflight = _v2_machine_preflight(
+                merged, revision=draft_revision
+            )
+            contribution_count = len(contribution_rows) + 1
+            import_summary = {
+                "mode": "five_quantity_v2_direct_collection",
+                "import_id": import_id,
+                "duplicate_content": duplicate_content,
+                "merge": {
+                    "source_id": source_id,
+                    "source_revision": source_revision,
+                    "same_content": same_content,
+                    "repeated_snapshot": repeated_snapshot,
+                    "contribution_count": contribution_count,
+                    "day_count": len(merged["days"]),
+                    "evidence_source_count": len(merged["sources"]),
+                },
+            }
+            updated = db.execute(
+                """
+                UPDATE connector_ingestions
+                SET status = 'imported', draft_id = ?,
+                    import_summary_json = ?, draft_revision = ?,
+                    draft_payload_sha256 = ?, workflow_result_json = ?,
+                    updated_at = ?
+                WHERE ingestion_id = ? AND status = 'bound'
+                    AND lease_owner = ?
+                """,
+                (
+                    draft_id,
+                    jcs_json(import_summary),
+                    draft_revision,
+                    payload_sha256,
+                    jcs_json(preflight) if preflight is not None else None,
+                    now,
+                    ingestion_id,
+                    lease_owner,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ConflictError("机器自动填报租约已失效")
+            self._append_audit(
+                db,
+                "five_quantity_machine_autofilled",
+                actor,
+                {
+                    "ingestion_id": ingestion_id,
+                    "event_id": ingestion["event_id"],
+                    "draft_id": draft_id,
+                    "import_id": import_id,
+                    "source_id": source_id,
+                    "source_revision": source_revision,
+                    "content_sha256": imported["content_sha256"],
+                    "draft_revision": draft_revision,
+                    "payload_sha256": payload_sha256,
+                    "preflight_performed": preflight is not None,
+                    "replacement_of_discarded_draft_id": replacement_of,
+                },
+            )
+            if replacement_of is not None:
+                self._append_audit(
+                    db,
+                    "five_quantity_machine_draft_replaced",
+                    actor,
+                    {
+                        "discarded_draft_id": replacement_of,
+                        "replacement_draft_id": draft_id,
+                        "reporting_month": reporting_month,
+                        "payload_sha256": payload_sha256,
+                    },
+                )
+        return {
+            "draft_id": draft_id,
+            "draft_revision": draft_revision,
+            "payload_sha256": payload_sha256,
+            "import_summary": import_summary,
+            "preflight": preflight,
+        }
+
     def record_quarantine(
         self,
         *,
@@ -693,6 +1446,166 @@ class FiveQuantityStore:
         if row is None:
             raise NotFoundError("五量草稿不存在")
         return self._draft(row)
+
+    def machine_sync_state(self, draft_id: str) -> dict[str, Any] | None:
+        """Describe whether a machine-managed draft may still auto-update."""
+
+        with self.repository._read() as db:
+            draft = db.execute(
+                "SELECT * FROM fq_drafts WHERE draft_id=?", (draft_id,)
+            ).fetchone()
+            if draft is None:
+                raise NotFoundError("五量草稿不存在")
+            binding = db.execute(
+                "SELECT * FROM connector_draft_bindings WHERE draft_id=?",
+                (draft_id,),
+            ).fetchone()
+            if binding is None:
+                evidence = db.execute(
+                    "SELECT 1 FROM connector_ingestions WHERE draft_id=? LIMIT 1",
+                    (draft_id,),
+                ).fetchone()
+                if evidence is None:
+                    return None
+                return {
+                    "state": "paused",
+                    "reason_code": "machine_draft_replaced_or_unbound",
+                    "message": "该历史机器草稿已不再是当前自动同步目标",
+                    "can_resume": False,
+                }
+            current_hash = sha256_jcs(json.loads(draft["payload_json"]))
+            revision_matches = int(draft["revision"]) == int(
+                binding["last_machine_revision"]
+            )
+            payload_matches = current_hash == str(
+                binding["last_machine_payload_sha256"]
+            )
+            if draft["status"] != "ready_review":
+                reason_code = f"draft_{draft['status']}"
+                message = "草稿已确认、发送或放弃，自动同步已暂停"
+                can_resume = False
+            elif not revision_matches or not payload_matches:
+                reason_code = "human_changes_detected"
+                message = "检测到人工修改，自动同步已暂停以避免覆盖"
+                can_resume = True
+            else:
+                return {
+                    "state": "active",
+                    "reason_code": None,
+                    "message": "机器来源可继续更新此待复核草稿",
+                    "can_resume": False,
+                    "authoritative_client_id": str(binding["client_id"]),
+                    "last_machine_revision": int(
+                        binding["last_machine_revision"]
+                    ),
+                }
+            return {
+                "state": "paused",
+                "reason_code": reason_code,
+                "message": message,
+                "can_resume": can_resume,
+                "authoritative_client_id": str(binding["client_id"]),
+                "last_machine_revision": int(binding["last_machine_revision"]),
+            }
+
+    def resume_machine_sync(
+        self,
+        draft_id: str,
+        *,
+        expected_revision: int,
+        actor: str,
+        identity: MineIdentity,
+    ) -> dict[str, Any]:
+        """Explicitly discard human edits and restore latest machine snapshots."""
+
+        now = utc_text()
+        with self.repository._transaction() as db:
+            draft = db.execute(
+                "SELECT * FROM fq_drafts WHERE draft_id=?", (draft_id,)
+            ).fetchone()
+            if draft is None:
+                raise NotFoundError("五量草稿不存在")
+            if int(draft["revision"]) != expected_revision:
+                raise ConflictError("草稿修订号已变化，请刷新后重试")
+            binding = db.execute(
+                "SELECT * FROM connector_draft_bindings WHERE draft_id=?",
+                (draft_id,),
+            ).fetchone()
+            if binding is None:
+                raise ConflictError("该草稿不是当前机器自动同步目标")
+            pending = db.execute(
+                "SELECT 1 FROM fq_outbox WHERE aggregate_id=? "
+                "AND message_kind='submission' LIMIT 1",
+                (draft_id,),
+            ).fetchone()
+            if (
+                draft["status"] != "ready_review"
+                or draft["confirmation_json"] is not None
+                or draft["submission_message_id"] is not None
+                or pending is not None
+            ):
+                raise ConflictError("仅未确认、待复核的机器草稿可以恢复自动同步")
+            contributions = db.execute(
+                """
+                SELECT * FROM fq_machine_source_contributions
+                WHERE client_id=? AND draft_key=? ORDER BY source_id
+                """,
+                (binding["client_id"], binding["draft_key"]),
+            ).fetchall()
+            if not contributions:
+                raise ConflictError("机器来源快照缺失，不能恢复自动同步")
+            merged = _merge_machine_payloads(
+                [json.loads(row["payload_json"]) for row in contributions]
+            )
+            validate_five_quantity_payload(
+                merged, identity=identity, confirmed=False
+            )
+            if merged["reporting_month"] != binding["reporting_month"]:
+                raise ConflictError("机器来源月份与草稿绑定不一致")
+            revision = expected_revision + 1
+            payload_hash = sha256_jcs(merged)
+            previous_hash = sha256_jcs(json.loads(draft["payload_json"]))
+            db.execute(
+                """
+                UPDATE fq_drafts SET revision=?,status='ready_review',
+                    payload_json=?,confirmation_json=NULL,updated_at=?
+                WHERE draft_id=?
+                """,
+                (revision, jcs_json(merged), now, draft_id),
+            )
+            db.execute(
+                """
+                UPDATE connector_draft_bindings
+                SET last_machine_revision=?,last_machine_payload_sha256=?
+                WHERE client_id=? AND draft_key=?
+                """,
+                (
+                    revision,
+                    payload_hash,
+                    binding["client_id"],
+                    binding["draft_key"],
+                ),
+            )
+            self._append_audit(
+                db,
+                "five_quantity_machine_sync_resumed",
+                actor,
+                {
+                    "draft_id": draft_id,
+                    "revision": revision,
+                    "discarded_human_payload_sha256": previous_hash,
+                    "restored_machine_payload_sha256": payload_hash,
+                    "requires_new_event": True,
+                    "source_revisions": [
+                        {
+                            "source_id": str(row["source_id"]),
+                            "source_revision": int(row["source_revision"]),
+                        }
+                        for row in contributions
+                    ],
+                },
+            )
+        return self.get_draft(draft_id)
 
     def list_drafts(
         self, limit: int = 100, *, include_discarded: bool = False
@@ -807,6 +1720,8 @@ class FiveQuantityStore:
         confirmation: dict[str, Any],
         message: dict[str, Any],
         actor: str,
+        machine_source_policies: tuple[dict[str, Any], ...],
+        health_now_epoch: float,
     ) -> dict[str, Any]:
         now = utc_text()
         message_json = jcs_json(message)
@@ -829,6 +1744,83 @@ class FiveQuantityStore:
                 if existing is None:
                     raise ConflictError("草稿状态与 outbox 不一致")
                 return dict(existing)
+            health = (
+                self.repository
+                .connector_source_health_for_draft_in_transaction(
+                    db,
+                    draft_id,
+                    policies=machine_source_policies,
+                    now_epoch=health_now_epoch,
+                )
+            )
+            if health["freshness"]["overall_state"] not in {
+                "fresh",
+                "not_applicable",
+            }:
+                stale_sources = health["freshness"][
+                    "stale_required_source_ids"
+                ]
+                source_text = "、".join(stale_sources) or "未配置来源"
+                raise ValidationBlockedError(
+                    "必需机器来源未通过动态新鲜度与当前快照绑定检查："
+                    f"{source_text}"
+                )
+            binding = db.execute(
+                "SELECT 1 FROM connector_draft_bindings WHERE draft_id=?",
+                (draft_id,),
+            ).fetchone()
+            if binding is not None:
+                current_payload = json.loads(str(row["payload_json"]))
+                current_payload_sha256 = sha256_jcs(current_payload)
+                latest = db.execute(
+                    """
+                    SELECT workflow_result_json
+                    FROM connector_ingestions
+                    WHERE draft_id=? AND status='completed'
+                        AND workflow_result_json IS NOT NULL
+                    ORDER BY completed_at DESC,created_at DESC,ingestion_id DESC
+                    LIMIT 1
+                    """,
+                    (draft_id,),
+                ).fetchone()
+                stored_preflight: dict[str, Any] | None = None
+                if latest is not None:
+                    try:
+                        candidate = json.loads(
+                            str(latest["workflow_result_json"])
+                        )
+                    except (TypeError, json.JSONDecodeError):
+                        candidate = None
+                    if isinstance(candidate, dict):
+                        stored_preflight = candidate
+                preflight_is_current = bool(
+                    stored_preflight is not None
+                    and stored_preflight.get("contract_version")
+                    == "five-quantity-machine-preflight/v1"
+                    and stored_preflight.get("bound_revision")
+                    == int(row["revision"])
+                    and stored_preflight.get("payload_sha256")
+                    == current_payload_sha256
+                )
+                if not preflight_is_current:
+                    recalculated = _v2_machine_preflight(
+                        current_payload,
+                        revision=int(row["revision"]),
+                    )
+                    self._append_audit(
+                        db,
+                        "five_quantity_machine_preflight_recomputed",
+                        actor,
+                        {
+                            "draft_id": draft_id,
+                            "reason": (
+                                "missing"
+                                if stored_preflight is None
+                                else "obsolete"
+                            ),
+                            "preflight": recalculated,
+                        },
+                    )
             db.execute(
                 """UPDATE fq_drafts SET status='queued',confirmation_json=?,
                     submission_message_id=?,correlation_id=?,updated_at=?
@@ -1506,10 +2498,24 @@ class FiveQuantityRuntime:
         )
         self._watch_state: dict[str, tuple[int, int, float]] = {}
         self._processed_paths: dict[str, tuple[int, int]] = {}
+        self._machine_source_policies: tuple[dict[str, Any], ...] = ()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         if auto_start:
             self.start()
+
+    def configure_machine_source_policies(
+        self, policies: tuple[dict[str, Any], ...]
+    ) -> None:
+        self._machine_source_policies = tuple(
+            json.loads(jcs_json(policy)) for policy in policies
+        )
+
+    def machine_source_health(self, draft_id: str) -> dict[str, Any]:
+        return self.store.repository.connector_source_health_for_draft(
+            draft_id,
+            policies=self._machine_source_policies,
+        )
 
     @staticmethod
     def _watched(values: tuple[str, ...]) -> tuple[Path, ...]:
@@ -1632,6 +2638,84 @@ class FiveQuantityRuntime:
             result["draft"] = self.store.get_draft(result["draft_id"])
         return result
 
+    def ingest_machine_source(
+        self,
+        *,
+        ingestion_id: str,
+        lease_owner: str,
+        client_id: str,
+        draft_key: str,
+        source_id: str,
+        source_revision: int,
+        filename: str,
+        source_name: str,
+        source_system: str,
+        original_filename: str | None,
+        observed_at: str,
+        coverage_as_of: str,
+        format_name: str,
+        content: bytes,
+        actor_id: str,
+        source_required: bool,
+        freshness_max_seconds: int,
+    ) -> dict[str, Any]:
+        """Normalise one connector snapshot into the formal V2 review inbox."""
+
+        expected_suffix = f".{format_name}"
+        if not isinstance(filename, str) or not filename.lower().endswith(
+            expected_suffix
+        ):
+            raise ValueError(
+                f"机器来源文件名必须以 {expected_suffix} 结尾并与 format 一致"
+            )
+        imported = import_five_quantity_bytes(
+            filename=filename,
+            content=content,
+            acquisition_mode="direct_collection",
+            identity=self.identity,
+        )
+        if (
+            coverage_as_of != imported["payload"]["period_end"]
+            or not coverage_as_of.startswith(
+                f"{imported['payload']['reporting_month']}-"
+            )
+        ):
+            raise ValueError(
+                "source.coverage_as_of 必须等于规范化快照的 period_end"
+            )
+        for evidence_source in imported["payload"]["sources"]:
+            internal_source_id = str(evidence_source["source_id"])
+            evidence_source["source_system"] = source_system
+            evidence_source["captured_at"] = observed_at
+            evidence_source["source_record_id"] = (
+                f"connector:{source_id}:r{source_revision}:{internal_source_id}"
+            )[:256]
+            evidence_source["source_location"] = (
+                f"{original_filename or source_name}#source={source_id}"
+            )[:256]
+            evidence_source["normalization"] = (
+                "Authenticated connector transport; deterministic V2 mapping; "
+                "missing values remain null and no value is estimated or imputed."
+            )
+        validate_five_quantity_payload(
+            imported["payload"], identity=self.identity, confirmed=False
+        )
+        return self.store.create_or_update_machine_import(
+            imported,
+            ingestion_id=ingestion_id,
+            lease_owner=lease_owner,
+            client_id=client_id,
+            draft_key=draft_key,
+            source_id=source_id,
+            source_revision=source_revision,
+            source_observed_at=observed_at,
+            source_coverage_as_of=coverage_as_of,
+            source_required=source_required,
+            freshness_max_seconds=freshness_max_seconds,
+            actor=actor_id,
+            identity=self.identity,
+        )
+
     @staticmethod
     def _read_no_follow(path: Path) -> bytes:
         flags = os.O_RDONLY
@@ -1729,6 +2813,32 @@ class FiveQuantityRuntime:
             actor=actor,
         )
 
+    def machine_sync_state(self, draft_id: str) -> dict[str, Any] | None:
+        return self.store.machine_sync_state(draft_id)
+
+    def resume_machine_sync(
+        self,
+        draft_id: str,
+        *,
+        expected_revision: int,
+        accepted: bool,
+        actor: str,
+    ) -> dict[str, Any]:
+        if accepted is not True:
+            raise ValidationBlockedError(
+                "必须明确确认放弃本草稿的人工修改后才能恢复自动同步"
+            )
+        if isinstance(expected_revision, bool) or not isinstance(
+            expected_revision, int
+        ):
+            raise ValueError("expected_revision 必须是整数")
+        return self.store.resume_machine_sync(
+            draft_id,
+            expected_revision=expected_revision,
+            actor=actor,
+            identity=self.identity,
+        )
+
     def discard_draft(
         self,
         draft_id: str,
@@ -1810,6 +2920,18 @@ class FiveQuantityRuntime:
         draft = self.store.get_draft(draft_id)
         if draft["revision"] != expected_revision:
             raise ConflictError("草稿修订号已变化")
+        sync_state = self.store.machine_sync_state(draft_id)
+        if sync_state is not None:
+            health = self.machine_source_health(draft_id)
+            stale_sources = health["freshness"][
+                "stale_required_source_ids"
+            ]
+            if health["freshness"]["overall_state"] != "fresh":
+                source_text = "、".join(stale_sources) or "未配置来源"
+                raise ValidationBlockedError(
+                    "必需机器来源未通过动态新鲜度与当前快照绑定检查："
+                    f"{source_text}"
+                )
         payload = json.loads(jcs_json(draft["payload"]))
         confirmed_at = utc_text()
         confirmation_record = {
@@ -1851,6 +2973,8 @@ class FiveQuantityRuntime:
             confirmation=confirmation_record,
             message=message,
             actor=actor_id,
+            machine_source_policies=self._machine_source_policies,
+            health_now_epoch=time.time(),
         )
         return self.store.get_draft(draft_id)
 

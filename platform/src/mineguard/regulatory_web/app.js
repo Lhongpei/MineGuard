@@ -846,6 +846,19 @@ function renderMineDetail(detail) {
   $("mineName").textContent = mine.mine_name || mine.mine_id || "—";
   const latestSubmission = detail.latest_submission || {};
   $("mineMeta").textContent = `${mine.mine_id || "—"} · 报表期 ${latestSubmission.report_month || mine.report_month || "—"} · 截至 ${formatTime(latestSubmission.data_as_of || mine.data_as_of)}`;
+  const source = latestSubmission.source_disclosure || {};
+  const sourceNotice = $("mineSourceNotice");
+  if (source.demo) {
+    const sourceHash = String(source.source_sha256 || "");
+    const detailText = source.data_origin === "bundled_workbook_values"
+      ? `${source.label || "ET样表原值"} · 空白未补数、日期未平移 · 单位与身份待核验${sourceHash ? ` · SHA ${sourceHash.slice(0, 12)}…` : ""}`
+      : (source.label || "程序合成教学场景");
+    sourceNotice.textContent = detailText;
+    sourceNotice.classList.remove("hidden");
+  } else {
+    sourceNotice.textContent = "";
+    sourceNotice.classList.add("hidden");
+  }
   $("mineStatus").innerHTML = `<span class="status-pill status-${status[2]}">${escapeHtml(status[0])}</span>`;
   $("algorithmMeta").innerHTML = `<dt>算法版本</dt><dd>${escapeHtml(analysis.algorithm_version || "—")}</dd><dt>配置指纹</dt><dd title="${escapeHtml(analysis.configuration_sha256 || "")}">${escapeHtml((analysis.configuration_sha256 || "—").slice(0,16))}</dd><dt>协调求解</dt><dd>${escapeHtml(solverDisplay(analysis.solver_status || "—"))}</dd><dt>时序证据</dt><dd>${escapeHtml(humanizeBusinessText(analysis.temporal_status || (analysis.temporal && analysis.temporal.status) || "—"))}</dd><dt>同类矿样本</dt><dd>${formatNumber(analysis.peer_sample_count)}</dd><dt>参考候选</dt><dd>${analysis.baseline_reference_candidate === true ? "是" : analysis.baseline_reference_candidate === false ? "否" : "—"}</dd><dt>进入历史基线</dt><dd>${analysis.baseline_eligible === true ? "是" : analysis.baseline_eligible === false ? "否（结论仍独立留痕）" : "—"}</dd>`;
   const response = detail.response_summary || {};

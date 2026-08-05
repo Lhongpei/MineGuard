@@ -455,6 +455,10 @@ def _serve_agent(
             secure_cookie=settings.secure_cookie,
             public_origin=settings.public_origin,
             web_root=selected_web,
+            connector_clients=settings.connector_clients,
+            connector_max_clock_skew_seconds=(
+                settings.connector_max_clock_skew_seconds
+            ),
             on_started=lambda server: _startup_banner(
                 server=server,
                 service=service,

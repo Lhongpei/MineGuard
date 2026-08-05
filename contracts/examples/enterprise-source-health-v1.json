@@ -1,0 +1,17 @@
+{
+  "contract_version": "enterprise-source-health/v1",
+  "event_id": "chlt_c7e1277e9f08414a95ccfbcf05d2fb33",
+  "draft_key": "draft:operator-qy-001:five-quantity:monthly:2026-07",
+  "reporting_month": "2026-07",
+  "source_id": "production-http",
+  "source_system": "production-mes",
+  "outcome": "success_empty",
+  "attempted_at": "2026-07-31T23:59:00+08:00",
+  "completed_at": "2026-07-31T23:59:02+08:00",
+  "record_count": 0,
+  "coverage_as_of": null,
+  "snapshot_sha256": null,
+  "autofill_event_id": null,
+  "source_revision": null,
+  "error_code": null
+}

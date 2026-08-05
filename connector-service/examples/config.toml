@@ -1,0 +1,127 @@
+[service]
+state_db = "./state/connector.sqlite3"
+poll_interval_seconds = 10
+agent_url = "http://127.0.0.1:8090"
+client_id = "mine-qy-001-connector"
+secret_env = "ENTERPRISE_CONNECTOR_HMAC_SECRET"
+agent_timeout_seconds = 15
+agent_max_response_bytes = 1000000
+agent_allowed_hosts = ["127.0.0.1"]
+agent_allowed_ports = [8090]
+agent_allow_private_network = true
+# 内网 HTTPS 使用私有 CA 时取消下一行注释；不要关闭证书校验。
+# agent_ca_bundle = "/etc/enterprise-connector/private-ca.pem"
+retry_base_seconds = 5
+retry_max_seconds = 900
+lease_seconds = 120
+
+[[pipelines]]
+id = "mine-qy-001-five-quantity"
+enterprise_id = "operator-qy-001"
+report_type = "five-quantity"
+period_type = "daily"
+timezone = "Asia/Shanghai"
+timestamp_field = "observed_at"
+scope_field = "scope"
+reporting_lag_days = 0
+required_sources = ["blasting-file", "production-http", "energy-sqlite"]
+workflow_name = "daily_coal_health"
+
+[pipelines.scope_values]
+"日报" = "daily_total"
+"零点班" = "zero_shift"
+"八点班" = "eight_shift"
+"四点班" = "four_shift"
+
+[pipelines.mapping]
+production_t = { source = "production_t", type = "number" }
+electricity_kwh = { source = "electricity_kwh", type = "number" }
+ventilation_m3_min = { source = "ventilation_m3_min", type = "number" }
+detonators_count = { source = "detonators_count", type = "integer" }
+explosives_kg = { source = "explosives_kg", type = "number" }
+mine_entry_persons = { source = "mine_entry_persons", type = "integer" }
+
+[[pipelines.sources]]
+id = "blasting-file"
+adapter = "file-drop"
+source_name = "火工品与入井人员台账"
+source_system = "blasting-ledger"
+truth_statement = "从企业只读投递目录读取，未估算缺失值，需经办人核对原始台账"
+path = "./file-drop"
+glob = "*.json"
+format = "json"
+stable_seconds = 2
+max_bytes = 5000000
+max_records = 10000
+max_files_per_poll = 100
+max_total_bytes = 20000000
+max_total_records = 50000
+max_staleness_seconds = 3600
+timestamp_field = "issued_at"
+scope_field = "shift_code"
+# 仅灾备丢失 connector 状态库时，按 Agent 该 source 的最新修订人工设置。
+revision_seed = 0
+
+[pipelines.sources.scope_values]
+D = "daily_total"
+Z = "zero_shift"
+E = "eight_shift"
+F = "four_shift"
+
+[pipelines.sources.mapping]
+detonators_count = { source = "issued_detonators", type = "integer", required = true }
+explosives_kg = { source = "issued_explosives_kg", type = "number", required = true }
+mine_entry_persons = { source = "entrants", type = "integer", required = true }
+
+[[pipelines.sources]]
+id = "production-http"
+adapter = "http-poll"
+source_name = "生产计量接口"
+source_system = "production-mes"
+truth_statement = "通过只读 HTTP GET 获取，未执行来源系统写操作，需经办人核对"
+url = "http://127.0.0.1:18092/production"
+allowed_hosts = ["127.0.0.1"]
+allowed_ports = [18092]
+allow_private_network = true
+# ca_bundle = "/etc/enterprise-connector/upstream-ca.pem"
+format = "json"
+records_path = "records"
+timeout_seconds = 5
+max_bytes = 5000000
+max_records = 10000
+max_staleness_seconds = 3600
+timestamp_field = "measuredAt"
+scope_field = "reportingScope"
+
+[pipelines.sources.scope_values]
+DAY = "daily_total"
+SHIFT_0 = "zero_shift"
+SHIFT_8 = "eight_shift"
+SHIFT_16 = "four_shift"
+
+[pipelines.sources.mapping]
+production_t = { source = "rawTonnes", type = "number", required = true }
+
+[[pipelines.sources]]
+id = "energy-sqlite"
+adapter = "sqlite-query"
+source_name = "能耗与通风只读视图"
+source_system = "energy-sqlite"
+truth_statement = "SQLite 使用 mode=ro、query_only 和 authorizer，只读获取企业数据"
+database = "./demo-source.sqlite3"
+query = "SELECT meter_time, meter_bucket, active_energy_kwh, airflow_avg FROM energy_readonly"
+timeout_seconds = 5
+max_records = 10000
+max_staleness_seconds = 3600
+timestamp_field = "meter_time"
+scope_field = "meter_bucket"
+
+[pipelines.sources.scope_values]
+D = "daily_total"
+Z0 = "zero_shift"
+Z8 = "eight_shift"
+Z16 = "four_shift"
+
+[pipelines.sources.mapping]
+electricity_kwh = { source = "active_energy_kwh", type = "number", required = true }
+ventilation_m3_min = { source = "airflow_avg", type = "number", required = true }

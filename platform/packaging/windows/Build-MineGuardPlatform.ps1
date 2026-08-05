@@ -260,7 +260,9 @@ $buildRequirements = Join-Path $PSScriptRoot 'requirements-build.txt'
 foreach ($requiredFile in @(
     $projectFile, $constraintsFile, $entryPoint, $buildRequirements,
     (Join-Path $SourceDirectory 'src\mineguard\regulatory_web\index.html'),
-    (Join-Path $SourceDirectory 'src\mineguard\web\index.html')
+    (Join-Path $SourceDirectory 'src\mineguard\web\index.html'),
+    (Join-Path $SourceDirectory 'src\mineguard\demo_samples\taiyue-2026-07.et'),
+    (Join-Path $SourceDirectory 'src\mineguard\demo_samples\gengyang-2026-07.et')
 )) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "构建输入不完整：$requiredFile"
@@ -524,6 +526,9 @@ try {
         ('--include-data-dir=' +
             (Join-Path $SourceDirectory 'src\mineguard\web') +
             '=mineguard/web'),
+        ('--include-data-dir=' +
+            (Join-Path $SourceDirectory 'src\mineguard\demo_samples') +
+            '=mineguard/demo_samples'),
         '--include-package=_yaml',
         '--include-package=tzdata',
         '--include-package-data=tzdata',

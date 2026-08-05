@@ -66,6 +66,8 @@ def test_product_cli_self_check_covers_both_frontends_timezone_and_solver(
         "web/index.html",
         "web/app.js",
         "web/styles.css",
+        "demo_samples/taiyue-2026-07.et",
+        "demo_samples/gengyang-2026-07.et",
     } == set(result["assets"])
     assert all(item["bytes"] > 0 for item in result["assets"].values())
     assert all(
@@ -296,12 +298,14 @@ def test_seed_v2_demo_command_creates_isolated_dashboard_data(
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload["synthetic_demo"] is True
-    assert payload["mine_count"] == 8
-    assert payload["submission_count"] == 24
+    assert payload["demo_dataset"] is True
+    assert payload["contains_workbook_examples"] is True
+    assert payload["mine_count"] == 10
+    assert payload["submission_count"] == 26
     assert payload["decision_counts"] == {
         "insufficient_data": 1,
-        "normal_candidate": 19,
-        "risk": 4,
+        "normal_candidate": 20,
+        "risk": 5,
     }
     assert (state / "mineguard.db").is_file()
 

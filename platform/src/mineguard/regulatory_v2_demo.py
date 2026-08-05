@@ -1,15 +1,18 @@
-"""Explicitly synthetic data for the read-only regulatory V2 dashboard.
+"""Isolated teaching data for the read-only regulatory V2 dashboard.
 
 The demo seed is deliberately routed through :class:`RegulatoryV2Store` and
 therefore through the same :func:`analyze_five_quantity` entry point as an
 authenticated enterprise submission.  It never inserts analysis rows or
 findings directly.
 
-Every mine, source record and retained exchange envelope says that it is
-synthetic.  ``manual_import`` and ``direct_collection`` are both represented
-as provenance facts; the demo does not turn either mode into a trust grade.
-The default filesystem wrapper owns only ``.mineguard-v2-demo-v2`` and refuses to
-reuse an unmarked, non-empty directory.
+Eight generated mines retain the synthetic teaching scenarios.  Two additional
+mines are mapped cell-for-cell from the bundled July 2026 WPS ``.et`` examples:
+their values are never shifted, interpolated, backfilled or randomised.  Every
+retained exchange envelope identifies which origin applies.  ``manual_import``
+and ``direct_collection`` remain provenance facts, not trust grades.
+
+The default filesystem wrapper owns only ``.mineguard-v2-demo-v2`` and refuses
+to reuse an unmarked, non-empty directory.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 import hashlib
+from importlib.resources import files
 import json
 import math
 import os
@@ -29,6 +33,12 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import Field
 
+from .five_quantity import (
+    FiveQuantityDay as ImportedFiveQuantityDay,
+    FiveQuantityImportRequest,
+    FiveQuantityImportResult,
+    import_five_quantity_et,
+)
 from .models import StrictModel
 from .regulatory_v2 import (
     AcquisitionMode,
@@ -49,15 +59,29 @@ from .regulatory_v2_store import (
 )
 
 
-V2_DEMO_SCHEMA_VERSION = "mineguard-regulatory-v2-synthetic-demo-v2"
+V2_DEMO_SCHEMA_VERSION = "mineguard-regulatory-v2-demo-v3"
 DEFAULT_V2_DEMO_STATE_DIRECTORY = ".mineguard-v2-demo-v2"
 V2_DEMO_DATABASE_FILENAME = "mineguard.db"
 V2_DEMO_STATE_MARKER = ".mineguard-v2-synthetic-owner.json"
 V2_DEMO_AGENT_PREFIX = "synthetic-demo-agent-"
-SYNTHETIC_DEMO_DISCLAIMER = (
+V2_WORKBOOK_DEMO_AGENT_PREFIX = "workbook-demo-agent-"
+SYNTHETIC_ONLY_SCHEMA_VERSION = "mineguard-regulatory-v2-synthetic-demo-v2"
+SYNTHETIC_ONLY_DISCLAIMER = (
     "本数据集完全由程序合成，仅用于功能演示和培训；不是企业实际报送、"
     "不是设备实采记录，也不得作为监管认定或执法依据。"
 )
+V2_DEMO_DISCLAIMER = (
+    "本演示库包含程序合成教学场景，以及从随项目提供的两份2026年7月ET样表"
+    "逐格映射的太岳矿、梗阳矿示例；样表值未补数、未插值、未平移日期。"
+    "全部记录均非企业签名报送，样表单位和身份未经监管核验，不得作为监管认定"
+    "或执法依据。"
+)
+# Kept as a source-level compatibility alias for callers that used the old
+# constant name.  The value now truthfully describes the mixed demo dataset.
+SYNTHETIC_DEMO_DISCLAIMER = V2_DEMO_DISCLAIMER
+WORKBOOK_DEMO_PERIOD_START = date(2026, 7, 1)
+WORKBOOK_DEMO_PERIOD_END = date(2026, 7, 31)
+WORKBOOK_DEMO_VALUE_POLICY = "source_cells_only_no_fill_interpolation_or_date_shift"
 
 
 class V2DemoSeedError(ValueError):
@@ -77,6 +101,12 @@ class V2DemoMine:
     base_production_t: float
     electricity_ratio: float
     acquisition_mode: AcquisitionMode
+    data_origin: Literal["synthetic_generated", "bundled_workbook_values"] = (
+        "synthetic_generated"
+    )
+    bundled_filename: str | None = None
+    original_filename: str | None = None
+    expected_source_sha256: str | None = None
 
 
 V2_DEMO_MINES: tuple[V2DemoMine, ...] = (
@@ -155,12 +185,57 @@ V2_DEMO_MINES: tuple[V2DemoMine, ...] = (
 )
 
 
+V2_WORKBOOK_DEMO_MINES: tuple[V2DemoMine, ...] = (
+    V2DemoMine(
+        "DEMO-WORKBOOK-TAIYUE-001",
+        "太岳矿",
+        "bundled_workbook_taiyue_2026_07",
+        "2026年7月ET样表原值 / 太岳矿",
+        0.0,
+        0.0,
+        AcquisitionMode.MANUAL_IMPORT,
+        data_origin="bundled_workbook_values",
+        bundled_filename="taiyue-2026-07.et",
+        original_filename="五量基础数据测试.et",
+        expected_source_sha256=(
+            "a83ca156886c4ee8443825e14126f0dad"
+            "731898951447f5a951e2570787530a9"
+        ),
+    ),
+    V2DemoMine(
+        "DEMO-WORKBOOK-GENGYANG-002",
+        "梗阳矿",
+        "bundled_workbook_gengyang_2026_07",
+        "2026年7月ET样表原值 / 梗阳矿",
+        0.0,
+        0.0,
+        AcquisitionMode.MANUAL_IMPORT,
+        data_origin="bundled_workbook_values",
+        bundled_filename="gengyang-2026-07.et",
+        original_filename="五量基础数据测试（沁源梗阳）.et",
+        expected_source_sha256=(
+            "5c1a0dde50965f9b3f8605676bc792fa"
+            "3b74d28ec90bba23182f759cfb1341f6"
+        ),
+    ),
+)
+V2_ALL_DEMO_MINES = (*V2_DEMO_MINES, *V2_WORKBOOK_DEMO_MINES)
+
+
 DEMO_COMPARISON_CONTEXT = ComparisonContext(
     capacity_band="synthetic-0.9-1.2mtpa",
     mining_method="synthetic-underground-longwall",
     shift_system="synthetic-three-shift-eight-hour",
     coal_type="synthetic-thermal-coal",
     operating_regime="synthetic-normal-production",
+)
+
+WORKBOOK_DEMO_COMPARISON_CONTEXT = ComparisonContext(
+    capacity_band="demo-source-not-verified",
+    mining_method="demo-source-not-verified",
+    shift_system="source-workbook-three-shift",
+    coal_type="demo-source-not-verified",
+    operating_regime="source-workbook-unverified",
 )
 
 
@@ -170,6 +245,10 @@ class V2DemoScenarioSummary(StrictModel):
     scenario_code: str
     scenario_label: str
     acquisition_mode: AcquisitionMode
+    data_origin: Literal["synthetic_generated", "bundled_workbook_values"]
+    source_filename: str | None = None
+    source_sha256: str | None = None
+    source_value_policy: str | None = None
     submission_count: Annotated[int, Field(ge=1)]
     decisions: dict[str, Annotated[int, Field(ge=0)]]
     latest_decision: DecisionStatus
@@ -179,15 +258,19 @@ class V2DemoScenarioSummary(StrictModel):
 
 
 class V2DemoSeedResult(StrictModel):
-    schema_version: Literal["mineguard-regulatory-v2-synthetic-demo-v2"] = (
+    schema_version: Literal["mineguard-regulatory-v2-demo-v3"] = (
         V2_DEMO_SCHEMA_VERSION
     )
     status: Literal["seeded", "resumed", "already_seeded"]
+    demo_dataset: Literal[True] = True
     synthetic_demo: Literal[True] = True
+    contains_workbook_examples: Literal[True] = True
     disclaimer: Literal[
-        "本数据集完全由程序合成，仅用于功能演示和培训；不是企业实际报送、"
-        "不是设备实采记录，也不得作为监管认定或执法依据。"
-    ] = SYNTHETIC_DEMO_DISCLAIMER
+        "本演示库包含程序合成教学场景，以及从随项目提供的两份2026年7月ET样表"
+        "逐格映射的太岳矿、梗阳矿示例；样表值未补数、未插值、未平移日期。"
+        "全部记录均非企业签名报送，样表单位和身份未经监管核验，不得作为监管认定"
+        "或执法依据。"
+    ] = V2_DEMO_DISCLAIMER
     dataset_id: str
     through_month: date
     period_start: date
@@ -204,15 +287,19 @@ class V2DemoSeedResult(StrictModel):
 
 
 class V2DemoStatusResult(StrictModel):
-    schema_version: Literal["mineguard-regulatory-v2-synthetic-demo-v2"] = (
+    schema_version: Literal["mineguard-regulatory-v2-demo-v3"] = (
         V2_DEMO_SCHEMA_VERSION
     )
     status: Literal["empty", "partial", "complete"]
+    demo_dataset: Literal[True] = True
     synthetic_demo: Literal[True] = True
+    contains_workbook_examples: Literal[True] = True
     disclaimer: Literal[
-        "本数据集完全由程序合成，仅用于功能演示和培训；不是企业实际报送、"
-        "不是设备实采记录，也不得作为监管认定或执法依据。"
-    ] = SYNTHETIC_DEMO_DISCLAIMER
+        "本演示库包含程序合成教学场景，以及从随项目提供的两份2026年7月ET样表"
+        "逐格映射的太岳矿、梗阳矿示例；样表值未补数、未插值、未平移日期。"
+        "全部记录均非企业签名报送，样表单位和身份未经监管核验，不得作为监管认定"
+        "或执法依据。"
+    ] = V2_DEMO_DISCLAIMER
     dataset_id: str
     through_month: date
     expected_submission_count: Annotated[int, Field(ge=1)]
@@ -254,7 +341,7 @@ def seed_v2_demo(
     decisions: Counter[str] = Counter()
     scenario_runs: dict[
         str, list[tuple[DecisionStatus, RegulatoryFiveQuantityResult]]
-    ] = {mine.mine_id: [] for mine in V2_DEMO_MINES}
+    ] = {mine.mine_id: [] for mine in V2_ALL_DEMO_MINES}
     for item in plan:
         store.bind_agent_to_mine(item.agent_id, item.mine.mine_id)
         receipt = store.submit_and_analyze(
@@ -270,7 +357,7 @@ def seed_v2_demo(
         scenario_runs[item.mine.mine_id].append((receipt.decision, result))
 
     scenario_summaries: list[V2DemoScenarioSummary] = []
-    for mine in V2_DEMO_MINES:
+    for mine in V2_ALL_DEMO_MINES:
         runs = scenario_runs[mine.mine_id]
         mine_decisions = Counter(decision.value for decision, _ in runs)
         results = [result for _, result in runs]
@@ -281,6 +368,14 @@ def seed_v2_demo(
                 scenario_code=mine.scenario_code,
                 scenario_label=mine.scenario_label,
                 acquisition_mode=mine.acquisition_mode,
+                data_origin=mine.data_origin,
+                source_filename=mine.original_filename,
+                source_sha256=mine.expected_source_sha256,
+                source_value_policy=(
+                    WORKBOOK_DEMO_VALUE_POLICY
+                    if mine.data_origin == "bundled_workbook_values"
+                    else None
+                ),
                 submission_count=len(runs),
                 decisions=dict(sorted(mine_decisions.items())),
                 latest_decision=runs[-1][0],
@@ -316,18 +411,19 @@ def seed_v2_demo(
             )
         )
 
-    first_period = plan[0].submission.period_start
+    first_period = min(item.submission.period_start for item in plan)
+    last_period = max(item.submission.period_end for item in plan)
     state = "already_seeded" if created == 0 else "resumed" if replayed else "seeded"
     database_path = (
         None if store.path == ":memory:" else str(Path(store.path).resolve())
     )
     return V2DemoSeedResult(
         status=state,
-        dataset_id=f"regulatory-v2-synthetic-demo-series-v2-{month_end:%Y-%m}",
+        dataset_id=f"regulatory-v2-demo-series-v3-{month_end:%Y-%m}",
         through_month=month_end,
         period_start=first_period,
-        period_end=month_end,
-        mine_count=len(V2_DEMO_MINES),
+        period_end=last_period,
+        mine_count=len(V2_ALL_DEMO_MINES),
         submission_count=len(plan),
         created_submission_count=created,
         replayed_submission_count=replayed,
@@ -359,7 +455,7 @@ def v2_demo_status(
             if recorded == len(plan)
             else "partial"
         ),
-        dataset_id=f"regulatory-v2-synthetic-demo-series-v2-{month_end:%Y-%m}",
+        dataset_id=f"regulatory-v2-demo-series-v3-{month_end:%Y-%m}",
         through_month=month_end,
         expected_submission_count=len(plan),
         recorded_submission_count=recorded,
@@ -385,6 +481,7 @@ def seed_v2_demo_state(
     database = root / V2_DEMO_DATABASE_FILENAME
     with RegulatoryV2Store(database) as store:
         result = seed_v2_demo(store, through_month=month_end)
+    _upgrade_demo_state_marker(root, through_month=month_end)
     try:
         database.chmod(0o600)
     except OSError:
@@ -405,29 +502,38 @@ def claim_v2_demo_state_directory(
     *,
     through_month: date | None = None,
 ) -> Path:
-    """Claim a non-root directory with a durable synthetic-demo marker."""
+    """Claim a non-root directory with a durable mixed-demo marker."""
 
     raw = os.fspath(value)
     if not raw.strip():
-        raise V2DemoStateOwnershipError("合成演示状态目录不能为空")
+        raise V2DemoStateOwnershipError("演示状态目录不能为空")
     root = Path(raw).expanduser().resolve()
     if root == Path(root.anchor):
-        raise V2DemoStateOwnershipError("文件系统根目录不能作为合成演示状态目录")
+        raise V2DemoStateOwnershipError("文件系统根目录不能作为演示状态目录")
     month_end = _normalise_through_month(through_month)
     marker = root / V2_DEMO_STATE_MARKER
     expected = {
         "schema_version": V2_DEMO_SCHEMA_VERSION,
+        "demo_dataset": True,
         "synthetic_demo": True,
+        "contains_workbook_examples": True,
         "through_month": month_end.isoformat(),
         "database": V2_DEMO_DATABASE_FILENAME,
-        "disclaimer": SYNTHETIC_DEMO_DISCLAIMER,
+        "disclaimer": V2_DEMO_DISCLAIMER,
     }
     if marker.is_file():
         try:
             actual = json.loads(marker.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            raise V2DemoStateOwnershipError("合成演示目录所有权标记损坏") from error
-        if actual != expected:
+            raise V2DemoStateOwnershipError("演示目录所有权标记损坏") from error
+        legacy = {
+            "schema_version": SYNTHETIC_ONLY_SCHEMA_VERSION,
+            "synthetic_demo": True,
+            "through_month": month_end.isoformat(),
+            "database": V2_DEMO_DATABASE_FILENAME,
+            "disclaimer": SYNTHETIC_ONLY_DISCLAIMER,
+        }
+        if actual not in (expected, legacy):
             raise V2DemoStateOwnershipError(
                 "合成演示目录属于另一数据月份或标记版本，已拒绝混写"
             )
@@ -453,12 +559,87 @@ def claim_v2_demo_state_directory(
     return root
 
 
+def _demo_state_marker_payload(through_month: date) -> dict[str, Any]:
+    return {
+        "schema_version": V2_DEMO_SCHEMA_VERSION,
+        "demo_dataset": True,
+        "synthetic_demo": True,
+        "contains_workbook_examples": True,
+        "through_month": through_month.isoformat(),
+        "database": V2_DEMO_DATABASE_FILENAME,
+        "disclaimer": V2_DEMO_DISCLAIMER,
+    }
+
+
+def _upgrade_demo_state_marker(root: Path, *, through_month: date) -> None:
+    """Atomically migrate only the exact legacy owned marker after seeding.
+
+    ``seed_v2_demo`` has already verified that every database record is the
+    expected plan prefix before this runs.  An arbitrary marker or mixed store
+    therefore never reaches this replacement path.
+    """
+
+    marker = root / V2_DEMO_STATE_MARKER
+    expected = _demo_state_marker_payload(through_month)
+    try:
+        actual = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise V2DemoStateOwnershipError("演示目录所有权标记损坏") from error
+    if actual == expected:
+        return
+    legacy = {
+        "schema_version": SYNTHETIC_ONLY_SCHEMA_VERSION,
+        "synthetic_demo": True,
+        "through_month": through_month.isoformat(),
+        "database": V2_DEMO_DATABASE_FILENAME,
+        "disclaimer": SYNTHETIC_ONLY_DISCLAIMER,
+    }
+    if actual != legacy:
+        raise V2DemoStateOwnershipError(
+            "演示目录所有权标记不属于可迁移的旧版数据集"
+        )
+    marker_text = json.dumps(expected, ensure_ascii=False, indent=2) + "\n"
+    temporary = root / f".{V2_DEMO_STATE_MARKER}.{os.getpid()}.upgrade"
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(marker_text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, marker)
+        try:
+            directory_descriptor = os.open(root, os.O_RDONLY)
+        except OSError:
+            # Windows does not expose a portable directory fsync handle.
+            directory_descriptor = None
+        if directory_descriptor is not None:
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _normalise_through_month(value: date | None) -> date:
     if value is None:
         today = datetime.now(UTC).date()
         first_this_month = today.replace(day=1)
         value = first_this_month - timedelta(days=1)
-    return value.replace(day=monthrange(value.year, value.month)[1])
+    normalized = value.replace(day=monthrange(value.year, value.month)[1])
+    if normalized < WORKBOOK_DEMO_PERIOD_END:
+        raise V2DemoSeedError(
+            "演示库包含固定的2026年7月太岳矿、梗阳矿样表，"
+            "--through-month 不能早于 2026-07"
+        )
+    return normalized
 
 
 def _validated_existing_prefix(
@@ -467,6 +648,7 @@ def _validated_existing_prefix(
 ) -> list[dict[str, Any]]:
     expected_ids = [item.submission.submission_id for item in plan]
     expected_mine_ids = {item.mine.mine_id for item in plan}
+    expected_exchange_ids = {item.exchange.message_id for item in plan}
     existing = store.list_submissions(limit=1_000)
     existing_ids = {str(item["submission_id"]) for item in existing}
     expected_prefix = set(expected_ids[: len(existing_ids)])
@@ -483,12 +665,12 @@ def _validated_existing_prefix(
     )
     foreign_exchange = any(
         item.mine_id not in expected_mine_ids
-        or item.body.get("synthetic_demo") is not True
+        or item.message_id not in expected_exchange_ids
         for item in exchanges
     )
     if existing_ids != expected_prefix or foreign_audit or foreign_exchange:
         raise V2DemoSeedError(
-            "目标数据库包含非本批次合成演示报送，已拒绝写入；"
+            "目标数据库包含非本批次演示报送，已拒绝写入；"
             "请使用独立的 .mineguard-v2-demo-v2 状态目录。"
         )
     return existing
@@ -576,11 +758,14 @@ def _build_plan(through_month: date) -> list[_PlannedSubmission]:
                 mine_id=mine.mine_id,
                 agent_id=agent_id,
                 body={
-                    "schema_version": V2_DEMO_SCHEMA_VERSION,
+                    # Keep the original synthetic envelope byte-for-byte
+                    # stable so an owned 24-submission V2 demo can safely
+                    # resume by appending only the two workbook examples.
+                    "schema_version": SYNTHETIC_ONLY_SCHEMA_VERSION,
                     "synthetic_demo": True,
                     "not_enterprise_signed": True,
                     "offline_seed": True,
-                    "disclaimer": SYNTHETIC_DEMO_DISCLAIMER,
+                    "disclaimer": SYNTHETIC_ONLY_DISCLAIMER,
                     "scenario_code": mine.scenario_code,
                     "missing_encoding": "null_with_missing_quality_flags",
                     "submission_id": submission_id,
@@ -603,7 +788,357 @@ def _build_plan(through_month: date) -> list[_PlannedSubmission]:
                     agent_id=agent_id,
                 )
             )
+    plan.extend(_build_workbook_example_plan())
     return plan
+
+
+def _build_workbook_example_plan() -> list[_PlannedSubmission]:
+    """Map the two bundled July workbooks without manufacturing any value.
+
+    The display identities are an explicit demo mapping supplied by the user;
+    in particular, the Taiyue workbook still contains an ``XX煤矿`` title and
+    that title is retained in the exchange evidence rather than treated as an
+    identity source.  The files declare neither units nor operating state, so
+    those limitations are also retained instead of guessed.
+    """
+
+    plan: list[_PlannedSubmission] = []
+    for mine in V2_WORKBOOK_DEMO_MINES:
+        imported = _load_workbook_example(mine)
+        days = [_map_imported_workbook_day(day) for day in imported.days]
+        source_digest = imported.source_sha256
+        submission_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "mineguard:v2:workbook-demo-v1:"
+                f"{mine.mine_id}:{WORKBOOK_DEMO_PERIOD_START}:{source_digest}",
+            )
+        )
+        submission = FiveQuantitySubmission(
+            submission_id=submission_id,
+            mine_id=mine.mine_id,
+            mine_name=mine.mine_name,
+            reporting_timezone="Asia/Shanghai",
+            revision=1,
+            period_start=WORKBOOK_DEMO_PERIOD_START,
+            period_end=WORKBOOK_DEMO_PERIOD_END,
+            comparison_context=WORKBOOK_DEMO_COMPARISON_CONTEXT,
+            days=days,
+            provenance=[
+                SubmissionProvenance(
+                    acquisition_mode=AcquisitionMode.MANUAL_IMPORT,
+                    source_name=f"演示样表人工导入：{mine.original_filename}",
+                    evidence_sha256=source_digest,
+                    source_record_id=(
+                        f"BUNDLED-ET-DEMO/2026-07/{mine.mine_id}"
+                    ),
+                )
+            ],
+        )
+        agent_id = V2_WORKBOOK_DEMO_AGENT_PREFIX + mine.mine_id.lower()
+        message_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "mineguard:v2:workbook-demo-exchange-v1:" + submission_id,
+            )
+        )
+        finding_counts = Counter(
+            finding.code for finding in imported.quality.findings
+        )
+        exchange = ExchangeMessageInput(
+            message_id=message_id,
+            direction="inbound",
+            message_type="provided_sample_demo_import_v1",
+            mine_id=mine.mine_id,
+            agent_id=agent_id,
+            body={
+                "schema_version": V2_DEMO_SCHEMA_VERSION,
+                "demo_dataset": True,
+                "synthetic_demo": False,
+                "workbook_example": True,
+                "data_origin": "bundled_workbook_values",
+                "not_enterprise_signed": True,
+                "offline_seed": True,
+                "regulatory_use": "prohibited",
+                "disclaimer": V2_DEMO_DISCLAIMER,
+                "mine_display_name": mine.mine_name,
+                "identity_binding": "user_supplied_demo_mapping_not_workbook_title",
+                "original_filename": mine.original_filename,
+                "original_workbook_title": imported.source_title,
+                "source_sha256": source_digest,
+                "source_report_month": imported.report_month,
+                "source_value_policy": WORKBOOK_DEMO_VALUE_POLICY,
+                "formula_policy": "stored_biff8_cached_value_only_no_execution",
+                "formula_cell_count": imported.formula_cell_count,
+                "closed_through": imported.closed_through.isoformat(),
+                "open_row_count": imported.quality.open_day_count,
+                "source_quality_finding_counts": dict(
+                    sorted(finding_counts.items())
+                ),
+                "unit_binding": "configured_demo_mapping_not_declared_in_workbook",
+                "personnel_binding": (
+                    "source_用工量_mapped_to_mine_entry_persons_"
+                    "for_demo_requires_business_confirmation"
+                ),
+                "comparison_context_policy": (
+                    "source_dimensions_unverified_excluded_from_synthetic_peer_group"
+                ),
+                "submission_id": submission_id,
+                "payload_sha256": hashlib.sha256(
+                    submission.model_dump_json().encode("utf-8")
+                ).hexdigest(),
+            },
+            exchanged_at=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+        plan.append(
+            _PlannedSubmission(
+                mine=mine,
+                month_index=0,
+                submission=submission,
+                exchange=exchange,
+                agent_id=agent_id,
+            )
+        )
+    return plan
+
+
+def _load_workbook_example(mine: V2DemoMine) -> FiveQuantityImportResult:
+    if (
+        mine.data_origin != "bundled_workbook_values"
+        or mine.bundled_filename is None
+        or mine.original_filename is None
+        or mine.expected_source_sha256 is None
+    ):
+        raise V2DemoSeedError("演示样表清单不完整")
+    try:
+        content = (
+            files("mineguard")
+            .joinpath("demo_samples", mine.bundled_filename)
+            .read_bytes()
+        )
+    except (FileNotFoundError, OSError) as error:
+        raise V2DemoSeedError(
+            f"演示样表资源缺失：{mine.bundled_filename}"
+        ) from error
+    digest = hashlib.sha256(content).hexdigest()
+    if digest != mine.expected_source_sha256:
+        raise V2DemoSeedError(
+            f"演示样表完整性校验失败：{mine.bundled_filename}"
+        )
+    request = FiveQuantityImportRequest.model_validate(
+        {
+            "mine_id": mine.mine_id,
+            "source": {
+                "source_id": f"bundled-demo:{mine.mine_id}:2026-07",
+                "filename": mine.original_filename,
+                "received_at": "2026-08-01T00:00:00Z",
+                "origin_system": "bundled-user-provided-demo-workbook",
+                "expected_sha256": digest,
+            },
+            "closed_through": "2026-07-30",
+            "report_month": "2026-07",
+            "content_bytes": content,
+        }
+    )
+    try:
+        imported = import_five_quantity_et(request)
+    except ValueError as error:
+        raise V2DemoSeedError(
+            f"演示样表解析失败：{mine.bundled_filename}"
+        ) from error
+    if (
+        imported.source_sha256 != digest
+        or imported.report_month != "2026-07"
+        or len(imported.days) != 31
+        or imported.days[0].date != WORKBOOK_DEMO_PERIOD_START
+        or imported.days[-1].date != WORKBOOK_DEMO_PERIOD_END
+    ):
+        raise V2DemoSeedError(
+            f"演示样表月份或内容清单不匹配：{mine.bundled_filename}"
+        )
+    return imported
+
+
+def _map_imported_workbook_day(day: ImportedFiveQuantityDay) -> FiveQuantityDay:
+    personnel, personnel_quality = _map_numeric_quantity(
+        day,
+        day.labor,
+        columns=(3, 4, 5, 6),
+        personnel_semantics=True,
+    )
+    electricity, electricity_quality = _map_numeric_quantity(
+        day,
+        day.electricity,
+        columns=(7, 8, 9, 10),
+    )
+    production, production_quality = _map_numeric_quantity(
+        day,
+        day.production,
+        columns=(15, 16, 17, 18),
+    )
+    detonators, detonator_quality = _map_explosive_quantity(
+        day,
+        field="detonators",
+    )
+    explosives, explosive_quality = _map_explosive_quantity(
+        day,
+        field="explosives",
+    )
+    ventilation_flags = _source_cell_flags(
+        day,
+        column=2,
+        value=day.ventilation,
+        partial_when_missing=True,
+    )
+    ventilation = ReportedQuantity(
+        daily_total=day.ventilation,
+        # The workbook contains one daily ventilation column and does not
+        # disclose whether it is an average or a snapshot.  Leaving the
+        # aggregation unset is more faithful than inventing either meaning.
+        daily_aggregation=None,
+        shifts=None,
+    )
+    return FiveQuantityDay(
+        date=day.date,
+        ventilation_m3_min=ventilation,
+        mine_entry_persons=personnel,
+        electricity_kwh=electricity,
+        detonators_count=detonators,
+        explosives_kg=explosives,
+        production_t=production,
+        declared_operating_state="unknown",
+        shift_metadata=None,
+        quality={
+            "ventilation_m3_min": ReportedQuality(
+                daily_total=ventilation_flags
+            ),
+            "mine_entry_persons": personnel_quality,
+            "electricity_kwh": electricity_quality,
+            "detonators_count": detonator_quality,
+            "explosives_kg": explosive_quality,
+            "production_t": production_quality,
+        },
+    )
+
+
+def _map_numeric_quantity(
+    day: ImportedFiveQuantityDay,
+    values: Any,
+    *,
+    columns: tuple[int, int, int, int],
+    personnel_semantics: bool = False,
+) -> tuple[ReportedQuantity, ReportedQuality]:
+    raw_values = (
+        values.zero_shift,
+        values.eight_shift,
+        values.four_shift,
+        values.daily_total,
+    )
+    provided_shift_count = sum(value is not None for value in raw_values[:3])
+    flags = tuple(
+        _source_cell_flags(
+            day,
+            column=column,
+            value=value,
+            personnel_semantics=personnel_semantics,
+            partial_when_missing=(
+                index == 3
+                or 0 < provided_shift_count < 3
+                or values.daily_total is None
+            ),
+        )
+        for index, (column, value) in enumerate(
+            zip(columns, raw_values, strict=True)
+        )
+    )
+    return (
+        ReportedQuantity(
+            daily_total=values.daily_total,
+            daily_aggregation="sum",
+            shifts=ShiftValues(
+                zero_shift=values.zero_shift,
+                eight_shift=values.eight_shift,
+                four_shift=values.four_shift,
+            ),
+        ),
+        ReportedQuality(
+            zero_shift=flags[0],
+            eight_shift=flags[1],
+            four_shift=flags[2],
+            daily_total=flags[3],
+        ),
+    )
+
+
+def _map_explosive_quantity(
+    day: ImportedFiveQuantityDay,
+    *,
+    field: Literal["detonators", "explosives"],
+) -> tuple[ReportedQuantity, ReportedQuality]:
+    usages = (
+        day.explosives.zero_shift,
+        day.explosives.eight_shift,
+        day.explosives.four_shift,
+        day.explosives.daily_total,
+    )
+    values = tuple(getattr(item, field) for item in usages)
+    columns = (11, 12, 13, 14)
+    provided_shift_count = sum(value is not None for value in values[:3])
+    flags = tuple(
+        _source_cell_flags(
+            day,
+            column=column,
+            value=value,
+            partial_when_missing=(
+                index == 3
+                or 0 < provided_shift_count < 3
+                or values[3] is None
+            ),
+        )
+        for index, (column, value) in enumerate(
+            zip(columns, values, strict=True)
+        )
+    )
+    return (
+        ReportedQuantity(
+            daily_total=values[3],
+            daily_aggregation="sum",
+            shifts=ShiftValues(
+                zero_shift=values[0],
+                eight_shift=values[1],
+                four_shift=values[2],
+            ),
+        ),
+        ReportedQuality(
+            zero_shift=flags[0],
+            eight_shift=flags[1],
+            four_shift=flags[2],
+            daily_total=flags[3],
+        ),
+    )
+
+
+def _source_cell_flags(
+    day: ImportedFiveQuantityDay,
+    *,
+    column: int,
+    value: float | None,
+    personnel_semantics: bool = False,
+    partial_when_missing: bool = False,
+) -> tuple[str, ...]:
+    flags = ["unit_mapping_not_declared_in_source"]
+    if personnel_semantics:
+        flags.append("source_business_semantics_requires_confirmation")
+    if value is None:
+        flags.append("missing")
+        if partial_when_missing:
+            flags.append("partial")
+    if not day.is_closed:
+        flags.extend(("open_period_unclosed", "partial"))
+    raw_cell = day.raw_cells[column - 1]
+    if raw_cell.is_formula:
+        flags.append("formula_cached_value")
+    return tuple(dict.fromkeys(flags))
 
 
 def _three_month_periods(through_month: date) -> tuple[tuple[date, date], ...]:
@@ -875,9 +1410,13 @@ def _integral_shifts(value: int) -> ShiftValues:
 
 __all__ = [
     "DEFAULT_V2_DEMO_STATE_DIRECTORY",
+    "SYNTHETIC_ONLY_DISCLAIMER",
     "SYNTHETIC_DEMO_DISCLAIMER",
+    "V2_ALL_DEMO_MINES",
     "V2_DEMO_DATABASE_FILENAME",
+    "V2_DEMO_DISCLAIMER",
     "V2_DEMO_MINES",
+    "V2_WORKBOOK_DEMO_MINES",
     "V2DemoSeedError",
     "V2DemoSeedResult",
     "V2DemoStatusResult",

@@ -194,7 +194,7 @@ C:\path\to\agent\.venv\Scripts\enterprise-agent.exe
 
 ### 5.4 最短的双端演示
 
-下列命令只用于一台 Windows 电脑上体验页面和合成多矿数据，不创建 Windows
+下列命令只用于一台 Windows 电脑上体验页面和混合来源演示数据，不创建 Windows
 Service，也不完成真实矿井的 HMAC 注册。在 PowerShell A 中：
 
 ```powershell
@@ -211,6 +211,10 @@ py -3.12 -m venv .venv
   --host 127.0.0.1 --port 8080 `
   --state-directory .\.mineguard-v2-demo-windows
 ```
+
+结果包含 8 座程序合成教学矿（各 3 个月）以及太岳矿、梗阳矿两份固定 2026 年 7 月
+ET 样表原值。后两者不会补数或平移月份，且未经过企业签名、单位和身份核验；整个状态
+目录只用于演示，不得作为正式监管库。
 
 在 PowerShell B 中：
 

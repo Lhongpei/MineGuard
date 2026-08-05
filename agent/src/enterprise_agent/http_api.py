@@ -10,13 +10,16 @@ import mimetypes
 import re
 import socket
 import sys
+import time
 from collections.abc import Callable
+from datetime import date
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
+from zoneinfo import ZoneInfo
 
 from . import __version__
 from .agent_v2.governance import GovernanceAccess
@@ -29,10 +32,24 @@ from .auth import (
     is_loopback,
 )
 from .errors import AgentError, RequestTooLargeError
+from .machine_ingestion import (
+    AUTOFILL_PATH,
+    SOURCE_HEALTH_PATH,
+    ConnectorAuthenticationError,
+    ConnectorAuthorizationError,
+    ConnectorClient,
+    MachineAutofillCoordinator,
+    authenticate_connector_request,
+    validate_autofill_payload,
+    validate_source_health_payload,
+)
 from .service import EnterpriseAgentService
+from .util import parse_aware_datetime, sha256_jcs, utc_now
 
 _MAX_BODY = 2 * 1024 * 1024
 _MAX_IMPORT_BODY = 30 * 1024 * 1024
+_MAX_MACHINE_BODY = 5 * 1024 * 1024
+_MAX_MACHINE_HEALTH_BODY = 64 * 1024
 _DRAFT_ROUTE = re.compile(
     r"^/api/v1/drafts/([^/]+)(?:/(import|event-snapshot|assist|questions|validate|reviews|confirm|submit|audit|submissions))?$"
 )
@@ -48,7 +65,9 @@ _SKILL_PROPOSAL_ROUTE = re.compile(
 )
 _SKILL_VERSION_ROUTE = re.compile(r"^/api/v1/agent/skill-versions/([^/]+)$")
 _CHAT_SESSION_ROUTE = re.compile(r"^/api/v1/chat/sessions/([^/]+)(?:/(messages))?$")
-_FQ_DRAFT_ROUTE = re.compile(r"^/api/v2/drafts/([^/]+)(?:/(confirm|send-now))?$")
+_FQ_DRAFT_ROUTE = re.compile(
+    r"^/api/v2/drafts/([^/]+)(?:/(confirm|send-now|ingestions|machine-resume))?$"
+)
 _FQ_RISK_ROUTE = re.compile(r"^/api/v2/risks/([^/]+)(?:/(chat|response))?$")
 _FQ_RESPONSE_ROUTE = re.compile(r"^/api/v2/responses/([^/]+)(?:/(confirm))?$")
 _AGENT_V2_PREFIXES = (
@@ -81,6 +100,8 @@ class EnterpriseAgentHTTPServer(ThreadingHTTPServer):
         secure_cookie: bool = False,
         public_origin: str | None = None,
         web_root: Path | None = None,
+        connector_clients: tuple[ConnectorClient, ...] = (),
+        connector_max_clock_skew_seconds: int = 300,
     ):
         loopback_bind = is_loopback(server_address[0])
         if auth_manager is None:
@@ -114,6 +135,10 @@ class EnterpriseAgentHTTPServer(ThreadingHTTPServer):
             auth_manager.allow_anonymous_local or auth_manager.has_temporary_accounts
         ):
             raise ValueError("配置 PUBLIC_ORIGIN 时禁止匿名身份和临时演示账号")
+        if not 30 <= connector_max_clock_skew_seconds <= 900:
+            raise ValueError("连接器时钟偏差上限必须在 30-900 秒之间")
+        if len(connector_clients) > 1:
+            raise ValueError("one-mine 模式最多允许 1 个权威机器连接器 client")
         if ":" in server_address[0]:
             self.address_family = socket.AF_INET6
         self.service = service
@@ -127,6 +152,33 @@ class EnterpriseAgentHTTPServer(ThreadingHTTPServer):
         )
         self.loopback_bind = loopback_bind
         self.web_root = web_root
+        self.connector_clients = tuple(connector_clients)
+        self.connector_max_clock_skew_seconds = connector_max_clock_skew_seconds
+        # Legacy/read-only service doubles used by embedding callers do not
+        # necessarily expose the durable repository.  The coordinator is only
+        # meaningful when an authenticated connector has explicitly been
+        # configured, so avoid imposing that dependency on every HTTP server.
+        self.machine_autofill = (
+            MachineAutofillCoordinator(service)
+            if self.connector_clients
+            else None
+        )
+        five_quantity_runtime = getattr(self.service, "_five_quantity", None)
+        configure_policies = getattr(
+            five_quantity_runtime,
+            "configure_machine_source_policies",
+            None,
+        )
+        if callable(configure_policies):
+            policies = (
+                tuple(
+                    policy.public_policy()
+                    for policy in self.connector_clients[0].allowed_sources
+                )
+                if self.connector_clients
+                else ()
+            )
+            configure_policies(policies)
         enable_harness = getattr(self.service, "enable_harness", None)
         try:
             # Finish all in-process runtime initialization before binding the
@@ -373,12 +425,12 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _body(
+    def _raw_body(
         self,
         *,
         optional: bool = False,
         maximum: int = _MAX_BODY,
-    ) -> dict[str, Any]:
+    ) -> bytes:
         transfer_encoding = self.headers.get("Transfer-Encoding")
         if transfer_encoding:
             raise ValueError("不支持 Transfer-Encoding，请发送 Content-Length")
@@ -388,17 +440,22 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
         raw_length = lengths[0] if lengths else None
         if raw_length is None:
             if optional:
-                return {}
+                return b""
             raise ValueError("请求缺少 Content-Length")
         try:
             length = int(raw_length)
         except ValueError as error:
             raise ValueError("Content-Length 非法") from error
         if length < 0 or length > maximum:
-            raise RequestTooLargeError(f"请求体不能超过 {maximum // (1024 * 1024)} MiB")
+            limit = (
+                f"{maximum // 1024} KiB"
+                if maximum < 1024 * 1024
+                else f"{maximum // (1024 * 1024)} MiB"
+            )
+            raise RequestTooLargeError(f"请求体不能超过 {limit}")
         if length == 0:
             if optional:
-                return {}
+                return b""
             raise ValueError("JSON 请求体不能为空")
         content_type = self.headers.get_content_type().lower()
         if content_type != "application/json" and not content_type.endswith("+json"):
@@ -406,13 +463,56 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         if len(raw) != length:
             raise ValueError("请求体未完整传输")
+        return raw
+
+    @staticmethod
+    def _parse_json_object(raw: bytes, *, optional: bool = False) -> dict[str, Any]:
+        if not raw and optional:
+            return {}
+
+        def reject_duplicate_keys(
+            pairs: list[tuple[str, Any]],
+        ) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"JSON 包含重复字段：{key}")
+                result[key] = value
+            return result
+
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ValueError("请求体必须是有效 JSON") from error
+        except RecursionError as error:
+            raise ValueError("JSON 嵌套层级过深") from error
         if not isinstance(parsed, dict):
             raise ValueError("JSON 顶层必须是对象")
+        stack: list[tuple[Any, int]] = [(parsed, 1)]
+        node_count = 0
+        while stack:
+            value, depth = stack.pop()
+            node_count += 1
+            if node_count > 250_000:
+                raise ValueError("JSON 结构节点过多")
+            if depth > 64:
+                raise ValueError("JSON 嵌套层级不能超过 64")
+            if isinstance(value, dict):
+                stack.extend((item, depth + 1) for item in value.values())
+            elif isinstance(value, list):
+                stack.extend((item, depth + 1) for item in value)
         return parsed
+
+    def _body(
+        self,
+        *,
+        optional: bool = False,
+        maximum: int = _MAX_BODY,
+    ) -> dict[str, Any]:
+        return self._parse_json_object(
+            self._raw_body(optional=optional, maximum=maximum),
+            optional=optional,
+        )
 
     def _cookie(self, token: str, max_age: int) -> str:
         parts = [
@@ -501,6 +601,206 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             can_review=context.principal.allows("governance_review"),
             can_manage_skills=context.principal.allows("skill_admin"),
         )
+
+    def _machine_autofill_route(self, method: str) -> None:
+        if method != "POST":
+            self._method_not_allowed(("POST",))
+            return
+        if self.path != AUTOFILL_PATH:
+            self._error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_request_target",
+                "机器自动填报请求路径必须与签名路径完全一致",
+            )
+            return
+        if not self._host_is_allowed():
+            self._error(
+                HTTPStatus.FORBIDDEN,
+                "host_not_allowed",
+                "请求主机不在企业端允许范围内",
+            )
+            return
+        if not self.server.connector_clients:
+            self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "connector_unavailable",
+                "机器自动填报入口尚未配置",
+            )
+            return
+
+        names = {
+            "client_id": "X-Enterprise-Connector-Client",
+            "timestamp": "X-Enterprise-Connector-Timestamp",
+            "request_id": "X-Enterprise-Connector-Request-Id",
+            "signature": "X-Enterprise-Connector-Signature",
+        }
+        values: dict[str, str] = {}
+        for key, name in names.items():
+            supplied = self.headers.get_all(name, [])
+            if len(supplied) != 1:
+                raise ConnectorAuthenticationError()
+            values[key] = supplied[0]
+
+        raw = self._raw_body(maximum=_MAX_MACHINE_BODY)
+        authenticated = authenticate_connector_request(
+            clients=self.server.connector_clients,
+            client_id=values["client_id"],
+            timestamp=values["timestamp"],
+            request_id=values["request_id"],
+            signature=values["signature"],
+            raw_body=raw,
+            maximum_clock_skew_seconds=(
+                self.server.connector_max_clock_skew_seconds
+            ),
+        )
+        self.server.service.repository.register_connector_request(
+            client_id=authenticated.client_id,
+            request_id=authenticated.request_id,
+            request_sha256=authenticated.body_sha256,
+            request_timestamp=authenticated.timestamp,
+        )
+        payload = validate_autofill_payload(self._parse_json_object(raw))
+        if (
+            parse_aware_datetime(
+                payload["source"]["observed_at"], "source.observed_at"
+            ).timestamp()
+            > min(float(authenticated.timestamp), time.time())
+            + self.server.connector_max_clock_skew_seconds
+        ):
+            raise ValueError("source.observed_at 不得晚于已认证请求时间")
+        client = next(
+            item
+            for item in self.server.connector_clients
+            if item.client_id == authenticated.client_id
+        )
+        source = payload["source"]
+        source_policy = client.source_policy(
+            source["source_id"], source["source_system"]
+        )
+        if source_policy is None:
+            raise ConnectorAuthorizationError(
+                "该权威连接器未获准声明此 source_id/source_system 来源"
+            )
+        result, created = self.server.machine_autofill.ingest(
+            authenticated=authenticated,
+            payload=payload,
+            source_policy=source_policy,
+        )
+        status = (
+            HTTPStatus.ACCEPTED
+            if created and result["workflow"]["triggered"]
+            else HTTPStatus.CREATED
+            if created
+            else HTTPStatus.OK
+        )
+        self._json(status, result)
+
+    def _machine_source_health_route(self, method: str) -> None:
+        if method != "POST":
+            self._method_not_allowed(("POST",))
+            return
+        if self.path != SOURCE_HEALTH_PATH:
+            self._error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_request_target",
+                "机器来源健康请求路径必须与签名路径完全一致",
+            )
+            return
+        if not self._host_is_allowed():
+            self._error(
+                HTTPStatus.FORBIDDEN,
+                "host_not_allowed",
+                "请求主机不在企业端允许范围内",
+            )
+            return
+        if not self.server.connector_clients:
+            self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "connector_unavailable",
+                "机器连接器入口尚未配置",
+            )
+            return
+        names = {
+            "client_id": "X-Enterprise-Connector-Client",
+            "timestamp": "X-Enterprise-Connector-Timestamp",
+            "request_id": "X-Enterprise-Connector-Request-Id",
+            "signature": "X-Enterprise-Connector-Signature",
+        }
+        values: dict[str, str] = {}
+        for key, name in names.items():
+            supplied = self.headers.get_all(name, [])
+            if len(supplied) != 1:
+                raise ConnectorAuthenticationError()
+            values[key] = supplied[0]
+        raw = self._raw_body(maximum=_MAX_MACHINE_HEALTH_BODY)
+        authenticated = authenticate_connector_request(
+            clients=self.server.connector_clients,
+            client_id=values["client_id"],
+            timestamp=values["timestamp"],
+            request_id=values["request_id"],
+            signature=values["signature"],
+            raw_body=raw,
+            maximum_clock_skew_seconds=(
+                self.server.connector_max_clock_skew_seconds
+            ),
+            path=SOURCE_HEALTH_PATH,
+        )
+        self.server.service.repository.register_connector_request(
+            client_id=authenticated.client_id,
+            request_id=authenticated.request_id,
+            request_sha256=authenticated.body_sha256,
+            request_timestamp=authenticated.timestamp,
+        )
+        payload = validate_source_health_payload(self._parse_json_object(raw))
+        now_epoch = time.time()
+        completed_epoch = parse_aware_datetime(
+            payload["completed_at"], "completed_at"
+        ).timestamp()
+        if completed_epoch > min(float(authenticated.timestamp), now_epoch) + (
+            self.server.connector_max_clock_skew_seconds
+        ):
+            raise ValueError("completed_at 不得晚于已认证请求时间")
+        if completed_epoch < now_epoch - 30 * 24 * 60 * 60:
+            raise ValueError("completed_at 早于允许的 30 天健康事件窗口")
+        runtime = getattr(self.server.service, "_five_quantity", None)
+        if runtime is None:
+            raise ValueError("五量 V2 正式填报运行时未启用")
+        expected_draft_key = (
+            f"draft:{runtime.identity.operator_id}:five-quantity:monthly:"
+            f"{payload['reporting_month']}"
+        )
+        if payload["draft_key"] != expected_draft_key:
+            raise ConnectorAuthorizationError(
+                "draft_key 不属于当前经营主体的权威五量月度范围"
+            )
+        if payload["coverage_as_of"] is not None:
+            local_today = utc_now().astimezone(
+                ZoneInfo(runtime.identity.timezone)
+            ).date()
+            if date.fromisoformat(payload["coverage_as_of"]) > local_today:
+                raise ValueError("coverage_as_of 不得晚于矿区当前日期")
+        client = next(
+            item
+            for item in self.server.connector_clients
+            if item.client_id == authenticated.client_id
+        )
+        policy = client.source_policy(
+            payload["source_id"], payload["source_system"]
+        )
+        if policy is None:
+            raise ConnectorAuthorizationError(
+                "该权威连接器未获准声明此 source_id/source_system 来源"
+            )
+        result, created = (
+            self.server.service.repository.record_connector_source_health(
+                client_id=authenticated.client_id,
+                request_sha256=authenticated.body_sha256,
+                payload=payload,
+                source_required=policy.required,
+                freshness_max_seconds=policy.freshness_max_seconds,
+            )
+        )
+        self._json(HTTPStatus.CREATED if created else HTTPStatus.OK, result)
 
     def _agent_v2_route(
         self,
@@ -1229,7 +1529,18 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 return True
             if not self._require(context, "read"):
                 return True
-            self._json(HTTPStatus.OK, runtime.status())
+            self._json(
+                HTTPStatus.OK,
+                {
+                    **runtime.status(),
+                    "machine_connector_enabled": bool(
+                        self.server.connector_clients
+                    ),
+                    "connector_client_count": len(
+                        self.server.connector_clients
+                    ),
+                },
+            )
             return True
         if path == "/api/v2/imports":
             if method == "GET":
@@ -1329,7 +1640,9 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             if action is None and method == "GET":
                 if not self._require(context, "read"):
                     return True
-                self._json(HTTPStatus.OK, runtime.store.get_draft(draft_id))
+                draft = runtime.store.get_draft(draft_id)
+                draft["sync_state"] = runtime.machine_sync_state(draft_id)
+                self._json(HTTPStatus.OK, draft)
                 return True
             if action is None and method == "PATCH":
                 if not self._require(context, "write"):
@@ -1364,6 +1677,113 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 self._json(
                     HTTPStatus.OK,
                     {"draft": result, "discarded": True},
+                )
+                return True
+            if action == "ingestions" and method == "GET":
+                if not self._require(context, "read"):
+                    return True
+                items = self.server.service.repository.connector_ingestions_for_draft(
+                    draft_id
+                )
+                latest_preflight_item = next(
+                    (
+                        item
+                        for item in items
+                        if item.get("preflight") is not None
+                    ),
+                    None,
+                )
+                sync_state = runtime.machine_sync_state(draft_id)
+                draft = runtime.store.get_draft(draft_id)
+                current_payload_sha256 = sha256_jcs(draft["payload"])
+                latest_preflight = (
+                    dict(latest_preflight_item["preflight"])
+                    if latest_preflight_item is not None
+                    else None
+                )
+                if latest_preflight_item is not None:
+                    internal = (
+                        self.server.service.repository
+                        .get_connector_ingestion(
+                            latest_preflight_item["ingestion_id"]
+                        )
+                    )
+                    stored = internal.get("workflow_result")
+                    preflight_is_current = bool(
+                        isinstance(stored, dict)
+                        and stored.get("contract_version")
+                        == "five-quantity-machine-preflight/v1"
+                        and stored.get("bound_revision") == draft["revision"]
+                        and stored.get("payload_sha256")
+                        == current_payload_sha256
+                    )
+                    latest_preflight["obsolete"] = not preflight_is_current
+                    if not preflight_is_current:
+                        latest_preflight["status"] = "attention_required"
+                        latest_preflight["warnings"] = [
+                            *list(latest_preflight.get("warnings", [])),
+                            "预检结果未绑定当前草稿修订版，请在确认时重新检查",
+                        ][:20]
+                elif sync_state is not None:
+                    latest_preflight = {
+                        "status": "attention_required",
+                        "bound_revision": None,
+                        "payload_sha256_prefix": "",
+                        "missing_count": None,
+                        "missing_day_count": None,
+                        "calendar_coverage": None,
+                        "arithmetic_mismatch_count": None,
+                        "source_count": None,
+                        "checked_at": None,
+                        "warnings": [
+                            "机器草稿缺少可绑定的确定性预检结果，确认时必须重新检查"
+                        ],
+                        "obsolete": True,
+                    }
+                health = runtime.machine_source_health(draft_id)
+                if latest_preflight is not None:
+                    latest_preflight = dict(latest_preflight)
+                    latest_preflight["freshness"] = health["freshness"]
+                    if health["freshness"]["overall_state"] != "fresh":
+                        latest_preflight["status"] = "attention_required"
+                        latest_preflight["warnings"] = [
+                            *list(latest_preflight.get("warnings", [])),
+                            "必需机器来源尚未新鲜且未与当前成功快照完全绑定",
+                        ][:20]
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "items": items,
+                        "ingestions": items,
+                        "count": len(items),
+                        "latest_preflight": latest_preflight,
+                        "sync_state": sync_state,
+                        "source_health": health["source_health"],
+                        "freshness": health["freshness"],
+                    },
+                )
+                return True
+            if action == "machine-resume" and method == "POST":
+                if not self._require(context, "write"):
+                    return True
+                body = self._body()
+                self._reject_unknown_fields(
+                    body,
+                    frozenset({"expected_revision", "accepted"}),
+                )
+                result = runtime.resume_machine_sync(
+                    draft_id,
+                    expected_revision=body.get("expected_revision"),
+                    accepted=body.get("accepted") is True,
+                    actor=actor,
+                )
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "draft": result,
+                        "sync_state": runtime.machine_sync_state(draft_id),
+                        "requires_new_event": True,
+                    },
                 )
                 return True
             if action == "confirm" and method == "POST":
@@ -1403,7 +1823,11 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, {"items": result, "count": len(result)})
                 return True
             self._method_not_allowed(
-                ("GET", "PATCH", "DELETE") if action is None else ("POST",)
+                ("GET", "PATCH", "DELETE")
+                if action is None
+                else ("GET",)
+                if action == "ingestions"
+                else ("POST",)
             )
             return True
         if path == "/api/v2/risks":
@@ -1552,6 +1976,12 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         path = urlsplit(self.path).path.rstrip("/") or "/"
+        if path == AUTOFILL_PATH:
+            self._machine_autofill_route(method)
+            return
+        if path == SOURCE_HEALTH_PATH:
+            self._machine_source_health_route(method)
+            return
         if path == "/api/v1/health" and method == "GET":
             llm_configured = self.server.service.llm_provider is not None
             agent_v2_runtime = getattr(
@@ -1689,6 +2119,12 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                         is not None
                     ),
                     "agent_v2_governed_learning": "proposal_approval_only",
+                    "machine_autofill_available": bool(
+                        self.server.connector_clients
+                    ),
+                    "machine_autofill_contract_version": (
+                        "enterprise-autofill-ingestion/v1"
+                    ),
                 },
             )
             return
@@ -2542,6 +2978,8 @@ def serve(
     secure_cookie: bool = False,
     public_origin: str | None = None,
     web_root: str | Path | None = None,
+    connector_clients: tuple[ConnectorClient, ...] = (),
+    connector_max_clock_skew_seconds: int = 300,
     on_started: Callable[[EnterpriseAgentHTTPServer], None] | None = None,
 ) -> None:
     root = Path(web_root) if web_root is not None else None
@@ -2553,6 +2991,10 @@ def serve(
             secure_cookie=secure_cookie,
             public_origin=public_origin,
             web_root=root,
+            connector_clients=connector_clients,
+            connector_max_clock_skew_seconds=(
+                connector_max_clock_skew_seconds
+            ),
         )
     except KeyboardInterrupt:
         disable_harness = getattr(service, "disable_harness", None)

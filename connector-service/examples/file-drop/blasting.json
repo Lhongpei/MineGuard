@@ -1,0 +1,14 @@
+[
+  {"issued_at":"2026-07-29T00:00:00+08:00","shift_code":"Z","issued_detonators":16,"issued_explosives_kg":6.4,"entrants":50},
+  {"issued_at":"2026-07-29T08:00:00+08:00","shift_code":"E","issued_detonators":18,"issued_explosives_kg":7.2,"entrants":56},
+  {"issued_at":"2026-07-29T16:00:00+08:00","shift_code":"F","issued_detonators":14,"issued_explosives_kg":5.6,"entrants":53},
+  {"issued_at":"2026-07-29T23:59:00+08:00","shift_code":"D","issued_detonators":48,"issued_explosives_kg":19.2,"entrants":159},
+  {"issued_at":"2026-07-30T00:00:00+08:00","shift_code":"Z","issued_detonators":17,"issued_explosives_kg":6.8,"entrants":52},
+  {"issued_at":"2026-07-30T08:00:00+08:00","shift_code":"E","issued_detonators":19,"issued_explosives_kg":7.6,"entrants":58},
+  {"issued_at":"2026-07-30T16:00:00+08:00","shift_code":"F","issued_detonators":15,"issued_explosives_kg":6.0,"entrants":54},
+  {"issued_at":"2026-07-30T23:59:00+08:00","shift_code":"D","issued_detonators":51,"issued_explosives_kg":20.4,"entrants":164},
+  {"issued_at":"2026-07-31T00:00:00+08:00","shift_code":"Z","issued_detonators":18,"issued_explosives_kg":7.2,"entrants":54},
+  {"issued_at":"2026-07-31T08:00:00+08:00","shift_code":"E","issued_detonators":20,"issued_explosives_kg":8.0,"entrants":60},
+  {"issued_at":"2026-07-31T16:00:00+08:00","shift_code":"F","issued_detonators":16,"issued_explosives_kg":6.4,"entrants":56},
+  {"issued_at":"2026-07-31T23:59:00+08:00","shift_code":"D","issued_detonators":54,"issued_explosives_kg":21.6,"entrants":170}
+]

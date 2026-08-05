@@ -49,6 +49,17 @@
     imports: [],
     drafts: [],
     currentDraft: null,
+    ingestionEvidence: {
+      draftId: "",
+      loading: false,
+      available: null,
+      items: [],
+      preflight: null,
+      syncState: null,
+      sourceHealth: [],
+      freshness: null,
+      error: "",
+    },
     risks: [],
     currentRisk: null,
     messages: [],
@@ -73,6 +84,24 @@
   };
   const statusText = (value) => STATUS[value] || value || "—";
   const metricLabel = (value) => METRIC_LABELS[value] || value || "未列明";
+  const reportingWindow = (payload) => {
+    const month = String((payload && payload.reporting_month) || "");
+    const match = /^(\d{4})-(\d{2})$/.exec(month);
+    if (!match) return { fullMonth: false, label: "统计窗口" };
+    const year = Number(match[1]);
+    const monthNumber = Number(match[2]);
+    const lastDay = new Date(Date.UTC(year, monthNumber, 0))
+      .getUTCDate()
+      .toString()
+      .padStart(2, "0");
+    const fullMonth =
+      payload.period_start === `${month}-01` &&
+      payload.period_end === `${month}-${lastDay}`;
+    return {
+      fullMonth,
+      label: fullMonth ? "整月月报" : "月内统计窗口（非整月）",
+    };
+  };
   const can = (permission) =>
     Boolean(
       state.principal &&
@@ -181,6 +210,17 @@
     state.principal = null;
     state.status = null;
     state.currentDraft = null;
+    state.ingestionEvidence = {
+      draftId: "",
+      loading: false,
+      available: null,
+      items: [],
+      preflight: null,
+      syncState: null,
+      sourceHealth: [],
+      freshness: null,
+      error: "",
+    };
     state.currentRisk = null;
     state.response = null;
     message("请登录企业账号后继续。", "notice");
@@ -243,6 +283,14 @@
     $("fqWatchSummary").textContent = directories.length
       ? `已配置 ${directories.length} 个受控目录：${directories.join("；")}`
       : "尚未配置固定监听目录；可继续使用人工上传或设备/API 接口。";
+    const connectorEnabled = state.status.machine_connector_enabled;
+    const connectorCount = Number(state.status.connector_client_count || 0);
+    $("fqConnectorSummary").textContent =
+      connectorEnabled === true
+        ? `自动连接器接口已启用${connectorCount ? `，登记 ${connectorCount} 个只读客户端` : ""}。`
+        : connectorEnabled === false
+          ? "自动连接器接口未启用；管理员配置后可从业务 API 或只读数据库自动建稿。"
+          : "自动连接器状态由服务端管理；自动导入成功后会显示在收件记录和草稿依据中。";
     $("fqIdentityCard").innerHTML = `
       <h3>本实例身份</h3>
       <dl class="fq-definition-list">
@@ -366,8 +414,9 @@
       .map((draft) => {
         const selected =
           state.currentDraft && state.currentDraft.draft_id === draft.draft_id;
+        const windowInfo = reportingWindow(draft.payload);
         return `<button class="fq-list-item ${selected ? "is-selected" : ""}" data-draft-id="${escapeHtml(draft.draft_id)}" type="button">
-          <span><strong>${escapeHtml(draft.payload.reporting_month)} 月报</strong><small>${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)}</small></span>
+          <span><strong>${escapeHtml(draft.payload.reporting_month)} · ${escapeHtml(windowInfo.label)}</strong><small>${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)}</small></span>
           <span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span>
         </button>`;
       })
@@ -382,11 +431,279 @@
   async function openDraft(draftId) {
     try {
       state.currentDraft = await api(`/api/v2/drafts/${encodeURIComponent(draftId)}`);
+      state.ingestionEvidence = {
+        draftId,
+        loading: true,
+        available: null,
+        items: [],
+        preflight: null,
+        syncState: state.currentDraft.sync_state || null,
+        sourceHealth: [],
+        freshness: null,
+        error: "",
+      };
       renderDraftList();
       renderDraft();
+      void loadDraftIngestions(draftId);
     } catch (error) {
       message(error.message, "error");
     }
+  }
+
+  async function loadDraftIngestions(draftId, notify = false) {
+    if (!draftId || !can("read")) return;
+    state.ingestionEvidence = {
+      draftId,
+      loading: true,
+      available: state.ingestionEvidence.available,
+      items:
+        state.ingestionEvidence.draftId === draftId
+          ? state.ingestionEvidence.items
+          : [],
+      preflight:
+        state.ingestionEvidence.draftId === draftId
+          ? state.ingestionEvidence.preflight
+          : null,
+      syncState:
+        state.ingestionEvidence.draftId === draftId
+          ? state.ingestionEvidence.syncState
+          : (state.currentDraft && state.currentDraft.sync_state) || null,
+      sourceHealth:
+        state.ingestionEvidence.draftId === draftId
+          ? state.ingestionEvidence.sourceHealth
+          : [],
+      freshness:
+        state.ingestionEvidence.draftId === draftId
+          ? state.ingestionEvidence.freshness
+          : null,
+      error: "",
+    };
+    if (state.currentDraft && state.currentDraft.draft_id === draftId) renderDraft();
+    try {
+      const payload = await api(
+        `/api/v2/drafts/${encodeURIComponent(draftId)}/ingestions`,
+      );
+      if (!state.currentDraft || state.currentDraft.draft_id !== draftId) return;
+      const items = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload && payload.items)
+          ? payload.items
+          : Array.isArray(payload && payload.ingestions)
+            ? payload.ingestions
+            : [];
+      const latestWithPreflight = [...items]
+        .reverse()
+        .find((item) => item && (item.preflight || (item.workflow && item.workflow.preflight)));
+      state.ingestionEvidence = {
+        draftId,
+        loading: false,
+        available: true,
+        items,
+        preflight:
+          (payload && (payload.latest_preflight || payload.preflight)) ||
+          (latestWithPreflight &&
+            (latestWithPreflight.preflight || latestWithPreflight.workflow.preflight)) ||
+          null,
+        syncState:
+          (payload && payload.sync_state) ||
+          (state.currentDraft && state.currentDraft.sync_state) ||
+          null,
+        sourceHealth:
+          Array.isArray(payload && payload.source_health)
+            ? payload.source_health
+            : [],
+        freshness: (payload && payload.freshness) || null,
+        error: "",
+      };
+      renderDraft();
+      if (notify) message("自动填报依据已刷新。", "success");
+    } catch (error) {
+      if (!state.currentDraft || state.currentDraft.draft_id !== draftId) return;
+      state.ingestionEvidence = {
+        draftId,
+        loading: false,
+        available: error.status === 404 ? false : null,
+        items: [],
+        preflight: null,
+        syncState: (state.currentDraft && state.currentDraft.sync_state) || null,
+        sourceHealth: [],
+        freshness: null,
+        error:
+          error.status === 404
+            ? "这份草稿不是由机器连接器生成，或当前服务版本尚未提供自动导入记录。"
+            : `自动填报依据暂时读取失败：${error.message}`,
+      };
+      renderDraft();
+      if (notify && error.status !== 404) message(error.message, "error");
+    }
+  }
+
+  function ingestionStatusText(value) {
+    const labels = {
+      bound: "已绑定草稿",
+      imported: "已写入草稿",
+      completed: "已完成",
+      duplicate: "幂等重放",
+      rejected: "已拒绝",
+    };
+    const status = String(value || "completed").toLowerCase();
+    return labels[status] || status;
+  }
+
+  function preflightNumber(preflight, ...names) {
+    for (const name of names) {
+      const value = preflight && preflight[name];
+      if (Number.isFinite(Number(value))) return Number(value);
+    }
+    return 0;
+  }
+
+  function formatAgeSeconds(value) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds < 0) return "—";
+    if (seconds < 60) return `${Math.floor(seconds)} 秒`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时`;
+    return `${Math.floor(seconds / 86400)} 天`;
+  }
+
+  function sourceHealthHtml(evidence) {
+    const health = Array.isArray(evidence.sourceHealth)
+      ? evidence.sourceHealth.slice(0, 32)
+      : [];
+    const sourceNames = new Map(
+      (Array.isArray(evidence.items) ? evidence.items : [])
+        .filter((item) => item && item.source_id && item.source_name)
+        .map((item) => [String(item.source_id), String(item.source_name)]),
+    );
+    const overall = evidence.freshness || null;
+    if (!health.length && !overall) return "";
+    const stateLabels = {
+      fresh: "新鲜",
+      stale: "已陈旧",
+      waiting: "等待数据",
+      error: "采集异常",
+      unknown: "状态未知",
+    };
+    const outcomeLabels = {
+      success_nonempty: "成功取得数据",
+      success_empty: "成功但结果为空",
+      error: "采集失败",
+      stability_wait: "等待文件稳定",
+    };
+    const overallState = String(
+      (overall && (overall.overall_state || overall.state)) || "unknown",
+    );
+    const staleIds = Array.isArray(overall && overall.stale_required_source_ids)
+      ? overall.stale_required_source_ids
+      : [];
+    const rows = health.map((item) => {
+      const freshnessState = String(item.freshness_state || "unknown");
+      const sourceLabel =
+        item.source_name || sourceNames.get(String(item.source_id || "")) ||
+        item.source_id || "采集来源";
+      return `<article class="fq-source-health-row is-${escapeHtml(freshnessState)}">
+        <div><strong>${escapeHtml(sourceLabel)}</strong><small>${item.required ? "必需来源" : "辅助来源"}${item.source_system ? ` · ${escapeHtml(item.source_system)}` : ""}</small></div>
+        <div><span class="fq-status is-${escapeHtml(freshnessState)}">${escapeHtml(stateLabels[freshnessState] || freshnessState)}</span><small>${escapeHtml(outcomeLabels[item.outcome] || item.outcome || "尚无采集结果")}</small></div>
+        <p>最近完成 ${escapeHtml(formatTime(item.completed_at))} · 年龄 ${escapeHtml(formatAgeSeconds(item.age_seconds))}${item.coverage_as_of ? ` · 覆盖截至 ${escapeHtml(item.coverage_as_of)}` : ""}${item.error_code ? ` · 错误代码 ${escapeHtml(item.error_code)}` : ""}</p>
+      </article>`;
+    }).join("");
+    return `<section class="fq-source-health is-${escapeHtml(overallState)}">
+      <div class="fq-source-health-head"><div><strong>自动采集时效</strong><p>空结果、超时或文件尚未稳定只更新健康状态，不会把旧值自动删除或改成 0。</p></div><span class="fq-status is-${escapeHtml(overallState)}">${escapeHtml(stateLabels[overallState] || overallState)}</span></div>
+      ${staleIds.length ? `<p class="fq-source-health-alert" role="alert">必需来源已不可用于当前就绪判断：${staleIds.map((sourceId) => escapeHtml(sourceNames.get(String(sourceId)) || sourceId)).join("、")}。请先恢复采集并取得新的成功快照。</p>` : ""}
+      <div class="fq-source-health-list">${rows || '<p class="fq-empty">尚无来源健康心跳。</p>'}</div>
+    </section>`;
+  }
+
+  function autofillEvidenceHtml(draft) {
+    const evidence = state.ingestionEvidence;
+    const syncState = evidence.syncState || draft.sync_state || null;
+    const freshnessState = String(
+      (evidence.freshness &&
+        (evidence.freshness.overall_state || evidence.freshness.state)) ||
+        "",
+    );
+    if (evidence.draftId !== draft.draft_id || evidence.loading) {
+      return `<section class="fq-autofill-evidence" aria-live="polite">
+        <div class="fq-section-head"><div><h4>自动填报依据</h4><p>正在读取抓取批次、来源和报送前体检…</p></div></div>
+      </section>`;
+    }
+    if (evidence.available === false || (!evidence.items.length && evidence.error)) {
+      return `<section class="fq-autofill-evidence">
+        <div class="fq-section-head"><div><h4>自动填报依据</h4><p>${escapeHtml(evidence.error || "当前没有机器导入记录。")}</p></div>
+        <button class="fq-link-button" type="button" data-fq-action="refresh-ingestions">重新读取</button></div>
+      </section>`;
+    }
+    const items = evidence.items || [];
+    const preflight = evidence.preflight;
+    const missing = preflightNumber(preflight, "missing_count", "missing_measurement_count");
+    const mismatches = preflightNumber(
+      preflight,
+      "arithmetic_mismatch_count",
+      "daily_shift_mismatch_count",
+    );
+    const missingDays = preflightNumber(preflight, "missing_day_count");
+    const sourceCount = preflightNumber(preflight, "source_count") ||
+      new Set(items.map((item) => item.source_id || item.source_name).filter(Boolean)).size;
+    const warnings = Array.isArray(preflight && preflight.warnings)
+      ? preflight.warnings.slice(0, 12)
+      : [];
+    const boundRevision = Number(
+      preflight && (preflight.bound_revision || preflight.draft_revision),
+    );
+    const preflightStale = Boolean(
+      preflight &&
+        Number.isFinite(boundRevision) &&
+        boundRevision !== Number(draft.revision),
+    );
+    const freshnessUnsafe = Boolean(
+      preflight && freshnessState && freshnessState !== "fresh",
+    );
+    const rows = items.length
+      ? items
+          .slice(0, 100)
+          .map((item) => {
+            const rejection = item && item.rejection && typeof item.rejection === "object"
+              ? item.rejection
+              : null;
+            return `<article class="fq-autofill-source ${item.status === "rejected" ? "is-rejected" : ""}">
+              <div><strong>${escapeHtml(item.source_name || item.source_id || "自动采集来源")}</strong><small>${escapeHtml(item.source_system || "未标注来源系统")} · ${escapeHtml(String(item.format || "json").toUpperCase())}${item.client_id ? ` · 认证客户端 ${escapeHtml(item.client_id)}` : ""}</small></div>
+              <div><span class="fq-status is-${escapeHtml(item.status || "completed")}">${escapeHtml(ingestionStatusText(item.status))}</span><small>${escapeHtml(formatTime(item.completed_at || item.updated_at || item.created_at))}</small></div>
+              <p>事件 ${escapeHtml(shortHash(item.event_id))}${item.draft_revision ? ` · 写入修订 ${escapeHtml(item.draft_revision)}` : ""}${item.request_hash || item.request_sha256_prefix ? ` · 请求摘要 ${escapeHtml(item.request_hash || item.request_sha256_prefix)}` : ""}</p>
+              ${rejection ? `<p class="fq-autofill-rejection"><strong>未写入原因：</strong>${escapeHtml(rejection.message || "来源未通过安全校验")}<small>${rejection.code ? `代码 ${escapeHtml(rejection.code)}` : ""}${rejection.recorded_at ? ` · ${escapeHtml(formatTime(rejection.recorded_at))}` : ""}</small></p>` : ""}
+            </article>`;
+          })
+          .join("")
+      : '<p class="fq-empty">当前没有机器导入批次；可能由人工文件或本机固定目录生成。</p>';
+    const preflightHtml = preflight
+      ? `${preflightStale ? `<div class="fq-autofill-stale" role="alert"><strong>这份预检已经过期</strong><p>预检绑定修订 ${escapeHtml(boundRevision)}，当前草稿为修订 ${escapeHtml(draft.revision)}。下列数字只供追溯，不能代表当前草稿；请刷新来源或重新运行数据就绪预检。</p></div>` : ""}${freshnessUnsafe ? '<div class="fq-autofill-stale" role="alert"><strong>来源时效不满足就绪条件</strong><p>至少一个必需来源为空、异常、状态未知或已超过时效阈值；旧预检不能作为当前确认依据。</p></div>' : ""}<div class="fq-autofill-preflight ${preflightStale || freshnessUnsafe ? "is-stale" : ""}">
+          <div><small>绑定草稿修订</small><strong>${escapeHtml(preflight.bound_revision || preflight.draft_revision || draft.revision)}</strong></div>
+          <div><small>来源数</small><strong>${escapeHtml(sourceCount)}</strong></div>
+          <div class="${missing ? "is-warn" : "is-ok"}"><small>缺失数据格</small><strong>${escapeHtml(missing)}</strong></div>
+          <div class="${missingDays ? "is-warn" : "is-ok"}"><small>缺失整日报</small><strong>${escapeHtml(missingDays)}</strong></div>
+          <div class="${mismatches ? "is-warn" : "is-ok"}"><small>日报/班次不一致</small><strong>${escapeHtml(mismatches)}</strong></div>
+        </div>
+        ${warnings.length ? `<ul class="fq-autofill-warnings">${warnings.map((warning) => `<li>${escapeHtml(typeof warning === "string" ? warning : warning.message || warning.reason || "存在待人工核对项")}</li>`).join("")}</ul>` : ""}`
+      : '<p class="fq-safe-note">本批次尚未形成自动报送前体检，仍可逐日人工复核。</p>';
+    const syncHtml = syncState && syncState.state === "paused"
+      ? `<div class="fq-autofill-sync-paused" role="alert">
+          <div><strong>自动同步已暂停</strong><p>${escapeHtml(syncState.message || "检测到人工修改，后台不会覆盖当前草稿。")}</p></div>
+          ${syncState.can_resume && can("write") && draft.status === "ready_review"
+            ? '<button class="button button-danger-quiet" type="button" data-fq-action="resume-machine-sync">放弃手工修改并恢复自动同步</button>'
+            : ""}
+        </div>`
+      : syncState && syncState.state === "active"
+        ? '<div class="fq-autofill-sync-active"><strong>自动同步开启</strong><span>新来源修订可继续更新这份未确认草稿；保存人工修改后会立即暂停。</span></div>'
+        : "";
+    return `<details class="fq-autofill-evidence" open>
+      <summary><span><strong>自动填报依据</strong><small>${items.length} 个导入批次 · ${sourceCount} 个来源</small></span><span>展开核对</span></summary>
+      <div class="fq-autofill-boundary"><strong>自动写入不等于企业确认</strong><p>这里只显示安全来源元数据和确定性报送前体检，不展示原文、签名或连接密钥；历史和物理分析不能替代本期原始数据。</p></div>
+      ${syncHtml}
+      ${sourceHealthHtml(evidence)}
+      ${preflightHtml}
+      <div class="fq-autofill-source-list">${rows}</div>
+      <button class="fq-link-button" type="button" data-fq-action="refresh-ingestions">刷新依据</button>
+    </details>`;
   }
 
   function measurementSet(day, scope) {
@@ -456,17 +773,40 @@
         </details>`;
       })
       .join("");
-    const finalizeAllowed = can("confirm") && can("submit") && !credentialsLocked();
+    const machineManaged = Boolean(draft.sync_state);
+    const machineFreshnessState = String(
+      (state.ingestionEvidence.draftId === draft.draft_id &&
+        state.ingestionEvidence.freshness &&
+        (state.ingestionEvidence.freshness.overall_state ||
+          state.ingestionEvidence.freshness.state)) ||
+        "",
+    );
+    const machineFreshnessBlocked = Boolean(
+      machineManaged &&
+        (state.ingestionEvidence.loading || machineFreshnessState !== "fresh"),
+    );
+    const finalizeAllowed =
+      can("confirm") &&
+      can("submit") &&
+      !credentialsLocked() &&
+      !machineFreshnessBlocked;
+    const windowInfo = reportingWindow(draft.payload);
     const permissionHint = credentialsLocked()
       ? "当前为临时/演示账号，必须换成正式逐用户账号后才能确认报送。"
+      : machineFreshnessBlocked
+        ? state.ingestionEvidence.loading
+          ? "正在核对机器来源时效和当前快照绑定，完成前不能确认报送。"
+          : "至少一个必需机器来源为空、异常、陈旧或未与当前成功快照绑定；恢复采集后才能确认报送。"
       : !finalizeAllowed
         ? "当前账号缺少确认或提交权限，可继续复核和保存。"
         : "确认后消息进入可靠发送队列；接收回执不代表监管认定正常。";
     target.innerHTML = `
-      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(draft.payload.mine.mine_name)}</p><h3>${escapeHtml(draft.payload.reporting_month)} 五量月报</h3><p>${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)} · 修订 ${draft.revision}</p></div><span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span></div>
+      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(draft.payload.mine.mine_name)}</p><h3>${escapeHtml(draft.payload.reporting_month)} 五量${escapeHtml(windowInfo.fullMonth ? "整月月报" : "月内窗口报表")}</h3><p>${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)} · ${escapeHtml(windowInfo.label)} · 修订 ${draft.revision}</p></div><span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span></div>
       <div class="fq-summary-strip"><span><strong>${draft.payload.days.length}</strong>日报天数</span><span class="${missing ? "is-warn" : "is-ok"}"><strong>${missing}</strong>缺失测量</span><span><strong>${draft.payload.sources.length}</strong>来源记录</span><span><strong>${draft.submission_revision}</strong>报送版本</span></div>
+      ${windowInfo.fullMonth ? "" : `<div class="fq-import-warning"><strong>当前不是整月覆盖</strong><p>本次申报窗口仅为 ${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)}。系统不会把窗口外日期算作已填报；确认前请核对这正是本次应申报范围。</p></div>`}
       ${importWarnings.length ? `<div class="fq-import-warning"><strong>导入映射需要人工核对</strong><ul>${importWarnings.slice(0, 20).map((item) => `<li>${escapeHtml(item.reason || "存在未明确的来源字段")}</li>`).join("")}</ul></div>` : ""}
       <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。展开每一天可核对日报合计和三个班次。</div>
+      ${autofillEvidenceHtml(draft)}
       <div class="fq-day-list">${days}</div>
       <div class="fq-sticky-actions">
         <button class="button button-secondary" type="button" data-fq-action="save-draft" ${locked || !can("write") ? "disabled" : ""}>保存复核修改</button>
@@ -480,7 +820,7 @@
           <label class="field"><span>岗位/角色</span><input id="fqDraftConfirmerRole" value="${escapeHtml((state.principal && state.principal.role) || "企业填报员")}" ${locked ? "disabled" : ""}></label>
         </div>
         <label class="field"><span>确认说明</span><textarea id="fqDraftAttestation" rows="3" ${locked ? "disabled" : ""}>本人已对照原始日报、三个班次记录及单位口径逐项核对。</textarea></label>
-        <label class="check-row"><input id="fqDraftAccepted" type="checkbox" ${locked ? "disabled" : ""}><span>我确认本月完整内容真实反映企业核对结果，并同意发送至政府监管平台。</span></label>
+        <label class="check-row"><input id="fqDraftAccepted" type="checkbox" ${locked ? "disabled" : ""}><span>我确认上述申报窗口内的完整内容真实反映企业核对结果，并同意发送至政府监管平台。</span></label>
         <button class="button button-primary" type="button" data-fq-action="confirm-draft" ${locked || !finalizeAllowed ? "disabled" : ""}>确认并进入发送队列</button>
         ${draft.receipt ? `<div class="fq-receipt"><strong>政府已接收</strong><span>回执：${escapeHtml((draft.receipt.payload && draft.receipt.payload.receipt_id) || draft.receipt.message_id)}</span><small>政府接收并排队，不等于监管结论。</small></div>` : ""}
       </section>`;
@@ -517,6 +857,46 @@
     const button = event.target.closest("[data-fq-action]");
     if (!button || !state.currentDraft) return;
     const action = button.dataset.fqAction;
+    if (action === "refresh-ingestions") {
+      button.disabled = true;
+      try {
+        await loadDraftIngestions(state.currentDraft.draft_id, true);
+      } finally {
+        if (button.isConnected) button.disabled = false;
+      }
+      return;
+    }
+    if (action === "resume-machine-sync") {
+      const accepted = window.confirm(
+        "恢复自动同步会永久放弃这份草稿尚未确认的所有手工修改，并使用当前已保存的最新机器来源快照重建内容。原修订摘要仍保留在审计链中。确认继续吗？",
+      );
+      if (!accepted) return;
+      button.disabled = true;
+      try {
+        const payload = await api(
+          `/api/v2/drafts/${encodeURIComponent(state.currentDraft.draft_id)}/machine-resume`,
+          {
+            method: "POST",
+            body: {
+              expected_revision: state.currentDraft.revision,
+              accepted: true,
+            },
+          },
+        );
+        state.currentDraft = payload.draft || payload;
+        await Promise.all([
+          loadDraftIngestions(state.currentDraft.draft_id),
+          loadDrafts(false),
+          loadAudit(false),
+        ]);
+        renderDraft();
+        message("已按最新机器来源快照重建草稿，原手工修改摘要已写入审计链。", "success");
+      } catch (error) {
+        message(error.message, "error");
+        button.disabled = false;
+      }
+      return;
+    }
     let discardReason = "";
     if (action === "discard-draft") {
       const entered = window.prompt(
@@ -534,6 +914,10 @@
           method: "PATCH",
           body: { expected_revision: state.currentDraft.revision, payload: state.currentDraft.payload },
         });
+        state.currentDraft = await api(
+          `/api/v2/drafts/${encodeURIComponent(state.currentDraft.draft_id)}`,
+        );
+        await loadDraftIngestions(state.currentDraft.draft_id);
         message("复核修改已保存。", "success");
       } else if (action === "confirm-draft") {
         if (!$("fqDraftAccepted").checked) throw new Error("请先勾选人工确认声明。");

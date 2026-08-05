@@ -16,8 +16,21 @@
 - 设备观测签名：`mineguard-governed-observation-hmac-sha256-v1`
 - 矿端遥测批次：`edge-telemetry-batch-v1`
 - 矿端遥测回执：`edge-telemetry-receipt-v1`
+- 企业内部连接器自动建稿：`enterprise-autofill-ingestion/v1`
+- 企业内部连接器来源健康：`enterprise-source-health/v1`
+- 企业内部连接器运输签名域：`ENTERPRISE-CONNECTOR-HMAC-SHA256-V1`
 
 修改其中一个，不自动修改其他版本。
+
+`enterprise-autofill-ingestion/v1` 只连接企业伴随 connector 与单矿 Agent，不进入
+政府接口。改变来源 revision 起点、签名六行材料、机器权限边界、幂等语义或允许机器
+确认/报送，均属不兼容变更，必须发布新版本，不能原地放宽。
+
+`enterprise-source-health/v1` 与业务快照分别版本化；它只能更新时效和采集状态，不能
+携带原始记录、修改来源贡献或执行草稿生命周期动作。新增 outcome、改变陈旧边界或把
+空结果解释为撤回，都属于不兼容变更。两个企业内部协议目前仍处于首次生产发布前的
+共同建设基线，`observed_at`、`coverage_as_of` 和健康心跳必须成套上线，不能只升级
+发送端或接收端。
 
 目标架构另外发布一组相互关联但仍各自显式标识的 V2 消息：
 

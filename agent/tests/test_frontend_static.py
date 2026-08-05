@@ -756,6 +756,44 @@ def test_agent_autofill_is_source_grounded_and_never_auto_submits() -> None:
     assert "不会自动确认或提交" in HTML
 
 
+def test_autofill_evidence_preview_is_read_only_and_evidence_layered() -> None:
+    for element_id in (
+        'id="autofillEvidenceButton"',
+        'id="autofillEvidenceDialog"',
+        'id="autofillIngestionList"',
+        'id="autofillRawList"',
+        'id="autofillHistoryList"',
+        'id="autofillPhysicalList"',
+        'id="autofillConflictList"',
+    ):
+        assert element_id in HTML
+    for text in (
+        "自动写入不等于企业确认",
+        "历史数据只提供建议",
+        "物理关系只用于分析",
+        "不能生成来源签名",
+    ):
+        assert text in HTML
+    for token in (
+        "endpoints.ingestions(draftId)",
+        "function autofillRawEvidence",
+        "historical_suggestion",
+        "physical_inference",
+        "证据预览为只读页面",
+        "不展示原文、签名或连接密钥",
+    ):
+        assert token in JS
+    preview = JS[
+        JS.index("async function openAutofillEvidenceDialog") : JS.index(
+            "function renderMeasurements"
+        )
+    ]
+    assert 'method: "POST"' not in preview
+    assert 'method: "PATCH"' not in preview
+    assert 'method: "DELETE"' not in preview
+    assert "innerHTML" not in preview
+
+
 def test_quick_workflow_keeps_event_snapshot_and_review_boundaries() -> None:
     assert "function hasRegulatorEventSnapshot(draft)" in JS
     assert JS.count("hasRegulatorEventSnapshot(draft)") >= 5

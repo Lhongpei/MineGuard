@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:enterprise-source-health:v1",
+  "title": "Enterprise Connector Source Health V1",
+  "description": "Authenticated status-only observation from an enterprise connector. It cannot contain source records and cannot create, modify, confirm, delete or submit a draft.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "event_id",
+    "draft_key",
+    "reporting_month",
+    "source_id",
+    "source_system",
+    "outcome",
+    "attempted_at",
+    "completed_at",
+    "record_count",
+    "coverage_as_of",
+    "snapshot_sha256",
+    "autofill_event_id",
+    "source_revision",
+    "error_code"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "enterprise-source-health/v1"
+    },
+    "event_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "draft_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^draft:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}:five-quantity:monthly:[0-9]{4}-(?:0[1-9]|1[0-2])$"
+    },
+    "reporting_month": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])$"
+    },
+    "source_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "source_system": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+    },
+    "outcome": {
+      "enum": [
+        "success_nonempty",
+        "success_empty",
+        "error",
+        "stability_wait"
+      ]
+    },
+    "attempted_at": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 20,
+      "maxLength": 40
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 20,
+      "maxLength": 40
+    },
+    "record_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000000
+    },
+    "coverage_as_of": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "snapshot_sha256": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Digest of the normalized source.content bytes. Freshness is usable only while this digest matches the current accepted source contribution."
+    },
+    "autofill_event_id": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/identifier"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Autofill business event carrying the exact snapshot. The Agent must have completed that event before treating the health record as fresh."
+    },
+    "source_revision": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "error_code": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9_.:-]{0,63}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "success_nonempty"
+          }
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "record_count": {
+            "minimum": 1
+          },
+          "coverage_as_of": {
+            "type": "string"
+          },
+          "snapshot_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "autofill_event_id": {
+            "type": "string"
+          },
+          "source_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "error_code": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "record_count": {
+            "const": 0
+          },
+          "coverage_as_of": {
+            "type": "null"
+          },
+          "snapshot_sha256": {
+            "type": "null"
+          },
+          "autofill_event_id": {
+            "type": "null"
+          },
+          "source_revision": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "error"
+          }
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "error_code": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.:-]{0,63}$"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "error_code": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    }
+  }
+}

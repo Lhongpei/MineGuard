@@ -405,19 +405,21 @@ function Assert-PlatformDemoSeed {
         (New-Object Text.UTF8Encoding($false))
     )
     if ([string]$Seed.status -ne "seeded" -or
+        -not [bool]$Seed.demo_dataset -or
         -not [bool]$Seed.synthetic_demo -or
-        [int]$Seed.mine_count -ne 8 -or
-        [int]$Seed.submission_count -ne 24 -or
-        [int]$Seed.created_submission_count -ne 24 -or
+        -not [bool]$Seed.contains_workbook_examples -or
+        [int]$Seed.mine_count -ne 10 -or
+        [int]$Seed.submission_count -ne 26 -or
+        [int]$Seed.created_submission_count -ne 26 -or
         [int]$Seed.replayed_submission_count -ne 0 -or
         [string]$Seed.period_start -ne "2026-05-01" -or
         [string]$Seed.period_end -ne "2026-07-31") {
-        throw "Platform frozen runtime did not create the exact fresh 8-mine/24-submission V2 demo dataset."
+        throw "Platform frozen runtime did not create the exact fresh 10-mine/26-submission V2 demo dataset."
     }
     $ExpectedDecisionCounts = @{
         insufficient_data = 1
-        normal_candidate = 19
-        risk = 4
+        normal_candidate = 20
+        risk = 5
     }
     $ActualDecisionProperties = @($Seed.decision_counts.PSObject.Properties)
     if ($ActualDecisionProperties.Count -ne $ExpectedDecisionCounts.Count) {
@@ -432,14 +434,37 @@ function Assert-PlatformDemoSeed {
     $Scenarios = @($Seed.scenarios)
     $MineIds = @($Scenarios | ForEach-Object { [string]$_.mine_id } | Sort-Object -Unique)
     $ScenarioSubmissionCount = ($Scenarios | Measure-Object -Property submission_count -Sum).Sum
-    if ($Scenarios.Count -ne 8 -or $MineIds.Count -ne 8 -or [int]$ScenarioSubmissionCount -ne 24) {
-        throw "Platform V2 demo did not persist three real submissions for each of eight distinct mines."
+    if ($Scenarios.Count -ne 10 -or $MineIds.Count -ne 10 -or [int]$ScenarioSubmissionCount -ne 26) {
+        throw "Platform V2 demo did not persist the expected eight synthetic series and two one-month workbook examples."
     }
     foreach ($Scenario in $Scenarios) {
         $DecisionTotal = (@($Scenario.decisions.PSObject.Properties) |
             Measure-Object -Property Value -Sum).Sum
-        if ([int]$Scenario.submission_count -ne 3 -or [int]$DecisionTotal -ne 3) {
-            throw "Platform V2 demo scenario $($Scenario.mine_id) is not backed by three analyzed submissions."
+        $ExpectedScenarioSubmissions = if (
+            [string]$Scenario.data_origin -eq "bundled_workbook_values"
+        ) { 1 } else { 3 }
+        if ([int]$Scenario.submission_count -ne $ExpectedScenarioSubmissions -or
+            [int]$DecisionTotal -ne $ExpectedScenarioSubmissions) {
+            throw "Platform V2 demo scenario $($Scenario.mine_id) has an unexpected analyzed submission count."
+        }
+    }
+    $WorkbookScenarios = @($Scenarios | Where-Object {
+        [string]$_.data_origin -eq "bundled_workbook_values"
+    })
+    $ExpectedWorkbookHashes = @{
+        "太岳矿" = "a83ca156886c4ee8443825e14126f0dad731898951447f5a951e2570787530a9"
+        "梗阳矿" = "5c1a0dde50965f9b3f8605676bc792fa3b74d28ec90bba23182f759cfb1341f6"
+    }
+    if ($WorkbookScenarios.Count -ne 2) {
+        throw "Platform V2 demo does not contain the two bundled workbook examples."
+    }
+    foreach ($Scenario in $WorkbookScenarios) {
+        $Name = [string]$Scenario.mine_name
+        if (-not $ExpectedWorkbookHashes.ContainsKey($Name) -or
+            [string]$Scenario.source_sha256 -ne $ExpectedWorkbookHashes[$Name] -or
+            [string]$Scenario.source_value_policy -ne
+                "source_cells_only_no_fill_interpolation_or_date_shift") {
+            throw "Platform V2 workbook example identity/hash policy mismatch: $Name"
         }
     }
     $LatestDecisions = @($Scenarios | ForEach-Object {

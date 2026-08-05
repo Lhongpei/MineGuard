@@ -150,6 +150,23 @@ def test_leader_overview_has_plain_language_sections_and_dom_contract() -> None:
     assert '<option value="data_insufficient">数据待补</option>' in index
 
 
+def test_mine_detail_discloses_demo_workbook_origin_without_raw_payload() -> None:
+    index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="mineSourceNotice"' in index
+    for required in (
+        "source_disclosure",
+        "bundled_workbook_values",
+        "ET样表原值",
+        "空白未补数、日期未平移",
+        "单位与身份待核验",
+    ):
+        assert required in script
+    assert ".mine-source-notice" in styles
+
+
 def test_leader_attention_progress_is_svg_exact_and_zero_safe() -> None:
     _run_regulatory_frontend_probe(
         r"""
