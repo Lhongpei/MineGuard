@@ -1,4 +1,4 @@
-[CmdletBinding(DefaultParameterSetName = "Release")]
+﻿[CmdletBinding(DefaultParameterSetName = "Release")]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = "Release")][string]$PlatformStage,
     [Parameter(Mandatory = $true, ParameterSetName = "Release")][string]$AgentStage,
