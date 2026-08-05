@@ -5,6 +5,7 @@ param(
     [Parameter(ParameterSetName = "Release")][string]$ArtifactDirectory = "",
     [Parameter(ParameterSetName = "Release")][switch]$RequireSigned,
     [Parameter(ParameterSetName = "Release")][switch]$ExpectUnsignedTestOnly,
+    [Parameter(ParameterSetName = "Release")][switch]$ExpectLegacyServer2012R2CompatibilityTest,
     [Parameter(ParameterSetName = "Release")][switch]$SkipRuntimeSmoke,
     [Parameter(ParameterSetName = "Release")][switch]$TestInstallerLifecycle,
     [Parameter(Mandatory = $true, ParameterSetName = "SecretAudit")]
@@ -21,6 +22,10 @@ if ($env:OS -ne "Windows_NT") {
 }
 if ($RequireSigned -and $ExpectUnsignedTestOnly) {
     throw "RequireSigned and ExpectUnsignedTestOnly are mutually exclusive."
+}
+if ($ExpectLegacyServer2012R2CompatibilityTest -and
+    (-not $ExpectUnsignedTestOnly -or $RequireSigned)) {
+    throw "ExpectLegacyServer2012R2CompatibilityTest requires ExpectUnsignedTestOnly and cannot be signed."
 }
 if ($TestInstallerLifecycle -and -not $ArtifactDirectory) {
     throw "TestInstallerLifecycle requires ArtifactDirectory."
@@ -625,6 +630,22 @@ function Test-RootArtifactManifest {
     if (($RequireSigned -or $ExpectUnsignedTestOnly) -and [string]$Manifest.classification -ne $ExpectedClassification) {
         throw "Root release classification mismatch."
     }
+    if ($ExpectLegacyServer2012R2CompatibilityTest) {
+        $CompatibilityProfile = $Manifest.compatibility_profile
+        if ([string]$CompatibilityProfile.id -ne
+                "legacy-windows-server-2012r2-test-v1" -or
+            [bool]$CompatibilityProfile.production_approved -or
+            [bool]$CompatibilityProfile.target_os_validated -or
+            [string]$CompatibilityProfile.required_windows_powershell -ne "5.1" -or
+            [string]$Manifest.minimum_windows -notmatch
+                '^Windows Server 2012 R2 x64 \(6\.3\.9600\),') {
+            throw "Legacy Windows Server 2012 R2 release evidence is missing or inconsistent."
+        }
+    }
+    elseif ([string]$Manifest.compatibility_profile.id -eq
+            "legacy-windows-server-2012r2-test-v1") {
+        throw "A legacy Windows Server 2012 R2 release was not explicitly requested."
+    }
     if ($RequireSigned) {
         $WheelhouseEvidence = $Manifest.wheelhouse_supply_chain
         $ActualManifestSha256 = [string]$WheelhouseEvidence.manifest_sha256
@@ -654,6 +675,14 @@ function Test-RootArtifactManifest {
         }
         if ($ExpectUnsignedTestOnly -and $Relative -notmatch 'UNSIGNED-TEST-ONLY') {
             throw "Unsigned installer filename lacks the required UNSIGNED-TEST-ONLY marker: $Relative"
+        }
+        if ($ExpectLegacyServer2012R2CompatibilityTest -and
+            $Relative -notmatch '-LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY\.exe$') {
+            throw "Legacy Windows Server 2012 R2 installer filename lacks its required profile marker: $Relative"
+        }
+        if (-not $ExpectLegacyServer2012R2CompatibilityTest -and
+            $Relative -match '-LEGACY-SERVER-2012R2-') {
+            throw "An unrequested legacy Windows Server 2012 R2 installer is present: $Relative"
         }
         if ($RequireSigned -and $Relative -match 'UNSIGNED-TEST-ONLY') {
             throw "A signed production candidate uses an unsigned-test filename: $Relative"

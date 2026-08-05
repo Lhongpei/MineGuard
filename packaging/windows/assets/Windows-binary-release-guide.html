@@ -32,6 +32,12 @@
     <p>文件名含 <strong>UNSIGNED-TEST-ONLY</strong> 的安装包仅供隔离验收，不得作为正式可信发布。正式候选包必须同时核验单位批准的 Authenticode 签名、时间戳以及随交付清单提供的 SHA-256。</p>
   </section>
 
+  <section class="card warn">
+    <h2>Server 2012 R2 legacy 测试包</h2>
+    <p>文件名含 <strong>LEGACY-SERVER-2012R2</strong> 的安装包只用于真实目标机兼容性验收，尚未获得生产批准。目标机必须是完全修补的 x64 Server 2012 R2，并先安装 Windows Management Framework 5.1；系统自带的 Windows PowerShell 4.0 不满足要求。目标 CPU/虚拟 CPU 还需暴露 x86-64-v2 指令集，并具备 Universal C Runtime 和 Microsoft Visual C++ x64 运行库。</p>
+    <p>安装后必须依次验证 self-check/HiGHS、前台健康、Windows 服务、数据库备份与恢复、升级和卸载。领导端应从仍处于安全支持期的办公终端浏览器经 HTTPS 访问，不要依赖 Server 2012 R2 本机的旧浏览器。</p>
+  </section>
+
   <section class="card">
     <h2>政府侧 Platform</h2>
     <ol>

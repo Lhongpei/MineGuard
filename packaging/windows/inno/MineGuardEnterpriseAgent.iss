@@ -16,6 +16,9 @@
 #ifndef ArtifactFileName
   #error ArtifactFileName is required.
 #endif
+#ifndef MinimumWindowsVersion
+  #define MinimumWindowsVersion "10.0.17763"
+#endif
 
 #define ProductName "MineGuard Enterprise Agent"
 #define ProductPublisher "MineGuard Delivery Team"
@@ -32,7 +35,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible and not arm64
 ArchitecturesInstallIn64BitMode=x64compatible
-MinVersion=10.0.17763
+MinVersion={#MinimumWindowsVersion}
 WizardStyle=modern
 Compression=lzma2/ultra64
 SolidCompression=yes

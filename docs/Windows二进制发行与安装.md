@@ -31,6 +31,30 @@ x64 仿真尚未验证，不能作为当前验收环境。程序和 SQLite 状�
 `4.1.3`，其构建依赖也在两个子项目中精确锁定。建议构建机至少 8 核、16 GiB 内存和
 20 GiB 临时磁盘空间。
 
+### 1.1 Windows Server 2012 R2 legacy 兼容测试
+
+标准发布不支持 Windows Server 2012 R2。手工触发发布工作流时可显式选择
+`legacy_server_2012r2_compatibility_test`，它只会生成名称含
+`LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY` 的未签名试验介质，不能与生产签名
+同时开启，也不表示已完成目标系统认证。
+
+目标机至少必须满足：
+
+- x64 Windows Server 2012 R2，已安装适用的安全更新；
+- 已安装 Windows Management Framework 5.1，`$PSVersionTable.PSVersion` 显示 5.1；
+- CPU/虚拟 CPU 暴露完整 x86-64-v2 指令集，并具备 Universal C Runtime 和 Microsoft Visual C++ x64 运行库；
+- 程序和 SQLite 状态位于本机固定 NTFS；
+- 领导端从受支持的办公终端现代浏览器经 HTTPS 访问，不依赖服务器本机旧浏览器。
+
+必须在真实 2012 R2 目标机完成 standalone self-check/HiGHS、安装回滚、前台与服务
+健康、SQLite 备份/校验/恢复、升级和卸载验收。在此之前只能用于隔离兼容测试。
+
+Server 2012 R2 系统自带 PowerShell 4.0 时，从
+[Microsoft Windows Management Framework 5.1 官方下载页](https://www.microsoft.com/en-us/download/details.aspx?id=54616)
+只选择 `Win8.1AndW2K12R2-KB3191564-x64.msu`。安装前由 Windows 运维人员核对
+.NET Framework、KB2919355、现有 WMF 依赖以及 Hyper-V HNV/RRAS 集群网关影响，安排
+维护窗口和系统备份；安装后重启，再确认 `$PSVersionTable.PSVersion` 为 5.1。
+
 ## 2. 一次构建两份未签名验收包
 
 在仓库根目录的 Windows PowerShell 5.1 中执行：

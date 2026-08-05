@@ -8,6 +8,11 @@ on:
         required: true
         default: false
         type: boolean
+      legacy_server_2012r2_compatibility_test:
+        description: Build an unsigned, target-unvalidated Windows Server 2012 R2 legacy compatibility test
+        required: true
+        default: false
+        type: boolean
   push:
     tags:
       - "windows-v*"
@@ -198,13 +203,22 @@ jobs:
       - name: Build, audit, compile, install, health-check and uninstall
         shell: powershell
         run: |
-          .\scripts\Build-WindowsBinaryRelease.ps1 `
-            -OutputDirectory "$pwd\release\windows" `
-            -InnoCompiler $env:INNO_COMPILER `
-            -AllowNuitkaToolDownloads `
-            -UnsignedCompilerCacheReadyMarker $env:MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER `
-            -TestInstallerFailurePropagation `
-            -TestInstallerLifecycle
+          if ('${{ inputs.sign_artifacts }}' -eq 'true' -and
+              '${{ inputs.legacy_server_2012r2_compatibility_test }}' -eq 'true') {
+            throw 'A legacy Windows Server 2012 R2 test cannot also request signed production candidates.'
+          }
+          $releaseParameters = @{
+            OutputDirectory = "$pwd\release\windows"
+            InnoCompiler = $env:INNO_COMPILER
+            AllowNuitkaToolDownloads = $true
+            UnsignedCompilerCacheReadyMarker = $env:MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER
+            TestInstallerFailurePropagation = $true
+            TestInstallerLifecycle = $true
+          }
+          if ('${{ inputs.legacy_server_2012r2_compatibility_test }}' -eq 'true') {
+            $releaseParameters.LegacyWindowsServer2012R2CompatibilityTest = $true
+          }
+          & .\scripts\Build-WindowsBinaryRelease.ps1 @releaseParameters
 
       - name: Qualify complete unsigned compiler cache
         id: nuitka_cache_ready
@@ -229,6 +243,7 @@ jobs:
           key: ${{ env.MINEGUARD_NUITKA_CLCACHE_KEY }}
 
       - name: Upload explicit unsigned test media
+        if: ${{ !inputs.legacy_server_2012r2_compatibility_test }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mineguard-windows-UNSIGNED-TEST-ONLY-${{ github.sha }}
@@ -239,10 +254,25 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Upload explicit Server 2012 R2 legacy test media
+        if: ${{ inputs.legacy_server_2012r2_compatibility_test }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mineguard-windows-LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY-${{ github.sha }}
+          path: |
+            release/windows/*-LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY.exe
+            release/windows/release-manifest.json
+            release/windows/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
   signed-production-candidate:
     name: Build signed production-candidate artifacts
     needs: unsigned-test
-    if: github.event_name == 'workflow_dispatch' && inputs.sign_artifacts
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.sign_artifacts &&
+      !inputs.legacy_server_2012r2_compatibility_test
     runs-on: [self-hosted, windows, x64, signing]
     environment: windows-production-signing
     timeout-minutes: 180

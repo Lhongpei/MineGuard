@@ -214,7 +214,8 @@ def test_inno_scripts() -> None:
         required = (
             "ArchitecturesAllowed=x64compatible and not arm64",
             "ArchitecturesInstallIn64BitMode=x64compatible",
-            "MinVersion=10.0.17763",
+            '#define MinimumWindowsVersion "10.0.17763"',
+            "MinVersion={#MinimumWindowsVersion}",
             "CloseApplications=no",
             "{#StageRoot}\\runtime\\*",
             "{#StageRoot}\\deploy\\windows\\*",
@@ -288,6 +289,13 @@ def test_root_build_orchestration() -> None:
         "UNSIGNED-TEST-ONLY",
         "signed-production-candidate",
         "unsigned-test-artifacts",
+        "LegacyWindowsServer2012R2CompatibilityTest",
+        "legacy-windows-server-2012r2-test-v1",
+        "6.3.9600",
+        "target_os_validated = $false",
+        "cannot be signed as a production candidate",
+        "/DMinimumWindowsVersion=$MinimumWindowsVersion",
+        "ExpectLegacyServer2012R2CompatibilityTest",
         "release-manifest.json",
         "SHA256SUMS.txt",
         "6.7.1",
@@ -377,6 +385,10 @@ def test_root_build_orchestration() -> None:
         )
     assert "$InnoVersion = Get-InnoCompilerVersion" in build
     assert build.index("Final installer audit") < build.index("$FilesToPublish")
+    assert build.count('+= "-ExpectLegacyServer2012R2CompatibilityTest"') == 2, (
+        "both final-stage and atomically published legacy artifacts must receive "
+        "the explicit Server 2012 R2 audit profile"
+    )
     assert build.index("Published artifact audit") < build.index(
         "[IO.Directory]::Move($PublishStage, $OutputDirectory)"
     )
@@ -428,6 +440,9 @@ def test_audit_and_lifecycle() -> None:
         "/api/v1/health",
         "Get-AuthenticodeSignature",
         "UNSIGNED-TEST-ONLY",
+        "ExpectLegacyServer2012R2CompatibilityTest",
+        "legacy-windows-server-2012r2-test-v1",
+        "Legacy Windows Server 2012 R2 release evidence is missing or inconsistent",
         "ci-state-sentinel.txt",
         "AddSeconds(30)",
         "release-metadata",
@@ -946,11 +961,15 @@ def test_workflow() -> None:
         "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
         "NUITKA_CACHE_DIR_CLCACHE",
         "MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER",
-        "-UnsignedCompilerCacheReadyMarker",
+        "UnsignedCompilerCacheReadyMarker",
         "Qualify complete unsigned compiler cache",
         "Save complete unsigned Nuitka compiler cache",
         "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
         "steps.nuitka_cache_ready.outputs.ready == 'true'",
+        "legacy_server_2012r2_compatibility_test",
+        "LegacyWindowsServer2012R2CompatibilityTest",
+        "LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY",
+        "A legacy Windows Server 2012 R2 test cannot also request signed production candidates",
     ):
         assert token in workflow, f"release workflow missing: {token}"
     lowered = workflow.lower()
@@ -962,6 +981,15 @@ def test_workflow() -> None:
     assert "curl " not in lowered and "invoke-webrequest" not in lowered
     assert "gh release" not in lowered and "softprops/action-gh-release" not in lowered
     unsigned_job = workflow.split("signed-production-candidate:", 1)[0]
+    build_block, _, _ = named_step_block(
+        unsigned_job, "Build, audit, compile, install, health-check and uninstall"
+    )
+    assert "$releaseParameters = @{" in build_block
+    assert "@releaseParameters" in build_block
+    assert "@releaseArguments" not in build_block, (
+        "PowerShell array splatting is positional and must not carry named release "
+        "parameters; use hashtable splatting"
+    )
     assert unsigned_job.index("Validate packaging contracts statically") < (
         unsigned_job.index("Build, audit, compile, install, health-check and uninstall")
     ), "unsigned packaging checks must run before the long Nuitka build"

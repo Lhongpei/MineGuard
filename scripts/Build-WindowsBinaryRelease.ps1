@@ -19,7 +19,8 @@ param(
     [uri]$TimestampUrl,
     [switch]$RequireSigned,
     [switch]$TestInstallerFailurePropagation,
-    [switch]$TestInstallerLifecycle
+    [switch]$TestInstallerLifecycle,
+    [switch]$LegacyWindowsServer2012R2CompatibilityTest
 )
 
 Set-StrictMode -Version 2.0
@@ -386,6 +387,7 @@ function Invoke-InnoCompile {
         [string]$ArtifactsRoot,
         [string]$Version,
         [string]$ArtifactBaseName,
+        [string]$MinimumWindowsVersion,
         [bool]$SigningEnabled,
         [string]$SigningCommand
     )
@@ -396,7 +398,8 @@ function Invoke-InnoCompile {
         "/DOutputDir=$ArtifactsRoot",
         "/DAppVersion=$Version",
         "/DNumericVersion=$Version.0",
-        "/DArtifactFileName=$ArtifactBaseName"
+        "/DArtifactFileName=$ArtifactBaseName",
+        "/DMinimumWindowsVersion=$MinimumWindowsVersion"
     )
     if ($SigningEnabled) {
         if ($script:ExpectedSignToolSha256) {
@@ -477,6 +480,14 @@ if ($SigningEnabled -and -not $RequireSigned) {
 }
 if ($RequireSigned -and -not $SigningEnabled) {
     throw "RequireSigned requires the complete Authenticode signing configuration."
+}
+if ($LegacyWindowsServer2012R2CompatibilityTest -and
+    ($RequireSigned -or $SigningEnabled)) {
+    throw "The Windows Server 2012 R2 compatibility profile is an unsigned, target-unvalidated legacy test and cannot be signed as a production candidate."
+}
+if ($LegacyWindowsServer2012R2CompatibilityTest) {
+    $TestInstallerFailurePropagation = $true
+    $TestInstallerLifecycle = $true
 }
 if ($RequireSigned) {
     if ($AllowDirtySource -or $SourceDirty -ne $false -or [string]::IsNullOrWhiteSpace($SourceRevision)) {
@@ -770,7 +781,21 @@ try {
         ) -Label "Installer failure-propagation audit"
     }
 
-    $ClassificationSuffix = if ($SigningEnabled) { "" } else { "-UNSIGNED-TEST-ONLY" }
+    $MinimumWindowsVersion = if ($LegacyWindowsServer2012R2CompatibilityTest) {
+        "6.3.9600"
+    } else {
+        "10.0.17763"
+    }
+    $CompatibilitySuffix = if ($LegacyWindowsServer2012R2CompatibilityTest) {
+        "-LEGACY-SERVER-2012R2"
+    } else {
+        ""
+    }
+    $ClassificationSuffix = if ($SigningEnabled) {
+        ""
+    } else {
+        "$CompatibilitySuffix-UNSIGNED-TEST-ONLY"
+    }
     $PlatformArtifactBase = "MineGuard-Platform-$PlatformVersion-windows-x64$ClassificationSuffix"
     $AgentArtifactBase = "MineGuard-EnterpriseAgent-$AgentVersion-windows-x64$ClassificationSuffix"
     $SignToolCommand = ""
@@ -785,11 +810,13 @@ try {
         -ScriptPath (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardPlatform.iss") `
         -StageRoot $PlatformStage -AssetsRoot $AssetsRoot -ArtifactsRoot $ArtifactStage `
         -Version $PlatformVersion -ArtifactBaseName $PlatformArtifactBase `
+        -MinimumWindowsVersion $MinimumWindowsVersion `
         -SigningEnabled $SigningEnabled -SigningCommand $SignToolCommand
     $AgentInstaller = Invoke-InnoCompile `
         -ScriptPath (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardEnterpriseAgent.iss") `
         -StageRoot $AgentStage -AssetsRoot $AssetsRoot -ArtifactsRoot $ArtifactStage `
         -Version $AgentVersion -ArtifactBaseName $AgentArtifactBase `
+        -MinimumWindowsVersion $MinimumWindowsVersion `
         -SigningEnabled $SigningEnabled -SigningCommand $SignToolCommand
 
     $PlatformMetadata = Get-Content -LiteralPath (Join-Path $PlatformStage "build-metadata.json") -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -854,8 +881,44 @@ try {
         source_revision = $SourceRevision
         source_dirty = $SourceDirty
         architecture = "native-windows-x64"
-        minimum_windows = "Windows 10 1809 / Windows Server 2019 x64"
+        minimum_windows = if ($LegacyWindowsServer2012R2CompatibilityTest) {
+            "Windows Server 2012 R2 x64 (6.3.9600), fully patched, with Windows PowerShell 5.1; target validation required"
+        } else {
+            "Windows 10 1809 / Windows Server 2019 x64"
+        }
         arm64_status = "not-validated-and-blocked"
+        compatibility_profile = if ($LegacyWindowsServer2012R2CompatibilityTest) {
+            [ordered]@{
+                id = "legacy-windows-server-2012r2-test-v1"
+                production_approved = $false
+                target_os_validated = $false
+                required_windows_powershell = "5.1"
+                required_cpu = "x86-64-v2 features required by the pinned NumPy 2.4 runtime"
+                required_os_components = @(
+                    "applicable Windows Server 2012 R2 security updates",
+                    "Universal C Runtime",
+                    "Microsoft Visual C++ x64 runtime"
+                )
+                required_target_acceptance = @(
+                    "standalone self-check and HiGHS solver",
+                    "installer transaction and rollback",
+                    "foreground and service health",
+                    "SQLite backup, verify and restore",
+                    "upgrade and uninstall lifecycle"
+                )
+            }
+        } else {
+            [ordered]@{
+                id = "standard-windows-x64-v1"
+                production_approved = [bool]$SigningEnabled
+                target_os_validation = if ($TestInstallerLifecycle) {
+                    "release build-host lifecycle passed; minimum target OS was not independently attested"
+                } else {
+                    "not requested"
+                }
+                required_windows_powershell = "5.1"
+            }
+        }
         process_statement = "Constrained, traceable and repeatable build; byte-for-byte identical output is not promised."
         contents_statement = "No MineGuard backend Python source, Python bytecode, tests, Git history or real secrets. Browser HTML/JavaScript/CSS and operations PowerShell remain visible plaintext."
         toolchain = [ordered]@{
@@ -941,6 +1004,9 @@ try {
     )
     if ($SigningEnabled) { $FinalAuditArguments += "-RequireSigned" }
     else { $FinalAuditArguments += "-ExpectUnsignedTestOnly" }
+    if ($LegacyWindowsServer2012R2CompatibilityTest) {
+        $FinalAuditArguments += "-ExpectLegacyServer2012R2CompatibilityTest"
+    }
     if ($TestInstallerLifecycle) { $FinalAuditArguments += "-TestInstallerLifecycle" }
     Invoke-NativeChecked -FilePath "powershell.exe" -ArgumentList $FinalAuditArguments -Label "Final installer audit"
     if ($RequireSigned) {
@@ -987,6 +1053,9 @@ try {
     )
     if ($SigningEnabled) { $PublishedAuditArguments += "-RequireSigned" }
     else { $PublishedAuditArguments += "-ExpectUnsignedTestOnly" }
+    if ($LegacyWindowsServer2012R2CompatibilityTest) {
+        $PublishedAuditArguments += "-ExpectLegacyServer2012R2CompatibilityTest"
+    }
     Invoke-NativeChecked -FilePath "powershell.exe" `
         -ArgumentList $PublishedAuditArguments `
         -Label "Published artifact audit (pre-rename staging)"
