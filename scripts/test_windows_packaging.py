@@ -313,6 +313,7 @@ def test_inno_scripts() -> None:
         "-STA",
         'Name: "desktopicon"',
         "{commondesktop}\\MineGuard Platform 控制中心",
+        'IconFilename: "{app}\\runtime\\MineGuardPlatform.exe"',
     ):
         assert token in platform
     assert "MineGuard Platform 高级运维" not in icons_section

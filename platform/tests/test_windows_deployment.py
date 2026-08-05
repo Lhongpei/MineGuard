@@ -177,7 +177,18 @@ def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
         "AllowDemoDefaultPassword = $true",
         "HttpOnlyDemo = $true",
         "Test-MineGuardHealth",
+        "Test-MineGuardHealthUrl",
+        "Test-LocalPortAvailable",
         "Get-ModernBrowserPath",
+        "Resolve-FormalAccessUri",
+        "Read-SavedFormalAccessUrl",
+        "Save-FormalAccessUrl",
+        "control-center.json",
+        "$parsed.AbsolutePath -ne '/'",
+        "[Net.SecurityProtocolType]::Tls12",
+        "$securityProtocolChanged",
+        "ConfigureFirst",
+        ".mineguard-platform-state.json",
         "请不要使用 Internet Explorer",
         "ClosingApproved",
         "[switch] $SelfTest",
@@ -191,6 +202,13 @@ def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
     assert "-AdminPassword'," not in wizard
     assert "Start-Job" not in wizard
     assert "Stop-Process" not in wizard
+    demo_worker = wizard.index("if ($Mode -eq 'demo')")
+    assert wizard.index("& $ConfigScript @parameters", demo_worker) < wizard.index(
+        "'seed-v2-demo'", demo_worker
+    )
+    assert "formalAccessUrl = $Uri.AbsoluteUri" in wizard
+    assert "Test-MineGuardHealthUrl -Url $formalHealthUrl.AbsoluteUri" in wizard
+    assert "Test-Path -LiteralPath $path -PathType Leaf" in wizard
 
 
 def test_windows_runtime_uninstall_is_transactional_and_data_preserving() -> None:

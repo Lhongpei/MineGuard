@@ -96,8 +96,8 @@ Source: "{#AssetsRoot}\Open-MineGuardPlatformControlCenter.ps1"; DestDir: "{app}
 Source: "{#StageRoot}\SHA256SUMS.txt"; DestDir: "{tmp}\MineGuardPlatformRelease"; Flags: ignoreversion deleteafterinstall; AfterInstall: InstallProductRuntime
 
 [Icons]
-Name: "{group}\MineGuard Platform 控制中心"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"
-Name: "{commondesktop}\MineGuard Platform 控制中心"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"; Tasks: desktopicon
+Name: "{group}\MineGuard Platform 控制中心"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"; IconFilename: "{app}\runtime\MineGuardPlatform.exe"
+Name: "{commondesktop}\MineGuard Platform 控制中心"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"; IconFilename: "{app}\runtime\MineGuardPlatform.exe"; Tasks: desktopicon
 Name: "{group}\MineGuard Platform 使用与部署说明"; Filename: "{app}\docs\Windows-binary-release-guide.html"
 
 [Run]

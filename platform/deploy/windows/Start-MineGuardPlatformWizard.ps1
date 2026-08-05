@@ -538,6 +538,7 @@ $script:ServerProcess = $null
 $script:ServerPort = 8080
 $script:ServerMode = ''
 $script:BrowserOpened = $false
+$script:BrowserAutoAttempted = $false
 $script:HealthConfirmed = $false
 $script:ClearBootstrapAttempted = $false
 $script:LastHealthCheck = [DateTime]::MinValue
@@ -545,6 +546,8 @@ $script:ServerStartedAt = [DateTime]::MinValue
 $script:HealthDelayReported = $false
 $script:StopRequested = $false
 $script:ClosingApproved = $false
+$script:FormalAccessSettingsPath = Join-Path (Join-Path $InstallRoot 'config') `
+    'control-center.json'
 $script:LogFilePath = Join-Path (Join-Path $InstallRoot 'logs') (
     'control-center-{0:yyyyMMdd-HHmmss}-{1}.log' -f `
         (Get-Date), [Guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -584,24 +587,33 @@ function Add-Log {
 
 function Set-BusyState {
     param([bool] $Busy)
+    $managedServerRunning = (
+        $null -ne $script:ServerProcess -and
+        -not $script:ServerProcess.HasExited
+    )
     $demoButton.Enabled = (-not $Busy) -and
-        ($script:ConfigurationState.kind -eq 'pristine')
+        (-not $managedServerRunning) -and
+        ($script:ConfigurationState.kind -in @('pristine', 'demo'))
     $formalButton.Enabled = (-not $Busy) -and
         ($script:ConfigurationState.kind -eq 'pristine')
     $startCurrentButton.Enabled = (-not $Busy) -and
         ($script:ConfigurationState.kind -in @('demo', 'formal'))
     $openButton.Enabled = (-not $Busy) -and
         ($script:ConfigurationState.kind -in @('demo', 'formal'))
-    $clientsBrowse.Enabled = -not $Busy
-    $stateBrowse.Enabled = -not $Busy
-    $monthPicker.Enabled = -not $Busy
-    $demoPort.Enabled = -not $Busy
-    $clientsText.Enabled = -not $Busy
-    $formalState.Enabled = -not $Busy
-    $portInput.Enabled = -not $Busy
-    $adminInput.Enabled = -not $Busy
-    $passwordInput.Enabled = -not $Busy
-    $confirmInput.Enabled = -not $Busy
+    $monthPicker.Enabled = (-not $Busy) -and (-not $managedServerRunning)
+    $demoPort.Enabled = (-not $Busy) -and
+        ($script:ConfigurationState.kind -eq 'pristine')
+    $formalInputsEnabled = (-not $Busy) -and
+        ($script:ConfigurationState.kind -eq 'pristine')
+    $clientsBrowse.Enabled = $formalInputsEnabled
+    $stateBrowse.Enabled = $formalInputsEnabled
+    $clientsText.Enabled = $formalInputsEnabled
+    $formalState.Enabled = $formalInputsEnabled
+    $portInput.Enabled = $formalInputsEnabled
+    $adminInput.Enabled = $formalInputsEnabled
+    $passwordInput.Enabled = $formalInputsEnabled
+    $confirmInput.Enabled = $formalInputsEnabled
+    $formalAccessUrl.Enabled = -not $Busy
     $refreshButton.Enabled = -not $Busy
 }
 
@@ -612,8 +624,25 @@ function Test-StateDirectoryHasContent {
             -not (Test-Path -LiteralPath $StateDirectory -PathType Container)) {
             return $false
         }
-        return $null -ne (Get-ChildItem -LiteralPath $StateDirectory -Force |
-            Select-Object -First 1)
+        $pending = New-Object System.Collections.Queue
+        $pending.Enqueue((Get-Item -LiteralPath $StateDirectory -Force))
+        while ($pending.Count -gt 0) {
+            $directory = $pending.Dequeue()
+            foreach ($child in Get-ChildItem -LiteralPath $directory.FullName -Force) {
+                if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    return $true
+                }
+                if ($child.PSIsContainer) {
+                    $pending.Enqueue($child)
+                } elseif ($child.Name -ne '.mineguard-platform-state.json') {
+                    return $true
+                }
+            }
+        }
+        # A failed first-run transaction may leave only the product ownership
+        # marker and empty directories.  Those contain no business state and
+        # are safe for the guarded configuration script to validate and reuse.
+        return $false
     } catch {
         # An unreadable or malformed existing path must never be treated as a
         # blank installation that the first-run wizard may overwrite.
@@ -753,6 +782,17 @@ function Get-ConfigurationState {
 function Refresh-ConfigurationState {
     $script:ConfigurationState = Get-ConfigurationState
     $script:ServerPort = [int]$script:ConfigurationState.port
+    if ($script:ConfigurationState.kind -eq 'demo') {
+        $demoButton.Text = '补齐数据并启动展示'
+        $demoPath.Text = [string]$script:ConfigurationState.stateDirectory
+        $demoPort.Value = [decimal]$script:ConfigurationState.port
+    } else {
+        $demoButton.Text = '一键准备并启动展示'
+    }
+    if ($script:ConfigurationState.kind -eq 'formal') {
+        $formalState.Text = [string]$script:ConfigurationState.stateDirectory
+        $portInput.Value = [decimal]$script:ConfigurationState.port
+    }
     $configurationBanner.Text = '  ' + $script:ConfigurationState.message
     switch ($script:ConfigurationState.kind) {
         'pristine' {
@@ -805,12 +845,121 @@ function Get-ModernBrowserPath {
     return $null
 }
 
+function Test-LocalPortAvailable {
+    param([ValidateRange(1, 65535)] [int] $Port)
+    $listener = $null
+    try {
+        $listener = New-Object System.Net.Sockets.TcpListener -ArgumentList @(
+            [System.Net.IPAddress]::Loopback,
+            $Port
+        )
+        $listener.Server.ExclusiveAddressUse = $true
+        $listener.Start()
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($null -ne $listener) {
+            try { $listener.Stop() } catch { }
+        }
+    }
+}
+
+function Resolve-FormalAccessUri {
+    param([string] $Value)
+    $candidate = $Value.Trim()
+    $parsed = $null
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        throw '单位 HTTPS 地址为空。'
+    }
+    if (-not [Uri]::TryCreate($candidate, [UriKind]::Absolute, [ref]$parsed) -or
+        $parsed.Scheme -ne 'https' -or
+        [string]::IsNullOrWhiteSpace($parsed.Host) -or
+        -not [string]::IsNullOrWhiteSpace($parsed.UserInfo) -or
+        -not [string]::IsNullOrWhiteSpace($parsed.Query) -or
+        -not [string]::IsNullOrWhiteSpace($parsed.Fragment) -or
+        $parsed.AbsolutePath -ne '/') {
+        throw (
+            '单位 HTTPS 地址必须是 https://主机名/ 根地址，' +
+            '不能带账号口令、子路径、查询参数或片段。'
+        )
+    }
+    return $parsed
+}
+
+function Read-SavedFormalAccessUrl {
+    $path = $script:FormalAccessSettingsPath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return '' }
+    try {
+        $item = Get-Item -LiteralPath $path -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $item.Length -gt 16384) {
+            throw '文件类型或大小不符合安全规则'
+        }
+        $document = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        $names = @($document.PSObject.Properties.Name)
+        if ($names.Count -ne 2 -or
+            $names -notcontains 'schemaVersion' -or
+            $names -notcontains 'formalAccessUrl' -or
+            [int]$document.schemaVersion -ne 1 -or
+            $document.formalAccessUrl -isnot [string]) {
+            throw '字段集合不符合已知格式'
+        }
+        $uri = Resolve-FormalAccessUri -Value ([string]$document.formalAccessUrl)
+        return $uri.AbsoluteUri
+    } catch {
+        Add-Log "已保存的单位 HTTPS 地址无法安全读取：$($_.Exception.Message)" 'warning'
+        return ''
+    }
+}
+
+function Save-FormalAccessUrl {
+    param([Parameter(Mandatory = $true)] [Uri] $Uri)
+    $path = $script:FormalAccessSettingsPath
+    $directory = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        throw '找不到受保护的 config 目录。'
+    }
+    if (Test-Path -LiteralPath $path) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw '控制中心配置路径已被非文件对象占用。'
+        }
+        $existing = Get-Item -LiteralPath $path -Force
+        if (($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw '拒绝覆盖 reparse point 形式的控制中心配置。'
+        }
+    }
+    $temporaryPath = Join-Path $directory (
+        '.control-center.{0}.tmp' -f [Guid]::NewGuid().ToString('N')
+    )
+    $document = [ordered]@{
+        schemaVersion = 1
+        formalAccessUrl = $Uri.AbsoluteUri
+    }
+    try {
+        [IO.File]::WriteAllText(
+            $temporaryPath,
+            ($document | ConvertTo-Json -Depth 3),
+            $script:LogEncoding
+        )
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            [IO.File]::Replace($temporaryPath, $path, $null)
+        } else {
+            Move-Item -LiteralPath $temporaryPath -Destination $path
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force
+        }
+    }
+}
+
 function Open-LeaderPage {
     $localUrl = 'http://127.0.0.1:{0}/' -f $script:ServerPort
     $url = $localUrl
     if ($script:ConfigurationState.kind -eq 'formal') {
         $candidate = $formalAccessUrl.Text.Trim()
-        $parsed = $null
         if ([string]::IsNullOrWhiteSpace($candidate)) {
             Add-Log '正式模式不会打开本机 HTTP。请先配置单位 HTTPS 反向代理，再填写访问地址。' 'warning'
             $httpsMessage = @(
@@ -826,13 +975,10 @@ function Open-LeaderPage {
             )
             return
         }
-        if (-not [Uri]::TryCreate($candidate, [UriKind]::Absolute, [ref]$parsed) -or
-            $parsed.Scheme -ne 'https' -or
-            [string]::IsNullOrWhiteSpace($parsed.Host) -or
-            -not [string]::IsNullOrWhiteSpace($parsed.UserInfo) -or
-            -not [string]::IsNullOrWhiteSpace($parsed.Query) -or
-            -not [string]::IsNullOrWhiteSpace($parsed.Fragment)) {
-            Add-Log '单位 HTTPS 地址无效；必须是无账号口令、查询参数或片段的 https:// 完整地址。' 'error'
+        try {
+            $parsed = Resolve-FormalAccessUri -Value $candidate
+        } catch {
+            Add-Log $_.Exception.Message 'error'
             return
         }
         $url = $parsed.AbsoluteUri
@@ -846,6 +992,31 @@ function Open-LeaderPage {
             [System.Windows.Forms.MessageBoxIcon]::Information
         )
         return
+    }
+    if ($script:ConfigurationState.kind -eq 'formal') {
+        $formalHealthUrl = New-Object System.Uri -ArgumentList @(
+            $parsed,
+            'healthz'
+        )
+        if (-not (Test-MineGuardHealthUrl -Url $formalHealthUrl.AbsoluteUri `
+                -TimeoutMilliseconds 5000)) {
+            Add-Log (
+                '本机服务正常，但单位 HTTPS 地址未能访问 /healthz。' +
+                '请检查 DNS、证书和反向代理根路径。'
+            ) 'error'
+            [void][System.Windows.Forms.MessageBox]::Show(
+                '单位 HTTPS 地址还没有连通本平台。请让运维检查 DNS、HTTPS 证书和反向代理后重试。',
+                'HTTPS 访问尚未就绪',
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            )
+            return
+        }
+        try {
+            Save-FormalAccessUrl -Uri $parsed
+        } catch {
+            Add-Log "页面可访问，但 HTTPS 地址保存失败：$($_.Exception.Message)" 'warning'
+        }
     }
     $browser = Get-ModernBrowserPath
     if ($null -eq $browser) {
@@ -873,17 +1044,30 @@ function Open-LeaderPage {
     }
 }
 
-function Test-MineGuardHealth {
-    param([int] $Port)
+function Test-MineGuardHealthUrl {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Url,
+        [ValidateRange(100, 30000)] [int] $TimeoutMilliseconds = 900
+    )
     $response = $null
     $reader = $null
+    $originalSecurityProtocol = $null
+    $securityProtocolChanged = $false
     try {
-        $request = [System.Net.HttpWebRequest]::Create(
-            ('http://127.0.0.1:{0}/healthz' -f $Port)
-        )
+        $healthUri = New-Object System.Uri -ArgumentList $Url
+        if ($healthUri.Scheme -eq 'https') {
+            $originalSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+            $tls12 = [Net.SecurityProtocolType]::Tls12
+            $enabledProtocols = $originalSecurityProtocol -bor $tls12
+            if ($enabledProtocols -ne $originalSecurityProtocol) {
+                [Net.ServicePointManager]::SecurityProtocol = $enabledProtocols
+                $securityProtocolChanged = $true
+            }
+        }
+        $request = [System.Net.HttpWebRequest]::Create($Url)
         $request.Proxy = $null
-        $request.Timeout = 900
-        $request.ReadWriteTimeout = 900
+        $request.Timeout = $TimeoutMilliseconds
+        $request.ReadWriteTimeout = $TimeoutMilliseconds
         $response = $request.GetResponse()
         $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
         $body = $reader.ReadToEnd()
@@ -895,7 +1079,17 @@ function Test-MineGuardHealth {
     } finally {
         if ($null -ne $reader) { $reader.Dispose() }
         if ($null -ne $response) { $response.Dispose() }
+        if ($securityProtocolChanged) {
+            [Net.ServicePointManager]::SecurityProtocol = $originalSecurityProtocol
+        }
     }
+}
+
+function Test-MineGuardHealth {
+    param([int] $Port)
+    return Test-MineGuardHealthUrl -Url (
+        'http://127.0.0.1:{0}/healthz' -f $Port
+    )
 }
 
 function New-SecureStringFromTextBox {
@@ -924,7 +1118,12 @@ function Start-ConfigurationOperation {
         return
     }
     Refresh-ConfigurationState
-    if ($script:ConfigurationState.kind -ne 'pristine') {
+    $configureFirst = ($script:ConfigurationState.kind -eq 'pristine')
+    $canResumeDemo = (
+        $Mode -eq 'demo' -and
+        $script:ConfigurationState.kind -eq 'demo'
+    )
+    if (-not $configureFirst -and -not $canResumeDemo) {
         Add-Log '检测到已有配置或状态数据；为防止覆盖，已取消首次配置。' 'error'
         if ($null -ne $AdminPassword) { $AdminPassword.Dispose() }
         return
@@ -941,13 +1140,31 @@ param(
     [string] $ClientsFile,
     [string] $AdminUsername,
     [Security.SecureString] $AdminPassword,
-    [string] $ThroughMonth
+    [string] $ThroughMonth,
+    [bool] $ConfigureFirst
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 . $ResolverScript
 $runtime = Resolve-MineGuardPlatformExecutable -InstallRoot $InstallRoot
 if ($Mode -eq 'demo') {
+    if ($ConfigureFirst) {
+        Write-Information '正在应用受保护的本机配置...' -InformationAction Continue
+        $parameters = @{
+            InstallRoot = $InstallRoot
+            StateDirectory = $StateDirectory
+            Port = $Port
+            AdminUsername = 'admin'
+            DemoWithoutClientRegistry = $true
+            AllowDemoDefaultPassword = $true
+            HttpOnlyDemo = $true
+            NonInteractive = $true
+        }
+        & $ConfigScript @parameters
+        Write-Information '受保护的本机配置已完成。' -InformationAction Continue
+    } else {
+        Write-Information '已有演示配置；本次只补齐或核验演示数据，不改写配置。' -InformationAction Continue
+    }
     Write-Information '正在生成或核验演示数据，请稍候...' -InformationAction Continue
     $seedArguments = Join-MineGuardPlatformArguments -Runtime $runtime -Arguments @(
         'seed-v2-demo', '--state-directory', $StateDirectory,
@@ -957,18 +1174,7 @@ if ($Mode -eq 'demo') {
     if ($LASTEXITCODE -ne 0) {
         throw "演示数据生成失败，运行时退出码：$LASTEXITCODE"
     }
-    Write-Information '演示数据准备完成，正在应用受保护的本机配置...' -InformationAction Continue
-    $parameters = @{
-        InstallRoot = $InstallRoot
-        StateDirectory = $StateDirectory
-        Port = $Port
-        AdminUsername = 'admin'
-        DemoWithoutClientRegistry = $true
-        AllowDemoDefaultPassword = $true
-        HttpOnlyDemo = $true
-        NonInteractive = $true
-    }
-    & $ConfigScript @parameters
+    Write-Information '演示数据已准备完成。' -InformationAction Continue
 } else {
     Write-Information '正在校验 clients.json 并原子保存正式配置...' -InformationAction Continue
     $parameters = @{
@@ -982,14 +1188,15 @@ if ($Mode -eq 'demo') {
     }
     & $ConfigScript @parameters
 }
-Write-Information '受保护的配置事务已完成。' -InformationAction Continue
+Write-Information '一键准备操作已完成。' -InformationAction Continue
 '@
 
     $script:OperationPowerShell = [System.Management.Automation.PowerShell]::Create()
     [void]$script:OperationPowerShell.AddScript($worker)
     foreach ($argument in @(
         $Mode, $InstallRoot, $resolverScript, $configScript, $StateDirectory,
-        $Port, $ClientsFile, $AdminUsername, $AdminPassword, $ThroughMonth
+        $Port, $ClientsFile, $AdminUsername, $AdminPassword, $ThroughMonth,
+        $configureFirst
     )) {
         [void]$script:OperationPowerShell.AddArgument($argument)
     }
@@ -1077,6 +1284,12 @@ function Start-ConfiguredServer {
         if ($script:ServerPort -lt 1 -or $script:ServerPort -gt 65535) {
             throw '配置中的端口不在 1-65535 范围。'
         }
+        if (-not (Test-LocalPortAvailable -Port $script:ServerPort)) {
+            throw ((
+                '本机端口 {0} 已被其他程序占用。' +
+                '请先关闭占用程序，或在首次配置时换一个端口。'
+            ) -f $script:ServerPort)
+        }
         $arguments = Join-NativeArguments -Arguments @(
             '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
             '-File', $startScript, '-InstallRoot', $InstallRoot
@@ -1102,6 +1315,7 @@ function Start-ConfiguredServer {
             [string]$script:ConfigurationState.kind
         } else { $Mode }
         $script:BrowserOpened = $false
+        $script:BrowserAutoAttempted = $false
         $script:HealthConfirmed = $false
         $script:ClearBootstrapAttempted = $false
         $script:LastHealthCheck = [DateTime]::MinValue
@@ -1109,6 +1323,7 @@ function Start-ConfiguredServer {
         $script:HealthDelayReported = $false
         $script:StopRequested = $false
         $stopButton.Enabled = $true
+        Set-BusyState -Busy $false
         $statusLabel.Text = '正在启动服务...'
         Add-Log (
             'Platform 前台服务已启动（进程号 {0}），正在等待健康检查。' -f
@@ -1235,6 +1450,7 @@ $stateBrowse.Add_Click({
     })
 
 $demoButton.Add_Click({
+        Refresh-ConfigurationState
         if (-not $demoWarning.Checked) {
             [void][System.Windows.Forms.MessageBox]::Show(
                 '请先勾选红色确认项，明确本机演示的默认密码和使用边界。',
@@ -1244,18 +1460,37 @@ $demoButton.Add_Click({
             )
             return
         }
+        if ($script:ConfigurationState.kind -eq 'demo' -and
+            (Test-MineGuardHealth -Port $script:ConfigurationState.port)) {
+            Add-Log '演示服务已经正常运行，直接打开页面。' 'success'
+            Open-LeaderPage
+            return
+        }
+        $requestedDemoPort = if ($script:ConfigurationState.kind -eq 'demo') {
+            [int]$script:ConfigurationState.port
+        } else {
+            [int]$demoPort.Value
+        }
+        if (-not (Test-LocalPortAvailable -Port $requestedDemoPort)) {
+            Add-Log (
+                ('端口 {0} 已被占用；本次未继续，现有配置没有被改写。' -f
+                    $requestedDemoPort)
+            ) 'error'
+            return
+        }
         $emptyPassword = New-Object Security.SecureString
         $emptyPassword.MakeReadOnly()
         $throughMonth = '{0:yyyy-MM-dd}' -f
             $monthPicker.Value.Date.AddMonths(1).AddDays(-1)
         Start-ConfigurationOperation -Mode demo `
-            -StateDirectory $demoPath.Text -Port ([int]$demoPort.Value) `
+            -StateDirectory $demoPath.Text -Port $requestedDemoPort `
             -ClientsFile '' `
             -AdminUsername 'admin' -AdminPassword $emptyPassword `
             -ThroughMonth $throughMonth
     })
 
 $formalButton.Add_Click({
+        Refresh-ConfigurationState
         if ([string]::IsNullOrWhiteSpace($clientsText.Text) -or
             -not (Test-Path -LiteralPath $clientsText.Text -PathType Leaf)) {
             Add-Log '请先选择实际存在、经批准的 clients.json。' 'error'
@@ -1269,6 +1504,23 @@ $formalButton.Add_Click({
             $adminInput.Text.Length -gt 128) {
             Add-Log '管理员用户名必须包含 1-128 个字符。' 'error'
             return
+        }
+        $requestedFormalPort = [int]$portInput.Value
+        if (-not (Test-LocalPortAvailable -Port $requestedFormalPort)) {
+            Add-Log (
+                ('端口 {0} 已被占用；未写入配置。请换一个端口后重试。' -f
+                    $requestedFormalPort)
+            ) 'error'
+            return
+        }
+        if (-not [string]::IsNullOrWhiteSpace($formalAccessUrl.Text)) {
+            try {
+                $formalUri = Resolve-FormalAccessUri -Value $formalAccessUrl.Text
+                $formalAccessUrl.Text = $formalUri.AbsoluteUri
+            } catch {
+                Add-Log $_.Exception.Message 'error'
+                return
+            }
         }
         $passwordText = $passwordInput.Text
         $confirmText = $confirmInput.Text
@@ -1293,7 +1545,7 @@ $formalButton.Add_Click({
         $passwordText = $null
         $confirmText = $null
         Start-ConfigurationOperation -Mode formal `
-            -StateDirectory $formalState.Text -Port ([int]$portInput.Value) `
+            -StateDirectory $formalState.Text -Port $requestedFormalPort `
             -ClientsFile $clientsText.Text -AdminUsername $adminInput.Text `
             -AdminPassword $securePassword -ThroughMonth '2026-07-31'
     })
@@ -1342,7 +1594,12 @@ $timer.Add_Tick({
                 if ($operationFailed) {
                     $statusLabel.Text = '配置失败'
                     $statusLabel.ForeColor = $red
-                    Add-Log '配置未完成。旧配置事务已由受保护脚本回滚；请按上方错误检查。' 'error'
+                    if ($purpose -eq 'demo' -and
+                        $script:ConfigurationState.kind -eq 'demo') {
+                        Add-Log '安全配置已保存，但演示数据未准备完成。修正上方问题后，再点击【补齐数据并启动展示】。' 'error'
+                    } else {
+                        Add-Log '准备未完成。配置文件事务已自动回滚；请按上方错误检查后重试。' 'error'
+                    }
                 } else {
                     $statusLabel.Text = '配置完成，正在启动'
                     $statusLabel.ForeColor = $green
@@ -1381,6 +1638,7 @@ $timer.Add_Tick({
                 $script:ServerCapture.Dispose()
                 $script:ServerCapture = $null
                 $script:StopRequested = $false
+                Set-BusyState -Busy $false
             } elseif (((Get-Date) - $script:LastHealthCheck).TotalSeconds -ge 2) {
                 $script:LastHealthCheck = Get-Date
                 if (Test-MineGuardHealth -Port $script:ServerPort) {
@@ -1394,8 +1652,14 @@ $timer.Add_Tick({
                         ) 'success'
                         Clear-BootstrapPasswordIfPresent
                     }
-                    if ($script:ServerMode -eq 'demo' -and
-                        -not $script:BrowserOpened) {
+                    $shouldOpenDemo = ($script:ServerMode -eq 'demo')
+                    $shouldOpenFormal = (
+                        $script:ServerMode -eq 'formal' -and
+                        -not [string]::IsNullOrWhiteSpace($formalAccessUrl.Text)
+                    )
+                    if (($shouldOpenDemo -or $shouldOpenFormal) -and
+                        -not $script:BrowserAutoAttempted) {
+                        $script:BrowserAutoAttempted = $true
                         Open-LeaderPage
                     }
                 } elseif (-not $script:HealthDelayReported -and
@@ -1459,6 +1723,10 @@ $form.Add_FormClosed({
         }
     })
 
+$savedFormalAccessUrl = Read-SavedFormalAccessUrl
+if (-not [string]::IsNullOrWhiteSpace($savedFormalAccessUrl)) {
+    $formalAccessUrl.Text = $savedFormalAccessUrl
+}
 Refresh-ConfigurationState
 $portInput.Value = [decimal]$script:ConfigurationState.port
 Add-Log ('安装目录：' + $InstallRoot)
