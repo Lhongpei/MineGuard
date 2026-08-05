@@ -44,6 +44,18 @@ class ProductConfigurationError(ValueError):
 _DEMO_DEFAULT_PASSWORD = "123123123"
 _MIN_PASSWORD_LENGTH = 8
 _MINE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_PLACEHOLDER_SECRET = re.compile(
+    r"(?i)(?:replace(?:[_-]|\b)|change[_-]?me|demo[_-]?only)"
+)
+_QUICK_START_SETTINGS = ".mineguard-start.json"
+_QUICK_START_SETTINGS_KIND = "mineguard-platform-start"
+_QUICK_START_SETTINGS_SCHEMA = 1
+_QUICK_START_SETTINGS_MAX_BYTES = 32 * 1024
+_DEMO_STATE_MARKER = ".mineguard-v2-synthetic-owner.json"
+_CLIENT_REGISTRY_ENVIRONMENT = (
+    "MINEGUARD_V2_CLIENTS_JSON",
+    "MINEGUARD_V2_CLIENTS_FILE",
+)
 _ROLE_LABELS = {
     Role.ADMIN: "系统管理员（查看全部煤矿）",
     Role.SUPERVISOR: "辖区监管负责人（只读）",
@@ -95,6 +107,57 @@ def _parser() -> argparse.ArgumentParser:
     server.add_argument(
         "--secure-cookie", action="store_true", help="HTTPS 代理部署时启用"
     )
+
+    demo_run = commands.add_parser(
+        "demo",
+        help="一条命令准备演示数据并启动本机展示",
+    )
+    demo_run.add_argument(
+        "--state-directory", default=DEFAULT_V2_DEMO_STATE_DIRECTORY
+    )
+    demo_run.add_argument("--port", type=_port, default=8080)
+    demo_run.add_argument(
+        "--through-month",
+        type=_calendar_date,
+        help="演示截止月份内任一日期；默认上一个完整自然月",
+    )
+
+    setup = commands.add_parser(
+        "setup",
+        help="通过安全向导生成正式启动配置",
+    )
+    setup.add_argument("--state-directory", default=".mineguard-v2")
+    setup.add_argument("--port", type=_port, default=8080)
+    setup.add_argument("--clients-file")
+    setup.add_argument("--admin-username")
+    cookie = setup.add_mutually_exclusive_group()
+    cookie.add_argument(
+        "--secure-cookie",
+        dest="secure_cookie",
+        action="store_true",
+        help="已由 HTTPS 反向代理对外提供服务",
+    )
+    cookie.add_argument(
+        "--no-secure-cookie",
+        dest="secure_cookie",
+        action="store_false",
+        help="仅在本机 HTTP 访问",
+    )
+    setup.set_defaults(secure_cookie=None)
+    setup.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help=(
+            "禁用提问；首次创建管理员时必须从 "
+            "MINEGUARD_ADMIN_PASSWORD 读取密码"
+        ),
+    )
+
+    start = commands.add_parser(
+        "start",
+        help="使用 setup 生成的配置启动平台",
+    )
+    start.add_argument("--state-directory", default=".mineguard-v2")
 
     demo = commands.add_parser(
         "seed-v2-demo",
@@ -233,6 +296,194 @@ def _state_root(value: str) -> Path:
     if root == Path(root.anchor):
         raise ProductConfigurationError("状态目录不能是文件系统根目录")
     return root
+
+
+def _prompt(label: str) -> str:
+    try:
+        return input(label)
+    except (EOFError, KeyboardInterrupt) as error:
+        raise ProductConfigurationError(
+            "当前终端无法交互输入；请在终端中重试，"
+            "或使用 --non-interactive 和必需参数"
+        ) from error
+
+
+def _prompt_yes_no(label: str, *, default: bool = False) -> bool:
+    answer = _prompt(label).strip().casefold()
+    if not answer:
+        return default
+    if answer in {"y", "yes", "1", "是", "是的"}:
+        return True
+    if answer in {"n", "no", "0", "否", "不"}:
+        return False
+    raise ProductConfigurationError("请输入 y 或 n")
+
+
+def _unquote_path(value: str) -> str:
+    rendered = value.strip()
+    if (
+        len(rendered) >= 2
+        and rendered[0] == rendered[-1]
+        and rendered[0] in {"'", '"'}
+    ):
+        return rendered[1:-1].strip()
+    return rendered
+
+
+def _validate_clients_file(value: str) -> tuple[Path, int]:
+    raw = _unquote_path(value)
+    if not raw:
+        raise ProductConfigurationError("clients.json 路径不能为空")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path = path.absolute()
+    from .exchange_v2 import load_exchange_clients
+
+    clients = load_exchange_clients(None, str(path))
+    if not clients:
+        raise ProductConfigurationError("clients.json 至少需要登记一座煤矿")
+    return path, len(clients)
+
+
+def _assert_setup_state_boundary(root: Path) -> None:
+    if (root / _DEMO_STATE_MARKER).exists():
+        raise ProductConfigurationError(
+            "演示数据目录不能转为正式状态目录；请换一个空目录"
+        )
+    if not root.exists():
+        return
+    if not root.is_dir():
+        raise ProductConfigurationError("状态目录必须是目录")
+    allowed = {
+        _QUICK_START_SETTINGS,
+        ".mineguard-platform.instance.lock",
+        "mineguard.db",
+        "mineguard.db-wal",
+        "mineguard.db-shm",
+        "auth.db",
+        "auth.db-wal",
+        "auth.db-shm",
+        "backup.key",
+        "backups",
+    }
+    unexpected = sorted(item.name for item in root.iterdir() if item.name not in allowed)
+    if unexpected:
+        raise ProductConfigurationError(
+            "状态目录含有非 MineGuard 文件，已拒绝混用："
+            + "、".join(unexpected[:5])
+        )
+
+
+def _formal_admin_password(*, non_interactive: bool) -> str:
+    configured = os.environ.get("MINEGUARD_ADMIN_PASSWORD")
+    if configured is not None:
+        password = configured
+    elif non_interactive:
+        raise ProductConfigurationError(
+            "非交互首次配置必须设置 MINEGUARD_ADMIN_PASSWORD"
+        )
+    else:
+        try:
+            password = getpass.getpass("管理员密码（输入时不显示）：")
+            confirmation = getpass.getpass("再次输入管理员密码：")
+        except (EOFError, KeyboardInterrupt) as error:
+            raise ProductConfigurationError(
+                "无法安全读取密码；请在终端中重试"
+            ) from error
+        if not secrets.compare_digest(password, confirmation):
+            raise ProductConfigurationError("两次输入的管理员密码不一致")
+    if len(password) < _MIN_PASSWORD_LENGTH:
+        raise ProductConfigurationError(
+            f"管理员密码至少需要 {_MIN_PASSWORD_LENGTH} 个字符"
+        )
+    if secrets.compare_digest(password, _DEMO_DEFAULT_PASSWORD):
+        raise ProductConfigurationError(
+            "正式 setup 不允许使用演示默认密码 123123123"
+        )
+    if _PLACEHOLDER_SECRET.search(password):
+        raise ProductConfigurationError("正式 setup 不允许使用示例或占位密码")
+    return password
+
+
+def _write_quick_start_settings(root: Path, value: dict[str, object]) -> Path:
+    target = root / _QUICK_START_SETTINGS
+    if target.is_symlink():
+        raise ProductConfigurationError("快速启动配置不能是符号链接")
+    temporary = root / f".{_QUICK_START_SETTINGS}.{secrets.token_hex(8)}.tmp"
+    payload = (
+        json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        try:
+            target.chmod(0o600)
+        except OSError:
+            pass
+    except BaseException:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return target
+
+
+def _load_quick_start_settings(root: Path) -> dict[str, object]:
+    path = root / _QUICK_START_SETTINGS
+    if path.is_symlink():
+        raise ProductConfigurationError("快速启动配置不能是符号链接")
+    try:
+        payload = path.read_bytes()
+    except FileNotFoundError as error:
+        raise ProductConfigurationError(
+            "尚未完成正式配置；请先运行 mineguard setup"
+        ) from error
+    if len(payload) > _QUICK_START_SETTINGS_MAX_BYTES:
+        raise ProductConfigurationError("快速启动配置超过 32 KiB 限制")
+    def without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"快速启动配置字段重复：{key}")
+            result[key] = item
+        return result
+
+    try:
+        value = json.loads(
+            payload.decode("utf-8"), object_pairs_hook=without_duplicates
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProductConfigurationError("快速启动配置不是有效 UTF-8 JSON") from error
+    required = {
+        "schema_version",
+        "kind",
+        "host",
+        "port",
+        "secure_cookie",
+        "clients_file",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ProductConfigurationError("快速启动配置字段不完整")
+    port = value.get("port")
+    if (
+        type(value.get("schema_version")) is not int
+        or value["schema_version"] != _QUICK_START_SETTINGS_SCHEMA
+        or value["kind"] != _QUICK_START_SETTINGS_KIND
+        or value["host"] != "127.0.0.1"
+        or type(port) is not int
+        or not 1 <= port <= 65535
+        or type(value["secure_cookie"]) is not bool
+        or not isinstance(value["clients_file"], str)
+        or not value["clients_file"].strip()
+    ):
+        raise ProductConfigurationError("快速启动配置值不合法")
+    return value
 
 
 def _state_database(args: argparse.Namespace, name: str) -> tuple[Path, Path]:
@@ -520,6 +771,8 @@ def _bootstrap_admin(
             )
         if len(password) < 8:
             raise ProductConfigurationError("管理员密码至少需要 8 个字符")
+        if _PLACEHOLDER_SECRET.search(password):
+            raise ProductConfigurationError("管理员密码不能使用示例或占位文本")
         user = store.bootstrap_admin(username, password)
         return user.username, display
 
@@ -560,6 +813,167 @@ def _serve(args: argparse.Namespace) -> None:
             auth_required=not args.no_auth,
             secure_cookie=args.secure_cookie,
         )
+
+
+def _serve_with_registry(
+    args: argparse.Namespace,
+    *,
+    clients_file: Path | None,
+    clear_admin_password: bool = False,
+) -> None:
+    keys = list(_CLIENT_REGISTRY_ENVIRONMENT)
+    if clear_admin_password:
+        keys.append("MINEGUARD_ADMIN_PASSWORD")
+    previous = {key: os.environ[key] for key in keys if key in os.environ}
+    for key in keys:
+        os.environ.pop(key, None)
+    if clients_file is not None:
+        os.environ["MINEGUARD_V2_CLIENTS_FILE"] = str(clients_file)
+    try:
+        _serve(args)
+    finally:
+        for key in keys:
+            os.environ.pop(key, None)
+        os.environ.update(previous)
+
+
+def _demo(args: argparse.Namespace) -> None:
+    result = _seed_demo(args)
+    print(
+        f"演示数据已就绪：{result['mine_count']} 座煤矿。",
+        file=sys.stderr,
+    )
+    print(
+        f"请用 Chrome 或 Edge 打开：http://127.0.0.1:{args.port}/",
+        file=sys.stderr,
+    )
+    serve_args = argparse.Namespace(
+        host="127.0.0.1",
+        port=args.port,
+        state_directory=args.state_directory,
+        admin_username="admin",
+        no_auth=False,
+        secure_cookie=False,
+    )
+    _serve_with_registry(
+        serve_args,
+        clients_file=None,
+        clear_admin_password=True,
+    )
+
+
+def _setup(args: argparse.Namespace) -> dict[str, object]:
+    clients_value = args.clients_file
+    if clients_value is None:
+        if args.non_interactive:
+            raise ProductConfigurationError(
+                "非交互配置必须指定 --clients-file"
+            )
+        clients_value = _prompt("clients.json 完整路径：")
+    clients_file, client_count = _validate_clients_file(clients_value)
+
+    secure_cookie = args.secure_cookie
+    if secure_cookie is None:
+        secure_cookie = (
+            False
+            if args.non_interactive
+            else _prompt_yes_no("是否已配置 HTTPS 反向代理？[y/N]：")
+        )
+
+    root = _state_root(args.state_directory)
+    _assert_setup_state_boundary(root)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        root.chmod(0o700)
+    except OSError:
+        pass
+
+    created_admin: str | None = None
+    with StateInstanceLock(root):
+        auth_database = root / "auth.db"
+        with LocalAuthStore(auth_database) as store:
+            users = store.list_users()
+            if users:
+                active_admins = [
+                    item
+                    for item in users
+                    if item["role"] == Role.ADMIN.value and item["active"]
+                ]
+                if not active_admins:
+                    raise ProductConfigurationError(
+                        "现有账号库没有启用的管理员，已拒绝启用快速启动"
+                    )
+            else:
+                username = args.admin_username
+                if username is None:
+                    username = (
+                        "admin"
+                        if args.non_interactive
+                        else (_prompt("管理员账号 [admin]：").strip() or "admin")
+                    )
+                password = _formal_admin_password(
+                    non_interactive=args.non_interactive
+                )
+                created_admin = store.bootstrap_admin(username, password).username
+
+        settings = {
+            "schema_version": _QUICK_START_SETTINGS_SCHEMA,
+            "kind": _QUICK_START_SETTINGS_KIND,
+            "host": "127.0.0.1",
+            "port": args.port,
+            "secure_cookie": bool(secure_cookie),
+            "clients_file": str(clients_file),
+        }
+        _write_quick_start_settings(root, settings)
+
+    return {
+        "status": "configured",
+        "state_directory": str(root),
+        "client_count": client_count,
+        "administrator_created": created_admin,
+        "password_stored_in_settings": False,
+        "next_command": (
+            "mineguard start"
+            if args.state_directory == ".mineguard-v2"
+            else f"mineguard start --state-directory {root}"
+        ),
+    }
+
+
+def _start(args: argparse.Namespace) -> None:
+    root = _state_root(args.state_directory)
+    if (root / _DEMO_STATE_MARKER).exists():
+        raise ProductConfigurationError(
+            "演示目录请使用 mineguard demo，不能作为正式启动配置"
+        )
+    settings = _load_quick_start_settings(root)
+    clients_file, _ = _validate_clients_file(str(settings["clients_file"]))
+    auth_database = root / "auth.db"
+    if not auth_database.is_file():
+        raise ProductConfigurationError(
+            "管理员账号库不存在；请重新运行 mineguard setup"
+        )
+    with LocalAuthStore(auth_database) as store:
+        users = store.list_users()
+    if not any(
+        item["role"] == Role.ADMIN.value and item["active"] for item in users
+    ):
+        raise ProductConfigurationError(
+            "正式启动至少需要一个启用的管理员账号"
+        )
+    configured_port = settings["port"]
+    configured_secure_cookie = settings["secure_cookie"]
+    assert type(configured_port) is int
+    assert type(configured_secure_cookie) is bool
+    serve_args = argparse.Namespace(
+        host="127.0.0.1",
+        port=configured_port,
+        state_directory=str(root),
+        admin_username="admin",
+        no_auth=False,
+        secure_cookie=configured_secure_cookie,
+    )
+    _serve_with_registry(serve_args, clients_file=clients_file)
 
 
 def _manager(
@@ -751,6 +1165,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = _parser().parse_args(argv)
         if args.command == "serve":
             _serve(args)
+        elif args.command == "demo":
+            _demo(args)
+        elif args.command == "setup":
+            _print(_setup(args))
+        elif args.command == "start":
+            _start(args)
         elif args.command == "seed-v2-demo":
             _print(_seed_demo(args))
         elif args.command == "backup":

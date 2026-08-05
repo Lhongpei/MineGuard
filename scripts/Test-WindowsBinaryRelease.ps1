@@ -962,6 +962,26 @@ function Invoke-InstallerLifecycleTest {
                 throw "$Product install is missing required runtime/operations/trace content: $Required"
             }
         }
+        if ($Product -eq "platform") {
+            $Wizard = Join-Path $OperationsDirectory `
+                "Start-MineGuardPlatformWizard.ps1"
+            $Launcher = Join-Path $InstallRoot `
+                "launcher\Open-MineGuardPlatformControlCenter.ps1"
+            foreach ($RequiredControlCenterFile in @($Wizard, $Launcher)) {
+                if (-not (Test-Path -LiteralPath $RequiredControlCenterFile `
+                        -PathType Leaf)) {
+                    throw "Platform control center file is missing: $RequiredControlCenterFile"
+                }
+            }
+            $WizardProbeText = & $Wizard -InstallRoot $InstallRoot -SelfTest |
+                Out-String
+            $WizardProbe = $WizardProbeText | ConvertFrom-Json
+            if ([string]$WizardProbe.status -ne "ok" -or
+                [string]$WizardProbe.component -ne `
+                    "mineguard-platform-control-center") {
+                throw "Platform control center headless self-test failed."
+            }
+        }
         $PreservationRoot = if ($Product -eq "platform") { $InstallRoot } else { Join-Path $AgentStateRoot "ci-preservation" }
         foreach ($DirectoryName in @("config", "state", "backups", "logs")) {
             $Directory = Join-Path $PreservationRoot $DirectoryName
@@ -1198,7 +1218,10 @@ function Invoke-InstallerLifecycleTest {
             (Join-Path $InstallRoot "runtime"),
             (Join-Path $InstallRoot "deploy"),
             (Join-Path $InstallRoot "service"),
-            (Join-Path $InstallRoot "release-metadata")
+            (Join-Path $InstallRoot "release-metadata"),
+            (Join-Path $InstallRoot "launcher"),
+            (Join-Path $InstallRoot "docs"),
+            (Join-Path $InstallRoot "uninstall-tools")
         )
         $RemovalDeadline = [DateTime]::UtcNow.AddSeconds(30)
         do {

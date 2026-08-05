@@ -24,7 +24,7 @@
 </head>
 <body><main>
   <div class="tag">MineGuard · 矿安智察</div>
-  <h1>Windows 二进制安装后指南</h1>
+  <h1>Windows 安装后快速使用指南</h1>
   <p class="muted">政府监管平台和企业侧智能体是两个独立软件。请只按本机安装的产品执行对应步骤。</p>
 
   <section class="card warn">
@@ -39,17 +39,38 @@
   </section>
 
   <section class="card">
-    <h2>政府侧 Platform</h2>
+    <h2>政府侧 Platform：先从控制中心启动</h2>
+    <p>安装完成后，无需输入 PowerShell 命令。从 Windows 桌面或开始菜单打开
+      <strong>“MineGuard Platform 控制中心”</strong>；系统询问管理员权限时选择“是”。</p>
+    <h3>只想马上看效果</h3>
     <ol>
-      <li>以管理员身份打开“MineGuard Platform operations console”。</li>
-      <li>准备正式的逐矿客户端注册表，不要使用示例密钥。</li>
-      <li>通过安全交互输入首次管理员密码并完成配置：</li>
+      <li>选择“本机展示（推荐先看）”。</li>
+      <li>勾选红色确认项，再点“一键准备并启动展示”。</li>
+      <li>健康检查通过后，控制中心会优先用 Edge 或 Chrome 打开领导端。</li>
     </ol>
+    <p>演示账号是 <code>admin</code>，密码是 <code>123123123</code>。它只监听本机、只供展示，
+      不得用于正式运行、企业报送或监管认定。Internet Explorer 不受支持；未安装 Edge/Chrome
+      时，控制中心会显示地址和提示，而不会用 IE 打开空白页面。</p>
+    <h3>配置正式内网环境</h3>
+    <p>选择“正式内网配置”，依次选择经批准的 <code>clients.json</code>、专用状态数据目录和
+      本机端口，填写管理员账号及两遍密码；单位 HTTPS 反向代理已就绪时，再填写领导端 HTTPS
+      地址；地址必须以 <code>https://</code> 开头，且不能包含账号口令、查询参数或片段。
+      该地址只用于本次安全打开浏览器，不会替管理员配置反向代理，也不会持久保存。
+      正式密码不能使用 <code>123123123</code>。控制中心不会把密码写进命令行或运行日志；
+      非敏感运行记录保存在受保护的 <code>logs\control-center-*.log</code>。</p>
+    <p>控制中心启动的是前台验收进程：窗口保持打开才会继续运行，关闭窗口会先询问并停止本次
+      启动。正式长期运行仍应由管理员使用单位批准并核验过的 WinSW 安装 Windows 服务。</p>
+    <details>
+      <summary>高级管理员：仍可使用原 PowerShell 配置入口</summary>
     <pre>Set-Location 'C:\ProgramData\MineGuard\Platform\service'
 &amp; '.\Set-MineGuardPlatformConfiguration.ps1' `
   -InstallRoot 'C:\ProgramData\MineGuard\Platform' `
   -ClientsFile 'D:\approved-media\clients.json'</pre>
-    <p>具体命令见安装目录 <code>service\README.md</code>。先运行 <code>Start-MineGuardPlatform.ps1</code> 前台验收，再用 <code>Test-MineGuardPlatform.ps1</code> 检查健康状态；正式对外访问应由批准的 HTTPS 反向代理提供。</p>
+    <p>具体命令见开始菜单的“MineGuard Platform 使用与部署说明”。先运行
+      <code>Start-MineGuardPlatform.ps1</code> 前台验收，再用
+      <code>Test-MineGuardPlatform.ps1</code> 检查健康状态；正式对外访问应由批准的 HTTPS
+      反向代理提供。</p>
+    </details>
   </section>
 
   <section class="card">

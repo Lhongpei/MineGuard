@@ -20,6 +20,9 @@ def test_product_cli_exposes_only_v2_runtime_and_operations() -> None:
     )
     assert set(subparsers.choices) == {
         "serve",
+        "demo",
+        "setup",
+        "start",
         "seed-v2-demo",
         "backup",
         "verify-backup",

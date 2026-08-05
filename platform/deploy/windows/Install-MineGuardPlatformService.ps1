@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[A-Fa-f0-9]{64}$')] [string] $ExpectedSha256,
     [string] $ExpectedConfigSha256,
-    [string] $InstallRoot = (Join-Path $env:ProgramData 'MineGuard\Platform'),
+    [string] $InstallRoot = (Join-Path ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonApplicationData)) 'MineGuard\Platform'),
     [switch] $StartService
 )
 

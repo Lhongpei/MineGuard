@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [string] $SourceDirectory = '',
-    [string] $InstallRoot = (Join-Path $env:ProgramData 'MineGuard\Platform'),
+    [string] $InstallRoot = (Join-Path ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonApplicationData)) 'MineGuard\Platform'),
     [string] $PythonExecutable,
     [string] $Wheelhouse,
     [ValidateRange(1, 65535)] [int] $Port = 8080,
@@ -772,6 +772,7 @@ if ($binaryMode) {
         }
         foreach ($requiredScript in @(
             'Start-MineGuardPlatform.ps1',
+            'Start-MineGuardPlatformWizard.ps1',
             'Resolve-MineGuardPlatformExecutable.ps1',
             'Install-MineGuardPlatformService.ps1'
         )) {
@@ -881,6 +882,7 @@ if ($binaryMode) {
             -Label '验证已安装冻结运行时'
         foreach ($requiredScript in @(
             'Start-MineGuardPlatform.ps1',
+            'Start-MineGuardPlatformWizard.ps1',
             'Resolve-MineGuardPlatformExecutable.ps1',
             'Install-MineGuardPlatformService.ps1'
         )) {

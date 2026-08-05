@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)] [string] $BackupId,
     [Parameter(Mandatory = $true)] [string] $TargetStateDirectory,
-    [string] $InstallRoot = (Join-Path $env:ProgramData 'MineGuard\Platform'),
+    [string] $InstallRoot = (Join-Path ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonApplicationData)) 'MineGuard\Platform'),
     [string] $BackupDirectory,
     [string] $KeyFile,
     [string] $KeyId = 'mineguard-v2-backup-key'

@@ -62,7 +62,48 @@ analyze_five_quantity(submission, history=..., peer_bands=..., parameters=...)
 `manual_import` 与 `direct_collection` 是并列合法的来源方式，只用于追溯；算法不会
 按采集方式设置权重、阈值或信任等级。
 
-## 本机启动
+## 最快开始：两条短路径
+
+从 U 盘复制完整的 `platform/` 目录后，先进入该目录，只需运行：
+
+```bash
+bash start.sh
+```
+
+中文菜单提供“演示启动、正式首次配置、启动现有配置、健康检查、退出”五项。若本目录
+还没有 `.venv`，脚本只会从同目录 `wheelhouse/`（或 `MINEGUARD_WHEELHOUSE` 指定的
+离线目录）安装，明确禁用网络索引；缺少完整离线依赖时会停下并给出中文提示，不会偷偷
+联网、提权或修改 systemd。已有环境时直接进入菜单。
+
+已经安装好 `mineguard` 后，Linux 上先看演示也只需一条命令，不需要准备
+`clients.json`，也不需要写环境变量或长参数：
+
+```bash
+mineguard demo
+```
+
+命令会准备隔离演示数据并在 `127.0.0.1:8080` 前台启动。用 Edge 或 Chrome 打开
+<http://127.0.0.1:8080/>，登录账号为 `admin`，密码为 `123123123`。默认账号只限本机
+展示，不能用于正式运行、企业报送或监管认定；Internet Explorer 不支持。终端一直占用
+表示平台正在运行，不是卡死；按 `Ctrl+C` 即停止。
+
+正式内网首次配置也不需要手写一串参数。先把单位批准的 `clients.json` 放在不会移动的
+受控路径，然后依次运行：
+
+```bash
+mineguard setup
+mineguard start
+```
+
+`mineguard setup` 会逐项询问 `clients.json` 完整路径、是否已有 HTTPS 反向代理、管理员
+账号和密码。密码输入时终端不会显示字符，需要再输入一次确认；正式密码至少 8 个字符，
+且不能使用演示密码 `123123123`。向导只在状态目录保存非敏感启动配置和密码摘要，不保存
+明文密码；`clients.json` 中的逐矿密钥仍留在原受控文件，因此该文件配置后不能随意移动。
+默认状态目录是当前目录下的 `.mineguard-v2`，默认端口是 `8080`，所以通常无需附加任何
+参数。`mineguard start` 仍只监听 `127.0.0.1`；正式领导端应通过单位批准的 HTTPS 反向
+代理访问。需要长期常驻时再按部署文档配置 systemd，而不是让人工终端一直开着。
+
+## 开发环境安装与高级启动
 
 需要 Python 3.11+：
 
@@ -81,7 +122,11 @@ command -v mineguard
 `Address already in use`，用 `ss -ltnp | grep ':8080'` 识别现有服务，停止旧服务或
 改用未占用端口。
 
-为一座演示矿配置政府登记信息。消息 HMAC 与 HTTP 运输 HMAC 应使用不同密钥：
+下面是保留给兼容部署、排障和自动化的 `serve` 高级入口；日常演示优先使用
+`mineguard demo`，正式首次配置优先使用 `mineguard setup` 后接 `mineguard start`。
+
+为一座接入测试矿配置政府登记信息。消息 HMAC 与 HTTP 运输 HMAC 应使用不同密钥。下例
+`change_me` 是故意不能通过校验的占位值，必须先替换成两把不同的独立随机密钥：
 
 ```bash
 export MINEGUARD_V2_CLIENTS_JSON='{

@@ -18,6 +18,7 @@ POWERSHELL_SCRIPTS = {
     "Install-MineGuardPlatform.ps1",
     "Set-MineGuardPlatformConfiguration.ps1",
     "Start-MineGuardPlatform.ps1",
+    "Start-MineGuardPlatformWizard.ps1",
     "Test-MineGuardPlatform.ps1",
     "Backup-MineGuardPlatform.ps1",
     "Restore-MineGuardPlatform.ps1",
@@ -101,6 +102,7 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
 
     for name in (
         "Start-MineGuardPlatform.ps1",
+        "Start-MineGuardPlatformWizard.ps1",
         "Test-MineGuardPlatform.ps1",
         "Backup-MineGuardPlatform.ps1",
         "Restore-MineGuardPlatform.ps1",
@@ -110,6 +112,22 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         assert "$PSVersionTable.PSVersion.Major -lt 5" in source, name
         assert "$PSVersionTable.PSVersion.Minor -lt 1" in source, name
         assert "Windows PowerShell 5.1" in source, name
+
+    for name in POWERSHELL_SCRIPTS:
+        source = (WINDOWS / name).read_text(encoding="utf-8-sig")
+        assert "Join-Path $env:ProgramData" not in source, name
+
+    for name in (
+        "Install-MineGuardPlatform.ps1",
+        "Set-MineGuardPlatformConfiguration.ps1",
+        "Start-MineGuardPlatform.ps1",
+        "Backup-MineGuardPlatform.ps1",
+        "Restore-MineGuardPlatform.ps1",
+        "Install-MineGuardPlatformService.ps1",
+        "Remove-MineGuardPlatformService.ps1",
+    ):
+        source = (WINDOWS / name).read_text(encoding="utf-8-sig")
+        assert "System.Environment+SpecialFolder]::CommonApplicationData" in source
 
     install = (WINDOWS / "Install-MineGuardPlatform.ps1").read_text(
         encoding="utf-8-sig"
@@ -142,6 +160,37 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         ".mineguard-platform-state.json",
     ):
         assert required in start
+
+
+def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
+    wizard = (WINDOWS / "Start-MineGuardPlatformWizard.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    for required in (
+        "System.Windows.Forms",
+        "MineGuard Platform 首次配置与启动",
+        "本机展示（推荐先看）",
+        "正式内网配置",
+        "一键准备并启动展示",
+        "[Security.SecureString] $AdminPassword",
+        "DemoWithoutClientRegistry = $true",
+        "AllowDemoDefaultPassword = $true",
+        "HttpOnlyDemo = $true",
+        "Test-MineGuardHealth",
+        "Get-ModernBrowserPath",
+        "请不要使用 Internet Explorer",
+        "ClosingApproved",
+        "[switch] $SelfTest",
+        "mineguard-platform-control-center",
+        "control-center-{0:yyyyMMdd-HHmmss}-{1}.log",
+    ):
+        assert required in wizard
+    assert wizard.index("Test-MineGuardHealth -Port") < wizard.index(
+        "Open-LeaderPage", wizard.index("Test-MineGuardHealth -Port")
+    )
+    assert "-AdminPassword'," not in wizard
+    assert "Start-Job" not in wizard
+    assert "Stop-Process" not in wizard
 
 
 def test_windows_runtime_uninstall_is_transactional_and_data_preserving() -> None:

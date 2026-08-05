@@ -431,6 +431,7 @@ foreach ($Required in @(
     (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardPlatform.iss"),
     (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardEnterpriseAgent.iss"),
     (Join-Path $RepositoryRoot "packaging\windows\inno\languages\ChineseSimplified.isl"),
+    (Join-Path $RepositoryRoot "packaging\windows\assets\Open-MineGuardPlatformControlCenter.ps1"),
     (Join-Path $RepositoryRoot "scripts\Test-WindowsBinaryRelease.ps1")
 )) {
     if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {

@@ -63,6 +63,15 @@ SignedUninstaller=no
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
 
+[Tasks]
+Name: "desktopicon"; Description: "创建 MineGuard Platform 控制中心桌面快捷方式"; GroupDescription: "快捷方式："; Flags: checkedonce
+
+[Dirs]
+; Only this tiny launcher directory is readable by desktop users.  The product
+; runtime, configuration, state and logs keep their stricter service ACLs.
+Name: "{app}\launcher"; Permissions: users-readexec
+Name: "{app}\docs"; Permissions: users-readexec
+
 [Files]
 ; Consume the exact audited Platform staging layout. The root installer does not
 ; carry a second Python entry point or a second Nuitka build definition. The
@@ -76,19 +85,23 @@ Source: "{#StageRoot}\release-manifest.json"; DestDir: "{tmp}\MineGuardPlatformR
 ; Keep the uninstall transaction runner outside every product-owned directory
 ; that it atomically quarantines. Inno owns and removes this protected copy.
 Source: "{#StageRoot}\deploy\windows\Uninstall-MineGuardPlatformRuntime.ps1"; DestDir: "{app}\uninstall-tools"; Flags: ignoreversion
-Source: "{#AssetsRoot}\Windows-binary-release-guide.html"; DestDir: "{app}\docs"; Flags: ignoreversion
-Source: "{#AssetsRoot}\RELEASE-NOTICE.txt"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "{#AssetsRoot}\Windows-binary-release-guide.html"; DestDir: "{app}\docs"; Flags: ignoreversion; Permissions: users-readexec
+Source: "{#AssetsRoot}\RELEASE-NOTICE.txt"; DestDir: "{app}\docs"; Flags: ignoreversion; Permissions: users-readexec
+; Keep a tiny, explicitly read-only launcher separate from the protected
+; runtime/config/state trees.  A desktop token can request UAC before opening
+; the administrator control center.  It contains no configuration or secret.
+Source: "{#AssetsRoot}\Open-MineGuardPlatformControlCenter.ps1"; DestDir: "{app}\launcher"; Flags: ignoreversion; Permissions: users-readexec
 ; Keep the guarded product transaction as the final [Files] action. If any
 ; ordinary payload copy fails, the product runtime has not been switched yet.
 Source: "{#StageRoot}\SHA256SUMS.txt"; DestDir: "{tmp}\MineGuardPlatformRelease"; Flags: ignoreversion deleteafterinstall; AfterInstall: InstallProductRuntime
 
 [Icons]
-Name: "{group}\MineGuard Platform deployment guide"; Filename: "{app}\docs\Windows-binary-release-guide.html"
-Name: "{group}\Configure MineGuard Platform"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -Command ""Write-Host 'Read the deployment guide, prepare clients.json and an administrator password, then run:' -ForegroundColor Cyan; Write-Host '& .\Set-MineGuardPlatformConfiguration.ps1 -InstallRoot ''{app}'' -ClientsFile ''C:\approved\clients.json'''; Set-Location -LiteralPath '{app}\service'"""; WorkingDir: "{app}\service"
-Name: "{group}\MineGuard Platform operations console"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -Command ""Set-Location -LiteralPath '{app}\service'; Get-ChildItem -Filter '*.ps1' | Select-Object Name"""; WorkingDir: "{app}\service"
+Name: "{group}\MineGuard Platform 控制中心"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"
+Name: "{commondesktop}\MineGuard Platform 控制中心"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"; Tasks: desktopicon
+Name: "{group}\MineGuard Platform 使用与部署说明"; Filename: "{app}\docs\Windows-binary-release-guide.html"
 
 [Run]
-Filename: "{app}\docs\Windows-binary-release-guide.html"; Description: "Open the deployment guide"; Flags: postinstall shellexec skipifsilent nowait
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\service\Start-MineGuardPlatformWizard.ps1"" -InstallRoot ""{app}"""; Description: "打开 MineGuard Platform 中文配置向导"; Flags: postinstall skipifsilent nowait
 
 [UninstallDelete]
 ; Product-owned immutable directories are removed only by the guarded

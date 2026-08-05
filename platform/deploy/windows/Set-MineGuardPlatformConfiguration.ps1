@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string] $InstallRoot = (Join-Path $env:ProgramData 'MineGuard\Platform'),
+    [string] $InstallRoot = (Join-Path ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonApplicationData)) 'MineGuard\Platform'),
     [string] $ClientsFile,
     [switch] $DemoWithoutClientRegistry,
     [string] $StateDirectory,

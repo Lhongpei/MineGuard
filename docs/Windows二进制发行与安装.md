@@ -10,6 +10,30 @@ PowerShell、版本信息、逐文件清单和 SHA-256。目标机不需要 Pyth
 Java、Excel、GPU 或源码，离线安装也不需要访问互联网。业务联网、HTTPS 证书、DNS、
 准确系统时间和模型/新闻接口仍按实际部署需要配置。
 
+## 安装后怎么打开（普通使用者先看）
+
+政府侧 Platform 安装完成后，不需要寻找 `ProgramData`，也不需要抄写 PowerShell 命令：
+
+1. 从 Windows 桌面或开始菜单点击 **MineGuard Platform 控制中心**；出现管理员权限确认时
+   选择“是”。
+2. 临时看效果时，选择“本机展示（推荐先看）”，勾选红色确认项，再点击
+   “一键准备并启动展示”。
+3. 控制中心显示服务正常后，会优先用 Edge 或 Chrome 打开领导端。登录账号为 `admin`，
+   密码为 `123123123`。
+
+这个默认账号只用于本机 HTTP 展示，不能用于正式运行、企业报送或监管认定。Internet
+Explorer 不支持；没有 Edge/Chrome 时应先离线安装现代浏览器，不能用 IE 打开，否则可能
+只看到空白页。控制中心运行的是前台验收进程，窗口保持打开才会继续运行；关闭窗口会提示
+并停止本次启动。正式长期运行仍须由管理员按本手册后文使用单位批准的 WinSW 安装服务。
+
+正式首次配置也在同一控制中心内完成：切换到“正式内网配置”，选择经批准的
+`clients.json`、专用状态数据目录和端口，填写管理员账号及两遍密码；单位 HTTPS 反向代理
+已经就绪时，再填写领导端 HTTPS 地址。地址必须以 `https://` 开头，且不能包含账号口令、
+查询参数或 `#` 片段；该栏只用于本次安全打开浏览器，不负责配置反向代理，也不会持久
+保存。正式密码不能使用 `123123123`，密码不会写入命令行或控制中心日志；
+非敏感运行记录写入受保护的 `logs\control-center-*.log`。已有正式配置或已有状态数据时，
+控制中心会防止一键覆盖，只允许安全启动和打开页面。
+
 ## 1. 支持边界
 
 目标机基线为原生 x64 的 Windows 10 1809+、Windows 11 x64、Windows Server 2019/2022
@@ -220,8 +244,28 @@ Inno Setup 日志；不会再出现“产品安装失败但 Setup 显示成功�
 安装器不会编造煤矿身份、客户端密钥、管理员密码或模型 API，也不会把默认
 `123123123` 注入正式配置。它只安装经过审计的不可变程序和运维入口。
 
-政府 Platform 默认在 `C:\ProgramData\MineGuard\Platform`。从开始菜单打开 Platform
-operations console，准备正式 `clients.json`，再通过安全交互输入首次管理员密码：
+### 6.1 政府 Platform 图形配置（推荐）
+
+政府 Platform 默认在 `C:\ProgramData\MineGuard\Platform`。从开始菜单打开
+**MineGuard Platform 控制中心**：
+
+- 展示验收：在“本机展示”页确认演示边界后一键准备并启动，无需 `clients.json`；
+- 正式内网：在“正式内网配置”页选择 `clients.json` 和专用状态目录，填写端口、管理员
+  账号、两遍密码及可选的单位 HTTPS 地址，再点击“保存正式配置并启动”；HTTPS 地址不得
+  包含账号口令、查询参数或 `#` 片段，且只用于本次打开浏览器，不会持久保存；
+- 再次打开：点击“启动当前配置”或“打开领导端页面”，控制中心不会重写已有配置；
+- 浏览器：只支持仍在安全支持期内的 Edge/Chrome，不支持 Internet Explorer；
+- 运行方式：这是前台启动，关闭控制中心会停止由它启动的 Platform。正式常驻服务继续按
+  6.3 节使用经批准的 WinSW。
+
+演示账号 `admin / 123123123` 只在本机展示模式启用。正式模式启用 Secure Cookie，应用只
+监听 `127.0.0.1`；应先配置单位批准的 HTTPS 反向代理，再让领导端通过 HTTPS 地址访问。
+控制中心的非敏感运行记录写在受保护的 `logs\control-center-*.log`，密码不会写入该日志。
+
+### 6.2 政府 Platform 高级命令入口
+
+需要脚本化运维时，仍可从管理员 PowerShell 准备正式 `clients.json`，再通过安全交互输入
+首次管理员密码：
 
 ```powershell
 Set-Location 'C:\ProgramData\MineGuard\Platform\service'
@@ -229,6 +273,8 @@ Set-Location 'C:\ProgramData\MineGuard\Platform\service'
   -InstallRoot 'C:\ProgramData\MineGuard\Platform' `
   -ClientsFile 'D:\approved-media\clients.json'
 ```
+
+### 6.3 企业 Agent 与正式 Windows 服务
 
 企业 Agent 程序默认在 `C:\Program Files\MineGuard\EnterpriseAgent`，实例状态在
 `C:\ProgramData\MineGuard\EnterpriseAgent\instances`。一矿一智能体，从开始菜单选择
@@ -245,8 +291,9 @@ Set-Location 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
 然后在实例的 ACL 受控配置文件中设置账号摘要、政府接口、两把不同的交换密钥以及可选的
 模型 API。演示登录只限回环隔离测试，不能用于确认、报送或生产服务。
 
-安装器不下载也不捆绑 WinSW。需要 Windows 服务时，继续使用两个产品随包提供的服务
-安装脚本，并从单位批准的软件源单独取得 WinSW、核验预先批准的 SHA-256。
+安装器不下载也不捆绑 WinSW。Platform 或 Agent 需要长期常驻 Windows 服务时，继续使用
+两个产品随包提供的服务安装脚本，并从单位批准的软件源单独取得 WinSW、核验预先批准的
+SHA-256。图形控制中心不能替代这一正式服务安装和审批流程。
 
 ## 7. 卸载与数据保留
 

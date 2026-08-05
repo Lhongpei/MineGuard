@@ -66,6 +66,7 @@ def test_layout() -> None:
         "packaging/windows/inno/languages/INNO-SETUP-LICENSE.txt",
         "packaging/windows/inno/languages/README.md",
         "packaging/windows/assets/RELEASE-NOTICE.txt",
+        "packaging/windows/assets/Open-MineGuardPlatformControlCenter.ps1",
         "packaging/windows/assets/Windows-binary-release-guide.html",
         "scripts/Build-WindowsBinaryRelease.ps1",
         "scripts/Test-WindowsBinaryRelease.ps1",
@@ -111,6 +112,10 @@ def test_powershell_text_encoding_is_safe_for_windows_powershell_51() -> None:
         "PowerShell scripts containing non-ASCII text require a UTF-8 BOM "
         f"for Windows PowerShell 5.1: {failures}"
     )
+    launcher = ROOT / (
+        "packaging/windows/assets/Open-MineGuardPlatformControlCenter.ps1"
+    )
+    assert launcher.read_bytes().startswith(b"\xef\xbb\xbf")
 
 
 def test_pinned_inno_chinese_language() -> None:
@@ -199,6 +204,26 @@ def test_child_toolchain_pins() -> None:
 def test_inno_scripts() -> None:
     platform = read("packaging/windows/inno/MineGuardPlatform.iss")
     agent = read("packaging/windows/inno/MineGuardEnterpriseAgent.iss")
+    launcher = read(
+        "packaging/windows/assets/Open-MineGuardPlatformControlCenter.ps1"
+    )
+    for token in (
+        "Verb = 'runas'",
+        "Start-MineGuardPlatformWizard.ps1",
+        "[Parameter(Mandatory = $true)]",
+        "-InstallRoot",
+        "-STA",
+        "[switch] $Elevated",
+        "WindowsBuiltInRole]::Administrator",
+    ):
+        assert token in launcher
+    for forbidden in (
+        "clients.json",
+        "settings.json",
+        "123123123",
+        "MINEGUARD_ADMIN_PASSWORD",
+    ):
+        assert forbidden not in launcher
     assert '#define ApplicationId "{{8B391CBD-E234-46D7-9946-E9D37F2649C1}"' in (
         platform
     ), "the production Platform AppId default must remain stable"
@@ -271,6 +296,24 @@ def test_inno_scripts() -> None:
     assert "{app}\\service" in platform
     icons_section = platform.split("[Icons]", 1)[1].split("[Run]", 1)[0]
     assert "{app}\\deploy\\windows" not in icons_section
+    for token in (
+        "MineGuard Platform 控制中心",
+        "Open-MineGuardPlatformControlCenter.ps1",
+        'Name: "{app}\\launcher"; Permissions: users-readexec',
+        'Name: "{app}\\docs"; Permissions: users-readexec',
+        "Start-MineGuardPlatformWizard.ps1",
+        "-InstallRoot \"\"{app}\"\"",
+        "-STA",
+        'Name: "desktopicon"',
+        "{commondesktop}\\MineGuard Platform 控制中心",
+    ):
+        assert token in platform
+    assert "MineGuard Platform 高级运维" not in icons_section
+    launcher_copy = platform.index("Open-MineGuardPlatformControlCenter.ps1")
+    guarded_transaction = platform.index(
+        'SHA256SUMS.txt"; DestDir: "{tmp}\\MineGuardPlatformRelease"'
+    )
+    assert launcher_copy < guarded_transaction
     assert "MineGuardEnterpriseAgent-*" in agent
     assert "Status -ne ''Stopped''" in platform
     assert "Status -ne ''Stopped''" in agent

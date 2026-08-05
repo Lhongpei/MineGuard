@@ -298,6 +298,22 @@ def test_client_registry_fails_closed_on_transport_key_reuse_or_omission(
         parse_exchange_clients(json.dumps({"clients": [entry]}))
 
 
+@pytest.mark.parametrize("secret_field", ["message_secret", "transport_secret"])
+def test_client_registry_rejects_template_secret_material(
+    secret_field: str,
+) -> None:
+    entry = {
+        "sender_id": "agent-mine-001",
+        "party_id": "operator-mine-001",
+        "mine_id": "MINE-001",
+        "message_secret": "valid-message-secret-material-0000000001",
+        "transport_secret": "valid-transport-secret-material-000000001",
+    }
+    entry[secret_field] = "replace-with-independent-random-secret-0001"
+    with pytest.raises(ValueError, match="placeholder"):
+        parse_exchange_clients(json.dumps({"clients": [entry]}))
+
+
 def test_multi_finding_response_is_not_silently_truncated() -> None:
     document = json.loads((EXAMPLES / "enterprise-risk-response-v2.json").read_text())
     second = dict(document["payload"]["finding_responses"][0])

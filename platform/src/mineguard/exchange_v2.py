@@ -81,6 +81,9 @@ SIGNED_HEADERS = (
 )
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_PLACEHOLDER_SECRET = re.compile(
+    r"(?i)(?:replace(?:[_-]|\b)|change[_-]?me|demo[_-]?only)"
+)
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{22,86}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MONTH = re.compile(r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")
@@ -1197,6 +1200,8 @@ def _encoded_secret(value: Any, *, label: str) -> bytes:
     encoded = value.encode("utf-8")
     if len(encoded) < 32:
         raise ValueError(f"{label} must contain at least 32 bytes")
+    if _PLACEHOLDER_SECRET.search(value):
+        raise ValueError(f"{label} must not use example or placeholder material")
     return encoded
 
 
@@ -1342,6 +1347,13 @@ def parse_exchange_clients(value: str | None) -> dict[str, ExchangeClient]:
         )
         if any(len(item) < 32 for item in transport_secrets_bytes):
             raise ValueError("each V2 shared secret must contain at least 32 bytes")
+        if any(
+            isinstance(item, str) and _PLACEHOLDER_SECRET.search(item)
+            for item in raw_transport_secrets
+        ):
+            raise ValueError(
+                "V2 transport secrets must not use example or placeholder material"
+            )
         if set(message_keys.values()) & set(transport_secrets_bytes):
             raise ValueError(
                 "application-message and HTTP transport keys must be different"
