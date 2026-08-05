@@ -744,7 +744,7 @@ function Get-ConfigurationState {
     }
     return [pscustomobject]@{
         kind = 'pristine'
-        message = '尚未首次配置：可选择“本机展示”或“正式内网配置”。'
+        message = '尚未首次配置：可选择【本机展示】或【正式内网配置】。'
         port = $port
         stateDirectory = $stateDirectory
     }
@@ -813,9 +813,13 @@ function Open-LeaderPage {
         $parsed = $null
         if ([string]::IsNullOrWhiteSpace($candidate)) {
             Add-Log '正式模式不会打开本机 HTTP。请先配置单位 HTTPS 反向代理，再填写访问地址。' 'warning'
+            $httpsMessage = @(
+                '正式模式启用了安全 Cookie，不能直接用本机 HTTP 登录。'
+                ''
+                '请先配置单位批准的 HTTPS 反向代理，再在【单位 HTTPS 地址】中粘贴领导端地址。'
+            ) -join [Environment]::NewLine
             [void][System.Windows.Forms.MessageBox]::Show(
-                '正式模式启用了安全 Cookie，不能直接用本机 HTTP 登录。' +
-                "`r`n`r`n请先配置单位批准的 HTTPS 反向代理，再在“单位 HTTPS 地址”中粘贴领导端地址。",
+                $httpsMessage,
                 '需要 HTTPS 地址',
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Information
@@ -836,7 +840,7 @@ function Open-LeaderPage {
     if (-not (Test-MineGuardHealth -Port $script:ServerPort)) {
         Add-Log "Platform 尚未通过健康检查，暂不打开页面：$localUrl" 'warning'
         [void][System.Windows.Forms.MessageBox]::Show(
-            'Platform 还没有正常启动。请先点击“启动当前配置”，并等待右下角显示“服务正常”。',
+            'Platform 还没有正常启动。请先点击【启动当前配置】，并等待右下角显示【服务正常】。',
             '服务尚未就绪',
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Information

@@ -100,17 +100,24 @@ def test_powershell_text_encoding_is_safe_for_windows_powershell_51() -> None:
         ROOT / "scripts",
     )
     failures: list[str] = []
+    typographic_quote_failures: list[str] = []
     for root in roots:
         for path in sorted(root.rglob("*.ps1")):
             payload = path.read_bytes()
             has_utf8_bom = payload.startswith(b"\xef\xbb\xbf")
             content = payload[3:] if has_utf8_bom else payload
-            content.decode("utf-8")
+            text = content.decode("utf-8")
             if any(byte > 0x7F for byte in content) and not has_utf8_bom:
                 failures.append(path.relative_to(ROOT).as_posix())
+            if any(quote in text for quote in "“”‘’"):
+                typographic_quote_failures.append(path.relative_to(ROOT).as_posix())
     assert not failures, (
         "PowerShell scripts containing non-ASCII text require a UTF-8 BOM "
         f"for Windows PowerShell 5.1: {failures}"
+    )
+    assert not typographic_quote_failures, (
+        "PowerShell 5.1 treats typographic quotes as string delimiters; "
+        f"use ASCII quotes or Chinese brackets instead: {typographic_quote_failures}"
     )
     launcher = ROOT / (
         "packaging/windows/assets/Open-MineGuardPlatformControlCenter.ps1"

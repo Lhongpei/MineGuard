@@ -26,7 +26,7 @@ function Assert-Administrator {
     if (-not $principal.IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator
     )) {
-        throw '安装和设置 NTFS ACL 必须在“以管理员身份运行”的 Windows PowerShell 5.1 中执行。'
+        throw '安装和设置 NTFS ACL 必须在【以管理员身份运行】的 Windows PowerShell 5.1 中执行。'
     }
 }
 
