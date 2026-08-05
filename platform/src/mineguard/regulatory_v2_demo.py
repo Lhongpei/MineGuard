@@ -63,6 +63,8 @@ V2_DEMO_SCHEMA_VERSION = "mineguard-regulatory-v2-demo-v3"
 DEFAULT_V2_DEMO_STATE_DIRECTORY = ".mineguard-v2-demo-v2"
 V2_DEMO_DATABASE_FILENAME = "mineguard.db"
 V2_DEMO_STATE_MARKER = ".mineguard-v2-synthetic-owner.json"
+PLATFORM_STATE_MARKER = ".mineguard-platform-state.json"
+PLATFORM_STATE_PRODUCT = "MineGuard Platform State"
 V2_DEMO_AGENT_PREFIX = "synthetic-demo-agent-"
 V2_WORKBOOK_DEMO_AGENT_PREFIX = "workbook-demo-agent-"
 SYNTHETIC_ONLY_SCHEMA_VERSION = "mineguard-regulatory-v2-synthetic-demo-v2"
@@ -539,9 +541,11 @@ def claim_v2_demo_state_directory(
             )
         return root
     if root.exists() and any(root.iterdir()):
-        raise V2DemoStateOwnershipError(
-            "目标目录非空且没有合成演示所有权标记，已拒绝写入"
-        )
+        if not _is_empty_platform_owned_state(root):
+            raise V2DemoStateOwnershipError(
+                "目标目录非空且没有可验证的演示或空 Platform "
+                "状态所有权标记，已拒绝写入"
+            )
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         root.chmod(0o700)
@@ -557,6 +561,52 @@ def claim_v2_demo_state_directory(
     except FileExistsError:
         return claim_v2_demo_state_directory(root, through_month=month_end)
     return root
+
+
+def _is_empty_platform_owned_state(root: Path) -> bool:
+    """Accept only the exact empty state tree prepared by the Windows wizard."""
+
+    try:
+        entries = tuple(root.iterdir())
+    except OSError:
+        return False
+    if len(entries) != 1:
+        return False
+    marker = entries[0]
+    if (
+        marker.name != PLATFORM_STATE_MARKER
+        or marker.is_symlink()
+        or not marker.is_file()
+    ):
+        return False
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or set(payload) != {
+        "schemaVersion",
+        "product",
+        "initializedFor",
+    }:
+        return False
+    if (
+        type(payload["schemaVersion"]) is not int
+        or payload["schemaVersion"] != 1
+        or payload["product"] != PLATFORM_STATE_PRODUCT
+        or not isinstance(payload["initializedFor"], str)
+        or not payload["initializedFor"].strip()
+    ):
+        return False
+    try:
+        raw_install_root = Path(payload["initializedFor"]).expanduser()
+        if not raw_install_root.is_absolute():
+            return False
+        install_root = raw_install_root.resolve()
+        platform_state_root = (install_root / "state").resolve()
+        root.relative_to(platform_state_root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
 
 
 def _demo_state_marker_payload(through_month: date) -> dict[str, Any]:

@@ -572,6 +572,61 @@ def test_demo_state_marker_refuses_non_owned_or_different_month(
         claim_v2_demo_state_directory(legacy, through_month=THROUGH_MONTH)
 
 
+def test_demo_seed_claims_only_an_empty_platform_owned_state(
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "MineGuard" / "Platform"
+    state = install_root / "state" / "local-demo"
+    state.mkdir(parents=True)
+    platform_marker = state / ".mineguard-platform-state.json"
+    platform_marker.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "product": "MineGuard Platform State",
+                "initializedFor": str(install_root),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = seed_v2_demo_state(state, through_month=THROUGH_MONTH)
+
+    assert Path(result.state_directory) == state.resolve()
+    assert Path(result.database_path).is_file()
+    assert platform_marker.is_file()
+    assert (state / V2_DEMO_STATE_MARKER).is_file()
+
+
+@pytest.mark.parametrize("extra_name", ["mineguard.db", "other.txt"])
+def test_demo_seed_rejects_platform_marker_beside_existing_content(
+    tmp_path: Path,
+    extra_name: str,
+) -> None:
+    install_root = tmp_path / "MineGuard" / "Platform"
+    state = install_root / "state" / "local-demo"
+    state.mkdir(parents=True)
+    (state / ".mineguard-platform-state.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "product": "MineGuard Platform State",
+                "initializedFor": str(install_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+    existing = state / extra_name
+    existing.write_text("do not overwrite", encoding="utf-8")
+
+    with pytest.raises(V2DemoStateOwnershipError, match="拒绝写入"):
+        claim_v2_demo_state_directory(state, through_month=THROUGH_MONTH)
+
+    assert existing.read_text(encoding="utf-8") == "do not overwrite"
+    assert not (state / V2_DEMO_STATE_MARKER).exists()
+
+
 def test_owned_legacy_24_submission_state_resumes_with_only_two_samples(
     tmp_path: Path,
 ) -> None:
