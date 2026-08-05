@@ -1342,6 +1342,7 @@ function bindEvents() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
+  $("frontendBootGuard").classList.add("hidden");
   if (isWallboardRequested()) enterWallboard({updateUrl:false});
   if (await recoverSession()) await refreshAll();
   state.refreshTimer = window.setInterval(() => refreshAll({automatic:true}), 10000);

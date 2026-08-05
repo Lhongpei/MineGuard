@@ -334,6 +334,27 @@ def test_wallboard_has_a_clean_direct_static_url(trace_api: TraceAPI) -> None:
     assert 'id="wallboardButton"' in page
 
 
+@pytest.mark.parametrize(
+    ("target", "expected_content_type"),
+    (
+        ("/", "text/html; charset=utf-8"),
+        ("/assets/app.js?v=2.8.1", "application/javascript; charset=utf-8"),
+        ("/assets/styles.css?v=2.8.1", "text/css; charset=utf-8"),
+    ),
+)
+def test_frontend_assets_use_platform_independent_explicit_mime_types(
+    trace_api: TraceAPI,
+    target: str,
+    expected_content_type: str,
+) -> None:
+    response = trace_api.request(target)
+
+    assert response.status == 200
+    assert response.headers["content-type"] == expected_content_type
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cache-control"] == "no-cache"
+
+
 def _problem_code(response: HTTPResult) -> str:
     return str(response.json().get("code", "")).lower()
 

@@ -7,7 +7,7 @@ import hmac
 from http.client import HTTPConnection
 import json
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -38,6 +38,124 @@ ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = ROOT / "contracts"
 EXAMPLE_SECRET = b"example-v2-exchange-secret-not-for-production"
 FIXED_NOW = datetime(2026, 8, 1, 0, 20, tzinfo=UTC)
+LOCAL_CONTROL_TOKEN = "a" * 64
+
+
+def test_local_control_shutdown_is_loopback_token_bound_and_graceful(
+    tmp_path: Path,
+) -> None:
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "regulatory.db",
+        auth_database_path=tmp_path / "auth.db",
+        auth_required=False,
+        clients={},
+        local_control_token=LOCAL_CONTROL_TOKEN,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    path = "/_mineguard/local-control/shutdown"
+    try:
+        connection.request("GET", path)
+        get_response = connection.getresponse()
+        get_response.read()
+        assert get_response.status == 404
+
+        connection.request(
+            "POST",
+            path,
+            body=b"",
+            headers={"X-MineGuard-Local-Control-Token": "b" * 64},
+        )
+        wrong_response = connection.getresponse()
+        wrong_response.read()
+        assert wrong_response.status == 404
+
+        connection.request(
+            "POST",
+            path,
+            body=b"",
+            headers={"X-MineGuard-Local-Control-Token": LOCAL_CONTROL_TOKEN},
+        )
+        accepted = connection.getresponse()
+        payload = json.loads(accepted.read())
+        assert accepted.status == 202
+        assert payload == {"service": "mineguard-v2", "status": "shutting_down"}
+
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    finally:
+        connection.close()
+        if thread.is_alive():
+            server.shutdown()
+            thread.join(timeout=5)
+        server.server_close()
+
+
+def test_local_control_shutdown_refuses_non_loopback_listener(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires a loopback listener"):
+        create_server(
+            "0.0.0.0",
+            0,
+            database_path=tmp_path / "regulatory.db",
+            auth_database_path=tmp_path / "auth.db",
+            auth_required=False,
+            clients={},
+            local_control_token=LOCAL_CONTROL_TOKEN,
+        )
+
+
+def test_server_close_drains_admitted_requests_before_closing_sqlite(
+    tmp_path: Path,
+) -> None:
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "drain.db",
+        auth_database_path=tmp_path / "drain-auth.db",
+        auth_required=False,
+        clients={},
+    )
+    closed = Event()
+    assert server.begin_request() is True
+
+    def close_server() -> None:
+        server.server_close()
+        closed.set()
+
+    thread = Thread(target=close_server, daemon=True)
+    thread.start()
+    try:
+        for _ in range(100):
+            if server.draining:
+                break
+            closed.wait(0.01)
+        assert server.draining is True
+        assert server.begin_request() is False
+        assert closed.wait(0.05) is False
+    finally:
+        server.end_request()
+    assert closed.wait(2) is True
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("token", ["short", "A" * 64, "g" * 64])
+def test_local_control_token_format_is_fail_closed(
+    tmp_path: Path,
+    token: str,
+) -> None:
+    with pytest.raises(ValueError, match="local control token"):
+        create_server(
+            "127.0.0.1",
+            0,
+            database_path=tmp_path / f"bad-{token[:4]}.db",
+            auth_database_path=tmp_path / f"bad-{token[:4]}-auth.db",
+            clients={},
+            local_control_token=token,
+        )
 
 
 def test_government_business_text_hides_internal_tokens_but_preserves_ids() -> None:

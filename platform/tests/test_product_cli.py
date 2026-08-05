@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 from pathlib import Path
 import sqlite3
 
@@ -122,6 +123,53 @@ def test_loopback_first_start_uses_requested_demo_password(
     with LocalAuthStore(state / "auth.db") as auth:
         login = auth.login("admin", "123123123", client_id="test")
         assert login.principal.username == "admin"
+
+
+def test_loopback_gui_control_token_is_consumed_and_passed_in_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "controlled-state"
+    token = "a" * 64
+    calls: list[dict[str, object]] = []
+    monkeypatch.setenv("MINEGUARD_LOCAL_CONTROL_TOKEN", token)
+    monkeypatch.setattr(
+        product_cli,
+        "serve",
+        lambda *args, **kwargs: calls.append(kwargs),
+    )
+
+    assert (
+        product_cli.main(
+            ["serve", "--state-directory", str(state), "--port", "18081"]
+        )
+        == 0
+    )
+    assert calls[0]["local_control_token"] == token
+    assert "MINEGUARD_LOCAL_CONTROL_TOKEN" not in os.environ
+
+
+def test_loopback_gui_control_token_rejects_malformed_input(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MINEGUARD_LOCAL_CONTROL_TOKEN", "not-a-token")
+    monkeypatch.setattr(
+        product_cli,
+        "serve",
+        lambda *args, **kwargs: pytest.fail("server must not start"),
+    )
+
+    assert (
+        product_cli.main(
+            ["serve", "--state-directory", str(tmp_path / "bad-control")]
+        )
+        == 2
+    )
+    error = json.loads(capsys.readouterr().out)
+    assert "本机控制令牌格式无效" in error["error"]["message"]
+    assert "MINEGUARD_LOCAL_CONTROL_TOKEN" not in os.environ
 
 
 def test_user_cli_manages_accounts_in_the_selected_live_state(

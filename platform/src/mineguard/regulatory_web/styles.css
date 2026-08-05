@@ -22,6 +22,26 @@ body { min-height: 100vh; margin: 0; background: radial-gradient(circle at 50% -
 button, input, select { font: inherit; }
 button { color: inherit; }
 .hidden { display: none !important; }
+.frontend-boot-guard {
+  position: fixed;
+  z-index: 10000;
+  right: 22px;
+  bottom: 22px;
+  display: grid;
+  visibility: hidden;
+  width: min(520px, calc(100% - 44px));
+  gap: 6px;
+  padding: 16px 18px;
+  border: 1px solid rgba(255,189,89,.62);
+  border-radius: 10px;
+  background: #2d210f;
+  color: #fff2d1;
+  box-shadow: 0 20px 70px rgba(0,0,0,.55);
+  animation: reveal-frontend-boot-failure 0s linear 5s forwards;
+}
+.frontend-boot-guard strong { color: #ffcf78; font-size: 16px; }
+.frontend-boot-guard span { color: #f1deba; font-size: 13px; line-height: 1.65; }
+@keyframes reveal-frontend-boot-failure { to { visibility: visible; } }
 .ambient { position: fixed; pointer-events: none; filter: blur(110px); opacity: .14; border-radius: 50%; }
 .ambient-a { width: 360px; height: 360px; background: var(--cyan); left: -140px; top: 22%; }
 .ambient-b { width: 440px; height: 440px; background: var(--violet); right: -220px; top: 42%; }

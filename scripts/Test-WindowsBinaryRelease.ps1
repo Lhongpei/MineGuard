@@ -274,6 +274,24 @@ function Get-FreeLoopbackPort {
     finally { $Listener.Stop() }
 }
 
+function Test-LoopbackPortAvailable {
+    param([ValidateRange(1, 65535)][int]$Port)
+    $Listener = $null
+    try {
+        $Listener = New-Object -TypeName Net.Sockets.TcpListener `
+            -ArgumentList @([Net.IPAddress]::Loopback, $Port)
+        $Listener.Server.ExclusiveAddressUse = $true
+        $Listener.Start()
+        return $true
+    }
+    catch { return $false }
+    finally {
+        if ($null -ne $Listener) {
+            try { $Listener.Stop() } catch { }
+        }
+    }
+}
+
 function ConvertTo-QuotedNativeArgument {
     param(
         [Parameter(Mandatory = $true)]
@@ -527,6 +545,7 @@ function Invoke-RuntimeSmoke {
     $StdoutPath = Join-Path $SmokeRoot "$Product-stdout.log"
     $StderrPath = Join-Path $SmokeRoot "$Product-stderr.log"
     $Port = Get-FreeLoopbackPort
+    $ControlToken = ""
     if ($Product -eq "platform") {
         $StatePath = Join-Path $SmokeRoot "platform state"
         $Arguments = @(
@@ -534,6 +553,10 @@ function Invoke-RuntimeSmoke {
             "--state-directory", $StatePath, "--admin-username", "release-audit", "--no-auth"
         )
         $HealthUrl = "http://127.0.0.1:$Port/healthz"
+        $ControlToken = (
+            [Guid]::NewGuid().ToString("N") +
+            [Guid]::NewGuid().ToString("N")
+        ).ToLowerInvariant()
     }
     else {
         $DatabasePath = Join-Path $SmokeRoot "enterprise agent.db"
@@ -553,6 +576,11 @@ function Invoke-RuntimeSmoke {
         if ([string]$EnvironmentName -match '(?i)(API[_-]?KEY|PASSWORD|HMAC[_-]?SECRET|ACCESS[_-]?TOKEN)') {
             $StartInfo.EnvironmentVariables.Remove([string]$EnvironmentName)
         }
+    }
+    if ($Product -eq "platform") {
+        $StartInfo.EnvironmentVariables["MINEGUARD_LOCAL_CONTROL_TOKEN"] = (
+            $ControlToken
+        )
     }
     $Process = New-Object Diagnostics.Process
     $Process.StartInfo = $StartInfo
@@ -590,6 +618,64 @@ function Invoke-RuntimeSmoke {
         }
         if (-not $Healthy) {
             throw "$Product runtime did not become healthy within 45 seconds."
+        }
+        if ($Product -eq "platform") {
+            $BaseUrl = "http://127.0.0.1:$Port"
+            $IndexResponse = Invoke-WebRequest `
+                -Uri "$BaseUrl/" -UseBasicParsing -TimeoutSec 5
+            $ScriptResponse = Invoke-WebRequest `
+                -Uri "$BaseUrl/assets/app.js?v=2.8.1" `
+                -UseBasicParsing -TimeoutSec 5
+            $StyleResponse = Invoke-WebRequest `
+                -Uri "$BaseUrl/assets/styles.css?v=2.8.1" `
+                -UseBasicParsing -TimeoutSec 5
+            if ([int]$IndexResponse.StatusCode -ne 200 -or
+                [string]$IndexResponse.Headers["Content-Type"] -ne
+                    "text/html; charset=utf-8" -or
+                [string]$ScriptResponse.Headers["Content-Type"] -ne
+                    "application/javascript; charset=utf-8" -or
+                [string]$StyleResponse.Headers["Content-Type"] -ne
+                    "text/css; charset=utf-8" -or
+                [string]$ScriptResponse.Headers["X-Content-Type-Options"] -ne
+                    "nosniff" -or
+                [string]$StyleResponse.Headers["X-Content-Type-Options"] -ne
+                    "nosniff" -or
+                $IndexResponse.Content -notmatch
+                    '/assets/app\.js\?v=2\.8\.1' -or
+                $IndexResponse.Content -notmatch 'id="frontendBootGuard"') {
+                throw "Platform frozen frontend MIME, cache version or boot guard is invalid."
+            }
+            $OverviewResponse = Invoke-WebRequest `
+                -Uri "$BaseUrl/v2/regulatory/overview" `
+                -UseBasicParsing -TimeoutSec 15
+            $MinesResponse = Invoke-WebRequest `
+                -Uri "$BaseUrl/v2/regulatory/mines" `
+                -UseBasicParsing -TimeoutSec 15
+            $Overview = $OverviewResponse.Content | ConvertFrom-Json
+            $Mines = $MinesResponse.Content | ConvertFrom-Json
+            $MineNames = @($Mines.items | ForEach-Object { [string]$_.mine_name })
+            if ([int]$Overview.counts.configured_mines -ne 10 -or
+                [int]$Overview.counts.reporting_mines -ne 10 -or
+                @($Mines.items).Count -ne 10 -or
+                "太岳矿" -notin $MineNames -or "梗阳矿" -notin $MineNames) {
+                throw "Platform frozen frontend API did not expose the complete 10-mine demo."
+            }
+            $ShutdownResponse = Invoke-WebRequest `
+                -Uri "$BaseUrl/_mineguard/local-control/shutdown" `
+                -Method POST -Body "" -Headers @{
+                    "X-MineGuard-Local-Control-Token" = $ControlToken
+                } -UseBasicParsing -TimeoutSec 5
+            if ([int]$ShutdownResponse.StatusCode -ne 202 -or
+                -not $Process.WaitForExit(30000)) {
+                throw "Platform frozen runtime did not complete token-bound graceful shutdown."
+            }
+            for ($Attempt = 0; $Attempt -lt 20; $Attempt++) {
+                if (Test-LoopbackPortAvailable -Port $Port) { break }
+                Start-Sleep -Milliseconds 250
+            }
+            if (-not (Test-LoopbackPortAvailable -Port $Port)) {
+                throw "Platform graceful shutdown did not release its listening port."
+            }
         }
     }
     finally {

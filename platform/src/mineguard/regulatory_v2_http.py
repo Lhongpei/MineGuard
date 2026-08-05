@@ -12,15 +12,17 @@ import csv
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+import hmac
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
+import ipaddress
 import json
-import mimetypes
 import os
 from pathlib import Path
 import re
-from threading import BoundedSemaphore
+import sys
+from threading import BoundedSemaphore, Condition, Lock, Thread
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qsl, quote, urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -88,6 +90,8 @@ _OVERVIEW_AUDIT_SCAN_LIMIT = 512
 _TRACE_DEFAULT_LIMIT = 20
 _TRACE_MAX_LIMIT = 100
 _TRACE_EXPORT_LIMIT = 10_000
+_LOCAL_CONTROL_PATH = "/_mineguard/local-control/shutdown"
+_LOCAL_CONTROL_HEADER = "X-MineGuard-Local-Control-Token"
 _TRACE_MINE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _TRACE_EVENT_GROUPS: dict[str, frozenset[str]] = {
     "submission": frozenset({"submission_received"}),
@@ -343,6 +347,7 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
         platform_system_id: str,
         platform_party_id: str,
         platform_key_id: str,
+        local_control_token: str | None,
         clock: Callable[[], datetime],
     ) -> None:
         self.store = store
@@ -353,6 +358,11 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
         self.platform_system_id = platform_system_id
         self.platform_party_id = platform_party_id
         self.platform_key_id = platform_key_id
+        self.local_control_token = local_control_token
+        self.local_control_lock = Lock()
+        self.request_condition = Condition()
+        self.active_requests = 0
+        self.draining = False
         self.clock = clock
         self.integrity_valid = store.verify_integrity()
         self.integrity_checked_at = clock()
@@ -363,6 +373,14 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
         super().__init__(address, RegulatoryV2RequestHandler)
 
     def server_close(self) -> None:
+        # Connection threads remain daemonized so an idle HTTP/1.1 keep-alive
+        # socket cannot hold shutdown forever. Business requests are counted
+        # separately: stop admitting work, let admitted handlers leave their
+        # store transactions, and only then close SQLite.
+        with self.request_condition:
+            self.draining = True
+            while self.active_requests > 0:
+                self.request_condition.wait(timeout=0.5)
         try:
             super().server_close()
         finally:
@@ -370,6 +388,37 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
                 self._resources_closed = True
                 self.store.close()
                 self.auth_store.close()
+
+    def begin_request(self) -> bool:
+        with self.request_condition:
+            if self.draining:
+                return False
+            self.active_requests += 1
+            return True
+
+    def end_request(self) -> None:
+        with self.request_condition:
+            if self.active_requests <= 0:  # pragma: no cover - invariant guard
+                raise RuntimeError("request accounting underflow")
+            self.active_requests -= 1
+            if self.active_requests == 0:
+                self.request_condition.notify_all()
+
+    def start_draining(self) -> None:
+        with self.request_condition:
+            self.draining = True
+            self.request_condition.notify_all()
+
+    def handle_error(
+        self, request: Any, client_address: tuple[str, int]
+    ) -> None:
+        error = sys.exc_info()[1]
+        if isinstance(
+            error,
+            (BrokenPipeError, ConnectionAbortedError, ConnectionResetError),
+        ):
+            return
+        super().handle_error(request, client_address)
 
 
 class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
@@ -380,9 +429,12 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         super().log_message(format, *args)
 
     def do_GET(self) -> None:  # noqa: N802
-        self._guard(self._dispatch_get)
+        self._tracked_request(lambda: self._guard(self._dispatch_get))
 
     def do_HEAD(self) -> None:  # noqa: N802
+        self._tracked_request(self._do_head)
+
+    def _do_head(self) -> None:
         path = urlsplit(self.path).path
         if path == "/v2/regulatory/exchanges/export.csv" or path.startswith(
             "/v2/analysis-reports"
@@ -394,10 +446,24 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         self._guard(lambda: self._dispatch_get(head_only=True))
 
     def do_POST(self) -> None:  # noqa: N802
-        self._guard(self._dispatch_post)
+        self._tracked_request(lambda: self._guard(self._dispatch_post))
 
     def do_OPTIONS(self) -> None:  # noqa: N802
-        self._send_empty(204, {"Allow": "GET, HEAD, POST, OPTIONS"})
+        self._tracked_request(
+            lambda: self._send_empty(
+                204, {"Allow": "GET, HEAD, POST, OPTIONS"}
+            )
+        )
+
+    def _tracked_request(self, operation: Callable[[], None]) -> None:
+        if not self.server.begin_request():
+            self.close_connection = True
+            self._send_error(503, "service_draining", "服务正在安全停止")
+            return
+        try:
+            operation()
+        finally:
+            self.server.end_request()
 
     def _guard(self, operation: Callable[[], None]) -> None:
         try:
@@ -603,6 +669,10 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
     def _dispatch_post(self) -> None:
         parsed = urlsplit(self.path)
         path = parsed.path
+        if path == _LOCAL_CONTROL_PATH:
+            self._reject_query(parsed.query)
+            self._local_control_shutdown()
+            return
         if path == "/v2/auth/login":
             self._reject_query(parsed.query)
             payload = self._read_json(limit=64 * 1024)
@@ -2684,6 +2754,47 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             raise ValueError("request body is too large")
         return self.rfile.read(length)
 
+    def _local_control_shutdown(self) -> None:
+        """Stop a GUI-owned loopback instance without killing SQLite mid-write."""
+
+        try:
+            peer_is_loopback = ipaddress.ip_address(self.client_address[0]).is_loopback
+        except ValueError:
+            peer_is_loopback = False
+        supplied = self.headers.get(_LOCAL_CONTROL_HEADER)
+        authorized = False
+        with self.server.local_control_lock:
+            configured = self.server.local_control_token
+            if (
+                configured is not None
+                and peer_is_loopback
+                and supplied is not None
+                and hmac.compare_digest(configured, supplied)
+            ):
+                self._read_body(limit=0)
+                # The process-control credential is deliberately single use.
+                self.server.local_control_token = None
+                authorized = True
+        if not authorized:
+            # Do not disclose whether local process control is enabled.
+            self._send_error(404, "not_found", "接口不存在")
+            return
+        self.server.start_draining()
+        shutdown_thread = Thread(
+            target=self.server.shutdown,
+            name="mineguard-local-control-shutdown",
+            daemon=True,
+        )
+        try:
+            self._send_json(
+                202,
+                {"status": "shutting_down", "service": "mineguard-v2"},
+            )
+        finally:
+            # A client disconnect after token acceptance must not leave the
+            # server permanently draining without completing shutdown.
+            shutdown_thread.start()
+
     def _read_json(self, *, limit: int = _MAX_JSON_BYTES) -> dict[str, Any]:
         body = self._read_body(limit=limit)
         try:
@@ -2736,18 +2847,17 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         return parsed
 
     def _serve_static(self, path: str, *, head_only: bool) -> None:
-        name = {
-            "/": "index.html",
-            "/index.html": "index.html",
-            "/wallboard": "index.html",
-            "/assets/app.js": "app.js",
-            "/assets/styles.css": "styles.css",
+        name, content_type = {
+            "/": ("index.html", "text/html"),
+            "/index.html": ("index.html", "text/html"),
+            "/wallboard": ("index.html", "text/html"),
+            "/assets/app.js": ("app.js", "application/javascript"),
+            "/assets/styles.css": ("styles.css", "text/css"),
         }[path]
         try:
             body = read_package_resource("regulatory_web", name)
         except (FileNotFoundError, ModuleNotFoundError) as error:
             raise RegulatoryV2NotFoundError("frontend asset not found") from error
-        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
         self._send_bytes(
             200,
             body,
@@ -2857,9 +2967,17 @@ def create_server(
     platform_system_id: str | None = None,
     platform_party_id: str | None = None,
     platform_key_id: str | None = None,
+    local_control_token: str | None = None,
     clock: Callable[[], datetime] = _utc_now,
     **_: Any,
 ) -> RegulatoryV2HTTPServer:
+    if local_control_token is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", local_control_token):
+            raise ValueError(
+                "local control token must be 64 lowercase hex characters"
+            )
+        if host not in {"127.0.0.1", "::1", "localhost"}:
+            raise ValueError("local process control requires a loopback listener")
     registry = (
         dict(clients)
         if clients is not None
@@ -2886,6 +3004,7 @@ def create_server(
             or os.environ.get("MINEGUARD_V2_PLATFORM_PARTY_ID", "regulator-qinyuan"),
             platform_key_id=platform_key_id
             or os.environ.get("MINEGUARD_V2_PLATFORM_KEY_ID", "regulator-key-v2"),
+            local_control_token=local_control_token,
             clock=clock,
         )
     except BaseException:

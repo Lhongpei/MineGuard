@@ -56,6 +56,8 @@ _CLIENT_REGISTRY_ENVIRONMENT = (
     "MINEGUARD_V2_CLIENTS_JSON",
     "MINEGUARD_V2_CLIENTS_FILE",
 )
+_LOCAL_CONTROL_ENVIRONMENT = "MINEGUARD_LOCAL_CONTROL_TOKEN"
+_LOCAL_CONTROL_TOKEN = re.compile(r"[0-9a-f]{64}")
 _ROLE_LABELS = {
     Role.ADMIN: "系统管理员（查看全部煤矿）",
     Role.SUPERVISOR: "辖区监管负责人（只读）",
@@ -782,6 +784,11 @@ def _serve(args: argparse.Namespace) -> None:
         raise ProductConfigurationError("--no-auth 只能与回环监听地址一起使用")
     root = _state_root(args.state_directory)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    local_control_token = os.environ.pop(_LOCAL_CONTROL_ENVIRONMENT, None)
+    if local_control_token is not None and not _LOCAL_CONTROL_TOKEN.fullmatch(
+        local_control_token
+    ):
+        raise ProductConfigurationError("本机控制令牌格式无效，已拒绝启动")
     with StateInstanceLock(root):
         database = root / "mineguard.db"
         auth_database = root / "auth.db"
@@ -812,6 +819,7 @@ def _serve(args: argparse.Namespace) -> None:
             auth_database_path=auth_database,
             auth_required=not args.no_auth,
             secure_cookie=args.secure_cookie,
+            local_control_token=local_control_token,
         )
 
 

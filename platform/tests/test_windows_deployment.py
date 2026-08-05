@@ -178,6 +178,11 @@ def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
         "HttpOnlyDemo = $true",
         "Test-MineGuardHealth",
         "Test-MineGuardHealthUrl",
+        "Request-MineGuardGracefulShutdown",
+        "New-MineGuardLocalControlToken",
+        "MINEGUARD_LOCAL_CONTROL_TOKEN",
+        "/_mineguard/local-control/shutdown",
+        "X-MineGuard-Local-Control-Token",
         "Test-LocalPortAvailable",
         "Get-ModernBrowserPath",
         "Resolve-FormalAccessUri",
@@ -194,6 +199,13 @@ def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
         "[switch] $SelfTest",
         "mineguard-platform-control-center",
         "control-center-{0:yyyyMMdd-HHmmss}-{1}.log",
+        "演示数据未达到受控样例的 10 座煤矿、26 期报送",
+        "演示数据已准备完成：{0} 座煤矿、{1} 期报送",
+        "@('/PID', $pidText, '/T', '/F')",
+        "数据库已完成收尾，端口已经释放",
+        'Lines.Enqueue("[STDOUT] "',
+        'Lines.Enqueue("[STDERR] "',
+        "Write-ServerCaptureLine",
     ):
         assert required in wizard
     assert wizard.index("Test-MineGuardHealth -Port") < wizard.index(
@@ -202,6 +214,9 @@ def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
     assert "-AdminPassword'," not in wizard
     assert "Start-Job" not in wizard
     assert "Stop-Process" not in wizard
+    assert "foreach ($force in @($false, $true))" not in wizard
+    assert "正常停止命令未成功" not in wizard
+    assert 'Lines.Enqueue("[错误] "' not in wizard
     demo_worker = wizard.index("if ($Mode -eq 'demo')")
     assert wizard.index("& $ConfigScript @parameters", demo_worker) < wizard.index(
         "'seed-v2-demo'", demo_worker

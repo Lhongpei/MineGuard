@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mineguard-mvp"
-version = "0.5.0"
+version = "0.5.1"
 description = "煤矿多源交叉验证与监管核查闭环内网影子运行版"
 requires-python = ">=3.11"
 dependencies = [

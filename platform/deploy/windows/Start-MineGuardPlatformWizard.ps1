@@ -192,12 +192,12 @@ public sealed class MineGuardGuiProcessCapture : IDisposable
 
     private void OnOutput(object sender, DataReceivedEventArgs args)
     {
-        if (args.Data != null) Lines.Enqueue(args.Data);
+        if (args.Data != null) Lines.Enqueue("[STDOUT] " + args.Data);
     }
 
     private void OnError(object sender, DataReceivedEventArgs args)
     {
-        if (args.Data != null) Lines.Enqueue("[错误] " + args.Data);
+        if (args.Data != null) Lines.Enqueue("[STDERR] " + args.Data);
     }
 
     public void Dispose()
@@ -545,6 +545,7 @@ $script:LastHealthCheck = [DateTime]::MinValue
 $script:ServerStartedAt = [DateTime]::MinValue
 $script:HealthDelayReported = $false
 $script:StopRequested = $false
+$script:ServerControlToken = $null
 $script:ClosingApproved = $false
 $script:FormalAccessSettingsPath = Join-Path (Join-Path $InstallRoot 'config') `
     'control-center.json'
@@ -552,7 +553,7 @@ $script:LogFilePath = Join-Path (Join-Path $InstallRoot 'logs') (
     'control-center-{0:yyyyMMdd-HHmmss}-{1}.log' -f `
         (Get-Date), [Guid]::NewGuid().ToString('N').Substring(0, 8)
 )
-$script:LogEncoding = New-Object System.Text.UTF8Encoding($false)
+$script:LogEncoding = New-Object System.Text.UTF8Encoding($true)
 
 function Add-Log {
     param([string] $Message, [string] $Level = 'info')
@@ -865,6 +866,19 @@ function Test-LocalPortAvailable {
     }
 }
 
+function Test-LocalPortListening {
+    param([ValidateRange(1, 65535)] [int] $Port)
+    try {
+        $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::`
+            GetIPGlobalProperties().GetActiveTcpListeners()
+        return @($listeners | Where-Object { $_.Port -eq $Port }).Count -gt 0
+    } catch {
+        # If listener enumeration is unavailable, binding remains a conservative
+        # fallback.  Never infer a PID from the port or terminate an unknown owner.
+        return -not (Test-LocalPortAvailable -Port $Port)
+    }
+}
+
 function Resolve-FormalAccessUri {
     param([string] $Value)
     $candidate = $Value.Trim()
@@ -1092,6 +1106,35 @@ function Test-MineGuardHealth {
     )
 }
 
+function Request-MineGuardGracefulShutdown {
+    param(
+        [ValidateRange(1, 65535)] [int] $Port,
+        [Parameter(Mandatory = $true)] [string] $ControlToken
+    )
+    if ($ControlToken -notmatch '^[0-9a-f]{64}$') { return $false }
+    $response = $null
+    try {
+        $request = [System.Net.HttpWebRequest]::Create(
+            ('http://127.0.0.1:{0}/_mineguard/local-control/shutdown' -f $Port)
+        )
+        $request.Method = 'POST'
+        $request.Proxy = $null
+        $request.KeepAlive = $false
+        $request.ContentLength = 0
+        $request.Timeout = 3000
+        $request.ReadWriteTimeout = 3000
+        $request.Headers.Add(
+            'X-MineGuard-Local-Control-Token', $ControlToken
+        )
+        $response = $request.GetResponse()
+        return ([int]$response.StatusCode -eq 202)
+    } catch {
+        return $false
+    } finally {
+        if ($null -ne $response) { $response.Dispose() }
+    }
+}
+
 function New-SecureStringFromTextBox {
     param([System.Windows.Forms.TextBox] $TextBox)
     $secure = New-Object Security.SecureString
@@ -1100,6 +1143,17 @@ function New-SecureStringFromTextBox {
     }
     $secure.MakeReadOnly()
     return $secure
+}
+
+function New-MineGuardLocalControlToken {
+    $bytes = New-Object byte[] 32
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    } finally {
+        $generator.Dispose()
+    }
+    return ([BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
 }
 
 function Start-ConfigurationOperation {
@@ -1170,11 +1224,29 @@ if ($Mode -eq 'demo') {
         'seed-v2-demo', '--state-directory', $StateDirectory,
         '--through-month', $ThroughMonth
     )
-    & $runtime.filePath @seedArguments | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "演示数据生成失败，运行时退出码：$LASTEXITCODE"
+    $seedOutput = & $runtime.filePath @seedArguments
+    $seedExitCode = $LASTEXITCODE
+    if ($seedExitCode -ne 0) {
+        throw "演示数据生成失败，运行时退出码：$seedExitCode"
     }
-    Write-Information '演示数据已准备完成。' -InformationAction Continue
+    try {
+        $seedResult = $seedOutput | Out-String | ConvertFrom-Json
+        $mineCount = [int]$seedResult.mine_count
+        $submissionCount = [int]$seedResult.submission_count
+    } catch {
+        throw "演示数据生成结果无法核验：$($_.Exception.Message)"
+    }
+    if ([string]$seedResult.schema_version -ne
+            'mineguard-regulatory-v2-demo-v3' -or
+        $mineCount -ne 10 -or $submissionCount -ne 26 -or
+        $seedResult.demo_dataset -ne $true -or
+        $seedResult.contains_workbook_examples -ne $true) {
+        throw '演示数据未达到受控样例的 10 座煤矿、26 期报送，已拒绝启动不完整页面。'
+    }
+    Write-Information (
+        '演示数据已准备完成：{0} 座煤矿、{1} 期报送。' -f
+        $mineCount, $submissionCount
+    ) -InformationAction Continue
 } else {
     Write-Information '正在校验 clients.json 并原子保存正式配置...' -InformationAction Continue
     $parameters = @{
@@ -1307,10 +1379,16 @@ function Start-ConfiguredServer {
             $startInfo.StandardOutputEncoding = $encoding
             $startInfo.StandardErrorEncoding = $encoding
         } catch { }
+        $controlToken = New-MineGuardLocalControlToken
+        $startInfo.EnvironmentVariables['MINEGUARD_LOCAL_CONTROL_TOKEN'] = (
+            $controlToken
+        )
         $capture = New-Object MineGuardGuiProcessCapture
         $capture.Start($startInfo)
         $script:ServerCapture = $capture
         $script:ServerProcess = $capture.Process
+        $script:ServerControlToken = $controlToken
+        $controlToken = $null
         $script:ServerMode = if ($Mode -eq 'existing') {
             [string]$script:ConfigurationState.kind
         } else { $Mode }
@@ -1330,6 +1408,7 @@ function Start-ConfiguredServer {
             $script:ServerProcess.Id
         )
     } catch {
+        $script:ServerControlToken = $null
         Add-Log "启动失败：$($_.Exception.Message)" 'error'
         $statusLabel.Text = '启动失败'
         $statusLabel.ForeColor = $red
@@ -1371,29 +1450,34 @@ function Stop-StartedServer {
     }
     try {
         $script:StopRequested = $true
-        if ($script:ServerProcess.CloseMainWindow() -and
-            $script:ServerProcess.WaitForExit(5000)) {
-            Add-Log 'Platform 已响应正常关闭请求。' 'success'
-            $statusLabel.Text = '已停止'
-            $statusLabel.ForeColor = $muted
-            return $true
+        $graceful = $false
+        if (-not [string]::IsNullOrWhiteSpace($script:ServerControlToken)) {
+            Add-Log '正在安全停止 Platform，并等待数据库完成收尾。'
+            $graceful = Request-MineGuardGracefulShutdown `
+                -Port $script:ServerPort `
+                -ControlToken $script:ServerControlToken
         }
-        $pidText = [string]$script:ServerProcess.Id
-        $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
-        foreach ($force in @($false, $true)) {
-            if ($script:ServerProcess.HasExited) { break }
-            if ($force) {
-                Add-Log '正常停止未在限定时间内完成，正在执行强制兜底；下次启动会自动核验数据库。' 'warning'
-            }
-            $arguments = @('/PID', $pidText, '/T')
-            if ($force) { $arguments += '/F' }
+        $script:ServerControlToken = $null
+        if ($graceful) {
+            [void]$script:ServerProcess.WaitForExit(30000)
+        } else {
+            # The service may have accepted the single-use request even if the
+            # control center did not receive its 202 response. Give it a short
+            # natural-exit window before using the process-tree fallback.
+            [void]$script:ServerProcess.WaitForExit(5000)
+        }
+        $usedForcedFallback = $false
+        if (-not $script:ServerProcess.HasExited) {
+            $usedForcedFallback = $true
+            Add-Log '安全停止未在限定时间内完成，正在停止本向导启动的进程树。' 'warning'
+            $pidText = [string]$script:ServerProcess.Id
+            $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+            $arguments = @('/PID', $pidText, '/T', '/F')
             $stopInfo = New-Object System.Diagnostics.ProcessStartInfo
             $stopInfo.FileName = $taskKill
             $stopInfo.Arguments = Join-NativeArguments -Arguments $arguments
             $stopInfo.UseShellExecute = $false
             $stopInfo.CreateNoWindow = $true
-            $stopInfo.RedirectStandardOutput = $true
-            $stopInfo.RedirectStandardError = $true
             $stopProcess = [System.Diagnostics.Process]::Start($stopInfo)
             if ($null -eq $stopProcess -or -not $stopProcess.WaitForExit(10000)) {
                 if ($null -ne $stopProcess) {
@@ -1403,18 +1487,31 @@ function Stop-StartedServer {
                 throw 'Windows 停止命令在 10 秒内没有返回。'
             }
             $taskKillExitCode = $stopProcess.ExitCode
-            $taskKillError = $stopProcess.StandardError.ReadToEnd().Trim()
             $stopProcess.Dispose()
             [void]$script:ServerProcess.WaitForExit(5000)
-            if (-not $script:ServerProcess.HasExited -and
-                $taskKillExitCode -ne 0 -and -not $force) {
-                Add-Log "正常停止命令未成功（退出码 $taskKillExitCode）：$taskKillError" 'warning'
+            if (-not $script:ServerProcess.HasExited -and $taskKillExitCode -ne 0) {
+                throw "Windows 进程树停止失败（退出码 $taskKillExitCode）。"
             }
         }
         if (-not $script:ServerProcess.HasExited) {
             throw 'Platform 进程仍在运行；请不要重复启动，并联系管理员查看任务管理器。'
         }
-        Add-Log '已确认本向导启动的 Platform 进程树停止。' 'success'
+        $portReleased = $false
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            if (-not (Test-LocalPortListening -Port $script:ServerPort)) {
+                $portReleased = $true
+                break
+            }
+            Start-Sleep -Milliseconds 250
+        }
+        if (-not $portReleased) {
+            throw "Platform 包装进程已退出，但端口 $($script:ServerPort) 仍被占用；请勿重复启动。"
+        }
+        if ($usedForcedFallback) {
+            Add-Log '已确认本向导启动的 Platform 进程树停止，端口已经释放。' 'success'
+        } else {
+            Add-Log 'Platform 已安全停止，数据库已完成收尾，端口已经释放。' 'success'
+        }
         $statusLabel.Text = '已停止'
         $statusLabel.ForeColor = $muted
         return $true
@@ -1558,6 +1655,36 @@ $refreshButton.Add_Click({
         Add-Log $script:ConfigurationState.message
     })
 
+function Write-ServerCaptureLine {
+    param([string] $Line)
+    if ([string]::IsNullOrWhiteSpace($Line)) { return }
+    $isStandardError = $Line.StartsWith('[STDERR] ')
+    $text = if ($isStandardError -or $Line.StartsWith('[STDOUT] ')) {
+        $Line.Substring(9)
+    } else {
+        $Line
+    }
+    if ([string]::IsNullOrWhiteSpace($text)) { return }
+    # The GUI itself probes health every two seconds.  These successful access
+    # lines are not useful to an operator and previously filled the pane with
+    # misleading red "errors" because BaseHTTPRequestHandler logs to stderr.
+    if ($text -match '"GET /healthz HTTP/1\.1" 200 (?:-|[0-9]+)$') { return }
+    $level = 'info'
+    if ($isStandardError) {
+        if ($text -match '" [23][0-9]{2} (?:-|[0-9]+)$' -or
+            $text -match '^(首次管理员账号|本机演示默认密码|管理员密码来自环境变量|MineGuard ·|状态目录：|业务前端只读)') {
+            $level = 'info'
+        } elseif ($text -match '" 4[0-9]{2} (?:-|[0-9]+)$') {
+            $level = 'warning'
+        } else {
+            $level = 'error'
+        }
+    } elseif ($text -match '^\s*\{\s*"error"\s*:') {
+        $level = 'error'
+    }
+    Add-Log $text $level
+}
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 250
 $timer.Add_Tick({
@@ -1612,8 +1739,7 @@ $timer.Add_Tick({
         if ($null -ne $script:ServerCapture) {
             $line = $null
             while ($script:ServerCapture.Lines.TryDequeue([ref]$line)) {
-                $level = if ($line.StartsWith('[错误]')) { 'error' } else { 'info' }
-                Add-Log $line $level
+                Write-ServerCaptureLine -Line $line
                 $line = $null
             }
         }
@@ -1638,6 +1764,7 @@ $timer.Add_Tick({
                 $script:ServerCapture.Dispose()
                 $script:ServerCapture = $null
                 $script:StopRequested = $false
+                $script:ServerControlToken = $null
                 Set-BusyState -Busy $false
             } elseif (((Get-Date) - $script:LastHealthCheck).TotalSeconds -ge 2) {
                 $script:LastHealthCheck = Get-Date

@@ -968,5 +968,18 @@ def test_five_quantity_chart_explains_tracks_and_busts_static_cache() -> None:
     assert 'aria-label="五量分轨时序图；火工品包含雷管和炸药子项"' in index
     assert "SIX TRACKS" not in index
     assert "六条原子序列" not in index
-    assert "/assets/styles.css?v=2.8.0" in index
-    assert "/assets/app.js?v=2.8.0" in index
+    assert "/assets/styles.css?v=2.8.1" in index
+    assert "/assets/app.js?v=2.8.1" in index
+
+
+def test_frontend_boot_failure_is_visible_without_running_application_js() -> None:
+    index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="frontendBootGuard"' in index
+    assert "页面程序未能启动" in index
+    assert "退出 IE 模式后按 Ctrl+F5" in index
+    assert '$("frontendBootGuard").classList.add("hidden")' in script
+    assert ".frontend-boot-guard" in styles
+    assert "reveal-frontend-boot-failure" in styles
