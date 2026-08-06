@@ -42,6 +42,9 @@ def _json_object(text: str) -> dict[str, Any]:
 
 def _service(settings: Settings) -> EnterpriseAgentService:
     repository = Repository(settings.database_path)
+    llm_provider = (
+        OpenAICompatibleProvider(settings.llm) if settings.llm is not None else None
+    )
     five_quantity_runtime = FiveQuantityRuntime(
         repository,
         identity=settings.five_quantity_identity,
@@ -54,15 +57,14 @@ def _service(settings: Settings) -> EnterpriseAgentService:
         quarantine_directory=settings.five_quantity_quarantine_directory,
         poll_seconds=settings.five_quantity_poll_seconds,
         stable_seconds=settings.five_quantity_stable_seconds,
+        llm_provider=llm_provider,
     )
     return EnterpriseAgentService(
         repository,
         platform_client=(
             PlatformClient(settings.platform) if settings.platform is not None else None
         ),
-        llm_provider=(
-            OpenAICompatibleProvider(settings.llm) if settings.llm is not None else None
-        ),
+        llm_provider=llm_provider,
         skill_registry=build_skill_registry(
             settings.coal_news,
             llm_config=settings.llm,

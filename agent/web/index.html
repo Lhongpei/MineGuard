@@ -140,15 +140,73 @@
         </div>
 
         <div class="fq-card-grid fq-card-grid-two">
-          <form class="fq-card" id="fqUploadForm">
+          <form class="fq-card fq-upload-card" id="fqUploadForm">
             <span class="fq-card-icon" aria-hidden="true">↑</span>
-            <h3>人工导入文件</h3>
-            <p>支持 ET、XLS、XLSX、CSV、JSON、JSONL，系统会先规范化，不会直接报送。</p>
+            <h3>上传 CSV，自动生成填报草稿</h3>
+            <p>把企业系统导出的五量表交给 Agent，系统会识别表头、日期和单位，并将可核对内容写入草稿。</p>
+            <ol class="fq-upload-steps" aria-label="CSV 智能建稿流程">
+              <li><span>1</span><strong>选择 CSV</strong><small>使用标准模板最稳妥</small></li>
+              <li><span>2</span><strong>预览映射</strong><small>黄色项必须人工选择</small></li>
+              <li><span>3</span><strong>确认建稿</strong><small>确认后才写入草稿</small></li>
+              <li><span>4</span><strong>人工复核</strong><small>最终确认后才能报送</small></li>
+            </ol>
+            <button class="button button-secondary fq-template-button" id="fqDownloadCsvTemplate" type="button">
+              下载标准 CSV 模板
+            </button>
+            <small class="fq-template-hint">模板包含日报合计和零点、八点、四点三个班次；没有的数据保持空白。</small>
             <label class="field">
-              <span>选择五量文件（最大 20 MiB）</span>
-              <input id="fqUploadFile" type="file" accept=".et,.xls,.xlsx,.csv,.json,.jsonl" required>
+              <span>选择 CSV 文件（最大 20 MiB）</span>
+              <input id="fqUploadFile" type="file" accept=".et,.xls,.xlsx,.csv,.json,.jsonl" required disabled>
             </label>
-            <button class="button button-primary" id="fqUploadButton" type="submit">导入并生成复核稿</button>
+            <p class="fq-upload-selected" id="fqSelectedFileSummary" role="status" aria-live="polite">
+              尚未选择文件。
+            </p>
+            <details class="fq-upload-other-formats">
+              <summary>其他系统导出格式也支持</summary>
+              <p>ET、XLS、XLSX、JSON 和 JSONL 仍可从上方选择，它们与 CSV 进入同一复核流程。</p>
+            </details>
+            <div class="fq-upload-boundary">
+              <strong>只生成草稿，不会自动报送</strong>
+              <span>空白值保持空白；Agent 不会填 0，也不会用历史数据猜测。</span>
+            </div>
+            <button class="button button-primary" id="fqUploadButton" type="submit" aria-label="让 Agent 读取并生成草稿前，先预览字段映射" disabled>
+              让 Agent 读取并预览映射
+            </button>
+            <p class="fq-upload-result" id="fqUploadResult" role="status" aria-live="polite" hidden></p>
+            <section class="fq-mapping-preview" id="fqMappingPreview" aria-labelledby="fqMappingPreviewTitle" hidden>
+              <div class="fq-mapping-preview-head">
+                <div>
+                  <p class="eyebrow">Agent 识别结果</p>
+                  <h4 id="fqMappingPreviewTitle">先确认字段映射，再生成草稿</h4>
+                  <p id="fqPreviewSummary">尚未生成预览。</p>
+                </div>
+                <button class="button button-quiet" id="fqCancelPreview" type="button">重新选择文件</button>
+              </div>
+              <div class="fq-preview-warning-box" id="fqPreviewWarningBox" hidden>
+                <strong>识别提醒</strong>
+                <ul id="fqPreviewWarnings"></ul>
+              </div>
+              <div class="fq-mapping-table-wrap">
+                <table class="fq-mapping-table">
+                  <thead>
+                    <tr><th>原表列</th><th>映射到填报字段</th><th>识别依据</th></tr>
+                  </thead>
+                  <tbody id="fqPreviewRows"></tbody>
+                </table>
+              </div>
+              <p class="fq-preview-validation" id="fqPreviewValidation" role="status" aria-live="polite"></p>
+              <label class="check-row fq-save-profile">
+                <input id="fqSaveMappingProfile" type="checkbox">
+                <span>将本次人工修正保存为下次映射参考（默认不保存）</span>
+              </label>
+              <div class="fq-preview-actions">
+                <button class="button button-secondary" id="fqCancelPreviewBottom" type="button">取消预览</button>
+                <button class="button button-primary" id="fqMaterializeButton" type="button" disabled>
+                  我已确认映射，生成草稿
+                </button>
+              </div>
+              <small class="fq-preview-boundary">生成后仍只是待复核草稿；本步不会代替企业确认，也不会向监管平台发送。</small>
+            </section>
           </form>
           <article class="fq-card">
             <span class="fq-card-icon" aria-hidden="true">↻</span>

@@ -42,6 +42,33 @@
     draft: "填写中",
     discarded: "已放弃",
   });
+  const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+  const CSV_TEMPLATE_HEADER = [
+    "日期",
+    ...["日合计", "零点班", "八点班", "四点班"].flatMap((scope) => [
+      `${scope}_风量(m3/min)`,
+      `${scope}_电量(kWh)`,
+      `${scope}_雷管(发)`,
+      `${scope}_炸药(kg)`,
+      `${scope}_入井人员量(人次)`,
+      `${scope}_产量(t)`,
+    ]),
+  ].join(",") + "\r\n";
+  const IMPORT_TARGETS = Object.freeze([
+    ["ventilation_m3_min", "风量", "m³/min"],
+    ["electricity_kwh", "电量", "kWh"],
+    ["detonators_count", "雷管", "发"],
+    ["explosives_kg", "炸药", "kg"],
+    ["mine_entry_persons", "入井人员量", "人次"],
+    ["production_t", "产量", "t"],
+  ]);
+  const IMPORT_PERIODS = Object.freeze([
+    ["daily_total", "日报合计"],
+    ["zero_shift", "零点班"],
+    ["eight_shift", "八点班"],
+    ["four_shift", "四点班"],
+  ]);
+  const MAPPING_REVIEW_CONFIDENCE = 0.85;
   const state = {
     csrf: "",
     principal: null,
@@ -65,6 +92,7 @@
     messages: [],
     response: null,
     showDiscarded: false,
+    uploadPreview: null,
     busy: new Set(),
   };
 
@@ -129,6 +157,12 @@
       void Promise.all([loadInbox(true), loadDrafts(false)]);
     });
     $("fqUploadForm").addEventListener("submit", uploadFile);
+    $("fqUploadFile").addEventListener("change", handleUploadFileSelection);
+    $("fqDownloadCsvTemplate").addEventListener("click", downloadCsvTemplate);
+    $("fqPreviewRows").addEventListener("change", handlePreviewMappingChange);
+    $("fqCancelPreview").addEventListener("click", cancelUploadPreview);
+    $("fqCancelPreviewBottom").addEventListener("click", cancelUploadPreview);
+    $("fqMaterializeButton").addEventListener("click", materializeUploadPreview);
     $("fqScanWatch").addEventListener("click", scanWatchedDirectories);
     $("fqPollRisks").addEventListener("click", pollRisks);
     $("fqDraftList").addEventListener("click", handleDraftListClick);
@@ -146,6 +180,7 @@
     const loginButton = $("loginButton");
     if (logoutButton) logoutButton.addEventListener("click", () => window.setTimeout(resetSession, 200));
     if (loginButton) loginButton.addEventListener("click", () => window.setTimeout(() => refreshSession(true), 300));
+    syncImportCapability();
     void refreshSession(true);
     window.setInterval(() => void refreshSession(false), 15000);
   }
@@ -199,6 +234,7 @@
         (payload.principal && payload.principal.actor_id);
       state.principal = payload.principal;
       state.csrf = payload.csrf_token;
+      syncImportCapability();
       if (actorChanged || forceLoad || !state.status) await loadAll();
     } catch (error) {
       if (error.status !== 401) message(error.message, "error");
@@ -223,6 +259,8 @@
     };
     state.currentRisk = null;
     state.response = null;
+    resetUploadPreview({ resetFile: true, clearResult: true });
+    syncImportCapability();
     message("请登录企业账号后继续。", "notice");
   }
 
@@ -262,6 +300,444 @@
       element.textContent = element.dataset.originalText || element.textContent;
       element.disabled = false;
     }
+  }
+
+  function formatFileSize(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 0) return "大小未知";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  }
+
+  function setUploadResult(text, kind = "notice") {
+    const target = $("fqUploadResult");
+    target.hidden = !text;
+    target.textContent = text || "";
+    target.className = `fq-upload-result is-${kind}`;
+  }
+
+  function syncImportCapability() {
+    const fileInput = $("fqUploadFile");
+    const uploadButton = $("fqUploadButton");
+    const scanButton = $("fqScanWatch");
+    if (!fileInput || !uploadButton || !scanButton) return;
+    const writable = can("write");
+    const previewActive = Boolean(state.uploadPreview);
+    const file = fileInput.files && fileInput.files[0];
+    const validFile = Boolean(file && file.size > 0 && file.size <= MAX_UPLOAD_BYTES);
+    fileInput.disabled =
+      !writable || previewActive || state.busy.has("fqUploadButton");
+    uploadButton.hidden = previewActive;
+    uploadButton.disabled =
+      previewActive || !writable || !validFile || state.busy.has("fqUploadButton");
+    scanButton.disabled = !writable || state.busy.has("fqScanWatch");
+    const previewBusy = state.busy.has("fqMaterializeButton");
+    $("fqCancelPreview").disabled = previewBusy;
+    $("fqCancelPreviewBottom").disabled = previewBusy;
+    $("fqSaveMappingProfile").disabled = !writable || previewBusy;
+    validatePreviewMappings();
+    if (!writable && state.principal) {
+      $("fqSelectedFileSummary").textContent =
+        "当前账号只能查看；请交给具有填报权限的经办人上传。";
+    } else if (!writable) {
+      $("fqSelectedFileSummary").textContent = "登录后即可选择五量文件。";
+    }
+  }
+
+  function handleUploadFileSelection() {
+    if (state.uploadPreview) resetUploadPreview();
+    const file = $("fqUploadFile").files && $("fqUploadFile").files[0];
+    if (!file) {
+      $("fqSelectedFileSummary").textContent = "尚未选择文件。";
+      $("fqUploadButton").textContent = "让 Agent 读取并预览映射";
+      setUploadResult("");
+      syncImportCapability();
+      return;
+    }
+    if (file.size <= 0) {
+      $("fqSelectedFileSummary").textContent = `${file.name} 是空文件，请重新导出。`;
+      setUploadResult("空文件不能生成草稿。", "error");
+    } else if (file.size > MAX_UPLOAD_BYTES) {
+      $("fqSelectedFileSummary").textContent =
+        `${file.name} · ${formatFileSize(file.size)} · 超过 20 MiB 限制`;
+      setUploadResult("文件过大，请拆分或重新导出后再上传。", "error");
+    } else {
+      $("fqSelectedFileSummary").textContent =
+        `已选择：${file.name} · ${formatFileSize(file.size)} · 等待 Agent 识别`;
+      $("fqUploadButton").textContent = file.name.toLowerCase().endsWith(".csv")
+        ? "让 Agent 读取并预览映射"
+        : "让 Agent 读取并生成草稿";
+      setUploadResult("");
+    }
+    syncImportCapability();
+  }
+
+  function resetUploadPreview({ resetFile = false, clearResult = false } = {}) {
+    state.uploadPreview = null;
+    const uploadCard = $("fqUploadForm");
+    if (uploadCard) uploadCard.classList.remove("has-preview");
+    const panel = $("fqMappingPreview");
+    if (panel) panel.hidden = true;
+    const rows = $("fqPreviewRows");
+    if (rows) rows.replaceChildren();
+    const warnings = $("fqPreviewWarnings");
+    if (warnings) warnings.replaceChildren();
+    const warningBox = $("fqPreviewWarningBox");
+    if (warningBox) warningBox.hidden = true;
+    const saveProfile = $("fqSaveMappingProfile");
+    if (saveProfile) saveProfile.checked = false;
+    const validation = $("fqPreviewValidation");
+    if (validation) {
+      validation.textContent = "";
+      validation.className = "fq-preview-validation";
+    }
+    if (resetFile && $("fqUploadForm")) $("fqUploadForm").reset();
+    if (clearResult) setUploadResult("");
+  }
+
+  function cancelUploadPreview() {
+    resetUploadPreview({ resetFile: true, clearResult: true });
+    handleUploadFileSelection();
+    message("已取消本次映射预览，请重新选择文件。", "notice");
+  }
+
+  function mappingKey(metric, period) {
+    return `${metric}|${period}`;
+  }
+
+  function allowedMapping(value) {
+    return IMPORT_TARGETS.some(([metric]) => metric === value.target_metric) &&
+      IMPORT_PERIODS.some(([period]) => period === value.target_period);
+  }
+
+  function mappingOptionHtml(selected) {
+    const groups = IMPORT_PERIODS.map(([period, periodLabel]) => {
+      const options = IMPORT_TARGETS.map(([metric, label, unit]) => {
+        const value = mappingKey(metric, period);
+        return `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(label)}（${escapeHtml(unit)}）</option>`;
+      }).join("");
+      return `<optgroup label="${escapeHtml(periodLabel)}">${options}</optgroup>`;
+    }).join("");
+    return `<option value="" ${selected ? "" : "selected"}>请选择规范字段…</option>${groups}<option value="__ignore__" ${selected === "__ignore__" ? "selected" : ""}>明确忽略此列</option>`;
+  }
+
+  function previewStatusLabel(column) {
+    const labels = {
+      mapped: "已识别",
+      needs_review: "需人工确认",
+      unmapped: "未映射",
+      blocked: "已阻断",
+    };
+    return labels[column.status] || "需人工确认";
+  }
+
+  function previewSourceLabel(value) {
+    const labels = {
+      deterministic: "规则识别",
+      rule: "规则识别",
+      approved_profile: "已批准映射参考",
+      llm: "Agent 建议",
+      model_suggestion: "Agent 建议",
+      human_override: "人工修正",
+    };
+    return labels[value] || "识别建议";
+  }
+
+  function isFixedDateColumn(column) {
+    return column.target_metric === "date" || column.status === "date";
+  }
+
+  function previewRowClass(column) {
+    const confidence = Number(column.confidence);
+    if (column.status === "blocked") return "is-blocked";
+    if (
+      column.status === "needs_review" ||
+      column.status === "unmapped" ||
+      !Number.isFinite(confidence) ||
+      confidence < MAPPING_REVIEW_CONFIDENCE
+    ) {
+      return "is-review";
+    }
+    return "is-mapped";
+  }
+
+  function renderUploadPreview(payload, filename) {
+    if (!payload || typeof payload.preview_id !== "string" || !payload.preview_id) {
+      throw new Error("预览服务未返回有效 preview_id。");
+    }
+    if (!Array.isArray(payload.columns) || payload.columns.length === 0) {
+      throw new Error("未识别到可预览的列。");
+    }
+    const previewColumns = [...payload.columns];
+    const dateColumn = payload.date_column;
+    if (
+      dateColumn &&
+      Number.isInteger(Number(dateColumn.source_index)) &&
+      !previewColumns.some(
+        (column) => Number(column && column.source_index) === Number(dateColumn.source_index),
+      )
+    ) {
+      previewColumns.unshift({
+        source_index: Number(dateColumn.source_index),
+        source_header: dateColumn.source_header || "日期",
+        target_metric: "date",
+        target_period: null,
+        target_unit: "ISO date",
+        confidence: dateColumn.confidence,
+        source: "deterministic",
+        reason: dateColumn.inferred ? "日期列由格式推断，建稿后需重点复核" : "日期列已确定",
+        status: "date",
+      });
+    }
+    const sourceIndexes = new Set();
+    const columns = previewColumns.map((raw, index) => {
+      const sourceIndex = Number(raw && raw.source_index);
+      if (!Number.isInteger(sourceIndex) || sourceIndex < 0 || sourceIndexes.has(sourceIndex)) {
+        throw new Error("预览列编号非法或重复。");
+      }
+      sourceIndexes.add(sourceIndex);
+      const column = {
+        source_index: sourceIndex,
+        source_header: String((raw && raw.source_header) || `第 ${index + 1} 列`),
+        target_metric: raw && raw.target_metric,
+        target_period: raw && raw.target_period,
+        target_unit: raw && raw.target_unit,
+        confidence: raw && raw.confidence,
+        source: String((raw && raw.source) || ""),
+        reason: String((raw && raw.reason) || "未提供识别理由"),
+        status: String((raw && raw.status) || "needs_review"),
+        selection: "",
+        human_changed: false,
+      };
+      if (isFixedDateColumn(column)) column.selection = "__date__";
+      else if (
+        column.status !== "unmapped" &&
+        column.status !== "blocked" &&
+        allowedMapping(column)
+      ) {
+        column.selection = mappingKey(column.target_metric, column.target_period);
+      }
+      return column;
+    });
+    state.uploadPreview = {
+      preview_id: payload.preview_id,
+      filename,
+      columns,
+      warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
+      detected_months: Array.isArray(payload.detected_months)
+        ? payload.detected_months.map(String)
+        : [],
+      expires_at: payload.expires_at || null,
+      row_count: Number(payload.row_count || 0),
+      valid_day_count: Number(payload.valid_day_count || 0),
+    };
+
+    $("fqUploadForm").classList.add("has-preview");
+    $("fqMappingPreview").hidden = false;
+    const monthText = state.uploadPreview.detected_months.length
+      ? state.uploadPreview.detected_months.join("、")
+      : "月份待确认";
+    const dayText = state.uploadPreview.valid_day_count > 0
+      ? ` · ${state.uploadPreview.valid_day_count} 个有效日期`
+      : "";
+    $("fqPreviewSummary").textContent =
+      `${filename} · ${columns.length} 个来源列 · ${monthText}${dayText}`;
+
+    const warningMessages = state.uploadPreview.warnings.map((warning) =>
+      typeof warning === "string"
+        ? warning
+        : String((warning && (warning.message || warning.reason || warning.code)) || "存在待复核提醒"),
+    );
+    $("fqPreviewWarningBox").hidden = warningMessages.length === 0;
+    $("fqPreviewWarnings").innerHTML = warningMessages
+      .map((warning) => `<li>${escapeHtml(warning)}</li>`)
+      .join("");
+
+    $("fqPreviewRows").innerHTML = columns.map((column) => {
+      const confidence = Number(column.confidence);
+      const confidenceText = Number.isFinite(confidence)
+        ? `${Math.round(Math.max(0, Math.min(1, confidence)) * 100)}%`
+        : "未提供";
+      const fixedDate = isFixedDateColumn(column);
+      const control = fixedDate
+        ? '<span class="fq-fixed-mapping">日期列（固定）</span>'
+        : `<label class="fq-mapping-select-label"><span class="sr-only">为 ${escapeHtml(column.source_header)} 选择映射</span><select class="fq-mapping-select" data-source-index="${column.source_index}">${mappingOptionHtml(column.selection)}</select></label>`;
+      return `<tr class="${previewRowClass(column)}" data-preview-row="${column.source_index}">
+        <td><strong>${escapeHtml(column.source_header)}</strong><small>第 ${column.source_index + 1} 列</small></td>
+        <td>${control}<small class="fq-mapping-unit" data-mapping-unit="${column.source_index}">${column.target_unit ? `建议单位：${escapeHtml(column.target_unit)}` : "单位由规范字段固定"}</small></td>
+        <td><span class="fq-mapping-status">${escapeHtml(previewStatusLabel(column))}</span><small>${escapeHtml(previewSourceLabel(column.source))} · 置信度 ${escapeHtml(confidenceText)}</small><p>${escapeHtml(column.reason)}</p></td>
+      </tr>`;
+    }).join("");
+    setUploadResult(
+      "映射预览已生成；请先处理黄色或红色项，再生成草稿。",
+      "notice",
+    );
+    syncImportCapability();
+  }
+
+  function handlePreviewMappingChange(event) {
+    const select = event.target.closest("[data-source-index]");
+    if (!select || !state.uploadPreview) return;
+    const sourceIndex = Number(select.dataset.sourceIndex);
+    const column = state.uploadPreview.columns.find(
+      (item) => item.source_index === sourceIndex,
+    );
+    if (!column || isFixedDateColumn(column)) return;
+    column.selection = select.value;
+    column.human_changed = true;
+    column.source = "human_override";
+    const row = document.querySelector(`[data-preview-row="${sourceIndex}"]`);
+    if (row) {
+      row.classList.remove("is-blocked", "is-mapped", "is-review");
+      row.classList.add(column.selection ? "is-review" : previewRowClass(column));
+      const status = row.querySelector(".fq-mapping-status");
+      if (status) {
+        status.textContent = column.selection === "__ignore__"
+          ? "已明确忽略"
+          : column.selection
+            ? "人工已选择"
+            : previewStatusLabel(column);
+      }
+      const unit = row.querySelector("[data-mapping-unit]");
+      if (unit) {
+        if (column.selection === "__ignore__") {
+          unit.textContent = "此列不会写入草稿";
+        } else if (column.selection) {
+          const [metric] = column.selection.split("|");
+          const target = IMPORT_TARGETS.find(([candidate]) => candidate === metric);
+          unit.textContent = target ? `规范单位：${target[2]}` : "单位由规范字段固定";
+        } else {
+          unit.textContent = column.target_unit
+            ? `建议单位：${column.target_unit}`
+            : "单位由规范字段固定";
+        }
+      }
+    }
+    validatePreviewMappings();
+  }
+
+  function validatePreviewMappings() {
+    const button = $("fqMaterializeButton");
+    const target = $("fqPreviewValidation");
+    if (!button || !target || !state.uploadPreview) {
+      if (button) button.disabled = true;
+      return false;
+    }
+    const columns = state.uploadPreview.columns.filter(
+      (column) => !isFixedDateColumn(column),
+    );
+    const unresolved = columns.filter((column) => !column.selection);
+    const targets = new Map();
+    for (const column of columns) {
+      if (!column.selection || column.selection === "__ignore__") continue;
+      const seen = targets.get(column.selection) || [];
+      seen.push(column.source_index);
+      targets.set(column.selection, seen);
+    }
+    const duplicates = new Set(
+      [...targets.values()].filter((indexes) => indexes.length > 1).flat(),
+    );
+    const mappedCount = columns.filter(
+      (column) => column.selection && column.selection !== "__ignore__",
+    ).length;
+    document.querySelectorAll("[data-preview-row]").forEach((row) => {
+      row.classList.toggle("is-duplicate", duplicates.has(Number(row.dataset.previewRow)));
+    });
+    const valid =
+      columns.length > 0 &&
+      mappedCount > 0 &&
+      unresolved.length === 0 &&
+      duplicates.size === 0;
+    button.disabled =
+      !valid || !can("write") || state.busy.has("fqMaterializeButton");
+    if (unresolved.length) {
+      target.textContent = `还有 ${unresolved.length} 列未确认；请选择规范字段，或明确忽略。`;
+      target.className = "fq-preview-validation is-warning";
+    } else if (duplicates.size) {
+      target.textContent = "多个原表列不能同时指向同一填报字段；请修正红色项。";
+      target.className = "fq-preview-validation is-error";
+    } else if (!columns.length) {
+      target.textContent = "没有可确认的业务列，不能生成草稿。";
+      target.className = "fq-preview-validation is-error";
+    } else if (!mappedCount) {
+      target.textContent = "不能忽略全部业务列；至少需要一列映射到五量字段。";
+      target.className = "fq-preview-validation is-error";
+    } else {
+      const reviewCount = columns.filter(
+        (column) =>
+          column.status !== "mapped" ||
+          !Number.isFinite(Number(column.confidence)) ||
+          Number(column.confidence) < MAPPING_REVIEW_CONFIDENCE,
+      ).length;
+      target.textContent = reviewCount
+        ? `映射已完整；其中 ${reviewCount} 列来自低置信度或人工复核项，请确认无误。`
+        : "映射已完整，可以生成待复核草稿。";
+      target.className = reviewCount
+        ? "fq-preview-validation is-warning"
+        : "fq-preview-validation is-success";
+    }
+    return valid;
+  }
+
+  function materializeMappings() {
+    if (!state.uploadPreview) return [];
+    return state.uploadPreview.columns
+      .filter((column) => !isFixedDateColumn(column))
+      .filter((column) => column.selection !== "__ignore__")
+      .map((column) => {
+        const [targetMetric, targetPeriod] = column.selection.split("|");
+        const candidate = { target_metric: targetMetric, target_period: targetPeriod };
+        if (!allowedMapping(candidate)) throw new Error("映射包含非白名单字段。");
+        return {
+          source_index: column.source_index,
+          target_metric: targetMetric,
+          target_period: targetPeriod,
+        };
+      });
+  }
+
+  async function completeImportedDraft(
+    result,
+    { reviewedMappings = false } = {},
+  ) {
+    resetUploadPreview({ resetFile: true });
+    $("fqSelectedFileSummary").textContent = "尚未选择文件。";
+    await Promise.all([loadInbox(false), loadDrafts(false), loadAudit(false)]);
+    const dayCount = Number(
+      result.draft && result.draft.payload && result.draft.payload.days
+        ? result.draft.payload.days.length
+        : 0,
+    );
+    const dayText = dayCount > 0 ? `${dayCount} 天数据` : "文件内数据";
+    const successText = result.duplicate
+      ? `Agent 已找到该文件对应的 ${dayText} 草稿；本次未重复建稿，当前尚未报送。`
+      : reviewedMappings
+        ? `Agent 已按确认映射读取 ${dayText}并生成复核草稿；当前尚未报送。`
+        : `Agent 已识别 ${dayText}并生成复核草稿；当前尚未报送。`;
+    setUploadResult(successText, "success");
+    message(successText, "success");
+    if (result.draft_id) {
+      activateTab("review");
+      await openDraft(result.draft_id);
+    }
+  }
+
+  function downloadCsvTemplate() {
+    const blob = new Blob(["\ufeff", CSV_TEMPLATE_HEADER], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "五量填报标准模板.csv";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    setUploadResult(
+      "标准 CSV 模板已下载；请按行填写每日数据，不要修改表头。",
+      "success",
+    );
   }
 
   function activateTab(name) {
@@ -342,32 +818,108 @@
 
   async function uploadFile(event) {
     event.preventDefault();
+    if (!can("write")) {
+      const text = "当前账号没有填报权限，请交给企业填报员处理。";
+      setUploadResult(text, "error");
+      return message(text, "error");
+    }
     const file = $("fqUploadFile").files[0];
-    if (!file) return message("请先选择文件。", "error");
-    if (file.size > 20 * 1024 * 1024) return message("文件超过 20 MiB，未上传。", "error");
-    setBusy("fqUploadButton", true, "正在安全导入…");
+    if (!file) {
+      setUploadResult("请先选择五量文件。", "error");
+      return message("请先选择文件。", "error");
+    }
+    if (file.size <= 0 || file.size > MAX_UPLOAD_BYTES) {
+      handleUploadFileSelection();
+      return message(
+        file.size <= 0 ? "文件为空，未上传。" : "文件超过 20 MiB，未上传。",
+        "error",
+      );
+    }
+    if (state.uploadPreview) return;
+    const csvPreview = file.name.toLowerCase().endsWith(".csv");
+    setBusy(
+      "fqUploadButton",
+      true,
+      csvPreview ? "Agent 正在生成预览…" : "Agent 正在识别并建稿…",
+    );
+    setUploadResult(
+      csvPreview
+        ? "正在识别表头、日期和单位；此时还不会写入草稿…"
+        : "正在安全读取文件并生成待复核草稿…",
+      "notice",
+    );
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       let binary = "";
       for (let offset = 0; offset < bytes.length; offset += 32768) {
         binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
       }
-      const result = await api("/api/v2/imports", {
-        method: "POST",
-        body: { filename: file.name, content_base64: btoa(binary) },
-      });
-      $("fqUploadForm").reset();
-      await Promise.all([loadInbox(false), loadDrafts(false), loadAudit(false)]);
-      if (result.duplicate) message("同一内容已经接收过，本次未重复建稿。", "notice");
-      else message("导入成功，已生成待人工复核草稿。", "success");
-      if (result.draft_id) {
-        activateTab("review");
-        await openDraft(result.draft_id);
+      const requestBody = { filename: file.name, content_base64: btoa(binary) };
+      if (csvPreview) {
+        const preview = await api("/api/v2/imports/preview", {
+          method: "POST",
+          body: requestBody,
+        });
+        renderUploadPreview(preview, file.name);
+        message("映射预览已生成；未映射或低置信度列需要人工确认。", "notice");
+      } else {
+        const result = await api("/api/v2/imports", {
+          method: "POST",
+          body: requestBody,
+        });
+        await completeImportedDraft(result);
       }
     } catch (error) {
+      resetUploadPreview();
+      setUploadResult(
+        `${csvPreview ? "未能生成映射预览" : "未能生成草稿"}：${error.message}`,
+        "error",
+      );
       message(error.message, "error");
     } finally {
       setBusy("fqUploadButton", false);
+      syncImportCapability();
+    }
+  }
+
+  async function materializeUploadPreview() {
+    if (!can("write")) {
+      const text = "当前账号没有生成草稿的权限。";
+      setUploadResult(text, "error");
+      return message(text, "error");
+    }
+    if (!state.uploadPreview || !validatePreviewMappings()) {
+      return message("请先完成所有字段映射。", "error");
+    }
+    const previewId = state.uploadPreview.preview_id;
+    let mappings;
+    try {
+      mappings = materializeMappings();
+    } catch (error) {
+      setUploadResult(error.message, "error");
+      return message(error.message, "error");
+    }
+    setBusy("fqMaterializeButton", true, "正在生成草稿…");
+    syncImportCapability();
+    setUploadResult("正在按已确认的映射生成待复核草稿…", "notice");
+    try {
+      const result = await api(
+        `/api/v2/imports/${encodeURIComponent(previewId)}/materialize`,
+        {
+          method: "POST",
+          body: {
+            mappings,
+            save_profile: $("fqSaveMappingProfile").checked,
+          },
+        },
+      );
+      await completeImportedDraft(result, { reviewedMappings: true });
+    } catch (error) {
+      setUploadResult(`未能生成草稿：${error.message}`, "error");
+      message(error.message, "error");
+    } finally {
+      setBusy("fqMaterializeButton", false);
+      syncImportCapability();
     }
   }
 
@@ -386,6 +938,7 @@
       message(error.message, "error");
     } finally {
       setBusy("fqScanWatch", false);
+      syncImportCapability();
     }
   }
 

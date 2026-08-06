@@ -70,6 +70,9 @@ _FQ_DRAFT_ROUTE = re.compile(
 )
 _FQ_RISK_ROUTE = re.compile(r"^/api/v2/risks/([^/]+)(?:/(chat|response))?$")
 _FQ_RESPONSE_ROUTE = re.compile(r"^/api/v2/responses/([^/]+)(?:/(confirm))?$")
+_FQ_IMPORT_MATERIALIZE_ROUTE = re.compile(
+    r"^/api/v2/imports/([0-9a-fA-F-]{36})/materialize$"
+)
 _AGENT_V2_PREFIXES = (
     "/api/v1/agent/workflows",
     "/api/v1/agent/flows",
@@ -1580,6 +1583,57 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 )
                 return True
             self._method_not_allowed(("GET", "POST"))
+            return True
+        if path == "/api/v2/imports/preview":
+            if method != "POST":
+                self._method_not_allowed(("POST",))
+                return True
+            if not self._require(context, "write"):
+                return True
+            body = self._body(maximum=_MAX_IMPORT_BODY)
+            self._reject_unknown_fields(
+                body,
+                frozenset({"filename", "content_base64"}),
+            )
+            encoded = body.get("content_base64")
+            if not isinstance(encoded, str):
+                raise ValueError("content_base64 必须是字符串")
+            try:
+                content = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as error:
+                raise ValueError("content_base64 非法") from error
+            result = runtime.preview_csv(
+                filename=body.get("filename"),
+                content=content,
+                actor=actor,
+            )
+            self._json(HTTPStatus.CREATED, result)
+            return True
+        materialize_match = _FQ_IMPORT_MATERIALIZE_ROUTE.fullmatch(path)
+        if materialize_match:
+            if method != "POST":
+                self._method_not_allowed(("POST",))
+                return True
+            if not self._require(context, "write"):
+                return True
+            body = self._body()
+            self._reject_unknown_fields(
+                body,
+                frozenset({"mappings", "save_profile"}),
+            )
+            save_profile = body.get("save_profile", False)
+            if not isinstance(save_profile, bool):
+                raise ValueError("save_profile 必须是布尔值")
+            result = runtime.materialize_csv_preview(
+                preview_id=materialize_match.group(1),
+                mappings=body.get("mappings"),
+                save_profile=save_profile,
+                actor=actor,
+            )
+            self._json(
+                HTTPStatus.OK if result.get("duplicate") else HTTPStatus.CREATED,
+                result,
+            )
             return True
         if path == "/api/v2/direct-ingest":
             if method != "POST":

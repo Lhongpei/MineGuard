@@ -13,6 +13,7 @@ from enterprise_agent.five_quantity_import import (
     METRICS,
     SHIFT_KEYS,
     import_five_quantity_bytes,
+    inspect_five_quantity_csv,
 )
 
 
@@ -105,6 +106,308 @@ def test_preferred_chinese_five_quantity_header_keeps_first_and_only_day() -> No
         "mine_entry_persons": 320,
         "production_t": 2600,
     }
+
+
+def test_csv_accepts_gb18030_and_semicolon_delimiter() -> None:
+    imported = import_five_quantity_bytes(
+        filename="业务系统导出.csv",
+        content=(
+            "日期;风量(m3/min);电量(kWh);雷管(发);炸药(kg);入井人员量(人次);产量(t)\n"
+            "2026-07-01;4800;96000;120;240;320;2600\n"
+        ).encode("gb18030"),
+        acquisition_mode="manual_import",
+        identity=identity(),
+        captured_at="2026-08-01T00:00:00Z",
+    )
+    values = imported["payload"]["days"][0]["reported_quantity"]["daily_total"]
+    assert values["ventilation_m3_min"]["value"] == 4800
+    assert values["production_t"]["value"] == 2600
+
+
+def test_complete_three_shift_csv_template_maps_every_scope() -> None:
+    scopes = ("日合计", "零点班", "八点班", "四点班")
+    metrics = (
+        "风量(m3/min)",
+        "电量(kWh)",
+        "雷管(发)",
+        "炸药(kg)",
+        "入井人员量(人次)",
+        "产量(t)",
+    )
+    header = ["日期"] + [
+        f"{scope}_{metric}" for scope in scopes for metric in metrics
+    ]
+    values = ["2026-07-01"] + [str(index) for index in range(1, 25)]
+    imported = import_five_quantity_bytes(
+        filename="五量填报标准模板.csv",
+        content=(",".join(header) + "\n" + ",".join(values) + "\n").encode(),
+        acquisition_mode="manual_import",
+        identity=identity(),
+        captured_at="2026-08-01T00:00:00Z",
+    )
+    reported = imported["payload"]["days"][0]["reported_quantity"]
+    assert [reported["daily_total"][metric]["value"] for metric in METRICS] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+    ]
+    assert [
+        reported["shifts"]["zero_shift"]["measurements"][metric]["value"]
+        for metric in METRICS
+    ] == [7, 8, 9, 10, 11, 12]
+    assert [
+        reported["shifts"]["eight_shift"]["measurements"][metric]["value"]
+        for metric in METRICS
+    ] == [13, 14, 15, 16, 17, 18]
+    assert [
+        reported["shifts"]["four_shift"]["measurements"][metric]["value"]
+        for metric in METRICS
+    ] == [19, 20, 21, 22, 23, 24]
+
+
+def test_csv_reports_unmapped_and_unsafe_numeric_cells_without_executing() -> None:
+    imported = import_five_quantity_bytes(
+        filename="待核对.csv",
+        content=(
+            '日期,产量,电量,企业备注\n'
+            '2026-07-01,=1+1,"1,2",不得自动采用\n'
+        ).encode(),
+        acquisition_mode="manual_import",
+        identity=identity(),
+        captured_at="2026-08-01T00:00:00Z",
+    )
+    values = imported["payload"]["days"][0]["reported_quantity"]["daily_total"]
+    assert values["production_t"]["value"] is None
+    assert values["electricity_kwh"]["value"] is None
+    assert "source_format_warning" in values["production_t"]["quality_flags"]
+    assert "source_format_warning" in values["electricity_kwh"]["quality_flags"]
+    kinds = {item["kind"] for item in imported["suggestions"]}
+    assert {"formula_like_cell", "invalid_numeric_cell", "unmapped_column"} <= kinds
+
+
+def test_csv_rejects_malformed_quotes_nul_and_excessive_cells() -> None:
+    for content, message in (
+        (b'date,production_t\n"2026-07-01,2600\n', "CSV"),
+        (b"date,production_t\n2026-07-01,26\x000\n", "NUL"),
+    ):
+        with pytest.raises(ImportContentError, match=message):
+            import_five_quantity_bytes(
+                filename="unsafe.csv",
+                content=content,
+                acquisition_mode="manual_import",
+                identity=identity(),
+            )
+
+    oversized_row = ",".join(["x"] * 256)
+    excessive_cells = (oversized_row + "\n") * 1954
+    with pytest.raises(ImportContentError, match="单元格"):
+        import_five_quantity_bytes(
+            filename="too-many-cells.csv",
+            content=excessive_cells.encode(),
+            acquisition_mode="manual_import",
+            identity=identity(),
+        )
+
+
+def test_csv_preview_masks_values_and_infers_an_opaque_date_header() -> None:
+    content = (
+        "业务日,原煤完成量,当日总电耗,内部备注\n"
+        "2026-07-01,2600,96000,仅内部可见\n"
+        "2026-07-02,2610,97000,继续生产\n"
+    ).encode()
+    preview = inspect_five_quantity_csv(filename="ERP导出.csv", content=content)
+
+    assert preview["date_column"] == {
+        "source_index": 0,
+        "source_header": "业务日",
+        "inferred": True,
+        "confidence": 0.85,
+    }
+    assert preview["valid_day_count"] == 2
+    assert preview["detected_months"] == ["2026-07"]
+    assert preview["encoding"] == "utf-8"
+    assert preview["delimiter"] == ","
+    assert preview["columns"][0]["sample_types"] == {"integer": 2}
+    serialized = json.dumps(preview, ensure_ascii=False)
+    assert "2600" not in serialized
+    assert "仅内部可见" not in serialized
+
+
+def test_headerless_csv_fails_closed_instead_of_exposing_first_data_row() -> None:
+    content = (
+        b"2026-08-01,2600,96000\n"
+        b"2026-08-02,2700,97000\n"
+    )
+
+    with pytest.raises(ImportContentError, match="日期列"):
+        inspect_five_quantity_csv(filename="无表头.csv", content=content)
+    with pytest.raises(ImportContentError, match="日期列"):
+        import_five_quantity_bytes(
+            filename="无表头.csv",
+            content=content,
+            acquisition_mode="manual_import",
+            identity=identity(),
+        )
+
+
+def test_headerless_unit_values_cannot_masquerade_as_safe_headers() -> None:
+    content = (
+        b"08/01/2026,2600t,96000kWh\n"
+        b"2026-08-02,2700t,97000kWh\n"
+        b"2026-08-03,2800t,98000kWh\n"
+    )
+
+    with pytest.raises(ImportContentError, match="日期列"):
+        inspect_five_quantity_csv(filename="伪表头.csv", content=content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        b"date,2600,SECRET-RAW-VALUE\n2026-08-01,2700,other\n",
+        b"date,=HYPERLINK('https://invalid'),production_t\n"
+        b"2026-08-01,2700,2800\n",
+    ),
+)
+def test_declared_date_header_rejects_observation_or_formula_cells(
+    content: bytes,
+) -> None:
+    with pytest.raises(ImportContentError, match="日期列"):
+        inspect_five_quantity_csv(filename="伪造显式表头.csv", content=content)
+
+
+@pytest.mark.parametrize("detail", ("产量,2600", "产量,=CMD()"))
+def test_multilevel_header_rejects_observation_or_formula_detail(
+    detail: str,
+) -> None:
+    content = (
+        "date,业务字段,内部备注\n"
+        f",{detail}\n"
+        "2026-08-01,2700,SECRET\n"
+    ).encode()
+
+    with pytest.raises(ImportContentError, match="表头明细行"):
+        inspect_five_quantity_csv(filename="伪造多层表头.csv", content=content)
+
+
+def test_opaque_date_inference_accepts_real_erp_field_codes() -> None:
+    preview = inspect_five_quantity_csv(
+        filename="ERP字段码.csv",
+        content=(
+            "业务日,A17,ERP_COL_01,风量(m3/min)\n"
+            "2026-08-01,2600,96000,4800\n"
+            "2026-08-02,2700,97000,4900\n"
+        ).encode(),
+    )
+
+    assert preview["date_column"]["inferred"] is True
+    assert [item["source_header"] for item in preview["columns"]] == [
+        "A17",
+        "ERP_COL_01",
+        "风量(m3/min)",
+    ]
+
+
+def test_reviewed_csv_mapping_materializes_values_without_model_editing() -> None:
+    content = (
+        "业务日,原煤完成量,当日总电耗,内部备注\n"
+        "2026-07-01,2600,96000,不得写入报表\n"
+    ).encode()
+    imported = import_five_quantity_bytes(
+        filename="ERP导出.csv",
+        content=content,
+        acquisition_mode="manual_import",
+        identity=identity(),
+        captured_at="2026-08-01T00:00:00Z",
+        column_mappings=[
+            {
+                "source_index": 1,
+                "target_metric": "production_t",
+                "target_period": "daily_total",
+            },
+            {
+                "source_index": 2,
+                "target_metric": "electricity_kwh",
+                "target_period": "daily_total",
+            },
+        ],
+        model_assistance_used=True,
+        model_output_sha256="a" * 64,
+    )
+
+    daily = imported["payload"]["days"][0]["reported_quantity"]["daily_total"]
+    assert daily["production_t"]["value"] == 2600
+    assert daily["electricity_kwh"]["value"] == 96000
+    assert imported["payload"]["agent_processing"]["model_assistance_used"] is True
+    assert any(
+        item["kind"] == "explicitly_unmapped_column"
+        and item["source_column"] == 3
+        for item in imported["suggestions"]
+    )
+
+
+def test_reviewed_csv_mapping_rejects_duplicate_or_unknown_targets() -> None:
+    content = "日期,A,B\n2026-07-01,1,2\n".encode()
+    invalid_mappings = (
+        [
+            {
+                "source_index": 1,
+                "target_metric": "production_t",
+                "target_period": "daily_total",
+            },
+            {
+                "source_index": 2,
+                "target_metric": "production_t",
+                "target_period": "daily_total",
+            },
+        ],
+        [
+            {
+                "source_index": 1,
+                "target_metric": "arbitrary_python_expression",
+                "target_period": "daily_total",
+            }
+        ],
+    )
+    for mappings in invalid_mappings:
+        with pytest.raises(ImportContentError, match="同一规范字段|白名单"):
+            import_five_quantity_bytes(
+                filename="unsafe.csv",
+                content=content,
+                acquisition_mode="manual_import",
+                identity=identity(),
+                column_mappings=mappings,
+            )
+
+
+def test_csv_mapping_never_silently_treats_incompatible_units_as_canonical() -> None:
+    content = "日期,原煤产量(kg),风量(m3/s)\n2026-07-01,2600000,80\n".encode()
+    preview = inspect_five_quantity_csv(filename="wrong-units.csv", content=content)
+    assert {item["status"] for item in preview["columns"]} == {"blocked"}
+    assert all("不会静默换算" in item["reason"] for item in preview["columns"])
+
+    with pytest.raises(ImportContentError, match="不会静默换算"):
+        import_five_quantity_bytes(
+            filename="wrong-units.csv",
+            content=content,
+            acquisition_mode="manual_import",
+            identity=identity(),
+            column_mappings=[
+                {
+                    "source_index": 1,
+                    "target_metric": "production_t",
+                    "target_period": "daily_total",
+                },
+                {
+                    "source_index": 2,
+                    "target_metric": "ventilation_m3_min",
+                    "target_period": "daily_total",
+                },
+            ],
+        )
 
 
 def test_separate_columns_accept_unambiguous_business_unit_suffixes() -> None:

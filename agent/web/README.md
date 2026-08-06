@@ -3,7 +3,7 @@
 默认页面是面向企业经办人和负责人的四步工作区，不要求用户理解 JSON Schema、
 HMAC、求解器或任务编排：
 
-1. **数据收件箱**：人工上传 ET/XLS/XLSX/CSV/JSON/JSONL，或立即扫描固定目录；
+1. **数据收件箱**：以“上传 CSV，自动生成填报草稿”为主入口，可下载中文标准模板；也支持 ET/XLS/XLSX/JSON/JSONL 或立即扫描固定目录；
 2. **规范化复核与报送**：逐日展开日报合计和零点、八点、四点班的风量、电量、
    火工品量、入井人员量、产量五类数据；火工品量内分雷管、炸药子项，保存后由正式
    账号人工确认；
@@ -15,6 +15,12 @@ HMAC、求解器或任务编排：
 人工导入和直采的数据均进入同一复核与报送流程。缺失值显示为空和“缺失”，页面
 不会用 0、历史均值或模型猜测填补。企业确认和回复确认均要求 `confirm + submit`
 权限；演示/待换密账号即使误配权限也会被服务器拒绝。
+
+CSV 上传后的准确流程是“安全预检 → 已批准配置/本地规则/受约束模型给出映射建议 →
+人员处理黄色或红色列并确认映射 → 生成待复核草稿 → 逐日复核 → 具名确认后进入发送
+队列”。模型只看到表头和整数/日期/文本等类型统计，不接收原始数值；映射下拉也只能
+选择固定五量字段和日报/三班次。上传和映射确认都不会调用报送确认或发送接口；只读
+账号的文件选择和目录扫描入口会在页面上直接锁定。
 
 ## 文件
 
@@ -33,6 +39,8 @@ HMAC、求解器或任务编排：
 ```text
 GET  /api/v2/status
 GET/POST /api/v2/imports  # GET 可带 include_discarded=true
+POST /api/v2/imports/preview
+POST /api/v2/imports/{preview_id}/materialize
 POST /api/v2/watch/scan
 GET  /api/v2/drafts       # 可带 include_discarded=true
 GET/PATCH/DELETE /api/v2/drafts/{id}  # DELETE 仅软放弃未确认稿

@@ -144,6 +144,23 @@ def test_enterprise_v2_http_import_review_confirm_and_audit(tmp_path: Path) -> N
         )
         assert status == 201
         second_draft = second_import["draft"]
+        status, duplicate_month = request_json(
+            connection,
+            "POST",
+            f"/api/v2/drafts/{second_draft['draft_id']}/confirm",
+            {
+                "expected_revision": second_draft["revision"],
+                "confirmer_name": "本机测试员",
+                "confirmer_role": "企业填报员",
+                "attestation": "同月第二份首报必须得到清晰冲突提示。",
+                "accepted": True,
+            },
+        )
+        assert status == 409
+        assert "该月份" in duplicate_month["error"]["message"]
+        assert runtime.store.get_draft(second_draft["draft_id"])["status"] == (
+            "ready_review"
+        )
         status, discarded = request_json(
             connection,
             "DELETE",
@@ -222,6 +239,141 @@ def test_enterprise_v2_http_import_review_confirm_and_audit(tmp_path: Path) -> N
         assert status == 400
         status, _ = request_json(connection, "DELETE", "/api/v2/risks/report-1", {})
         assert status == 405
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_csv_preview_mapping_profile_and_materialize_http_flow(
+    tmp_path: Path,
+) -> None:
+    repository = Repository(tmp_path / "agent.db")
+    runtime = FiveQuantityRuntime(
+        repository,
+        identity=identity(),
+        quarantine_directory=tmp_path / "quarantine",
+        csv_preview_directory=tmp_path / "csv-preview-evidence",
+    )
+    service = EnterpriseAgentService(repository, five_quantity_runtime=runtime)
+    server = EnterpriseAgentHTTPServer(
+        ("127.0.0.1", 0),
+        service,
+        web_root=ROOT / "web",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", server.server_address[1], timeout=5
+    )
+    csv = (
+        "业务日,原煤完成量,当日总电耗,内部备注\n"
+        "2026-08-01,2600,96000,不得发送给模型\n"
+    ).encode()
+    try:
+        status, preview = request_json(
+            connection,
+            "POST",
+            "/api/v2/imports/preview",
+            {
+                "filename": "erp-august.csv",
+                "content_base64": base64.b64encode(csv).decode(),
+            },
+        )
+        assert status == 201
+        assert preview["status"] == "active"
+        assert preview["date_column"]["source_index"] == 0
+        assert preview["date_column"]["inferred"] is True
+        assert preview["detected_months"] == ["2026-08"]
+        assert preview["valid_day_count"] == 1
+        assert preview["mapping_assistant"]["attempted"] is False
+        assert {item["status"] for item in preview["columns"]} == {"unmapped"}
+        assert "2600" not in json.dumps(preview, ensure_ascii=False)
+        assert "不得发送给模型" not in json.dumps(preview, ensure_ascii=False)
+
+        status, invalid = request_json(
+            connection,
+            "POST",
+            f"/api/v2/imports/{preview['preview_id']}/materialize",
+            {
+                "mappings": [
+                    {
+                        "source_index": 99,
+                        "target_metric": "production_t",
+                        "target_period": "daily_total",
+                    }
+                ],
+                "save_profile": False,
+            },
+        )
+        assert status == 422
+        assert "不存在" in invalid["error"]["message"]
+
+        mappings = [
+            {
+                "source_index": 1,
+                "target_metric": "production_t",
+                "target_period": "daily_total",
+            },
+            {
+                "source_index": 2,
+                "target_metric": "electricity_kwh",
+                "target_period": "daily_total",
+            },
+        ]
+        status, materialized = request_json(
+            connection,
+            "POST",
+            f"/api/v2/imports/{preview['preview_id']}/materialize",
+            {"mappings": mappings, "save_profile": True},
+        )
+        assert status == 201
+        assert materialized["status"] == "ready_review"
+        assert materialized["mapping_profile"]["status"] == "active"
+        assert materialized["model_assistance_used"] is False
+        daily = materialized["draft"]["payload"]["days"][0][
+            "reported_quantity"
+        ]["daily_total"]
+        assert daily["production_t"]["value"] == 2600
+        assert daily["electricity_kwh"]["value"] == 96000
+
+        second_csv = csv.replace(b"2026-08-01", b"2026-08-02").replace(
+            b"2600", b"2610"
+        )
+        status, reused = request_json(
+            connection,
+            "POST",
+            "/api/v2/imports/preview",
+            {
+                "filename": "erp-august-next.csv",
+                "content_base64": base64.b64encode(second_csv).decode(),
+            },
+        )
+        assert status == 201
+        assert reused["mapping_profile_applied"] == materialized["mapping_profile"][
+            "profile_id"
+        ]
+        reused_by_index = {
+            item["source_index"]: item for item in reused["columns"]
+        }
+        assert reused_by_index[1]["source"] == "approved_profile"
+        assert reused_by_index[1]["target_metric"] == "production_t"
+        assert reused_by_index[2]["target_metric"] == "electricity_kwh"
+
+        status, audit = request_json(connection, "GET", "/api/v2/audit")
+        assert status == 200
+        assert audit["valid"] is True
+        preview_events = [
+            item
+            for item in audit["events"]
+            if item["event_type"].startswith("five_quantity_csv_")
+        ]
+        assert preview_events
+        assert all(
+            item["details"].get("submission_enqueued") is not True
+            for item in preview_events
+        )
     finally:
         connection.close()
         server.shutdown()
@@ -328,6 +480,16 @@ def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
     assert "include_discarded=true" in script
     assert "放弃草稿" in script
     assert "人工导入和直采均进入同一复核与报送流程" in script
+    assert "上传 CSV，自动生成填报草稿" in html
+    assert 'id="fqDownloadCsvTemplate"' in html
+    assert 'id="fqSelectedFileSummary" role="status"' in html
+    assert 'id="fqUploadResult" role="status"' in html
+    assert "只生成草稿，不会自动报送" in html
+    assert "让 Agent 读取并生成草稿" in html
+    assert "CSV_TEMPLATE_HEADER" in script
+    assert "零点班" in script and "八点班" in script and "四点班" in script
+    assert "syncImportCapability" in script
+    assert "当前尚未报送" in script
     assert "可信度分层" not in script
     assert "入井人员量" in html
     assert "入井人员量" in script
@@ -354,3 +516,19 @@ def test_frontend_v2_autofill_evidence_behavior_in_jsdom() -> None:
         "JSDOM five-quantity autofill evidence checks passed"
         in completed.stdout
     )
+
+
+def test_frontend_v2_csv_upload_behavior_in_jsdom() -> None:
+    import subprocess
+
+    script = ROOT / "tests" / "frontend_five_quantity_csv_upload_dom.test.js"
+    completed = subprocess.run(
+        ["node", str(script)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "JSDOM five-quantity CSV upload checks passed" in completed.stdout

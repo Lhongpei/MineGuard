@@ -5817,6 +5817,317 @@ p {
   padding: 9px 10px;
 }
 
+.fq-upload-card {
+  min-height: 0;
+}
+
+.fq-upload-card.has-preview {
+  grid-column: 1 / -1;
+}
+
+.fq-upload-steps {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  list-style: none;
+  margin: 16px 0;
+  padding: 0;
+}
+
+.fq-upload-step,
+.fq-upload-steps li {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: grid;
+  gap: 3px;
+  grid-template-columns: 28px minmax(0, 1fr);
+  padding: 10px;
+}
+
+.fq-upload-steps li > span {
+  align-items: center;
+  background: var(--green-pale);
+  border-radius: 50%;
+  color: var(--green-dark);
+  display: inline-flex;
+  font-weight: 800;
+  grid-row: 1 / 3;
+  height: 26px;
+  justify-content: center;
+  width: 26px;
+}
+
+.fq-upload-steps strong,
+.fq-upload-steps small {
+  min-width: 0;
+}
+
+.fq-upload-steps small {
+  color: var(--ink-soft);
+  line-height: 1.35;
+}
+
+.fq-template-button {
+  margin-bottom: 6px;
+}
+
+.fq-template-hint {
+  color: var(--ink-soft);
+  display: block;
+  line-height: 1.45;
+  margin-bottom: 14px;
+}
+
+.fq-upload-selected,
+.fq-upload-result {
+  border-radius: 9px;
+  line-height: 1.5;
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+  padding: 9px 11px;
+}
+
+.fq-upload-selected {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
+}
+
+.fq-upload-other-formats {
+  color: var(--ink-soft);
+  font-size: 13px;
+  margin: 10px 0;
+}
+
+.fq-upload-other-formats summary {
+  color: var(--green-dark);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.fq-upload-other-formats p {
+  line-height: 1.5;
+  margin: 7px 0 0;
+}
+
+.fq-upload-boundary {
+  background: var(--blue-pale);
+  border-left: 4px solid var(--blue);
+  border-radius: 8px;
+  display: grid;
+  gap: 3px;
+  margin: 12px 0;
+  padding: 10px 12px;
+}
+
+.fq-upload-boundary strong {
+  color: #274f7e;
+}
+
+.fq-upload-boundary span {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.fq-upload-result {
+  background: var(--blue-pale);
+  border: 1px solid #cbdcf3;
+  color: var(--blue);
+}
+
+.fq-upload-result.is-success {
+  background: var(--green-pale);
+  border-color: #b9dfcf;
+  color: var(--green-dark);
+}
+
+.fq-upload-result.is-error {
+  background: var(--red-pale);
+  border-color: #f0c9c6;
+  color: var(--red);
+}
+
+.fq-mapping-preview {
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 18px;
+}
+
+.fq-mapping-preview-head,
+.fq-preview-actions {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.fq-mapping-preview-head h4 {
+  font-size: 18px;
+  margin: 2px 0 5px;
+}
+
+.fq-mapping-preview-head p {
+  color: var(--ink-soft);
+  margin: 0;
+}
+
+.fq-preview-warning-box {
+  background: var(--amber-pale);
+  border-left: 4px solid var(--amber);
+  border-radius: 8px;
+  color: var(--amber);
+  margin: 14px 0;
+  padding: 10px 12px;
+}
+
+.fq-preview-warning-box ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+
+.fq-mapping-table-wrap {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-top: 14px;
+  overflow: auto;
+}
+
+.fq-mapping-table {
+  border-collapse: collapse;
+  min-width: 760px;
+  width: 100%;
+}
+
+.fq-mapping-table th,
+.fq-mapping-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 11px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.fq-mapping-table th {
+  background: #f1f5f2;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.fq-mapping-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.fq-mapping-table tr.is-review td {
+  background: #fff9e8;
+}
+
+.fq-mapping-table tr.is-blocked td,
+.fq-mapping-table tr.is-duplicate td {
+  background: var(--red-pale);
+}
+
+.fq-mapping-table td:first-child {
+  max-width: 220px;
+  overflow-wrap: anywhere;
+}
+
+.fq-mapping-table td strong,
+.fq-mapping-table td small,
+.fq-mapping-table td p {
+  display: block;
+}
+
+.fq-mapping-table td small,
+.fq-mapping-table td p {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 4px 0 0;
+}
+
+.fq-mapping-select {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  min-width: 230px;
+  padding: 8px;
+  width: 100%;
+}
+
+.fq-mapping-table tr.is-review .fq-mapping-select {
+  border-color: var(--amber);
+  box-shadow: 0 0 0 2px rgba(174, 111, 0, 0.08);
+}
+
+.fq-mapping-table tr.is-blocked .fq-mapping-select,
+.fq-mapping-table tr.is-duplicate .fq-mapping-select {
+  border-color: var(--red);
+}
+
+.fq-fixed-mapping,
+.fq-mapping-status {
+  background: var(--green-pale);
+  border-radius: 999px;
+  color: var(--green-dark);
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 8px;
+}
+
+.fq-mapping-table tr.is-review .fq-mapping-status {
+  background: var(--amber-pale);
+  color: var(--amber);
+}
+
+.fq-mapping-table tr.is-blocked .fq-mapping-status,
+.fq-mapping-table tr.is-duplicate .fq-mapping-status {
+  background: var(--red-pale);
+  color: var(--red);
+}
+
+.fq-preview-validation {
+  border-radius: 8px;
+  margin: 12px 0;
+  padding: 9px 11px;
+}
+
+.fq-preview-validation.is-warning {
+  background: var(--amber-pale);
+  color: var(--amber);
+}
+
+.fq-preview-validation.is-error {
+  background: var(--red-pale);
+  color: var(--red);
+}
+
+.fq-preview-validation.is-success {
+  background: var(--green-pale);
+  color: var(--green-dark);
+}
+
+.fq-save-profile {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 12px 0;
+  padding: 10px 12px;
+}
+
+.fq-preview-actions {
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.fq-preview-boundary {
+  color: var(--ink-soft);
+  display: block;
+  line-height: 1.5;
+  margin-top: 9px;
+}
+
 .fq-card-icon {
   align-items: center;
   background: var(--green-pale);
@@ -6712,6 +7023,20 @@ p {
 
   .fq-nav {
     grid-template-columns: 1fr;
+  }
+
+  .fq-upload-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .fq-mapping-preview-head,
+  .fq-preview-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .fq-preview-actions .button {
+    width: 100%;
   }
 
   .fq-page-head,

@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConflictError, NotFoundError, PlatformError, ValidationBlockedError
+from .five_quantity_csv_persistence import (
+    CSV_MAPPING_PROFILE_CONTRACT,
+    FiveQuantityCsvPersistence,
+)
 from .five_quantity_exchange import (
     HTTP_SIGNING_CONTEXT,
     MESSAGE_SIGNING_CONTEXT,
@@ -28,9 +32,14 @@ from .five_quantity_import import (
     ALLOWED_SUFFIXES,
     MAX_IMPORT_BYTES,
     METRICS,
+    PERIOD_KEYS,
     SHIFT_KEYS,
+    UNITS,
+    csv_header_unit_issue,
     import_five_quantity_bytes,
+    inspect_five_quantity_csv,
 )
+from .five_quantity_mapping import ApprovedColumnMapping, map_csv_inspection
 from .util import jcs_json, parse_aware_datetime, sha256_jcs, utc_now, utc_text
 
 ZERO_HASH = "0" * 64
@@ -610,6 +619,38 @@ def _v2_machine_preflight(
     }
 
 
+def _column_mapping_sha256(value: Any) -> str:
+    """Hash effective source-column targets while ignoring advisory wording."""
+
+    if not isinstance(value, list):
+        raise ConflictError("已有导入记录的字段映射元数据非法")
+    mappings: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict) or item.get("kind") != "column_mapping":
+            continue
+        source_column = item.get("source_column")
+        metric = item.get("metric")
+        period = item.get("period")
+        if (
+            isinstance(source_column, bool)
+            or not isinstance(source_column, int)
+            or not isinstance(metric, str)
+            or not isinstance(period, str)
+        ):
+            raise ConflictError("已有导入记录的字段映射元数据非法")
+        mappings.append(
+            {
+                "source_column": source_column,
+                "metric": metric,
+                "period": period,
+            }
+        )
+    mappings.sort(
+        key=lambda item: (item["source_column"], item["metric"], item["period"])
+    )
+    return sha256_jcs(mappings)
+
+
 class FiveQuantityStore:
     """V2 tables isolated from legacy draft tables in the same local database."""
 
@@ -840,6 +881,15 @@ class FiveQuantityStore:
                 (imported["content_sha256"],),
             ).fetchone()
             if existing is not None:
+                existing_mapping = _column_mapping_sha256(
+                    self._loads(existing["suggestions_json"])
+                )
+                requested_mapping = _column_mapping_sha256(imported["suggestions"])
+                if not hmac.compare_digest(existing_mapping, requested_mapping):
+                    raise ConflictError(
+                        "相同 CSV 原件已按另一套字段映射生成草稿；"
+                        "当前确认映射未被采用，请放弃旧草稿后使用修订后的源文件重试"
+                    )
                 result = dict(existing)
                 result["duplicate"] = True
                 return result
@@ -1744,6 +1794,19 @@ class FiveQuantityStore:
                 if existing is None:
                     raise ConflictError("草稿状态与 outbox 不一致")
                 return dict(existing)
+            same_business_submission = db.execute(
+                "SELECT aggregate_id FROM fq_outbox "
+                "WHERE idempotency_key=? AND message_kind='submission' LIMIT 1",
+                (message["idempotency_key"],),
+            ).fetchone()
+            if (
+                same_business_submission is not None
+                and same_business_submission["aggregate_id"] != draft_id
+            ):
+                raise ConflictError(
+                    "本矿该月份的同一报送版本已经确认；请放弃重复草稿。"
+                    "如需更正，必须从已提交版本发起正式更正流程。"
+                )
             health = (
                 self.repository
                 .connector_source_health_for_draft_in_transaction(
@@ -2481,12 +2544,20 @@ class FiveQuantityRuntime:
         platform_client: FiveQuantityPlatformClient | None = None,
         watched_directories: tuple[str, ...] = (),
         quarantine_directory: str | Path | None = None,
+        csv_preview_directory: str | Path | None = None,
         poll_seconds: float = 5.0,
         stable_seconds: float = 2.0,
         auto_start: bool = False,
+        llm_provider: Any | None = None,
     ):
         self.store = FiveQuantityStore(repository)
         self.identity = identity
+        self.csv_persistence = FiveQuantityCsvPersistence(
+            repository,
+            identity=identity,
+            evidence_directory=csv_preview_directory,
+            audit_sink=self.store._append_audit,
+        )
         self.platform_client = platform_client
         self.poll_seconds = max(0.5, min(float(poll_seconds), 60.0))
         self.stable_seconds = max(0.5, min(float(stable_seconds), 60.0))
@@ -2496,6 +2567,7 @@ class FiveQuantityRuntime:
             repository=repository,
             watched=self.watched_directories,
         )
+        self.csv_mapping_provider = llm_provider
         self._watch_state: dict[str, tuple[int, int, float]] = {}
         self._processed_paths: dict[str, tuple[int, int]] = {}
         self._machine_source_policies: tuple[dict[str, Any], ...] = ()
@@ -2606,12 +2678,307 @@ class FiveQuantityRuntime:
     def _loop(self) -> None:
         while not self._stop.is_set():
             with suppress(Exception):
+                self.csv_persistence.expire_previews()
+            with suppress(Exception):
                 self.scan_watched_directories()
             with suppress(Exception):
                 self.process_outbox_once()
             with suppress(Exception):
                 self.poll_analysis_once()
             self._stop.wait(self.poll_seconds)
+
+    def _approved_csv_mappings(
+        self,
+        schema_fingerprint: str,
+    ) -> tuple[list[ApprovedColumnMapping], str | None]:
+        profiles = self.csv_persistence.list_mapping_profiles(
+            schema_fingerprint=schema_fingerprint,
+            limit=10,
+        )
+        if not profiles:
+            return [], None
+        # The UI creates one stable profile name per exact schema fingerprint.
+        # If an administrator later adds more named profiles, never combine
+        # them implicitly: two configurations may assign the same abbreviation
+        # to different targets.
+        preferred_name = f"csv-schema-{schema_fingerprint[:24]}"
+        profile = next(
+            (
+                item
+                for item in profiles
+                if item.get("profile_name") == preferred_name
+            ),
+            profiles[0],
+        )
+        approved = [
+            ApprovedColumnMapping(
+                source_header=item["source_header"],
+                metric=item["metric"],
+                scope=item["scope"],
+                shift=item["shift"],
+                unit=item["unit"],
+                profile_id=item["profile_id"],
+                profile_revision=item["profile_revision"],
+            )
+            for item in profile["approved_mappings"]
+        ]
+        return approved, str(profile["profile_id"])
+
+    @staticmethod
+    def _mapped_csv_inspection(
+        inspection: dict[str, Any],
+        mapping_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        enriched = json.loads(jcs_json(inspection))
+        candidates = {
+            int(item["source_index"]): item
+            for item in mapping_result["candidates"]
+        }
+        blocked = {int(value) for value in mapping_result["blocked_columns"]}
+        for column in enriched["columns"]:
+            source_index = int(column["source_index"])
+            candidate = candidates.get(source_index)
+            if candidate is not None:
+                column.update(
+                    {
+                        "target_metric": candidate["target_metric"],
+                        "target_period": candidate["target_period"],
+                        "target_unit": candidate["target_unit"],
+                        "confidence": candidate["confidence"],
+                        "source": candidate["source"],
+                        "reason": candidate["reason"],
+                        "status": candidate["status"],
+                    }
+                )
+                unit_issue = csv_header_unit_issue(
+                    candidate["target_metric"],
+                    column["source_header"],
+                )
+                if unit_issue is not None:
+                    column.update(
+                        {
+                            "target_metric": None,
+                            "target_period": None,
+                            "target_unit": None,
+                            "confidence": 0.0,
+                            "reason": unit_issue,
+                            "status": "blocked",
+                        }
+                    )
+            elif source_index in blocked:
+                column.update(
+                    {
+                        "target_metric": None,
+                        "target_period": None,
+                        "target_unit": None,
+                        "confidence": 0.0,
+                        "status": "blocked",
+                    }
+                )
+        for warning in mapping_result.get("warnings", [])[:50]:
+            enriched["warnings"].append(
+                {
+                    "code": "mapping_advice",
+                    "message": str(warning)[:500],
+                    "severity": "warning",
+                }
+            )
+        return enriched
+
+    def preview_csv(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Create an actor-bound, advisory-only CSV mapping preview."""
+
+        inspection = inspect_five_quantity_csv(filename=filename, content=content)
+        approved, applied_profile_id = self._approved_csv_mappings(
+            inspection["schema_fingerprint"]
+        )
+        mapping_result = map_csv_inspection(
+            inspection,
+            approved_mappings=approved,
+            llm_provider=self.csv_mapping_provider,
+        )
+        enriched = self._mapped_csv_inspection(inspection, mapping_result)
+        mapping_advice = {
+            "schema_version": "five-quantity-csv-mapping-advice-v1",
+            "content_sha256": inspection["content_sha256"],
+            "columns": [
+                {
+                    "source_index": item["source_index"],
+                    "target_metric": item["target_metric"],
+                    "target_period": item["target_period"],
+                    "source": item["source"],
+                    "confidence": item["confidence"],
+                    "status": item["status"],
+                }
+                for item in enriched["columns"]
+            ],
+            "llm": mapping_result["llm"],
+        }
+        preview = self.csv_persistence.create_preview(
+            original_filename=filename,
+            content=content,
+            inspection=inspection,
+            actor=actor,
+            mapping_advice=mapping_advice,
+        )
+        return {
+            "preview_id": preview["preview_id"],
+            "status": preview["status"],
+            "revision": preview["revision"],
+            "expires_at": preview["expires_at"],
+            "inspection_sha256": preview["inspection_sha256"],
+            "mapping_profile_applied": applied_profile_id,
+            "mapping_assistant": mapping_result["llm"],
+            **enriched,
+        }
+
+    @staticmethod
+    def _csv_mapping_profile_document(
+        inspection: dict[str, Any],
+        mappings: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        headers = {
+            int(item["source_index"]): str(item["source_header"])
+            for item in inspection["columns"]
+        }
+        columns = []
+        for item in mappings:
+            period = item["target_period"]
+            metric = item["target_metric"]
+            columns.append(
+                {
+                    "source_header": headers[item["source_index"]],
+                    "metric": metric,
+                    "scope": "daily_total" if period == "daily_total" else "shift",
+                    "shift": None if period == "daily_total" else period,
+                    "unit": UNITS[metric],
+                }
+            )
+        return {
+            "schema_version": CSV_MAPPING_PROFILE_CONTRACT,
+            "columns": columns,
+        }
+
+    def materialize_csv_preview(
+        self,
+        *,
+        preview_id: str,
+        mappings: list[dict[str, Any]],
+        save_profile: bool,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Materialise confirmed mappings into a draft, never a submission."""
+
+        if not isinstance(mappings, list) or not 1 <= len(mappings) <= 256:
+            raise ValidationBlockedError("至少需要确认一个 CSV 五量字段映射")
+        if not isinstance(save_profile, bool):
+            raise ValidationBlockedError("save_profile 必须是布尔值")
+        preview = self.csv_persistence.get_preview(preview_id, actor=actor)
+        inspection = preview["inspection"]
+        allowed_columns = {
+            int(item["source_index"]): item for item in inspection["columns"]
+        }
+        advice_columns = {
+            int(item["source_index"]): item
+            for item in preview["mapping_advice"]["columns"]
+        }
+        date_column = int(inspection["date_column"]["source_index"])
+        selected_targets: set[tuple[str, str]] = set()
+        selected_sources: set[int] = set()
+        for item in mappings:
+            if not isinstance(item, dict) or set(item) != {
+                "source_index",
+                "target_metric",
+                "target_period",
+            }:
+                raise ValidationBlockedError("CSV 映射结构非法")
+            source_index = item["source_index"]
+            metric = item["target_metric"]
+            period = item["target_period"]
+            if metric not in METRICS or period not in PERIOD_KEYS:
+                raise ValidationBlockedError("CSV 映射目标不在五量白名单内")
+            target = (metric, period)
+            if (
+                isinstance(source_index, bool)
+                or not isinstance(source_index, int)
+                or source_index == date_column
+                or source_index not in allowed_columns
+            ):
+                raise ValidationBlockedError("CSV 映射引用了预览中不存在的业务列")
+            unit_issue = csv_header_unit_issue(
+                metric,
+                allowed_columns[source_index]["source_header"],
+            )
+            if unit_issue is not None:
+                raise ValidationBlockedError(unit_issue)
+            if source_index in selected_sources:
+                raise ValidationBlockedError("同一来源列不能重复映射")
+            if target in selected_targets:
+                raise ValidationBlockedError("多个来源列不能指向同一规范字段")
+            selected_sources.add(source_index)
+            selected_targets.add(target)
+        content = self.csv_persistence.read_preview_evidence(
+            preview_id,
+            actor=actor,
+        )
+        model_assistance_used = any(
+            advice_columns.get(item["source_index"], {}).get("source") == "llm"
+            and advice_columns.get(item["source_index"], {}).get("target_metric")
+            == item["target_metric"]
+            and advice_columns.get(item["source_index"], {}).get("target_period")
+            == item["target_period"]
+            for item in mappings
+        )
+        imported = import_five_quantity_bytes(
+            filename=preview["original_filename"],
+            content=content,
+            acquisition_mode="manual_import",
+            identity=self.identity,
+            column_mappings=mappings,
+            model_assistance_used=model_assistance_used,
+            model_output_sha256=(
+                preview["mapping_advice"]["llm"]["output_sha256"]
+                if model_assistance_used
+                else None
+            ),
+        )
+        validate_five_quantity_payload(
+            imported["payload"], identity=self.identity, confirmed=False
+        )
+        result = self.store.create_import(imported, source_path=None, actor=actor)
+        if not result.get("draft_id"):
+            raise ConflictError("相同 CSV 原件已存在，但没有可复核草稿")
+        profile: dict[str, Any] | None = None
+        if save_profile:
+            profile = self.csv_persistence.approve_mapping_profile(
+                profile_name=(
+                    f"csv-schema-{inspection['schema_fingerprint'][:24]}"
+                ),
+                schema_fingerprint=inspection["schema_fingerprint"],
+                mapping=self._csv_mapping_profile_document(inspection, mappings),
+                approved_by=actor,
+                human_approved=True,
+            )
+        self.csv_persistence.consume_preview(
+            preview_id,
+            expected_revision=preview["revision"],
+            expected_inspection_sha256=preview["inspection_sha256"],
+            resulting_draft_id=result["draft_id"],
+            actor=actor,
+            mapping_profile_id=(profile["profile_id"] if profile is not None else None),
+        )
+        if result.get("draft_id"):
+            result["draft"] = self.store.get_draft(result["draft_id"])
+        result["preview_id"] = preview_id
+        result["mapping_profile"] = profile
+        result["model_assistance_used"] = model_assistance_used
+        return result
 
     def ingest_bytes(
         self,
@@ -3257,6 +3624,8 @@ class FiveQuantityRuntime:
             "platform_configured": self.platform_client is not None,
             "watched_directories": [str(path) for path in self.watched_directories],
             "quarantine_directory": str(self.quarantine_directory),
+            "csv_mapping_preview_enabled": True,
+            "csv_mapping_ai_configured": self.csv_mapping_provider is not None,
             "acquisition_modes": ["manual_import", "direct_collection"],
             "acquisition_trust_tiering": False,
             "message_signature_domain": MESSAGE_SIGNING_CONTEXT,
