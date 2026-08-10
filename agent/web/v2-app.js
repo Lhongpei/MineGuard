@@ -1,21 +1,51 @@
 (() => {
   "use strict";
 
-  const FIVE_QUANTITIES = Object.freeze([
-    ["风量", [["ventilation_m3_min", "风量", "m³/min"]]],
-    ["电量", [["electricity_kwh", "电量", "kWh"]]],
-    [
-      "火工品量",
-      [
-        ["detonators_count", "雷管", "发"],
-        ["explosives_kg", "炸药", "kg"],
+  // 十个监管业务量按领导和企业人员熟悉的三个环节展示。火工品量
+  // 仍由雷管、炸药两个不可混加的原子字段组成，因此是十量、十一原子字段。
+  const QUANTITY_SECTIONS = Object.freeze([
+    {
+      code: "safety_support",
+      label: "安全生产支撑",
+      quantities: [
+        { code: "airflow", label: "风量", shift: true, metrics: [["ventilation_m3_min", "风量", "m³/min"]] },
+        { code: "electricity", label: "电量", shift: true, metrics: [["electricity_kwh", "电量", "kWh"]] },
+        {
+          code: "blasting_materials",
+          label: "火工品量",
+          shift: true,
+          metrics: [
+            ["detonators_count", "雷管", "发"],
+            ["explosives_kg", "炸药", "kg"],
+          ],
+        },
+        { code: "mine_entry_personnel", label: "入井人员量", shift: true, metrics: [["mine_entry_persons", "入井人员量", "人次"]] },
       ],
-    ],
-    ["入井人员量", [["mine_entry_persons", "入井人员量", "人次"]]],
-    ["产量", [["production_t", "产量", "t"]]],
+    },
+    {
+      code: "production_flow",
+      label: "生产煤流",
+      quantities: [
+        { code: "production", label: "产量（企业报表）", shift: true, metrics: [["production_t", "产量（企业报表）", "t"]] },
+        { code: "extraction", label: "开采量（采掘计量）", shift: true, metrics: [["extraction_t", "开采量（采掘计量）", "t"]] },
+        { code: "transport", label: "运输量", shift: true, metrics: [["transport_t", "运输量", "t"]] },
+        { code: "washing", label: "洗煤量（入洗原煤）", shift: true, metrics: [["wash_feed_t", "洗煤量（入洗原煤）", "t"]] },
+      ],
+    },
+    {
+      code: "business_documents",
+      label: "经营票据",
+      quantities: [
+        { code: "sales", label: "销售量", shift: false, metrics: [["sales_t", "销售量", "t"]] },
+        { code: "invoiced", label: "开票量（吨）", shift: false, metrics: [["invoiced_quantity_t", "开票量（吨）", "t"]] },
+      ],
+    },
   ]);
+  const TEN_QUANTITIES = Object.freeze(
+    QUANTITY_SECTIONS.flatMap((section) => section.quantities),
+  );
   const METRICS = Object.freeze(
-    FIVE_QUANTITIES.flatMap(([, metrics]) => metrics),
+    TEN_QUANTITIES.flatMap((quantity) => quantity.metrics),
   );
   const METRIC_LABELS = Object.freeze({
     ventilation_m3_min: "风量",
@@ -24,7 +54,12 @@
     explosives_kg: "火工品量（炸药）",
     mine_entry_persons: "入井人员量",
     labor_persons: "入井人员量",
-    production_t: "产量",
+    production_t: "产量（企业报表）",
+    extraction_t: "开采量（采掘计量）",
+    sales_t: "销售量",
+    transport_t: "运输量",
+    wash_feed_t: "洗煤量（入洗原煤）",
+    invoiced_quantity_t: "开票量（吨）",
   });
   const SCOPES = Object.freeze([
     ["daily_total", "日报合计"],
@@ -43,24 +78,34 @@
     discarded: "已放弃",
   });
   const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+  // 给日常经办人的默认模板只有日期加十一原子字段，共十二列；班次
+  // 明细在复核页按需展开，避免默认导出四十余列的宽表。
   const CSV_TEMPLATE_HEADER = [
     "日期",
-    ...["日合计", "零点班", "八点班", "四点班"].flatMap((scope) => [
-      `${scope}_风量(m3/min)`,
-      `${scope}_电量(kWh)`,
-      `${scope}_雷管(发)`,
-      `${scope}_炸药(kg)`,
-      `${scope}_入井人员量(人次)`,
-      `${scope}_产量(t)`,
-    ]),
+    "风量(m3/min)",
+    "电量(kWh)",
+    "雷管(发)",
+    "炸药(kg)",
+    "入井人员量(人次)",
+    "产量_企业报表(t)",
+    "开采量_采掘计量(t)",
+    "销售量(t)",
+    "运输量(t)",
+    "洗煤量_入洗原煤(t)",
+    "开票量(t)",
   ].join(",") + "\r\n";
   const IMPORT_TARGETS = Object.freeze([
-    ["ventilation_m3_min", "风量", "m³/min"],
-    ["electricity_kwh", "电量", "kWh"],
-    ["detonators_count", "雷管", "发"],
-    ["explosives_kg", "炸药", "kg"],
-    ["mine_entry_persons", "入井人员量", "人次"],
-    ["production_t", "产量", "t"],
+    ["ventilation_m3_min", "风量", "m³/min", true],
+    ["electricity_kwh", "电量", "kWh", true],
+    ["detonators_count", "雷管", "发", true],
+    ["explosives_kg", "炸药", "kg", true],
+    ["mine_entry_persons", "入井人员量", "人次", true],
+    ["production_t", "产量（企业报表）", "t", true],
+    ["extraction_t", "开采量（采掘计量）", "t", true],
+    ["sales_t", "销售量", "t", false],
+    ["transport_t", "运输量", "t", true],
+    ["wash_feed_t", "洗煤量（入洗原煤）", "t", true],
+    ["invoiced_quantity_t", "开票量（吨）", "t", false],
   ]);
   const IMPORT_PERIODS = Object.freeze([
     ["daily_total", "日报合计"],
@@ -340,7 +385,7 @@
       $("fqSelectedFileSummary").textContent =
         "当前账号只能查看；请交给具有填报权限的经办人上传。";
     } else if (!writable) {
-      $("fqSelectedFileSummary").textContent = "登录后即可选择五量文件。";
+      $("fqSelectedFileSummary").textContent = "登录后即可选择十量文件。";
     }
   }
 
@@ -406,16 +451,25 @@
   }
 
   function allowedMapping(value) {
-    return IMPORT_TARGETS.some(([metric]) => metric === value.target_metric) &&
+    return IMPORT_TARGETS.some(
+      ([metric, _label, _unit, supportsShift]) =>
+        metric === value.target_metric &&
+        (value.target_period === "daily_total" || supportsShift),
+    ) &&
       IMPORT_PERIODS.some(([period]) => period === value.target_period);
   }
 
   function mappingOptionHtml(selected) {
     const groups = IMPORT_PERIODS.map(([period, periodLabel]) => {
-      const options = IMPORT_TARGETS.map(([metric, label, unit]) => {
-        const value = mappingKey(metric, period);
-        return `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(label)}（${escapeHtml(unit)}）</option>`;
-      }).join("");
+      const options = IMPORT_TARGETS
+        .filter(([_metric, _label, _unit, supportsShift]) =>
+          period === "daily_total" || supportsShift,
+        )
+        .map(([metric, label, unit]) => {
+          const value = mappingKey(metric, period);
+          return `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(label)}（${escapeHtml(unit)}）</option>`;
+        })
+        .join("");
       return `<optgroup label="${escapeHtml(periodLabel)}">${options}</optgroup>`;
     }).join("");
     return `<option value="" ${selected ? "" : "selected"}>请选择规范字段…</option>${groups}<option value="__ignore__" ${selected === "__ignore__" ? "selected" : ""}>明确忽略此列</option>`;
@@ -660,7 +714,7 @@
       target.textContent = "没有可确认的业务列，不能生成草稿。";
       target.className = "fq-preview-validation is-error";
     } else if (!mappedCount) {
-      target.textContent = "不能忽略全部业务列；至少需要一列映射到五量字段。";
+      target.textContent = "不能忽略全部业务列；至少需要一列映射到十量字段。";
       target.className = "fq-preview-validation is-error";
     } else {
       const reviewCount = columns.filter(
@@ -729,13 +783,13 @@
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = "五量填报标准模板.csv";
+    anchor.download = "十量填报标准模板（日汇总）.csv";
     document.body.append(anchor);
     anchor.click();
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
     setUploadResult(
-      "标准 CSV 模板已下载；请按行填写每日数据，不要修改表头。",
+      "十量日汇总 CSV 模板已下载；每行填写一天，班次明细可在复核页按需展开。",
       "success",
     );
   }
@@ -825,7 +879,7 @@
     }
     const file = $("fqUploadFile").files[0];
     if (!file) {
-      setUploadResult("请先选择五量文件。", "error");
+      setUploadResult("请先选择十量文件。", "error");
       return message("请先选择文件。", "error");
     }
     if (file.size <= 0 || file.size > MAX_UPLOAD_BYTES) {
@@ -1260,10 +1314,11 @@
   }
 
   function measurementSet(day, scope) {
+    const reported = (day && day.reported_quantity) || {};
+    const shifts = reported.shifts || {};
+    const shift = shifts[scope] || {};
     const measurements =
-      scope === "daily_total"
-        ? day.reported_quantity.daily_total
-        : day.reported_quantity.shifts[scope].measurements;
+      (scope === "daily_total" ? reported.daily_total : shift.measurements) || {};
     if (
       !measurements.mine_entry_persons &&
       measurements.labor_persons
@@ -1276,6 +1331,138 @@
       delete measurements.labor_persons;
     }
     return measurements;
+  }
+
+  function hasOwn(object, key) {
+    return Boolean(
+      object && Object.prototype.hasOwnProperty.call(object, key),
+    );
+  }
+
+  function measurementIsNotApplicable(measurement) {
+    return Boolean(
+      measurement &&
+        Array.isArray(measurement.quality_flags) &&
+        measurement.quality_flags.includes("not_applicable"),
+    );
+  }
+
+  function quantityPresentInValues(values, quantity) {
+    return quantity.metrics.every(([metric]) => hasOwn(values, metric));
+  }
+
+  function quantityPresentInPayload(payload, quantity) {
+    return quantity.metrics.every(([metric]) =>
+      (payload.days || []).some((day) =>
+        SCOPES.some(([scope]) => hasOwn(measurementSet(day, scope), metric)),
+      ),
+    );
+  }
+
+  function quantityCoverage(payload) {
+    return TEN_QUANTITIES.filter((quantity) =>
+      quantityPresentInPayload(payload, quantity),
+    ).length;
+  }
+
+  function countMissingMeasurements(values, quantities = TEN_QUANTITIES) {
+    return quantities.reduce(
+      (count, quantity) => count + quantity.metrics.reduce(
+        (subtotal, [metric]) => {
+          const measurement = values[metric];
+          return subtotal + Number(
+            Boolean(
+              measurement &&
+                measurement.value === null &&
+                !measurementIsNotApplicable(measurement),
+            ),
+          );
+        },
+        0,
+      ),
+      0,
+    );
+  }
+
+  function renderMetricEditor({
+    values,
+    quantity,
+    metric,
+    label,
+    unit,
+    dayIndex,
+    scope,
+    locked,
+  }) {
+    const measurement = values[metric];
+    const integerMetric = ["detonators_count", "mine_entry_persons"].includes(metric);
+    if (!measurement || measurementIsNotApplicable(measurement)) {
+      const status = measurementIsNotApplicable(measurement) ||
+        (scope !== "daily_total" && !quantity.shift)
+        ? "无需班次"
+        : scope === "daily_total"
+          ? "未接入此项"
+          : "该班次未提供";
+      return `<div class="fq-metric-unavailable"><span>${escapeHtml(label)}<small>${escapeHtml(unit)}</small></span><strong>${status}</strong></div>`;
+    }
+    return `<label><span>${escapeHtml(label)}<small>${escapeHtml(unit)}</small></span><input type="number" min="0" step="${integerMetric ? "1" : "any"}" value="${measurement.value == null ? "" : escapeHtml(measurement.value)}" data-fq-value data-day="${dayIndex}" data-scope="${scope}" data-metric="${metric}" ${locked || !can("write") ? "disabled" : ""}><em>${measurement.value === null ? "缺失" : "已报告"}</em></label>`;
+  }
+
+  function renderQuantityGroup(values, quantity, dayIndex, scope, locked) {
+    const present = quantityPresentInValues(values, quantity);
+    const missing = countMissingMeasurements(values, [quantity]);
+    const stateLabel = present
+      ? missing
+        ? `${missing} 项缺失`
+        : "已到"
+      : scope !== "daily_total" && !quantity.shift
+        ? "无需班次"
+        : "未接入";
+    return `<section class="fq-quantity-group ${quantity.metrics.length > 1 ? "is-fire-material" : ""} ${present ? "is-present" : "is-unavailable"}" data-quantity-code="${quantity.code}"><h6><span>${escapeHtml(quantity.label)}</span><small>${stateLabel}</small></h6>${quantity.metrics.map(
+      ([metric, label, unit]) => renderMetricEditor({
+        values,
+        quantity,
+        metric,
+        label,
+        unit,
+        dayIndex,
+        scope,
+        locked,
+      }),
+    ).join("")}</section>`;
+  }
+
+  function renderQuantitySection(day, dayIndex, scope, section, locked, open) {
+    const values = measurementSet(day, scope);
+    const applicable = scope === "daily_total"
+      ? section.quantities
+      : section.quantities.filter(
+        (quantity) => quantity.shift || quantityPresentInValues(values, quantity),
+      );
+    const received = applicable.filter((quantity) =>
+      quantityPresentInValues(values, quantity),
+    ).length;
+    const missing = countMissingMeasurements(values, applicable);
+    const status = applicable.length
+      ? `${received}/${applicable.length} 已到${missing ? ` · ${missing} 项缺失` : ""}`
+      : "本组无需班次填报";
+    return `<details class="fq-quantity-section" data-quantity-section="${section.code}" ${open ? "open" : ""}><summary><span><strong>${escapeHtml(section.label)}</strong><small>${escapeHtml(section.quantities.map((quantity) => quantity.label).join("、"))}</small></span><em>${status}</em></summary><div class="fq-metric-grid">${section.quantities.map(
+      (quantity) => renderQuantityGroup(values, quantity, dayIndex, scope, locked),
+    ).join("")}</div></details>`;
+  }
+
+  function renderMeasurementScope(day, dayIndex, scope, scopeLabel, locked) {
+    const daily = scope === "daily_total";
+    return `<div class="fq-measure-group ${daily ? "is-daily" : "is-shift"}"><h5>${scopeLabel}${daily ? "（优先核对）" : ""}</h5><div class="fq-quantity-sections">${QUANTITY_SECTIONS.map(
+      (section, sectionIndex) => renderQuantitySection(
+        day,
+        dayIndex,
+        scope,
+        section,
+        locked,
+        sectionIndex === 0,
+      ),
+    ).join("")}</div></div>`;
   }
 
   function renderDraft() {
@@ -1292,37 +1479,35 @@
     let missing = 0;
     for (const day of draft.payload.days) {
       for (const [scope] of SCOPES) {
-        for (const [metric] of METRICS) {
-          if (measurementSet(day, scope)[metric].value === null) missing += 1;
-        }
+        missing += countMissingMeasurements(measurementSet(day, scope));
       }
     }
+    const receivedQuantityCount = quantityCoverage(draft.payload);
     const days = draft.payload.days
       .map((day, dayIndex) => {
-        let dayMissing = 0;
-        for (const [scope] of SCOPES) {
-          for (const [metric] of METRICS) {
-            if (measurementSet(day, scope)[metric].value === null) dayMissing += 1;
-          }
-        }
-        const groups = SCOPES.map(([scope, scopeLabel]) => {
-          const values = measurementSet(day, scope);
-          return `<div class="fq-measure-group"><h5>${scopeLabel}</h5><div class="fq-metric-grid">${FIVE_QUANTITIES.map(
-            ([quantityLabel, metrics]) => `<section class="fq-quantity-group ${metrics.length > 1 ? "is-fire-material" : ""}"><h6>${quantityLabel}</h6>${metrics.map(
-              ([metric, label, unit]) => {
-                const measurement = values[metric];
-                const integerMetric = ["detonators_count", "mine_entry_persons"].includes(metric);
-                return `<label><span>${label}<small>${unit}</small></span><input type="number" min="0" step="${integerMetric ? "1" : "any"}" value="${measurement.value == null ? "" : measurement.value}" data-fq-value data-day="${dayIndex}" data-scope="${scope}" data-metric="${metric}" ${locked ? "disabled" : ""}><em>${measurement.value === null ? "缺失" : "已报告"}</em></label>`;
-              },
-            ).join("")}</section>`,
-          ).join("")}</div></div>`;
-        }).join("");
+        const dailyValues = measurementSet(day, "daily_total");
+        const dayMissing = countMissingMeasurements(dailyValues);
+        const dayReceived = TEN_QUANTITIES.filter((quantity) =>
+          quantityPresentInValues(dailyValues, quantity),
+        ).length;
+        const dailyGroup = renderMeasurementScope(
+          day,
+          dayIndex,
+          "daily_total",
+          "日报合计",
+          locked,
+        );
+        const shiftGroups = SCOPES.slice(1).map(([scope, scopeLabel]) =>
+          renderMeasurementScope(day, dayIndex, scope, scopeLabel, locked),
+        ).join("");
+        const needsAttention = dayMissing > 0 || dayReceived < TEN_QUANTITIES.length;
         return `<details class="fq-day-card" ${dayMissing ? "" : ""}>
-          <summary><span><strong>${escapeHtml(day.date)}</strong><small>${dayMissing ? `${dayMissing} 个数据格缺失，需核对` : "五类数据均完整（含火工品两个子项）"}</small></span><span class="fq-status ${dayMissing ? "is-warn" : "is-ok"}">${dayMissing ? "待补充/说明" : "完整"}</span></summary>
+          <summary><span><strong>${escapeHtml(day.date)}</strong><small>十量日报已到 ${dayReceived}/10${dayMissing ? ` · ${dayMissing} 个已接入字段缺失` : ""}</small></span><span class="fq-status ${needsAttention ? "is-warn" : "is-ok"}">${needsAttention ? "待核对" : "完整"}</span></summary>
           <label class="field fq-operating-state"><span>当日运行状态</span><select data-fq-operating-state data-day="${dayIndex}" ${locked ? "disabled" : ""}>${[
             ["producing", "生产"], ["stopped", "停产"], ["maintenance", "检修"], ["restarting", "复产过渡"], ["unknown", "待确认"],
           ].map(([value, label]) => `<option value="${value}" ${day.operating_state === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
-          ${groups}
+          ${dailyGroup}
+          <details class="fq-shift-review"><summary><span><strong>班次高级明细</strong><small>按需展开零点班、八点班和四点班；销售量、开票量不强制填班次。</small></span><em>展开</em></summary>${shiftGroups}</details>
         </details>`;
       })
       .join("");
@@ -1371,12 +1556,13 @@
         ? "当前账号缺少确认或提交权限，可继续复核和保存。"
         : "确认后消息进入可靠发送队列；接收回执不代表监管认定正常。";
     target.innerHTML = `
-      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(draft.payload.mine.mine_name)}</p><h3>${escapeHtml(draft.payload.reporting_month)} 五量${escapeHtml(windowInfo.fullMonth ? "整月月报" : "月内窗口报表")}</h3><p>${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)} · ${escapeHtml(windowInfo.label)} · 修订 ${draft.revision}</p></div><span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span></div>
-      <div class="fq-summary-strip"><span><strong>${draft.payload.days.length}</strong>日报天数</span><span class="${missing ? "is-warn" : "is-ok"}"><strong>${missing}</strong>缺失测量</span><span><strong>${draft.payload.sources.length}</strong>来源记录</span><span><strong>${draft.submission_revision}</strong>报送版本</span></div>
+      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(draft.payload.mine.mine_name)}</p><h3>${escapeHtml(draft.payload.reporting_month)} 十量${escapeHtml(windowInfo.fullMonth ? "整月月报" : "月内窗口报表")}</h3><p>${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)} · ${escapeHtml(windowInfo.label)} · 修订 ${draft.revision}</p></div><span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span></div>
+      <div class="fq-summary-strip"><span><strong>${draft.payload.days.length}</strong>日报天数</span><span class="${receivedQuantityCount < 10 ? "is-warn" : "is-ok"}"><strong>${receivedQuantityCount}/10</strong>十量已到</span><span class="${missing ? "is-warn" : "is-ok"}"><strong>${missing}</strong>已接入字段缺失</span><span><strong>${draft.payload.sources.length}</strong>来源记录</span><span><strong>${draft.submission_revision}</strong>报送版本</span></div>
+      ${receivedQuantityCount === 5 ? '<div class="fq-import-warning"><strong>当前是旧版 V2 五量数据：已到 5/10</strong><p>新增的开采量、销售量、运输量、洗煤量和开票量尚未接入；页面不会用历史比例、算法或 0 补齐。</p></div>' : receivedQuantityCount < 10 ? `<div class="fq-import-warning"><strong>十量尚未全部接入：已到 ${receivedQuantityCount}/10</strong><p>未接入项保持明确缺失，不会阻止查看旧报文，也不会由 Agent 猜测填补。</p></div>` : ""}
       ${reviewGate.required ? `<div class="fq-import-warning" role="status"><strong>四眼复核：${awaitingHumanPreparer ? "先由经办人接收核对" : currentIsLastEditor ? "待另一账号接手" : reviewActorMissing ? "经办人记录缺失" : "当前账号可独立复核"}</strong><p>${escapeHtml(reviewGate.message || "最后创建/编辑人不能确认或入发送队列。")}</p></div>` : ""}
       ${windowInfo.fullMonth ? "" : `<div class="fq-import-warning"><strong>当前不是整月覆盖</strong><p>本次申报窗口仅为 ${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)}。系统不会把窗口外日期算作已填报；确认前请核对这正是本次应申报范围。</p></div>`}
       ${importWarnings.length ? `<div class="fq-import-warning"><strong>导入映射需要人工核对</strong><ul>${importWarnings.slice(0, 20).map((item) => `<li>${escapeHtml(item.reason || "存在未明确的来源字段")}</li>`).join("")}</ul></div>` : ""}
-      <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。展开每一天可核对日报合计和三个班次。</div>
+      <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。每天先核对十量日报合计；只有需要时再展开三个班次，销售量和开票量不强制提供班次实值。</div>
       ${autofillEvidenceHtml(draft)}
       <div class="fq-day-list">${days}</div>
       <div class="fq-sticky-actions">
@@ -1390,7 +1576,7 @@
           <label class="field"><span>确认人姓名</span><input id="fqDraftConfirmerName" value="${escapeHtml((state.principal && state.principal.name) || "")}" ${locked ? "disabled" : ""}></label>
           <label class="field"><span>岗位/角色</span><input id="fqDraftConfirmerRole" value="${escapeHtml((state.principal && state.principal.role) || "企业填报员")}" ${locked ? "disabled" : ""}></label>
         </div>
-        <label class="field"><span>确认说明</span><textarea id="fqDraftAttestation" rows="3" ${locked ? "disabled" : ""}>本人已对照原始日报、三个班次记录及单位口径逐项核对。</textarea></label>
+        <label class="field"><span>确认说明</span><textarea id="fqDraftAttestation" rows="3" ${locked ? "disabled" : ""}>本人已对照十量原始日报、适用班次记录及单位口径逐项核对。</textarea></label>
         <label class="check-row"><input id="fqDraftAccepted" type="checkbox" ${locked ? "disabled" : ""}><span>我确认上述申报窗口内的完整内容真实反映企业核对结果，并同意发送至政府监管平台。</span></label>
         <button class="button button-primary" type="button" data-fq-action="confirm-draft" ${locked || !finalizeAllowed ? "disabled" : ""}>确认并进入发送队列</button>
         ${draft.receipt ? `<div class="fq-receipt"><strong>政府已接收</strong><span>回执：${escapeHtml((draft.receipt.payload && draft.receipt.payload.receipt_id) || draft.receipt.message_id)}</span><small>政府接收并排队，不等于监管结论。</small></div>` : ""}
@@ -1409,6 +1595,7 @@
     }
     if (!input.matches("[data-fq-value]")) return;
     const measurement = measurementSet(day, input.dataset.scope)[input.dataset.metric];
+    if (!measurement || measurementIsNotApplicable(measurement)) return;
     if (input.value.trim() === "") {
       measurement.value = null;
       measurement.quality_flags = ["missing"];

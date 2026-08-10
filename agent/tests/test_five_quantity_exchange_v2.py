@@ -148,6 +148,41 @@ def test_http_transport_signature_covers_exact_path_query_and_body() -> None:
     assert headers["X-Exchange-Content-SHA256"] == body_hash
 
 
+def test_v3_route_uses_v3_http_domain_for_reused_v2_lifecycle_body() -> None:
+    body = b'{"contract_version":"risk-delivery-ack-v2"}'
+    url = "https://regulator.example/v3/analysis-reports/report-1/delivery-ack"
+    headers = http_transport_headers(
+        method="POST",
+        url=url,
+        body=body,
+        sender_id="agent-mine-test-001",
+        secret=TRANSPORT_SECRET,
+        contract_version="risk-delivery-ack-v2",
+        timestamp="2026-08-01T00:00:00Z",
+        nonce="0123456789abcdef0123456789abcdef",
+    )
+    body_hash = hashlib.sha256(body).hexdigest()
+    material = "\n".join(
+        [
+            "MINEGUARD-TEN-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V3",
+            "POST",
+            "/v3/analysis-reports/report-1/delivery-ack",
+            "agent-mine-test-001",
+            "2026-08-01T00:00:00Z",
+            "0123456789abcdef0123456789abcdef",
+            "risk-delivery-ack-v2",
+            body_hash,
+        ]
+    ).encode()
+    expected = hmac.new(
+        TRANSPORT_SECRET.encode(), material, hashlib.sha256
+    ).hexdigest()
+
+    assert headers["X-Exchange-Signature-Version"] == "hmac-sha256-v3"
+    assert headers["X-Exchange-Contract-Version"] == "risk-delivery-ack-v2"
+    assert headers["X-Exchange-Signature"] == expected
+
+
 class _Response:
     def __init__(self, request: Any, status: int, raw: bytes):
         self.status = status
@@ -188,24 +223,30 @@ def test_client_implements_all_seven_paths_and_preserves_opaque_cursor() -> None
     message_id = str(uuid4())
     report_id = str(uuid4())
     response_id = str(uuid4())
-    client.submit({"payload": {}})
+    client.submit({"contract_version": "ten-quantity-submission-v3", "payload": {}})
     client.submission_receipt(message_id)
     client.pull_next(after_cursor="opaque.cursor:0001-next")
     client.analysis_report(report_id)
-    client.acknowledge(report_id, {"payload": {}})
-    client.respond(report_id, {"payload": {}})
+    client.acknowledge(
+        report_id,
+        {"contract_version": "risk-delivery-ack-v2", "payload": {}},
+    )
+    client.respond(
+        report_id,
+        {"contract_version": "enterprise-risk-response-v2", "payload": {}},
+    )
     client.response_receipt(response_id)
     assert [
         (method, url.removeprefix("https://regulator.example"))
         for method, url in requests
     ] == [
-        ("POST", "/v2/five-quantity-submissions"),
-        ("GET", f"/v2/five-quantity-submissions/{message_id}/receipt"),
-        ("GET", "/v2/analysis-reports/next?after_cursor=opaque.cursor:0001-next"),
-        ("GET", f"/v2/analysis-reports/{report_id}"),
-        ("POST", f"/v2/analysis-reports/{report_id}/delivery-ack"),
-        ("POST", f"/v2/analysis-reports/{report_id}/responses"),
-        ("GET", f"/v2/risk-responses/{response_id}/receipt"),
+        ("POST", "/v3/ten-quantity-submissions"),
+        ("GET", f"/v3/ten-quantity-submissions/{message_id}/receipt"),
+        ("GET", "/v3/analysis-reports/next?after_cursor=opaque.cursor:0001-next"),
+        ("GET", f"/v3/analysis-reports/{report_id}"),
+        ("POST", f"/v3/analysis-reports/{report_id}/delivery-ack"),
+        ("POST", f"/v3/analysis-reports/{report_id}/responses"),
+        ("GET", f"/v3/risk-responses/{response_id}/receipt"),
     ]
 
 
@@ -214,7 +255,7 @@ def test_client_refuses_to_follow_any_redirect() -> None:
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            if self.path == "/v2/analysis-reports/next":
+            if self.path == "/v3/analysis-reports/next":
                 hits["redirect"] += 1
                 self.send_response(307)
                 self.send_header("Location", "/target")

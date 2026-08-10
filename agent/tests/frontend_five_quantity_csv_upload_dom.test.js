@@ -359,6 +359,15 @@ function attachFile(window, input, file) {
   input.dispatchEvent(new window.Event("change", { bubbles: true }));
 }
 
+function readBlob(window, blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new window.FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result || "")));
+    reader.addEventListener("error", () => reject(reader.error));
+    reader.readAsText(blob);
+  });
+}
+
 async function main() {
   const writer = createDom(["read", "write", "confirm", "submit"]);
   try {
@@ -375,10 +384,22 @@ async function main() {
     assert.equal(uploadButton.disabled, true, "upload waits for a selected file");
 
     document.getElementById("fqDownloadCsvTemplate").click();
-    assert.equal(writer.getDownloadedName(), "五量填报标准模板.csv");
+    assert.equal(writer.getDownloadedName(), "十量填报标准模板（日汇总）.csv");
     assert.equal(writer.getDownloadedBlob().type, "text/csv;charset=utf-8");
     assert(writer.getDownloadedBlob().size > 20);
-    assert.match(document.getElementById("fqUploadResult").textContent, /标准 CSV 模板已下载/);
+    const templateText = await readBlob(window, writer.getDownloadedBlob());
+    const templateColumns = templateText.replace(/^\ufeff/, "").trim().split(",");
+    assert.equal(templateColumns.length, 12, "default template is date plus eleven atomic fields");
+    for (const label of [
+      "开采量_采掘计量(t)",
+      "销售量(t)",
+      "运输量(t)",
+      "洗煤量_入洗原煤(t)",
+      "开票量(t)",
+    ]) {
+      assert(templateColumns.includes(label), `default template includes ${label}`);
+    }
+    assert.match(document.getElementById("fqUploadResult").textContent, /十量日汇总 CSV 模板已下载/);
 
     const csv = Buffer.from(
       "日期,风量(m3/min),电量(kWh),雷管(发),炸药(kg),入井人员量(人次),产量(t)\n" +
@@ -450,7 +471,7 @@ async function main() {
         (option) =>
           option.value === "" ||
           option.value === "__ignore__" ||
-          /^(ventilation_m3_min|electricity_kwh|detonators_count|explosives_kg|mine_entry_persons|production_t)\|(daily_total|zero_shift|eight_shift|four_shift)$/.test(
+          /^(ventilation_m3_min|electricity_kwh|detonators_count|explosives_kg|mine_entry_persons|production_t|extraction_t|sales_t|transport_t|wash_feed_t|invoiced_quantity_t)\|(daily_total|zero_shift|eight_shift|four_shift)$/.test(
             option.value,
           ),
       ),
@@ -480,8 +501,23 @@ async function main() {
     assert.match(document.getElementById("fqGlobalMessage").textContent, /当前尚未报送/);
     assert.equal(document.getElementById("fqPanelReview").hidden, false);
     await waitFor(
-      () => /2026-07 五量/.test(document.getElementById("fqDraftDetail").textContent),
+      () => /2026-07 十量/.test(document.getElementById("fqDraftDetail").textContent),
       "created draft detail",
+    );
+    const detail = document.getElementById("fqDraftDetail");
+    assert.match(detail.textContent, /旧版 V2 五量数据：已到 5\/10/);
+    assert.match(detail.textContent, /安全生产支撑/);
+    assert.match(detail.textContent, /生产煤流/);
+    assert.match(detail.textContent, /经营票据/);
+    assert.equal(detail.querySelectorAll(".fq-shift-review").length, 2);
+    assert(
+      [...detail.querySelectorAll(".fq-shift-review")].every((item) => !item.open),
+      "advanced shift details stay collapsed by default",
+    );
+    assert.equal(
+      detail.querySelectorAll('[data-fq-value][data-metric="sales_t"]').length,
+      0,
+      "missing V2 fields are shown but never fabricated into the payload",
     );
 
     const materializePost = writer.requests.find(

@@ -34,7 +34,7 @@ catch { throw "Health endpoint did not return valid JSON." }
 if ($null -eq $Body -or $Body.status -ne "ok" -or
     $Body.service -ne "enterprise-reporting-agent" -or
     $Body.contract_version -ne "enterprise-submission-v1" -or
-    $Body.primary_contract_version -ne "five-quantity-submission-v2" -or
+    $Body.primary_contract_version -ne "ten-quantity-submission-v3" -or
     [string]::IsNullOrWhiteSpace([string]$Body.version)) {
     throw "Health response does not identify the expected Enterprise Agent contract."
 }

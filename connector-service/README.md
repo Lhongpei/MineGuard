@@ -1,6 +1,8 @@
-# 企业数据自动采集连接器
+# 企业十量 V3 自动采集连接器
 
-`connector-service` 是独立进程，不导入 `agent`、`platform` 或 `edge-agent` 的任何代码。它只使用版本化 HTTP 合同，把企业只读数据转换成正式“五量 V2”月度来源快照，交给企业 Agent 生成或修订待复核草稿。
+`connector-service` 是独立进程，不导入 `agent`、`platform` 或 `edge-agent` 的任何
+代码。它只使用版本化 HTTP 接口，把企业只读数据转换成十量 V3 月度来源快照，交给
+企业 Agent 生成待复核草稿。
 
 它不会确认、签名或提交报表。企业经办人仍需在 Agent 前端核对，监管平台也不会信任连接器自行生成的结论。
 
@@ -10,8 +12,10 @@
 - `http-poll`：只发 GET；主机和端口显式 allowlist、DNS 解析后固定 IP、SSRF/云元数据地址防护、拒绝重定向、响应大小和超时上限。
 - `sqlite-query`：以 `mode=ro` 打开，启用 `query_only`、SQLite authorizer 和查询 deadline，只允许单条 `SELECT`/只读 `WITH`。
 - 异构字段映射：pipeline 提供默认值，每个 source 可分别覆盖 `timestamp_field`、`period_type`、`scope_field/scope_values`、`mapping` 和 `shifts`；不要假设 ERP、MES、火工品台账的列名和班次编码相同。
-- 月度 V2：每个来源按月形成完整 `days`、日报、零点班、八点班、四点班结构；没有的数据保持 `null + missing`，不估算。
-- 日期覆盖：先按企业时区计算“本地今日减 `reporting_lag_days`”的应报截止日；截止日所在月从月初补到截止日，更早月份补到月末，跨月时不会提前声明未来覆盖。整日缺报也会形成 24 个明确缺失单元格。没有独立受控状态字段时，运行状态保持 `unknown`，不能仅凭产量推断停产。
+- 月度 V3：每个来源按月形成完整 `days`、日报、零点班、八点班、四点班结构。日报
+  明确携带全部 11 个原子字段；来源没有的字段保持 `null + missing`，不以 0、历史值
+  或模型结果补齐。
+- 日期覆盖：先按企业时区计算“本地今日减 `reporting_lag_days`”的应报截止日；截止日所在月从月初补到截止日，更早月份补到月末，跨月时不会提前声明未来覆盖。整日缺报也会形成 44 个明确缺失单元格。没有独立受控状态字段时，运行状态保持 `unknown`，不能仅凭产量推断停产。
 - 多来源：同一 `(client_id, draft_key, source_id)` 由 Agent 保存最新来源快照并重算；不同来源非空值冲突时 Agent 阻断，绝不后写覆盖。
 - 完整代次：所有 `required_sources` 的最新修订到齐后，最后一个事件才设置 `trigger_workflow=true`；来源修订后组合摘要变化可再次体检。
 - 采集健康：每个 source/月度草稿持久记录 `success_nonempty/success_empty/error/stability_wait`，按状态变化或有界心跳投递。必需来源空、错误、过期，或 health 未绑定 Agent 当前已完成 contribution 时，不触发就绪预检。
@@ -24,13 +28,13 @@
 ERP/MES/地磅/台账（只读）
         │
         ▼
-connector-service ── 字段映射、V2补全、来源修订、耐久双 outbox
+connector-service ── 十量映射、显式缺失、来源修订、耐久双 outbox
         │  HMAC POST /api/v1/machine/source-health + /api/v1/machine/autofill
         ▼
 企业 Agent ── 多来源合并/冲突阻断/草稿修订/只读预检
         │
         ▼
-企业经办人核对确认 ── 正式五量 V2 报送 ── 监管平台
+企业经办人核对 ── 十量 V3 草稿（人工确认后才可进入正式报送）
 ```
 
 ## 快速安装
@@ -51,11 +55,17 @@ export ENTERPRISE_CONNECTOR_HMAC_SECRET='replace-with-a-random-secret-of-at-leas
 
 # Agent 进程使用相同密钥建立最小权限 allowlist：
 export ENTERPRISE_AGENT_CONNECTOR_CLIENTS_JSON='[
-  {"client_id":"mine-qy-001-connector","secret":"replace-with-a-random-secret-of-at-least-32-bytes","permissions":["autofill"],"allowed_sources":{"blasting-file":{"source_system":"blasting-ledger","required":true,"freshness_max_seconds":3600},"production-http":{"source_system":"production-mes","required":true,"freshness_max_seconds":3600},"energy-sqlite":{"source_system":"energy-sqlite","required":true,"freshness_max_seconds":3600}}}
+  {"client_id":"mine-qy-001-connector","secret":"replace-with-a-random-secret-of-at-least-32-bytes","permissions":["autofill"],"allowed_sources":{"blasting-file":{"source_system":"blasting-ledger","required":true,"freshness_max_seconds":3600},"production-http":{"source_system":"production-mes","required":true,"freshness_max_seconds":3600},"energy-sqlite":{"source_system":"energy-sqlite","required":true,"freshness_max_seconds":3600},"business-sqlite":{"source_system":"business-sqlite","required":true,"freshness_max_seconds":3600}}}
 ]'
 ```
 
-V1 严格是“一矿一 connector 一个五量 pipeline”。`enterprise_id` 必须精确等于 Agent 的 `ENTERPRISE_OPERATOR_ID`。`allowed_sources` 要把每个固定 `source_id` 绑定到 `source_system`，并与 connector 的 `required_sources/max_staleness_seconds` 逐项一致；不支持通配。多个上游系统都放在这一 pipeline 的 `sources` 下。
+严格是“一矿一 connector 一个十量 pipeline”。`enterprise_id` 必须精确等于 Agent 的
+`ENTERPRISE_OPERATOR_ID`。`report_type = "five-quantity"` 是为兼容既有 Agent
+`draft_key` 保留的稳定路由名，不表示仍在生成 V2。实际来源内容会明确声明
+`contract_version = "ten-quantity-submission-v3"`。`allowed_sources` 要把每个固定
+`source_id` 绑定到 `source_system`，并与 connector 的
+`required_sources/max_staleness_seconds` 逐项一致；不支持通配。多个上游系统都放在
+这一 pipeline 的 `sources` 下。
 
 密钥环境变量必须在两个服务启动前配置。修改后要重启对应服务；正在运行的进程不会重新读取父 shell 的环境变量。
 
@@ -69,11 +79,15 @@ enterprise-connector status --config /etc/enterprise-connector/config.toml
 enterprise-connector check --config /etc/enterprise-connector/config.toml
 ```
 
+`validate` 会输出 `data_contract/atomic_metrics/mapping_coverage`。若仍是六字段旧来源，
+命令可以通过，但会在 `unmapped_metrics` 和 `warnings` 中列出五个缺口；运行时这些单元格
+只会是 `null + missing`。
+
 终端持续占用代表守护进程正在轮询，不是卡死。生产建议使用 [systemd 样例](deploy/systemd/enterprise-connector.service) 或 [Dockerfile](deploy/docker/Dockerfile)。
 
 ## 可运行演示（三种适配器）
 
-演示配置同时使用文件投递、HTTP GET 和 SQLite 只读视图，三个系统故意使用不同的时间列、班次编码和业务字段，以验证 source 级映射。
+演示配置同时使用文件投递、HTTP GET 和 SQLite 只读视图，四个来源故意使用不同的时间列、班次编码和业务字段，以验证 source 级映射。
 
 ```bash
 cd /home/sevan/coral/connector-service
@@ -89,7 +103,9 @@ enterprise-connector validate --config examples/config.toml
 enterprise-connector run --config examples/config.toml
 ```
 
-文件来源默认要求稳定 2 秒，所以演示应运行常驻命令，或间隔两秒执行两次 `--once`。Agent 前端“五量填报”中会出现同一个 2026-07 月度草稿，而不是每天生成一份草稿。
+文件来源默认要求稳定 2 秒，所以演示应运行常驻命令，或间隔两秒执行两次 `--once`。
+演示覆盖全部 11 个原子字段：火工品/人员文件、生产与开采 HTTP、能耗与通风
+SQLite、销售/外运/入洗/普通发票 SQLite。它只创建 Agent 草稿，不代替人工确认。
 
 ## 配置口径
 
@@ -99,10 +115,10 @@ enterprise-connector run --config examples/config.toml
 |---|---|
 | `enterprise_id + report_type` | 唯一确定该 pipeline 的月度 `draft_key`；配置禁止重复组合 |
 | `timestamp_field` | ISO 8601、日期或 Unix 秒字段；无时区值按 pipeline 时区解释 |
-| `scope_field` | 原始日报/班次字段；通过 `scope_values` 对齐四个 V2 scope |
+| `scope_field` | 原始日报/班次字段；通过 `scope_values` 对齐日报和三个班次 scope |
 | `sources.timestamp_field/scope_field/mapping/shifts` | 可选 source 级覆盖；未配时继承 pipeline 默认值 |
 | `reporting_lag_days` | 应报截止日相对企业本地当天的延迟天数；跨月时目标月份和快照窗口都随该截止日切换，快照记录参数和 as-of 日期 |
-| `mapping` | 目标只能是六原子字段，或 `daily_total.production_t` 等显式单元格 |
+| `mapping` | 目标只能是 11 个十量 V3 原子字段，或 `daily_total.production_t` 等显式单元格 |
 | `required_sources` | 判断“完整来源代次”何时到齐并发出 workflow trigger；Agent 对每次成功机器导入都做修订/摘要绑定的只读体检，不能因本次未触发而漏检 |
 | `max_staleness_seconds` | 300-2592000 的整数，默认 3600；Agent allowlist 必须配同值 |
 | `max_files_per_poll/max_total_bytes/max_total_records` | file-drop 单轮总量上限，超限显式报错而不截断 |
@@ -111,7 +127,7 @@ enterprise-connector run --config examples/config.toml
 | `secret_env` | HMAC 密钥环境变量名；密钥本身禁止进入配置 |
 | `agent_ca_bundle` / `sources.ca_bundle` | 内网 HTTPS 私有 CA PEM 文件；相对路径按 TOML 目录解析 |
 
-六原子字段是：
+十个业务量对应以下 11 个原子字段（火工品拆成不可相加的雷管支数和炸药质量）：
 
 - `ventilation_m3_min`
 - `electricity_kwh`
@@ -119,6 +135,11 @@ enterprise-connector run --config examples/config.toml
 - `explosives_kg`
 - `mine_entry_persons`
 - `production_t`
+- `extraction_t`
+- `sales_t`
+- `transport_t`
+- `wash_feed_t`
+- `invoiced_quantity_t`
 
 每个来源、每个出现记录的月份必须至少映射出一个非空规范值，否则整批按字段漂移或
 映射错误处理并上报健康异常，不能生成“全是 null 却显示采集成功”的快照。应把该来源
@@ -132,7 +153,27 @@ enterprise-connector run --config examples/config.toml
 - `latest`：按观测时间取最后值；相同业务时间若出现不同值会阻断，不能按输入顺序任取；
 - `single`：只接受唯一值或多个完全相同值。
 
-风量的 V2 聚合口径是时间加权平均。若上游给的是瞬时序列，不应简单使用 `average`；应在来源只读视图中先按已批准口径生成结果。
+风量聚合口径是时间加权平均。若上游给的是瞬时序列，不应简单使用 `average`；应在来源只读视图中先按已批准口径生成结果。
+
+`production_t` 是企业生产报表产量，`extraction_t` 是采掘/工作面计量；两者不能因为
+名称相近而复用同一列。`transport_t` 是出矿/外运净吨，不是矿内皮带周转量。
+`wash_feed_t` 是进入洗选环节的原煤量。
+
+`invoiced_quantity_t` 只接受本期开具的普通/蓝票对应的非负实物吨数。红票、退货、
+折让是辅助事件，应保留在来源系统的独立明细或凭证中；禁止把带符号发票净额映射到
+主字段。连接器发现负值，或经 `factor/offset` 转换后得到负值，会阻断该来源快照并上报
+健康异常，不会取绝对值或静默丢弃。
+
+## V2 历史兼容边界
+
+- 已经存在于 connector 状态库中的旧 observation/outbox body 不会在启动、重放或迁移
+  时改写；灾备重放仍发送原始 bytes 对应的业务 JSON。
+- 已签名或已归档的 `five-quantity-submission-v2` 只能按历史只读链路查看/重放，不能由
+  connector 补五个字段后变成 V3。新 V3 必须从原始 ERP/MES/台账重新采集。
+- 仍只有六列的上游可继续配置：新快照会声明 V3，但五个新增字段只生成明确的
+  `null + missing`，等待其他权威来源合并或人工补充；绝不伪造数值。
+- `/api/v1/machine/autofill` 和 `enterprise-autofill-ingestion/v1` 是 Connector→Agent
+  的稳定机器传输合同，不等于报送 V1/V2。其 `source.content` 内才声明十量 V3 数据合同。
 
 `source.observed_at` 是这份稳定快照的采集时间，`connector_snapshot.data_watermark` 是来源记录中最大业务时间，`coverage_as_of` 是该月应报窗口的声明截止日。三者不可混用；快照仍可含 `missing_dates`，`coverage_as_of` 不代表“数据无缺失”。
 
@@ -223,7 +264,7 @@ enterprise-connector replay \
 
 如果 connector state 丢失但 Agent 数据库仍在，不能直接从修订 1 重建。先从 Agent 草稿的“来源与机器导入记录”取得每个 `source_id` 最新修订的证据，由两人记录恢复点、原因和文件摘要，再将 `revision_seed` 设为该值；首个新事件使用 `seed + 1`。`validate/status` 会醒目标记任何非零 seed。恢复后不要为了“让号码好看”盲目修改；恢复旧 state 始终是首选。
 
-空结果、读取错误或文件消失只会产生 health 状态，绝不自动清空 Agent 中旧 contribution。若上游确实撤回了整月记录，必须按现场制度在 Agent 中人工处理并保留凭证；V1 不提供无审计 tombstone。
+空结果、读取错误或文件消失只会产生 health 状态，绝不自动清空 Agent 中旧 contribution。若上游确实撤回了整月记录，必须按现场制度在 Agent 中人工处理并保留凭证；当前版本不提供无审计 tombstone。
 
 file-drop 文件名必须是有效 UTF-8，且不得含控制或格式控制字符。已知来源错误保留安全诊断；意外解析或编码异常会隔离为 `source_internal_error`，日志只记录异常类型并继续采集后续独立来源，避免正文或凭据进入日志。
 
@@ -262,4 +303,6 @@ python -m pytest
 python -m build
 ```
 
-测试覆盖 V2 月度结构、三种只读适配器、SSRF/重定向/大小限制、HMAC、双来源 generation、响应丢失后 exactly-once、SQLite 租约、来源 `A→B→A` 修订及重启幂等。
+测试覆盖十量 V3 月度结构、11 字段真实 Agent 消费、六字段来源显式缺失、开票负数
+阻断、三种只读适配器、SSRF/重定向/大小限制、HMAC、多来源 generation、响应丢失后
+exactly-once、SQLite 租约、来源 `A→B→A` 修订及重启幂等。

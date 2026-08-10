@@ -211,14 +211,22 @@ class Settings:
                 timeout_seconds=_float("PLATFORM_TIMEOUT_SECONDS", 20.0, 1.0, 120.0),
             )
 
-        # V1 and V2 are independent products/contracts.  A legacy V1 endpoint
-        # must never silently enable the V2 exchange client.
-        v2_base = os.environ.get("PLATFORM_V2_BASE_URL", "").strip()
+        # V1 and the governed V2/V3 exchange are independent products.  Keep
+        # the V2 variable names as deployment aliases, but all new reporting
+        # uses the V3 routes and signing domains.
+        v2_base = (
+            os.environ.get("PLATFORM_V3_BASE_URL", "").strip()
+            or os.environ.get("PLATFORM_V2_BASE_URL", "").strip()
+        )
         v2_sender_id = (
-            os.environ.get("PLATFORM_V2_SENDER_ID", "").strip()
+            os.environ.get("PLATFORM_V3_SENDER_ID", "").strip()
+            or os.environ.get("PLATFORM_V2_SENDER_ID", "").strip()
             or os.environ.get("ENTERPRISE_SYSTEM_ID", "agent-demo-mine-001").strip()
         )
-        v2_transport_secret = os.environ.get("PLATFORM_V2_TRANSPORT_HMAC_SECRET", "")
+        v2_transport_secret = (
+            os.environ.get("PLATFORM_V3_TRANSPORT_HMAC_SECRET", "")
+            or os.environ.get("PLATFORM_V2_TRANSPORT_HMAC_SECRET", "")
+        )
         explicit_message_secret = os.environ.get("ENTERPRISE_EXCHANGE_HMAC_SECRET", "")
         demo_message_secret = (
             "DEMO_ONLY_five_quantity_exchange_secret_change_before_production"
@@ -282,18 +290,19 @@ class Settings:
                 or not explicit_message_secret
             ):
                 raise ValueError(
-                    "配置 V2 监管地址时必须显式配置 PLATFORM_V2_SENDER_ID、"
+                    "配置 V3 监管地址时必须显式配置 PLATFORM_V3_SENDER_ID"
+                    "（或兼容的 V2 名称）、"
                     "ENTERPRISE_EXCHANGE_HMAC_SECRET 和 "
-                    "PLATFORM_V2_TRANSPORT_HMAC_SECRET"
+                    "PLATFORM_V3_TRANSPORT_HMAC_SECRET（或兼容的 V2 名称）"
                 )
             if hmac.compare_digest(
                 explicit_message_secret.encode("utf-8"),
                 v2_transport_secret.encode("utf-8"),
             ):
-                raise ValueError("V2 应用消息 HMAC 密钥与运输 HMAC 密钥不得相同")
+                raise ValueError("应用消息 HMAC 密钥与运输 HMAC 密钥不得相同")
             if v2_sender_id != five_quantity_identity.system_id:
                 raise ValueError(
-                    "PLATFORM_V2_SENDER_ID 必须与 ENTERPRISE_SYSTEM_ID 相同；"
+                    "PLATFORM_V3_SENDER_ID 必须与 ENTERPRISE_SYSTEM_ID 相同；"
                     "一个智能体实例只能绑定一个已登记发送系统"
                 )
             five_quantity_platform = FiveQuantityPlatformConfig(
@@ -301,21 +310,31 @@ class Settings:
                 sender_id=v2_sender_id,
                 transport_hmac_secret=v2_transport_secret,
                 timeout_seconds=_float(
-                    "PLATFORM_V2_TIMEOUT_SECONDS",
+                    (
+                        "PLATFORM_V3_TIMEOUT_SECONDS"
+                        if "PLATFORM_V3_TIMEOUT_SECONDS" in os.environ
+                        else "PLATFORM_V2_TIMEOUT_SECONDS"
+                    ),
                     20.0,
                     1.0,
                     120.0,
                 ),
                 submission_path=os.environ.get(
+                    "PLATFORM_V3_SUBMISSION_PATH",
+                    "/v3/ten-quantity-submissions",
+                ).strip(),
+                next_report_path=os.environ.get(
+                    "PLATFORM_V3_NEXT_REPORT_PATH",
+                    "/v3/analysis-reports/next",
+                ).strip(),
+                legacy_submission_path=os.environ.get(
                     "PLATFORM_V2_SUBMISSION_PATH",
                     "/v2/five-quantity-submissions",
                 ).strip(),
-                next_report_path=os.environ.get(
-                    "PLATFORM_V2_NEXT_REPORT_PATH",
-                    "/v2/analysis-reports/next",
-                ).strip(),
                 ca_bundle_path=(
-                    os.environ.get("PLATFORM_V2_CA_BUNDLE", "").strip() or None
+                    os.environ.get("PLATFORM_V3_CA_BUNDLE", "").strip()
+                    or os.environ.get("PLATFORM_V2_CA_BUNDLE", "").strip()
+                    or None
                 ),
             )
         watched_raw = os.environ.get("ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS", "")

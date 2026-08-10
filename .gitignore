@@ -12,6 +12,13 @@ node_modules/
 out/
 agent/artifacts/
 platform/artifacts/
+manuals/*.aux
+manuals/*.log
+manuals/*.out
+manuals/*.toc
+manuals/*.fls
+manuals/*.fdb_latexmk
+manuals/*.synctex.gz
 /release/
 next-env.d.ts
 .wrangler/

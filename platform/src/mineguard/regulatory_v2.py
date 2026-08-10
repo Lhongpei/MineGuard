@@ -1,6 +1,6 @@
-"""The single V2 regulatory engine for operational five-quantity reports.
+"""The V3 regulatory engine for ten-quantity reports, with V2 read support.
 
-The public product exposes :func:`analyze_five_quantity` as its only business
+The public product retains :func:`analyze_five_quantity` as its stable business
 algorithm.  The implementation is deliberately modular internally: it checks
 the deterministic daily/shift arithmetic, identifies operating states, uses
 robust same-mine history and anonymous peer aggregates, runs a weighted-L1
@@ -8,7 +8,8 @@ linear reconciliation, diagnoses counterfactual minimal conflict sets (MCS),
 and evaluates drift/change points.
 
 None of the historical or peer relationships is treated as a law of physics.
-They are soft intervals in the elastic optimisation.  The strict solves used
+Every relationship is an explicit numerator/denominator soft interval in the
+elastic optimisation.  The strict solves used
 for MCS answer the narrower question "which smallest set of reported/reference
 bands would have to be set aside to make this snapshot mutually feasible?".
 They are diagnostic and never a finding of cause or misconduct.
@@ -37,6 +38,7 @@ from pydantic import AliasChoices, AwareDatetime, Field, model_validator
 from scipy import __version__ as SCIPY_VERSION
 from scipy.optimize import linprog
 
+from . import regulatory_v3 as advanced_v3
 from .models import StrictModel
 from .temporal import (
     TemporalDetectionParameters,
@@ -47,10 +49,16 @@ from .temporal import (
 )
 
 
-REGULATORY_V2_METHOD_VERSION = "regulatory-five-quantity-v2.3.0"
-AGGREGATION_RULE_VERSION = "five-quantity-aggregation-v2.2"
-BASELINE_ADMISSION_RULE_VERSION = "baseline-admission-v2.2"
-BUSINESS_QUANTITY_GROUP_VERSION = "five-business-quantities-v2.3"
+REGULATORY_V2_METHOD_VERSION = "regulatory-ten-quantity-v3.2.0"
+AGGREGATION_RULE_VERSION = "ten-quantity-aggregation-v3.0"
+BASELINE_ADMISSION_RULE_VERSION = "baseline-admission-v3.0"
+BUSINESS_QUANTITY_GROUP_VERSION = "ten-business-quantities-v3.0"
+LEGACY_METHOD_VERSION = "regulatory-five-quantity-v2.3.0"
+LEGACY_AGGREGATION_RULE_VERSION = "five-quantity-aggregation-v2.2"
+LEGACY_BASELINE_ADMISSION_RULE_VERSION = "baseline-admission-v2.2"
+LEGACY_BUSINESS_QUANTITY_GROUP_VERSION = "five-business-quantities-v2.3"
+LEGACY_CONTRACT_VERSION = "enterprise-five-quantity-submission-v2"
+TEN_CONTRACT_VERSION = "enterprise-ten-quantity-submission-v3"
 CalendarDate = date
 
 
@@ -86,6 +94,17 @@ class RelationshipCode(StrEnum):
     DETONATORS_PER_PRODUCTION = "detonators_per_production"
     EXPLOSIVES_PER_PRODUCTION = "explosives_per_production"
     MINE_ENTRY_PERSONS_PER_PRODUCTION = "mine_entry_persons_per_production"
+    VENTILATION_PER_EXTRACTION = "ventilation_per_extraction"
+    ELECTRICITY_PER_EXTRACTION = "electricity_per_extraction"
+    DETONATORS_PER_EXTRACTION = "detonators_per_extraction"
+    EXPLOSIVES_PER_EXTRACTION = "explosives_per_extraction"
+    MINE_ENTRY_PERSONS_PER_EXTRACTION = "mine_entry_persons_per_extraction"
+    PRODUCTION_PER_EXTRACTION = "production_per_extraction"
+    SALES_PER_PRODUCTION = "sales_per_production"
+    TRANSPORT_PER_PRODUCTION = "transport_per_production"
+    TRANSPORT_PER_SALES = "transport_per_sales"
+    WASH_FEED_PER_PRODUCTION = "wash_feed_per_production"
+    INVOICED_QUANTITY_PER_SALES = "invoiced_quantity_per_sales"
 
     @classmethod
     def _missing_(cls, value: object) -> "RelationshipCode | None":
@@ -96,13 +115,25 @@ class RelationshipCode(StrEnum):
         return None
 
 
-METRICS: tuple[str, ...] = (
+LEGACY_METRICS: tuple[str, ...] = (
     "ventilation_m3_min",
     "electricity_kwh",
     "detonators_count",
     "explosives_kg",
     "mine_entry_persons",
     "production_t",
+)
+METRICS: tuple[str, ...] = (
+    *LEGACY_METRICS,
+    "extraction_t",
+    "sales_t",
+    "transport_t",
+    "wash_feed_t",
+    "invoiced_quantity_t",
+)
+SHIFT_REQUIRED_METRICS: tuple[str, ...] = (*LEGACY_METRICS, "extraction_t")
+COMMERCIAL_DAILY_METRICS = frozenset(
+    {"sales_t", "transport_t", "wash_feed_t", "invoiced_quantity_t"}
 )
 FIVE_QUANTITY_GROUPS: dict[str, tuple[str, ...]] = {
     "airflow": ("ventilation_m3_min",),
@@ -113,13 +144,122 @@ FIVE_QUANTITY_GROUPS: dict[str, tuple[str, ...]] = {
     "mine_entry_personnel": ("mine_entry_persons",),
     "production": ("production_t",),
 }
+TEN_QUANTITY_GROUPS: dict[str, tuple[str, ...]] = {
+    **FIVE_QUANTITY_GROUPS,
+    "extraction": ("extraction_t",),
+    "sales": ("sales_t",),
+    "transport": ("transport_t",),
+    "coal_washing": ("wash_feed_t",),
+    "invoicing": ("invoiced_quantity_t",),
+}
 ADDITIVE_METRICS = frozenset(METRICS) - {"ventilation_m3_min"}
+LEGACY_RELATIONSHIPS: tuple[RelationshipCode, ...] = (
+    RelationshipCode.VENTILATION_PER_PRODUCTION,
+    RelationshipCode.ELECTRICITY_PER_PRODUCTION,
+    RelationshipCode.DETONATORS_PER_PRODUCTION,
+    RelationshipCode.EXPLOSIVES_PER_PRODUCTION,
+    RelationshipCode.MINE_ENTRY_PERSONS_PER_PRODUCTION,
+)
+TEN_RELATIONSHIPS: tuple[RelationshipCode, ...] = (
+    RelationshipCode.VENTILATION_PER_EXTRACTION,
+    RelationshipCode.ELECTRICITY_PER_EXTRACTION,
+    RelationshipCode.DETONATORS_PER_EXTRACTION,
+    RelationshipCode.EXPLOSIVES_PER_EXTRACTION,
+    RelationshipCode.MINE_ENTRY_PERSONS_PER_EXTRACTION,
+    RelationshipCode.PRODUCTION_PER_EXTRACTION,
+    RelationshipCode.SALES_PER_PRODUCTION,
+    RelationshipCode.TRANSPORT_PER_PRODUCTION,
+    RelationshipCode.TRANSPORT_PER_SALES,
+    RelationshipCode.WASH_FEED_PER_PRODUCTION,
+    RelationshipCode.INVOICED_QUANTITY_PER_SALES,
+)
+RELATIONSHIP_METRICS: dict[RelationshipCode, tuple[str, str]] = {
+    RelationshipCode.VENTILATION_PER_PRODUCTION: (
+        "ventilation_m3_min",
+        "production_t",
+    ),
+    RelationshipCode.ELECTRICITY_PER_PRODUCTION: (
+        "electricity_kwh",
+        "production_t",
+    ),
+    RelationshipCode.DETONATORS_PER_PRODUCTION: (
+        "detonators_count",
+        "production_t",
+    ),
+    RelationshipCode.EXPLOSIVES_PER_PRODUCTION: (
+        "explosives_kg",
+        "production_t",
+    ),
+    RelationshipCode.MINE_ENTRY_PERSONS_PER_PRODUCTION: (
+        "mine_entry_persons",
+        "production_t",
+    ),
+    RelationshipCode.VENTILATION_PER_EXTRACTION: (
+        "ventilation_m3_min",
+        "extraction_t",
+    ),
+    RelationshipCode.ELECTRICITY_PER_EXTRACTION: (
+        "electricity_kwh",
+        "extraction_t",
+    ),
+    RelationshipCode.DETONATORS_PER_EXTRACTION: (
+        "detonators_count",
+        "extraction_t",
+    ),
+    RelationshipCode.EXPLOSIVES_PER_EXTRACTION: (
+        "explosives_kg",
+        "extraction_t",
+    ),
+    RelationshipCode.MINE_ENTRY_PERSONS_PER_EXTRACTION: (
+        "mine_entry_persons",
+        "extraction_t",
+    ),
+    RelationshipCode.PRODUCTION_PER_EXTRACTION: ("production_t", "extraction_t"),
+    RelationshipCode.SALES_PER_PRODUCTION: ("sales_t", "production_t"),
+    RelationshipCode.TRANSPORT_PER_PRODUCTION: ("transport_t", "production_t"),
+    RelationshipCode.TRANSPORT_PER_SALES: ("transport_t", "sales_t"),
+    RelationshipCode.WASH_FEED_PER_PRODUCTION: ("wash_feed_t", "production_t"),
+    RelationshipCode.INVOICED_QUANTITY_PER_SALES: (
+        "invoiced_quantity_t",
+        "sales_t",
+    ),
+}
+# Compatibility export used by read-side presentation code.  New algorithmic
+# code must use both columns in ``RELATIONSHIP_METRICS``.
 RELATIONSHIP_METRIC: dict[RelationshipCode, str] = {
-    RelationshipCode.VENTILATION_PER_PRODUCTION: "ventilation_m3_min",
-    RelationshipCode.ELECTRICITY_PER_PRODUCTION: "electricity_kwh",
-    RelationshipCode.DETONATORS_PER_PRODUCTION: "detonators_count",
-    RelationshipCode.EXPLOSIVES_PER_PRODUCTION: "explosives_kg",
-    RelationshipCode.MINE_ENTRY_PERSONS_PER_PRODUCTION: "mine_entry_persons",
+    relationship: numerator
+    for relationship, (numerator, _denominator) in RELATIONSHIP_METRICS.items()
+}
+RELATIONSHIP_LABELS: dict[RelationshipCode, str] = {
+    RelationshipCode.VENTILATION_PER_PRODUCTION: "风量/产量",
+    RelationshipCode.ELECTRICITY_PER_PRODUCTION: "电量/产量",
+    RelationshipCode.DETONATORS_PER_PRODUCTION: "雷管量/产量",
+    RelationshipCode.EXPLOSIVES_PER_PRODUCTION: "炸药量/产量",
+    RelationshipCode.MINE_ENTRY_PERSONS_PER_PRODUCTION: "入井人员量/产量",
+    RelationshipCode.VENTILATION_PER_EXTRACTION: "风量/开采量",
+    RelationshipCode.ELECTRICITY_PER_EXTRACTION: "电量/开采量",
+    RelationshipCode.DETONATORS_PER_EXTRACTION: "雷管量/开采量",
+    RelationshipCode.EXPLOSIVES_PER_EXTRACTION: "炸药量/开采量",
+    RelationshipCode.MINE_ENTRY_PERSONS_PER_EXTRACTION: "入井人员量/开采量",
+    RelationshipCode.PRODUCTION_PER_EXTRACTION: "产量/开采量",
+    RelationshipCode.SALES_PER_PRODUCTION: "销售量/产量",
+    RelationshipCode.TRANSPORT_PER_PRODUCTION: "运输量/产量",
+    RelationshipCode.TRANSPORT_PER_SALES: "运输量/销售量",
+    RelationshipCode.WASH_FEED_PER_PRODUCTION: "洗煤量/产量",
+    RelationshipCode.INVOICED_QUANTITY_PER_SALES: "开票量/销售量",
+}
+METRIC_LABELS: dict[str, str] = {
+    "ventilation_m3_min": "风量",
+    "electricity_kwh": "电量",
+    "detonators_count": "雷管量",
+    "explosives_kg": "炸药量",
+    "mine_entry_persons": "入井人员量",
+    "production_t": "产量",
+    "extraction_t": "开采量",
+    "sales_t": "销售量",
+    "transport_t": "运输量",
+    "wash_feed_t": "洗煤量",
+    "invoiced_quantity_t": "开票量",
 }
 METRIC_UNITS: dict[str, str] = {
     "ventilation_m3_min": "m3/min",
@@ -128,7 +268,36 @@ METRIC_UNITS: dict[str, str] = {
     "explosives_kg": "kg",
     "mine_entry_persons": "person",
     "production_t": "t",
+    "extraction_t": "t",
+    "sales_t": "t",
+    "transport_t": "t",
+    "wash_feed_t": "t",
+    "invoiced_quantity_t": "t",
 }
+
+
+def applicable_metrics_for_scope(scope: str) -> tuple[str, ...]:
+    if scope == "five_quantity_v2":
+        return LEGACY_METRICS
+    if scope == "ten_quantity_v3":
+        return METRICS
+    raise ValueError(f"unknown quantity scope: {scope}")
+
+
+def shift_required_metrics_for_scope(scope: str) -> tuple[str, ...]:
+    if scope == "five_quantity_v2":
+        return LEGACY_METRICS
+    if scope == "ten_quantity_v3":
+        return SHIFT_REQUIRED_METRICS
+    raise ValueError(f"unknown quantity scope: {scope}")
+
+
+def applicable_relationships_for_scope(scope: str) -> tuple[RelationshipCode, ...]:
+    if scope == "five_quantity_v2":
+        return LEGACY_RELATIONSHIPS
+    if scope == "ten_quantity_v3":
+        return TEN_RELATIONSHIPS
+    raise ValueError(f"unknown quantity scope: {scope}")
 
 
 class ShiftValues(StrictModel):
@@ -167,10 +336,13 @@ class ShiftValues(StrictModel):
         total_minutes = math.fsum(duration_minutes)
         if total_minutes <= 0:
             return None
-        return math.fsum(
-            value * minutes
-            for value, minutes in zip(numeric, duration_minutes, strict=True)
-        ) / total_minutes
+        return (
+            math.fsum(
+                value * minutes
+                for value, minutes in zip(numeric, duration_minutes, strict=True)
+            )
+            / total_minutes
+        )
 
 
 class ShiftWindowMetadata(StrictModel):
@@ -197,8 +369,14 @@ class ShiftWindowMetadata(StrictModel):
     def validate_window(self) -> "ShiftWindowMetadata":
         if self.end_at <= self.start_at:
             raise ValueError("shift metadata end_at must follow start_at")
-        if set(self.aggregations) != set(METRICS):
-            raise ValueError("shift metadata must preserve every metric aggregation")
+        metric_set = set(self.aggregations)
+        is_legacy = metric_set == set(LEGACY_METRICS)
+        is_v3 = set(SHIFT_REQUIRED_METRICS) <= metric_set <= set(METRICS)
+        if not (is_legacy or is_v3):
+            raise ValueError(
+                "shift metadata must preserve the six legacy atoms or seven "
+                "shift-required V3 atoms plus optional commercial atoms"
+            )
         return self
 
     @property
@@ -222,9 +400,7 @@ class ShiftMetadata(StrictModel):
 
 class ReportedQuantity(StrictModel):
     daily_total: Annotated[float | None, Field(ge=0.0)] = None
-    daily_aggregation: Literal["time_weighted_average", "sum", "snapshot"] | None = (
-        None
-    )
+    daily_aggregation: Literal["time_weighted_average", "sum", "snapshot"] | None = None
     shifts: ShiftValues | None = None
 
 
@@ -262,6 +438,11 @@ class FiveQuantityDay(StrictModel):
     detonators_count: ReportedQuantity
     explosives_kg: ReportedQuantity
     production_t: ReportedQuantity
+    extraction_t: ReportedQuantity | None = None
+    sales_t: ReportedQuantity | None = None
+    transport_t: ReportedQuantity | None = None
+    wash_feed_t: ReportedQuantity | None = None
+    invoiced_quantity_t: ReportedQuantity | None = None
     declared_operating_state: (
         Literal["producing", "stopped", "maintenance", "restarting", "unknown"] | None
     ) = None
@@ -294,8 +475,7 @@ class FiveQuantityDay(StrictModel):
                     )
                 )
             if any(
-                value is not None and not float(value).is_integer()
-                for value in values
+                value is not None and not float(value).is_integer() for value in values
             ):
                 raise ValueError(f"{metric} values must be integral")
         if self.mine_entry_persons.daily_aggregation not in {None, "sum"}:
@@ -309,12 +489,38 @@ class FiveQuantityDay(StrictModel):
             )
         ):
             raise ValueError("mine_entry_persons shift aggregation must be sum")
+        for metric in COMMERCIAL_DAILY_METRICS:
+            quantity = getattr(self, metric)
+            if quantity is not None and quantity.daily_aggregation not in {None, "sum"}:
+                raise ValueError(f"{metric} aggregation must be sum")
+        if (
+            self.extraction_t is not None
+            and self.extraction_t.daily_aggregation
+            not in {
+                None,
+                "sum",
+            }
+        ):
+            raise ValueError("extraction_t aggregation must be sum")
+        if self.shift_metadata is not None and self.extraction_t is not None:
+            if any(
+                shift.aggregations.get("extraction_t") != "sum"
+                for shift in (
+                    self.shift_metadata.zero_shift,
+                    self.shift_metadata.eight_shift,
+                    self.shift_metadata.four_shift,
+                )
+            ):
+                raise ValueError("extraction_t shift aggregation must be sum")
         if not set(self.quality) <= set(METRICS):
             raise ValueError("quality contains an unknown metric")
         return self
 
-    def quantities(self) -> dict[str, ReportedQuantity]:
-        return {metric: getattr(self, metric) for metric in METRICS}
+    def quantities(
+        self,
+        metrics: Sequence[str] = METRICS,
+    ) -> dict[str, ReportedQuantity | None]:
+        return {metric: getattr(self, metric) for metric in metrics}
 
 
 def _shift_aggregate(
@@ -328,13 +534,18 @@ def _shift_aggregate(
         aggregation = "sum" if metric in ADDITIVE_METRICS else "time_weighted_average"
     else:
         aggregations = {
-            window.aggregations[metric]
+            window.aggregations.get(metric)
             for window in (
                 day.shift_metadata.zero_shift,
                 day.shift_metadata.eight_shift,
                 day.shift_metadata.four_shift,
             )
         }
+        if None in aggregations:
+            # Commercial shift values are cadence-optional.  Preserve any raw
+            # values but do not invent an aggregation when metadata says the
+            # metric is not applicable to one or more shifts.
+            return None, "not_applicable"
         if len(aggregations) != 1:
             return None, "mixed"
         aggregation = aggregations.pop()
@@ -364,6 +575,8 @@ def effective_reported_value(
     """Return the governed daily value without changing aggregation meaning."""
 
     quantity = getattr(day, metric)
+    if quantity is None:
+        return None
     if quantity.daily_total is not None:
         return float(quantity.daily_total)
     shift_value, _ = _shift_aggregate(day, metric, quantity)
@@ -392,9 +605,11 @@ class ComparisonContext(StrictModel):
 
 
 class FiveQuantitySubmission(StrictModel):
-    contract_version: Literal["enterprise-five-quantity-submission-v2"] = (
-        "enterprise-five-quantity-submission-v2"
-    )
+    contract_version: Literal[
+        "enterprise-five-quantity-submission-v2",
+        "enterprise-ten-quantity-submission-v3",
+    ] = LEGACY_CONTRACT_VERSION
+    quantity_scope: Literal["five_quantity_v2", "ten_quantity_v3"] = "five_quantity_v2"
     submission_id: Annotated[str, Field(min_length=8, max_length=128)]
     mine_id: Annotated[str, Field(min_length=1, max_length=128)]
     mine_name: Annotated[str, Field(min_length=1, max_length=256)]
@@ -411,8 +626,33 @@ class FiveQuantitySubmission(StrictModel):
         list[SubmissionProvenance], Field(min_length=1, max_length=64)
     ]
 
+    @model_validator(mode="before")
+    @classmethod
+    def infer_quantity_scope(cls, value: Any) -> Any:
+        """Read V2 documents unchanged and infer scope for early V3 producers."""
+
+        if not isinstance(value, dict) or "quantity_scope" in value:
+            return value
+        normalized = dict(value)
+        if normalized.get("contract_version") == TEN_CONTRACT_VERSION:
+            normalized["quantity_scope"] = "ten_quantity_v3"
+        return normalized
+
     @model_validator(mode="after")
     def validate_period_and_days(self) -> "FiveQuantitySubmission":
+        expected_scope = (
+            "ten_quantity_v3"
+            if self.contract_version == TEN_CONTRACT_VERSION
+            else "five_quantity_v2"
+        )
+        if self.quantity_scope != expected_scope:
+            raise ValueError("contract_version and quantity_scope do not match")
+        if self.quantity_scope == "five_quantity_v2" and any(
+            getattr(day, metric) is not None or metric in day.quality
+            for day in self.days
+            for metric in METRICS[len(LEGACY_METRICS) :]
+        ):
+            raise ValueError("V2 scope cannot silently discard V3 quantity fields")
         if self.period_end < self.period_start:
             raise ValueError("period_end cannot predate period_start")
         expected_span = (self.period_end - self.period_start).days + 1
@@ -436,6 +676,14 @@ class FiveQuantitySubmission(StrictModel):
             raise ValueError("daily date outside submission period: " + outside[0])
         return self
 
+    @property
+    def applicable_metrics(self) -> tuple[str, ...]:
+        return applicable_metrics_for_scope(self.quantity_scope)
+
+    @property
+    def applicable_relationships(self) -> tuple[RelationshipCode, ...]:
+        return applicable_relationships_for_scope(self.quantity_scope)
+
 
 class HistoricalFiveQuantityDay(StrictModel):
     """A governed normal-candidate day from the same mine."""
@@ -449,6 +697,11 @@ class HistoricalFiveQuantityDay(StrictModel):
     detonators_count: Annotated[float, Field(ge=0.0)]
     explosives_kg: Annotated[float, Field(ge=0.0)]
     production_t: Annotated[float, Field(ge=0.0)]
+    extraction_t: Annotated[float | None, Field(ge=0.0)] = None
+    sales_t: Annotated[float | None, Field(ge=0.0)] = None
+    transport_t: Annotated[float | None, Field(ge=0.0)] = None
+    wash_feed_t: Annotated[float | None, Field(ge=0.0)] = None
+    invoiced_quantity_t: Annotated[float | None, Field(ge=0.0)] = None
 
     @model_validator(mode="after")
     def validate_integral_counts(self) -> "HistoricalFiveQuantityDay":
@@ -458,12 +711,19 @@ class HistoricalFiveQuantityDay(StrictModel):
             raise ValueError("detonators_count must be integral")
         return self
 
-    def values(self) -> dict[str, float]:
-        return {metric: float(getattr(self, metric)) for metric in METRICS}
+    def values(self) -> dict[str, float | None]:
+        return {
+            metric: (
+                float(value) if (value := getattr(self, metric)) is not None else None
+            )
+            for metric in METRICS
+        }
 
 
 class ReferenceBand(StrictModel):
     relationship: RelationshipCode
+    numerator_metric: Annotated[str | None, Field(min_length=1, max_length=64)] = None
+    denominator_metric: Annotated[str | None, Field(min_length=1, max_length=64)] = None
     lower: Annotated[float, Field(ge=0.0)]
     center: Annotated[float, Field(ge=0.0)]
     upper: Annotated[float, Field(ge=0.0)]
@@ -476,6 +736,17 @@ class ReferenceBand(StrictModel):
     def validate_bounds(self) -> "ReferenceBand":
         if not self.lower <= self.center <= self.upper:
             raise ValueError("reference band requires lower <= center <= upper")
+        canonical_numerator, canonical_denominator = RELATIONSHIP_METRICS[
+            self.relationship
+        ]
+        if self.numerator_metric not in {None, canonical_numerator}:
+            raise ValueError("reference numerator does not match relationship")
+        if self.denominator_metric not in {None, canonical_denominator}:
+            raise ValueError("reference denominator does not match relationship")
+        # Populate new V3 semantics while retaining read compatibility for bands
+        # written before the two columns existed.
+        object.__setattr__(self, "numerator_metric", canonical_numerator)
+        object.__setattr__(self, "denominator_metric", canonical_denominator)
         return self
 
 
@@ -507,20 +778,14 @@ class RegulatoryFiveQuantityParameters(StrictModel):
     change_point_bic_margin: Annotated[float, Field(ge=0.0, le=100.0)] = 2.0
     temporal_baseline_window: Annotated[int, Field(ge=8, le=365)] = 60
     temporal_min_history: Annotated[int, Field(ge=3, le=365)] = 7
-    temporal_minimum_relative_scale: Annotated[
-        float, Field(ge=0.0, le=1.0)
-    ] = 0.05
+    temporal_minimum_relative_scale: Annotated[float, Field(ge=0.0, le=1.0)] = 0.05
     temporal_mad_z_threshold: Annotated[float, Field(gt=0.0, le=100.0)] = 4.0
     temporal_ewma_alpha: Annotated[float, Field(gt=0.0, le=1.0)] = 0.25
     temporal_ewma_z_threshold: Annotated[float, Field(gt=0.0, le=100.0)] = 3.0
     temporal_cusum_drift: Annotated[float, Field(ge=0.0, le=100.0)] = 0.5
     temporal_cusum_threshold: Annotated[float, Field(gt=0.0, le=100.0)] = 5.0
-    temporal_page_hinkley_delta: Annotated[
-        float, Field(ge=0.0, le=100.0)
-    ] = 0.1
-    temporal_page_hinkley_threshold: Annotated[
-        float, Field(gt=0.0, le=100.0)
-    ] = 8.0
+    temporal_page_hinkley_delta: Annotated[float, Field(ge=0.0, le=100.0)] = 0.1
+    temporal_page_hinkley_threshold: Annotated[float, Field(gt=0.0, le=100.0)] = 8.0
     max_mcs: Annotated[int, Field(ge=1, le=20)] = 5
     max_mcs_cardinality: Annotated[int, Field(ge=1, le=3)] = 2
     max_mcs_search_combinations: Annotated[int, Field(ge=1, le=100_000)] = 20_000
@@ -600,9 +865,7 @@ class ReconciliationSummary(StrictModel):
         "numerical_failure",
         "solver_error",
     ] = "optimal"
-    solver_methods_attempted: list[str] = Field(
-        default_factory=lambda: ["highs"]
-    )
+    solver_methods_attempted: list[str] = Field(default_factory=lambda: ["highs"])
     solver_message: str | None = None
     objective_value: float | None
     adjustments: list[L1Adjustment]
@@ -653,7 +916,8 @@ class _Observation:
 class _Relation:
     group: str
     relationship: RelationshipCode
-    metric: str
+    numerator_metric: str
+    denominator_metric: str
     band: ReferenceBand
 
 
@@ -674,6 +938,123 @@ class _L1Solve:
     message: str | None
 
 
+def _advanced_v3_quantity(
+    quantity: ReportedQuantity | None,
+) -> advanced_v3.ReportedQuantity:
+    """Losslessly adapt one governed V3 measurement to the evidence engine."""
+
+    if quantity is None:
+        return advanced_v3.ReportedQuantity()
+    shifts = None
+    if quantity.shifts is not None:
+        shifts = advanced_v3.ShiftValues(
+            zero_shift=quantity.shifts.zero_shift,
+            eight_shift=quantity.shifts.eight_shift,
+            four_shift=quantity.shifts.four_shift,
+        )
+    return advanced_v3.ReportedQuantity(
+        daily_total=quantity.daily_total,
+        daily_aggregation=quantity.daily_aggregation,
+        shifts=shifts,
+    )
+
+
+def _run_advanced_v3_evidence_layer(
+    submission: FiveQuantitySubmission,
+    history: Sequence[HistoricalFiveQuantityDay],
+) -> advanced_v3.TenQuantityAnalysisResult:
+    """Run the governed V3.1 evidence layer without inventing support facts.
+
+    The base V3 exchange contains the eleven primary atoms but intentionally
+    does not claim inventory snapshots, washing outputs or shipment-level
+    credential cohorts.  Those evidence modules therefore remain explicitly
+    not applicable at this adapter boundary.  A future governed enrichment
+    connector may supply them as independent facts; this adapter must never
+    synthesize them from aggregate sales, transport or invoice totals.
+    """
+
+    days: list[advanced_v3.TenQuantityDay] = []
+    for day in sorted(submission.days, key=lambda item: item.date):
+        duration_updates: dict[str, float] = {}
+        if day.shift_metadata is not None:
+            zero, eight, four = day.shift_metadata.duration_minutes
+            duration_updates = {
+                "zero_shift": zero,
+                "eight_shift": eight,
+                "four_shift": four,
+            }
+        days.append(
+            advanced_v3.TenQuantityDay(
+                date=day.date,
+                **{
+                    metric: _advanced_v3_quantity(getattr(day, metric))
+                    for metric in METRICS
+                },
+                shift_durations=advanced_v3.ShiftDurations(**duration_updates),
+            )
+        )
+
+    historical_windows = [
+        advanced_v3.HistoricalReferenceWindow(
+            reference_id=f"eligible-day:{item.date.isoformat()}",
+            period_end=item.date,
+            # The store only passes admitted, immutable rows that predate the
+            # current window.  Their observation date is a conservative lower
+            # bound for availability and cannot leak current-period facts.
+            available_at=item.date,
+            operating_regime=submission.comparison_context.operating_regime,
+            baseline_eligible=True,
+            totals=advanced_v3.TenQuantityTotals(**item.values()),
+        )
+        for item in history
+    ]
+    adapted = advanced_v3.TenQuantitySubmission(
+        submission_id=submission.submission_id,
+        mine_id=submission.mine_id,
+        period_start=submission.period_start,
+        period_end=submission.period_end,
+        coverage_as_of=submission.period_end,
+        operating_regime=submission.comparison_context.operating_regime,
+        days=days,
+        applicability=advanced_v3.ModuleApplicability(
+            raw_coal_balance=False,
+            wash_balance=False,
+            credential_chain=False,
+        ),
+    )
+    return advanced_v3.analyze_ten_quantity(adapted, history=historical_windows)
+
+
+def _legacy_signal_from_advanced(
+    signal: advanced_v3.AnalysisSignal,
+) -> AnalysisSignal:
+    """Project an advanced signal without weakening its review priority."""
+
+    if signal.priority in {
+        advanced_v3.ReviewPriority.P1,
+        advanced_v3.ReviewPriority.P2,
+    }:
+        severity = SignalSeverity.RISK
+    elif signal.severity is advanced_v3.SignalSeverity.INFORMATION:
+        severity = SignalSeverity.INFORMATION
+    else:
+        severity = SignalSeverity.REVIEW
+    return AnalysisSignal(
+        code=f"advanced_v3.{signal.code}",
+        severity=severity,
+        message=signal.message,
+        date=signal.observed_date,
+        metric=",".join(signal.affected_metrics) or None,
+        observed=signal.observed,
+        expected_lower=signal.expected_lower,
+        expected_upper=signal.expected_upper,
+        basis=(
+            f"advanced_v3_{signal.layer.value}:"
+            f"{signal.basis}"
+        ),
+    )
+
+
 def analyze_five_quantity(
     submission: FiveQuantitySubmission,
     *,
@@ -681,13 +1062,19 @@ def analyze_five_quantity(
     peer_bands: Sequence[ReferenceBand] = (),
     parameters: RegulatoryFiveQuantityParameters | None = None,
 ) -> RegulatoryFiveQuantityResult:
-    """Run the government's single deterministic V2 regulatory engine.
+    """Run the deterministic V3 engine, including its V2 compatibility branch.
 
     The function is pure: persistence, risk delivery and lifecycle transitions
     are owned by :mod:`mineguard.regulatory_v2_store`.
     """
 
     parameters = parameters or RegulatoryFiveQuantityParameters()
+    applicable_metrics = submission.applicable_metrics
+    applicable_relationships = submission.applicable_relationships
+    legacy_scope = submission.quantity_scope == "five_quantity_v2"
+    method_version = (
+        LEGACY_METHOD_VERSION if legacy_scope else REGULATORY_V2_METHOD_VERSION
+    )
     ordered_days = sorted(submission.days, key=lambda item: item.date)
     effective, observations, quality_signals, coverage = _prepare_days(
         submission, ordered_days, parameters
@@ -695,7 +1082,11 @@ def analyze_five_quantity(
     states = _operating_states(effective, parameters)
     quality_signals.extend(_declared_state_signals(ordered_days, states))
 
-    accepted_history = _history_bands(history, parameters)
+    accepted_history = _history_bands(
+        history,
+        applicable_relationships,
+        parameters,
+    )
     accepted_peers = [
         item
         for item in peer_bands
@@ -704,8 +1095,14 @@ def analyze_five_quantity(
         and item.mine_count >= parameters.minimum_peer_mines
         and item.sample_count >= parameters.minimum_reference_samples
         and item.comparison_group == submission.comparison_context.group_key
+        and item.relationship in applicable_relationships
     ]
-    within = _within_submission_bands(effective, states, parameters)
+    within = _within_submission_bands(
+        effective,
+        states,
+        applicable_relationships,
+        parameters,
+    )
     active_bands = [*accepted_history, *accepted_peers]
     # The current period is descriptive only: it must not prove itself normal
     # or let a late-month value alter an early-day reference.  Cold-start
@@ -717,6 +1114,7 @@ def analyze_five_quantity(
         observations,
         states,
         active_bands,
+        applicable_metrics,
         parameters,
     )
     relationship_signals = _relationship_signals(reconciliation, parameters)
@@ -725,6 +1123,7 @@ def analyze_five_quantity(
         states,
         accepted_history,
         accepted_peers,
+        applicable_relationships,
         parameters,
     )
     temporal_signals.extend(
@@ -733,18 +1132,48 @@ def analyze_five_quantity(
             effective,
             states,
             history,
+            applicable_relationships,
             parameters,
         )
     )
     temporal_signals = _deduplicate_signals(temporal_signals)
 
+    advanced_result: advanced_v3.TenQuantityAnalysisResult | None = None
+    if not legacy_scope:
+        advanced_result = _run_advanced_v3_evidence_layer(submission, history)
+        for advanced_signal in advanced_result.signals:
+            projected = _legacy_signal_from_advanced(advanced_signal)
+            if advanced_signal.layer is advanced_v3.EvidenceLayer.DETERMINISTIC:
+                quality_signals.append(projected)
+            elif advanced_signal.layer is advanced_v3.EvidenceLayer.HISTORICAL:
+                temporal_signals.append(projected)
+            else:
+                relationship_signals.append(projected)
+        quality_signals = _deduplicate_signals(quality_signals)
+        relationship_signals = _deduplicate_signals(relationship_signals)
+        temporal_signals = _deduplicate_signals(temporal_signals)
+
     insufficient_reasons: list[str] = []
     if coverage.complete_day_count < parameters.minimum_complete_days:
-        insufficient_reasons.append("完整五量日不足")
+        insufficient_reasons.append(
+            "完整十量日不足"
+            if submission.quantity_scope == "ten_quantity_v3"
+            else "完整五量日不足"
+        )
     if coverage.completeness_ratio < parameters.minimum_completeness_ratio:
         insufficient_reasons.append("统计期数据覆盖率不足")
     if not reconciliation.success:
         insufficient_reasons.append("线性协调求解失败")
+    if (
+        advanced_result is not None
+        and advanced_result.decision
+        is advanced_v3.DecisionStatus.INSUFFICIENT_DATA
+    ):
+        insufficient_reasons.extend(
+            f"高级十量证据层：{reason}"
+            for reason in advanced_result.decision_reasons
+            if f"高级十量证据层：{reason}" not in insufficient_reasons
+        )
 
     risk_signals = [
         item
@@ -759,8 +1188,7 @@ def analyze_five_quantity(
         decision = DecisionStatus.RISK
         reasons = list(dict.fromkeys(item.message for item in risk_signals))[:20]
         reasons.extend(
-            f"同时存在数据充分性问题：{item}"
-            for item in insufficient_reasons
+            f"同时存在数据充分性问题：{item}" for item in insufficient_reasons
         )
     elif insufficient_reasons:
         decision = DecisionStatus.INSUFFICIENT_DATA
@@ -771,6 +1199,8 @@ def analyze_five_quantity(
 
     algorithm_payload = {
         "mine_id": submission.mine_id,
+        "contract_version": submission.contract_version,
+        "quantity_scope": submission.quantity_scope,
         "period_start": submission.period_start,
         "period_end": submission.period_end,
         "comparison_context": submission.comparison_context,
@@ -785,11 +1215,53 @@ def analyze_five_quantity(
         "numpy_version": np.__version__,
         "scipy_version": SCIPY_VERSION,
         "solver_backend": "HiGHS via scipy.optimize.linprog",
-        "aggregation_rule_version": AGGREGATION_RULE_VERSION,
-        "baseline_admission_rule_version": BASELINE_ADMISSION_RULE_VERSION,
-        "business_quantity_group_version": BUSINESS_QUANTITY_GROUP_VERSION,
+        "aggregation_rule_version": (
+            LEGACY_AGGREGATION_RULE_VERSION
+            if legacy_scope
+            else AGGREGATION_RULE_VERSION
+        ),
+        "baseline_admission_rule_version": (
+            LEGACY_BASELINE_ADMISSION_RULE_VERSION
+            if legacy_scope
+            else BASELINE_ADMISSION_RULE_VERSION
+        ),
+        "business_quantity_group_version": (
+            LEGACY_BUSINESS_QUANTITY_GROUP_VERSION
+            if legacy_scope
+            else BUSINESS_QUANTITY_GROUP_VERSION
+        ),
+        "quantity_scope": submission.quantity_scope,
+        "relationship_semantics": "explicit_numerator_denominator_soft_bands",
     }
+    if advanced_result is not None:
+        runtime_manifest.update(
+            {
+                "advanced_evidence_method_version": advanced_result.method_version,
+                "advanced_evidence_input_sha256": advanced_result.input_sha256,
+                "advanced_evidence_configuration_sha256": (
+                    advanced_result.configuration_sha256
+                ),
+                "advanced_evidence_decision": advanced_result.decision.value,
+                "advanced_evidence_review_priority": (
+                    advanced_result.review_priority.value
+                ),
+                "advanced_evidence_modules": json.dumps(
+                    {
+                        item.module: item.status.value
+                        for item in advanced_result.modules
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "advanced_support_policy": (
+                    "base_v3_exchange_has_no_auxiliary_inventory_wash_output_"
+                    "or_credential_cohort_facts"
+                ),
+            }
+        )
     return RegulatoryFiveQuantityResult(
+        method_version=method_version,
         mine_id=submission.mine_id,
         submission_id=submission.submission_id,
         decision=decision,
@@ -814,7 +1286,7 @@ def analyze_five_quantity(
         algorithm_input_sha256=_sha256(algorithm_payload),
         configuration_sha256=_sha256(
             {
-                "method_version": REGULATORY_V2_METHOD_VERSION,
+                "method_version": method_version,
                 "parameters": parameters,
                 "runtime_manifest": runtime_manifest,
             }
@@ -837,11 +1309,13 @@ def _prepare_days(
     observations: dict[date, list[_Observation]] = defaultdict(list)
     signals: list[AnalysisSignal] = []
     complete_count = 0
+    applicable_metrics = submission.applicable_metrics
+    ten_quantity = submission.quantity_scope == "ten_quantity_v3"
 
     for day in days:
         values: dict[str, float | None] = {}
         day_quality_complete = True
-        for metric, quantity in day.quantities().items():
+        for metric, quantity in day.quantities(applicable_metrics).items():
             quality = day.quality.get(metric, ReportedQuality())
             flags = quality.all_flags
             if flags & {"partial", "source_format_warning"}:
@@ -851,7 +1325,8 @@ def _prepare_days(
                         code="qualified_measurement_requires_review",
                         severity=SignalSeverity.REVIEW,
                         message=(
-                            f"{day.date.isoformat()} {metric} 带有部分值或来源格式警告，"
+                            f"{day.date.isoformat()} {METRIC_LABELS[metric]}"
+                            "带有部分值或来源格式警告，"
                             "不能作为完整日证明"
                         ),
                         date=day.date,
@@ -864,16 +1339,27 @@ def _prepare_days(
                     AnalysisSignal(
                         code="measurement_transformation_disclosed",
                         severity=SignalSeverity.INFORMATION,
-                        message=f"{day.date.isoformat()} {metric} 已披露单位换算或更正",
+                        message=(
+                            f"{day.date.isoformat()} {METRIC_LABELS[metric]}"
+                            "已披露单位换算或更正"
+                        ),
                         date=day.date,
                         metric=metric,
                         basis="wire_quality_flags",
                     )
                 )
-            shift_value, shift_aggregation = _shift_aggregate(
-                day, metric, quantity
-            )
-            if quantity.shifts is not None and 0 < quantity.shifts.provided_count < 3:
+            if quantity is None:
+                values[metric] = None
+                continue
+            shift_value, shift_aggregation = _shift_aggregate(day, metric, quantity)
+            if (
+                quantity.shifts is not None
+                and 0 < quantity.shifts.provided_count < 3
+                and (
+                    metric not in COMMERCIAL_DAILY_METRICS
+                    or quantity.daily_total is None
+                )
+            ):
                 signals.append(
                     AnalysisSignal(
                         code="partial_shift_values",
@@ -911,11 +1397,12 @@ def _prepare_days(
                         tolerance=tolerance,
                     )
                 )
-            comparable = (
-                shift_aggregation not in {"not_provided", "mixed", "snapshot"}
-                and quantity.daily_aggregation
-                in {None, shift_aggregation}
-            )
+            comparable = shift_aggregation not in {
+                "not_provided",
+                "not_applicable",
+                "mixed",
+                "snapshot",
+            } and quantity.daily_aggregation in {None, shift_aggregation}
             if (
                 daily is not None
                 and quantity.shifts is not None
@@ -927,7 +1414,8 @@ def _prepare_days(
                         code="aggregation_semantics_not_comparable",
                         severity=SignalSeverity.REVIEW,
                         message=(
-                            f"{day.date.isoformat()} {metric} 的日报与班次聚合语义"
+                            f"{day.date.isoformat()} {METRIC_LABELS[metric]}的日报与"
+                            "班次聚合语义"
                             "不能直接互推，已保留原值但不执行错误加总"
                         ),
                         date=day.date,
@@ -944,16 +1432,15 @@ def _prepare_days(
                 difference = abs(daily - shift_value)
                 if difference > allowed:
                     aggregation = (
-                        "班次合计"
-                        if shift_aggregation == "sum"
-                        else "班次时长加权均值"
+                        "班次合计" if shift_aggregation == "sum" else "班次时长加权均值"
                     )
                     signals.append(
                         AnalysisSignal(
                             code="daily_shift_arithmetic_mismatch",
                             severity=SignalSeverity.RISK,
                             message=(
-                                f"{day.date.isoformat()} {metric} 日报值与{aggregation}"
+                                f"{day.date.isoformat()} {METRIC_LABELS[metric]}日报值"
+                                f"与{aggregation}"
                                 "不一致"
                             ),
                             date=day.date,
@@ -965,9 +1452,20 @@ def _prepare_days(
                         )
                     )
         effective[day.date] = values
-        if day_quality_complete and all(
-            values[metric] is not None for metric in METRICS
-        ):
+        # V3 completeness is the governed eleven-atom *daily* report.  The four
+        # commercial quantities have no shift obligation, so their absent shift
+        # values never reduce completeness.  V2 retains its original six-atom
+        # effective-value rule, including governed shift aggregation fallback.
+        complete_values = (
+            all(
+                (quantity := getattr(day, metric)) is not None
+                and quantity.daily_total is not None
+                for metric in applicable_metrics
+            )
+            if ten_quantity
+            else all(values[metric] is not None for metric in applicable_metrics)
+        )
+        if day_quality_complete and complete_values:
             complete_count += 1
 
     expected = (submission.period_end - submission.period_start).days + 1
@@ -985,11 +1483,16 @@ def _prepare_days(
         )
     incomplete = len(days) - complete_count
     if incomplete:
+        quantity_name = "十量日报（11个原子指标）" if ten_quantity else "五量值"
         signals.append(
             AnalysisSignal(
-                code="incomplete_five_quantity_days",
+                code=(
+                    "incomplete_ten_quantity_days"
+                    if ten_quantity
+                    else "incomplete_five_quantity_days"
+                ),
                 severity=SignalSeverity.REVIEW,
-                message=f"有 {incomplete} 个日期缺少可用的完整五量值",
+                message=f"有 {incomplete} 个日期缺少可用的完整{quantity_name}",
                 basis="required_metric_completeness",
             )
         )
@@ -1030,12 +1533,12 @@ def _operating_states(
         ):
             nonproduction_run = 0
             ramp_remaining = 0
-        production = effective[observed_date]["production_t"]
-        if production is None:
+        activity = _operating_activity_value(effective[observed_date], parameters)
+        if activity is None:
             states[observed_date] = OperatingState.UNKNOWN
             nonproduction_run = 0
             ramp_remaining = 0
-        elif production <= parameters.production_epsilon_t:
+        elif activity <= parameters.production_epsilon_t:
             states[observed_date] = OperatingState.NON_PRODUCTION_CANDIDATE
             nonproduction_run += 1
             ramp_remaining = 0
@@ -1050,6 +1553,26 @@ def _operating_states(
             nonproduction_run = 0
         previous_date = observed_date
     return states
+
+
+def _operating_activity_value(
+    values: dict[str, float | None],
+    parameters: RegulatoryFiveQuantityParameters,
+) -> float | None:
+    """Infer activity from production and extraction without hiding either.
+
+    Production remains the primary established signal.  A positive extraction
+    value also establishes activity when production is absent or reported as
+    zero, avoiding a false stopped-state classification for the V3 scope.
+    """
+
+    production = values.get("production_t")
+    extraction = values.get("extraction_t")
+    available = [float(item) for item in (production, extraction) if item is not None]
+    if not available:
+        return None
+    positive = [item for item in available if item > parameters.production_epsilon_t]
+    return max(positive) if positive else 0.0
 
 
 def _declared_state_signals(
@@ -1074,11 +1597,16 @@ def _declared_state_signals(
                     code="declared_operating_state_mismatch",
                     severity=SignalSeverity.REVIEW,
                     message=(
-                        f"{day.date.isoformat()} 企业申报工况与按产量序列推断的工况不一致"
+                        f"{day.date.isoformat()} 企业申报工况与按产量/开采量序列"
+                        "推断的工况不一致"
                     ),
                     date=day.date,
-                    metric="production_t",
-                    basis="declared_vs_inferred_operating_state",
+                    metric=(
+                        "production_t,extraction_t"
+                        if day.extraction_t is not None
+                        else "production_t"
+                    ),
+                    basis="declared_vs_inferred_production_extraction_state",
                 )
             )
     return signals
@@ -1086,12 +1614,14 @@ def _declared_state_signals(
 
 def _history_bands(
     history: Sequence[HistoricalFiveQuantityDay],
+    relationships: Sequence[RelationshipCode],
     parameters: RegulatoryFiveQuantityParameters,
 ) -> list[ReferenceBand]:
     rows = [item.values() for item in history]
     return _bands_from_rows(
         rows,
         basis="same_mine_history",
+        relationships=relationships,
         parameters=parameters,
     )
 
@@ -1099,6 +1629,7 @@ def _history_bands(
 def _within_submission_bands(
     effective: dict[date, dict[str, float | None]],
     states: dict[date, OperatingState],
+    relationships: Sequence[RelationshipCode],
     parameters: RegulatoryFiveQuantityParameters,
 ) -> list[ReferenceBand]:
     rows = [
@@ -1110,23 +1641,27 @@ def _within_submission_bands(
     return _bands_from_rows(
         rows,
         basis="within_submission",
+        relationships=relationships,
         parameters=parameters,
     )
 
 
 def _bands_from_rows(
-    rows: Sequence[dict[str, float]],
+    rows: Sequence[dict[str, float | None]],
     *,
     basis: Literal["same_mine_history", "within_submission"],
+    relationships: Sequence[RelationshipCode],
     parameters: RegulatoryFiveQuantityParameters,
 ) -> list[ReferenceBand]:
     bands: list[ReferenceBand] = []
-    for relationship, metric in RELATIONSHIP_METRIC.items():
+    for relationship in relationships:
+        numerator, denominator = RELATIONSHIP_METRICS[relationship]
         ratios = [
-            row[metric] / row["production_t"]
+            float(row[numerator]) / float(row[denominator])
             for row in rows
-            if row.get("production_t", 0.0) > parameters.production_epsilon_t
-            and metric in row
+            if row.get(denominator) is not None
+            and float(row[denominator]) > parameters.production_epsilon_t
+            and row.get(numerator) is not None
         ]
         if len(ratios) < parameters.minimum_reference_samples:
             continue
@@ -1156,6 +1691,7 @@ def _reconcile(
     observations: dict[date, list[_Observation]],
     states: dict[date, OperatingState],
     bands: Sequence[ReferenceBand],
+    metrics: Sequence[str],
     parameters: RegulatoryFiveQuantityParameters,
 ) -> ReconciliationSummary:
     adjustments: list[L1Adjustment] = []
@@ -1188,15 +1724,24 @@ def _reconcile(
                         f"{band.relationship.value}"
                     ),
                     relationship=band.relationship,
-                    metric=RELATIONSHIP_METRIC[band.relationship],
+                    numerator_metric=RELATIONSHIP_METRICS[band.relationship][0],
+                    denominator_metric=RELATIONSHIP_METRICS[band.relationship][1],
                     band=band,
                 )
                 for band in bands
+                if effective[observed_date].get(
+                    RELATIONSHIP_METRICS[band.relationship][0]
+                )
+                is not None
+                and effective[observed_date].get(
+                    RELATIONSHIP_METRICS[band.relationship][1]
+                )
+                is not None
             ]
             if states[observed_date] is OperatingState.PRODUCTION
             else []
         )
-        solved = _solve_day_l1(day_observations, day_relations, parameters)
+        solved = _solve_day_l1(day_observations, day_relations, metrics, parameters)
         solver_methods.extend(solved.methods_attempted)
         if solved.status != "optimal" or solved.values is None:
             success = False
@@ -1207,7 +1752,7 @@ def _reconcile(
         values = solved.values
         objective_total += float(solved.objective or 0.0)
         reported = effective[observed_date]
-        for metric in METRICS:
+        for metric in metrics:
             if reported[metric] is None:
                 continue
             observed = float(reported[metric])
@@ -1225,11 +1770,11 @@ def _reconcile(
                     unit=METRIC_UNITS[metric],
                 )
             )
-        production = values["production_t"]
         for relation, lower_slack, upper_slack in solved.relation_slacks:
+            denominator = values[relation.denominator_metric]
             ratio = (
-                values[relation.metric] / production
-                if production > parameters.production_epsilon_t
+                values[relation.numerator_metric] / denominator
+                if denominator > parameters.production_epsilon_t
                 else None
             )
             diagnostics.append(
@@ -1251,6 +1796,7 @@ def _reconcile(
                 observed_date,
                 day_observations,
                 day_relations,
+                metrics,
                 parameters,
                 max(0, remaining_budget),
                 parameters.max_mcs - len(conflict_sets),
@@ -1277,9 +1823,10 @@ def _reconcile(
 def _solve_day_l1(
     observations: Sequence[_Observation],
     relations: Sequence[_Relation],
+    metrics: Sequence[str],
     parameters: RegulatoryFiveQuantityParameters,
 ) -> _L1Solve:
-    metric_count = len(METRICS)
+    metric_count = len(metrics)
     observation_count = len(observations)
     relation_count = len(relations)
     positive_start = metric_count
@@ -1291,7 +1838,7 @@ def _solve_day_l1(
     objective = np.zeros(variable_count)
     a_eq = np.zeros((observation_count, variable_count))
     b_eq = np.zeros(observation_count)
-    metric_index = {metric: index for index, metric in enumerate(METRICS)}
+    metric_index = {metric: index for index, metric in enumerate(metrics)}
     for index, observation in enumerate(observations):
         weight = 1.0 / observation.tolerance
         objective[positive_start + index] = weight
@@ -1303,24 +1850,31 @@ def _solve_day_l1(
 
     a_ub = np.zeros((relation_count * 2, variable_count))
     b_ub = np.zeros(relation_count * 2)
-    production_index = metric_index["production_t"]
-    production_hint = median(
-        [item.value for item in observations if item.metric == "production_t"] or [1.0]
-    )
     for index, relation in enumerate(relations):
-        metric = metric_index[relation.metric]
+        numerator = metric_index[relation.numerator_metric]
+        denominator = metric_index[relation.denominator_metric]
         lower_row = index * 2
         upper_row = lower_row + 1
-        # lower*P - M <= paid lower slack
-        a_ub[lower_row, production_index] = relation.band.lower
-        a_ub[lower_row, metric] = -1.0
+        # lower*D - N <= paid lower slack
+        a_ub[lower_row, denominator] = relation.band.lower
+        a_ub[lower_row, numerator] = -1.0
         a_ub[lower_row, lower_slack_start + index] = -1.0
-        # M - upper*P <= paid upper slack
-        a_ub[upper_row, metric] = 1.0
-        a_ub[upper_row, production_index] = -relation.band.upper
+        # N - upper*D <= paid upper slack
+        a_ub[upper_row, numerator] = 1.0
+        a_ub[upper_row, denominator] = -relation.band.upper
         a_ub[upper_row, upper_slack_start + index] = -1.0
         reference_scale = max(
-            abs(relation.band.center * production_hint),
+            abs(
+                relation.band.center
+                * median(
+                    [
+                        item.value
+                        for item in observations
+                        if item.metric == relation.denominator_metric
+                    ]
+                    or [1.0]
+                )
+            ),
             parameters.observation_absolute_tolerance,
         )
         coefficient = parameters.relationship_slack_penalty / reference_scale
@@ -1335,12 +1889,7 @@ def _solve_day_l1(
         b_eq=b_eq,
         bounds=[(0.0, None)] * variable_count,
     )
-    if (
-        status != "optimal"
-        or result is None
-        or result.x is None
-        or result.fun is None
-    ):
+    if status != "optimal" or result is None or result.x is None or result.fun is None:
         return _L1Solve(
             values=None,
             objective=None,
@@ -1349,7 +1898,7 @@ def _solve_day_l1(
             methods_attempted=methods,
             message=message,
         )
-    values = {metric: _finite(result.x[index]) for index, metric in enumerate(METRICS)}
+    values = {metric: _finite(result.x[index]) for index, metric in enumerate(metrics)}
     slacks = [
         (
             relation,
@@ -1409,14 +1958,17 @@ def _run_linprog_with_fallback(
         last_result = result
         last_message = str(getattr(result, "message", ""))[:500] or None
         status_code = int(getattr(result, "status", 4))
-        status_map: dict[int, Literal[
-            "optimal",
-            "infeasible",
-            "unbounded",
-            "iteration_or_time_limit",
-            "numerical_failure",
-            "solver_error",
-        ]] = {
+        status_map: dict[
+            int,
+            Literal[
+                "optimal",
+                "infeasible",
+                "unbounded",
+                "iteration_or_time_limit",
+                "numerical_failure",
+                "solver_error",
+            ],
+        ] = {
             0: "optimal",
             1: "iteration_or_time_limit",
             2: "infeasible",
@@ -1435,6 +1987,7 @@ def _day_mcs(
     observed_date: date,
     observations: Sequence[_Observation],
     relations: Sequence[_Relation],
+    metrics: Sequence[str],
     parameters: RegulatoryFiveQuantityParameters,
     search_budget: int,
     result_limit: int,
@@ -1444,7 +1997,7 @@ def _day_mcs(
     )
     examined = 1
     initial = _strict_day_feasible(
-        observations, relations, relaxed=frozenset()
+        observations, relations, metrics, relaxed=frozenset()
     )
     if initial == "feasible":
         return [], examined, True
@@ -1460,7 +2013,10 @@ def _day_mcs(
                 break
             examined += 1
             feasibility = _strict_day_feasible(
-                observations, relations, relaxed=frozenset(relaxed_tuple)
+                observations,
+                relations,
+                metrics,
+                relaxed=frozenset(relaxed_tuple),
             )
             if feasibility == "indeterminate":
                 complete = False
@@ -1488,44 +2044,45 @@ def _day_mcs(
 def _strict_day_feasible(
     observations: Sequence[_Observation],
     relations: Sequence[_Relation],
+    metrics: Sequence[str],
     *,
     relaxed: frozenset[str],
 ) -> Literal["feasible", "infeasible", "indeterminate"]:
-    metric_index = {metric: index for index, metric in enumerate(METRICS)}
+    metric_index = {metric: index for index, metric in enumerate(metrics)}
     rows: list[np.ndarray] = []
     bounds: list[float] = []
     for observation in observations:
         if observation.group in relaxed:
             continue
         index = metric_index[observation.metric]
-        upper = np.zeros(len(METRICS))
+        upper = np.zeros(len(metrics))
         upper[index] = 1.0
         rows.append(upper)
         bounds.append(observation.value + observation.tolerance)
-        lower = np.zeros(len(METRICS))
+        lower = np.zeros(len(metrics))
         lower[index] = -1.0
         rows.append(lower)
         bounds.append(-(max(0.0, observation.value - observation.tolerance)))
-    production = metric_index["production_t"]
     for relation in relations:
         if relation.group in relaxed:
             continue
-        metric = metric_index[relation.metric]
-        lower = np.zeros(len(METRICS))
-        lower[production] = relation.band.lower
-        lower[metric] = -1.0
+        numerator = metric_index[relation.numerator_metric]
+        denominator = metric_index[relation.denominator_metric]
+        lower = np.zeros(len(metrics))
+        lower[denominator] = relation.band.lower
+        lower[numerator] = -1.0
         rows.append(lower)
         bounds.append(0.0)
-        upper = np.zeros(len(METRICS))
-        upper[metric] = 1.0
-        upper[production] = -relation.band.upper
+        upper = np.zeros(len(metrics))
+        upper[numerator] = 1.0
+        upper[denominator] = -relation.band.upper
         rows.append(upper)
         bounds.append(0.0)
     result, status, _, _ = _run_linprog_with_fallback(
-        np.zeros(len(METRICS)),
+        np.zeros(len(metrics)),
         A_ub=np.asarray(rows) if rows else None,
         b_ub=np.asarray(bounds) if bounds else None,
-        bounds=[(0.0, None)] * len(METRICS),
+        bounds=[(0.0, None)] * len(metrics),
     )
     if status == "optimal" and result is not None:
         return "feasible"
@@ -1547,7 +2104,7 @@ def _relationship_signals(
                 code="soft_reference_interval_exceeded",
                 severity=SignalSeverity.RISK,
                 message=(
-                    f"{item.date.isoformat()} {item.relationship.value} 超出"
+                    f"{item.date.isoformat()} {RELATIONSHIP_LABELS[item.relationship]}超出"
                     f"{item.basis}软参考区间"
                 ),
                 date=item.date,
@@ -1569,7 +2126,8 @@ def _relationship_signals(
                 code="large_l1_reconciliation_adjustment",
                 severity=SignalSeverity.RISK,
                 message=(
-                    f"{adjustment.date.isoformat()} {adjustment.metric} 需要较大"
+                    f"{adjustment.date.isoformat()} "
+                    f"{METRIC_LABELS.get(adjustment.metric, adjustment.metric)}需要较大"
                     "L1协调调整才能与其余证据相容"
                 ),
                 date=adjustment.date,
@@ -1599,26 +2157,32 @@ def _temporal_signals(
     states: dict[date, OperatingState],
     history_bands: Sequence[ReferenceBand],
     peer_bands: Sequence[ReferenceBand],
+    relationships: Sequence[RelationshipCode],
     parameters: RegulatoryFiveQuantityParameters,
 ) -> list[AnalysisSignal]:
     series: dict[RelationshipCode, list[tuple[date, float]]] = defaultdict(list)
-    production_series: list[tuple[date, float]] = []
+    activity_series: list[tuple[date, float]] = []
+    has_extraction_scope = any(
+        "extraction_t" in values for values in effective.values()
+    )
     for observed_date, values in sorted(effective.items()):
-        production = values["production_t"]
-        if production is None:
-            continue
+        activity = _operating_activity_value(values, parameters)
         if states[observed_date] is OperatingState.PRODUCTION:
-            production_series.append((observed_date, float(production)))
-        if (
-            states[observed_date] is not OperatingState.PRODUCTION
-            or production <= parameters.production_epsilon_t
-        ):
+            if activity is not None:
+                activity_series.append((observed_date, activity))
+        if states[observed_date] is not OperatingState.PRODUCTION:
             continue
-        for relationship, metric in RELATIONSHIP_METRIC.items():
-            value = values[metric]
-            if value is not None:
+        for relationship in relationships:
+            numerator, denominator = RELATIONSHIP_METRICS[relationship]
+            numerator_value = values.get(numerator)
+            denominator_value = values.get(denominator)
+            if (
+                numerator_value is not None
+                and denominator_value is not None
+                and denominator_value > parameters.production_epsilon_t
+            ):
                 series[relationship].append(
-                    (observed_date, float(value) / float(production))
+                    (observed_date, float(numerator_value) / float(denominator_value))
                 )
 
     signals: list[AnalysisSignal] = []
@@ -1629,12 +2193,13 @@ def _temporal_signals(
         explosives = float(values.get("explosives_kg") or 0.0)
         detonators = float(values.get("detonators_count") or 0.0)
         if explosives > 0.0 or detonators > 0.0:
+            zero_basis = "产量及开采量" if has_extraction_scope else "产量"
             signals.append(
                 AnalysisSignal(
                     code="explosives_during_nonproduction_candidate",
                     severity=SignalSeverity.RISK,
                     message=(
-                        f"{observed_date.isoformat()} 产量为零但存在火工品使用，"
+                        f"{observed_date.isoformat()} {zero_basis}为零但存在火工品使用，"
                         "需结合掘进、检修或统计边界说明"
                     ),
                     date=observed_date,
@@ -1658,7 +2223,8 @@ def _temporal_signals(
                             code="robust_temporal_outlier",
                             severity=SignalSeverity.RISK,
                             message=(
-                                f"{observed_date.isoformat()} {relationship.value}"
+                                f"{observed_date.isoformat()} "
+                                f"{RELATIONSHIP_LABELS[relationship]}"
                                 f"偏离{band.basis}稳健基线"
                             ),
                             date=observed_date,
@@ -1680,7 +2246,8 @@ def _temporal_signals(
                         code="sustained_ratio_drift",
                         severity=SignalSeverity.RISK,
                         message=(
-                            f"{relationship.value}统计期后半段相对前半段持续"
+                            f"{RELATIONSHIP_LABELS[relationship]}统计期后半段相对"
+                            "前半段持续"
                             f"变化 {relative:.1%}"
                         ),
                         date=values[middle][0],
@@ -1698,7 +2265,8 @@ def _temporal_signals(
                     code="retrospective_change_point",
                     severity=SignalSeverity.RISK,
                     message=(
-                        f"{relationship.value}自 {change[0].isoformat()} 起出现"
+                        f"{RELATIONSHIP_LABELS[relationship]}自 "
+                        f"{change[0].isoformat()} 起出现"
                         f"水平变化候选（{change[1]:.1%}）"
                     ),
                     date=change[0],
@@ -1710,21 +2278,31 @@ def _temporal_signals(
                 )
             )
 
-    production_change = _change_point(production_series, parameters)
-    if production_change is not None:
+    activity_change = _change_point(activity_series, parameters)
+    if activity_change is not None:
+        activity_name = "产量/开采量工况序列" if has_extraction_scope else "产量"
         signals.append(
             AnalysisSignal(
-                code="production_change_point_context",
+                code=(
+                    "production_extraction_change_point_context"
+                    if has_extraction_scope
+                    else "production_change_point_context"
+                ),
                 severity=SignalSeverity.REVIEW,
                 message=(
-                    f"产量自 {production_change[0].isoformat()} 起出现水平变化候选；"
+                    f"{activity_name}自 {activity_change[0].isoformat()} 起出现"
+                    "水平变化候选；"
                     "需结合停复产和生产组织解释"
                 ),
-                date=production_change[0],
-                metric="production_t",
-                observed=production_change[3],
-                expected_lower=production_change[2],
-                expected_upper=production_change[2],
+                date=activity_change[0],
+                metric=(
+                    "production_t,extraction_t"
+                    if has_extraction_scope
+                    else "production_t"
+                ),
+                observed=activity_change[3],
+                expected_lower=activity_change[2],
+                expected_upper=activity_change[2],
                 basis="sse_bic_step_vs_linear",
             )
         )
@@ -1736,6 +2314,7 @@ def _past_only_detector_signals(
     effective: dict[date, dict[str, float | None]],
     states: dict[date, OperatingState],
     history: Sequence[HistoricalFiveQuantityDay],
+    relationships: Sequence[RelationshipCode],
     parameters: RegulatoryFiveQuantityParameters,
 ) -> list[AnalysisSignal]:
     """Run the established past-only rolling/EWMA/CUSUM/Page-Hinkley suite.
@@ -1746,7 +2325,7 @@ def _past_only_detector_signals(
     """
 
     observations: list[TemporalObservation] = []
-    source_id = "governed-five-quantity-history"
+    source_id = f"governed-{submission.quantity_scope}-history"
     history_by_date = {
         item.date: item.values()
         for item in history
@@ -1758,16 +2337,17 @@ def _past_only_detector_signals(
         for observed_date, values in sorted(effective.items())
         if states[observed_date] is OperatingState.PRODUCTION
     ]
-    for relationship, metric in RELATIONSHIP_METRIC.items():
+    for relationship in relationships:
+        numerator, denominator = RELATIONSHIP_METRICS[relationship]
         series_rows = [*history_rows, *current_rows]
         current_count = 0
         for observed_date, values in series_rows:
-            production = values.get("production_t")
-            metric_value = values.get(metric)
+            denominator_value = values.get(denominator)
+            numerator_value = values.get(numerator)
             if (
-                production is None
-                or metric_value is None
-                or float(production) <= parameters.production_epsilon_t
+                denominator_value is None
+                or numerator_value is None
+                or float(denominator_value) <= parameters.production_epsilon_t
             ):
                 continue
             if observed_date >= submission.period_start:
@@ -1782,16 +2362,14 @@ def _past_only_detector_signals(
                         datetime.min.time(),
                         tzinfo=UTC,
                     ),
-                    value=float(metric_value) / float(production),
+                    value=float(numerator_value) / float(denominator_value),
                     quality=1.0,
                     baseline_eligible=True,
                 )
             )
         if current_count == 0:
             observations = [
-                item
-                for item in observations
-                if item.metric_code != relationship.value
+                item for item in observations if item.metric_code != relationship.value
             ]
     if not observations:
         return []
@@ -1845,7 +2423,8 @@ def _past_only_detector_signals(
                         severity=severity,
                         message=(
                             f"{point.timestamp.date().isoformat()} "
-                            f"{series.metric_code}：{item.explanation}"
+                            f"{RELATIONSHIP_LABELS[RelationshipCode(series.metric_code)]}："
+                            f"{item.explanation}"
                         ),
                         date=point.timestamp.date(),
                         metric=series.metric_code,
@@ -1965,16 +2544,24 @@ __all__ = [
     "AnalysisSignal",
     "ComparisonContext",
     "DecisionStatus",
+    "FIVE_QUANTITY_GROUPS",
     "FiveQuantityDay",
     "FiveQuantitySubmission",
     "HistoricalFiveQuantityDay",
+    "LEGACY_METRICS",
+    "METRICS",
     "OperatingState",
     "ReferenceBand",
     "RegulatoryFiveQuantityParameters",
     "RegulatoryFiveQuantityResult",
     "RelationshipCode",
     "ReportedQuantity",
+    "SHIFT_REQUIRED_METRICS",
     "ShiftValues",
     "SubmissionProvenance",
+    "TEN_QUANTITY_GROUPS",
     "analyze_five_quantity",
+    "applicable_metrics_for_scope",
+    "applicable_relationships_for_scope",
+    "shift_required_metrics_for_scope",
 ]

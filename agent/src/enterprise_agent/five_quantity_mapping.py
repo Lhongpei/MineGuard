@@ -1,4 +1,4 @@
-"""Advisory-only CSV column mapping for the five-quantity V2 workflow.
+"""Advisory-only CSV column mapping for the ten-quantity V3 workflow.
 
 The module deliberately stops at *column meaning*.  It never returns cell
 values, edits a draft, confirms a report, or sends a submission.  Approved
@@ -19,14 +19,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import ProviderError
-from .five_quantity_import import METRICS, SHIFT_KEYS, UNITS
+from .five_quantity_import import (
+    SHIFT_KEYS,
+    ambiguous_header_reason,
+    csv_header_unit_issue,
+)
+from .quantity_catalog import METRICS, UNITS
 from .util import canonical_json
 
-MAPPING_CONTRACT_VERSION = "five-quantity-csv-column-mapping/v1"
-MAPPING_TOOL_NAME = "propose_five_quantity_column_mappings"
+MAPPING_CONTRACT_VERSION = "ten-quantity-csv-column-mapping/v2"
+MAPPING_TOOL_NAME = "propose_ten_quantity_column_mappings"
 MAPPING_SOURCES = frozenset({"rule", "approved_profile", "llm"})
 MAPPING_SCOPES = frozenset({"daily_total", "shift"})
-INSPECTION_CONTRACT_VERSION = "five-quantity-csv-inspection/v1"
+INSPECTION_CONTRACT_VERSION = "ten-quantity-csv-inspection/v2"
 
 MAX_COLUMNS = 256
 MAX_HEADER_CHARS = 256
@@ -94,8 +99,41 @@ _METRIC_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("electricity_kwh", "耗电量", "用电量", "电量", "electricity"),
     ),
     (
+        "invoiced_quantity_t",
+        (
+            "invoiced_quantity_t",
+            "开票量",
+            "开票吨数",
+            "开票煤量",
+            "发票煤量",
+        ),
+    ),
+    (
+        "sales_t",
+        ("sales_t", "销售出库量", "销售发运量", "销售量", "销量"),
+    ),
+    (
+        "transport_t",
+        (
+            "transport_t",
+            "运输量",
+            "出矿运输量",
+            "出矿运输",
+            "外运量",
+            "外运煤量",
+        ),
+    ),
+    (
+        "wash_feed_t",
+        ("wash_feed_t", "洗煤量", "入洗原煤量", "入洗煤量", "入洗量"),
+    ),
+    (
+        "extraction_t",
+        ("extraction_t", "工作面采出量", "采掘计量", "开采量"),
+    ),
+    (
         "production_t",
-        ("production_t", "原煤产量", "产量", "production"),
+        ("production_t", "企业报表产量", "报表产量", "production", "产量"),
     ),
 )
 
@@ -159,7 +197,7 @@ def _validate_target(
     *, metric: Any, scope: Any, shift: Any, unit: Any, label: str
 ) -> dict[str, str | None]:
     if metric not in METRICS:
-        raise ValueError(f"{label}.metric 不在五量白名单")
+        raise ValueError(f"{label}.metric 不在十量白名单")
     if scope not in MAPPING_SCOPES:
         raise ValueError(f"{label}.scope 只能是 daily_total 或 shift")
     if scope == "daily_total":
@@ -291,6 +329,9 @@ def _approved_by_header(
             unit=item.unit,
             label=f"approved_mappings[{index}]",
         )
+        unit_issue = csv_header_unit_issue(str(target["metric"]), header)
+        if unit_issue is not None:
+            raise ValueError(f"已批准映射与来源语义不兼容：{unit_issue}")
         target_key = (
             str(target["metric"]),
             str(target["scope"]),
@@ -314,6 +355,8 @@ def _period_from_header(normal: str) -> tuple[str, str | None, float]:
 
 def _rule_target(normal: str) -> tuple[dict[str, str | None], float, str] | None:
     if not normal or normal in _DATE_HEADERS:
+        return None
+    if ambiguous_header_reason(normal) is not None:
         return None
     if any(alias in normal for alias in _GENERIC_FIRE_ALIASES) and not any(
         alias in normal
@@ -343,6 +386,8 @@ def _rule_target(normal: str) -> tuple[dict[str, str | None], float, str] | None
             unit=UNITS[metric],
             label="rule",
         )
+        if csv_header_unit_issue(metric, normal) is not None:
+            return None
         return target, confidence, f"确定性表头别名“{alias}”命中"
     return None
 
@@ -571,6 +616,9 @@ def _validate_llm_arguments(
             )
         except ValueError as error:
             raise ProviderError(str(error)) from error
+        unit_issue = csv_header_unit_issue(str(target["metric"]), headers[column])
+        if unit_issue is not None:
+            raise ProviderError(f"模型映射与来源语义不兼容：{unit_issue}")
         target_key = _target_key(candidate)
         if target_key in seen_targets:
             raise ProviderError("模型映射与已有目标或模型内目标重复")
@@ -689,6 +737,7 @@ def map_csv_columns(
     warnings: list[str] = []
     date_column: dict[str, Any] | None = None
     extra_date_columns: set[int] = set()
+    semantic_blocked_columns: set[int] = set()
 
     for column, header in enumerate(clean_headers):
         normal = _normal_header(header)
@@ -729,6 +778,11 @@ def map_csv_columns(
                 )
             )
             continue
+        ambiguity = ambiguous_header_reason(normal)
+        if ambiguity is not None:
+            semantic_blocked_columns.add(column)
+            warnings.append(f"列 {column + 1}“{header}”存在口径歧义：{ambiguity}")
+            continue
         matched = _rule_target(normal)
         if matched is not None:
             target, confidence, reason = matched
@@ -749,6 +803,7 @@ def map_csv_columns(
 
     candidates, blocked_columns = _remove_rule_collisions(candidates, warnings)
     blocked_columns.update(extra_date_columns)
+    blocked_columns.update(semantic_blocked_columns)
     mapped_columns = {item["source_column"] for item in candidates}
     ignored_date_columns = {
         date_column["source_column"]

@@ -24,6 +24,27 @@ def test_validate_exposes_required_ttl_and_disaster_seed_warning(
     )
     assert main(["validate", "--config", str(path)]) == 0
     result = json.loads(capsys.readouterr().out)
+    assert result["data_contract"] == "ten-quantity-submission-v3"
+    assert result["atomic_metrics"] == [
+        "ventilation_m3_min",
+        "electricity_kwh",
+        "detonators_count",
+        "explosives_kg",
+        "mine_entry_persons",
+        "production_t",
+        "extraction_t",
+        "sales_t",
+        "transport_t",
+        "wash_feed_t",
+        "invoiced_quantity_t",
+    ]
+    assert result["mapping_coverage"] == [
+        {
+            "pipeline_id": "mine-one-five-quantity",
+            "mapped_metrics": result["atomic_metrics"],
+            "unmapped_metrics": [],
+        }
+    ]
     assert result["source_policies"] == [
         {
             "pipeline_id": "mine-one-five-quantity",
@@ -35,6 +56,34 @@ def test_validate_exposes_required_ttl_and_disaster_seed_warning(
         }
     ]
     assert result["warnings"] and "revision_seed" in result["warnings"][0]
+
+
+def test_validate_warns_when_legacy_mapping_leaves_new_v3_atoms_missing(
+    tmp_path: Path, source_db: Path, capsys
+) -> None:
+    path = write_config(tmp_path / "legacy-six.toml", source_db)
+    text = path.read_text(encoding="utf-8")
+    for metric in (
+        "extraction_t",
+        "sales_t",
+        "transport_t",
+        "wash_feed_t",
+        "invoiced_quantity_t",
+    ):
+        text = "\n".join(
+            line for line in text.splitlines() if not line.startswith(f"{metric} =")
+        )
+    path.write_text(f"{text}\n", encoding="utf-8")
+    assert main(["validate", "--config", str(path)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["mapping_coverage"][0]["unmapped_metrics"] == [
+        "extraction_t",
+        "sales_t",
+        "transport_t",
+        "wash_feed_t",
+        "invoiced_quantity_t",
+    ]
+    assert any("null + missing" in warning for warning in result["warnings"])
 
 
 def test_check_is_machine_readable_and_maintenance_refuses_live_lease(

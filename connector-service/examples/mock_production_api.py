@@ -12,14 +12,23 @@ def records() -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     for index, day in enumerate(("2026-07-29", "2026-07-30", "2026-07-31")):
         shifts = (1080 + index * 20, 1120 + index * 20, 1080 + index * 20)
-        for hour, scope, value in zip(
-            (0, 8, 16), ("SHIFT_0", "SHIFT_8", "SHIFT_16"), shifts, strict=True
+        extracted = tuple(
+            value + offset
+            for value, offset in zip(shifts, (12, 8, 15), strict=True)
+        )
+        for hour, scope, value, extracted_value in zip(
+            (0, 8, 16),
+            ("SHIFT_0", "SHIFT_8", "SHIFT_16"),
+            shifts,
+            extracted,
+            strict=True,
         ):
             result.append(
                 {
                     "measuredAt": f"{day}T{hour:02d}:00:00+08:00",
                     "reportingScope": scope,
                     "rawTonnes": value,
+                    "faceExtractedTonnes": extracted_value,
                 }
             )
         result.append(
@@ -27,6 +36,7 @@ def records() -> list[dict[str, object]]:
                 "measuredAt": f"{day}T23:59:00+08:00",
                 "reportingScope": "DAY",
                 "rawTonnes": sum(shifts),
+                "faceExtractedTonnes": sum(extracted),
             }
         )
     return result

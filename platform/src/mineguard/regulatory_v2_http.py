@@ -54,6 +54,7 @@ from .exchange_v2 import (
     ExchangeLineageError,
     FiveQuantitySubmissionMessage,
     RiskDeliveryAckMessage,
+    TenQuantitySubmissionMessage,
     authenticate_transport,
     decode_inbound_message,
     load_exchange_clients,
@@ -64,7 +65,12 @@ from .exchange_v2 import (
     verify_exchange_message_signature,
 )
 from .external_submission import jcs_canonical_json
-from .regulatory_v2 import DecisionStatus, METRICS
+from .regulatory_v2 import (
+    METRICS,
+    RELATIONSHIP_METRICS,
+    DecisionStatus,
+    RelationshipCode,
+)
 from .regulatory_v2_store import (
     AnalysisReport,
     AuditProjection,
@@ -87,10 +93,23 @@ _UUID_PATH = r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 _SUBMISSION_RECEIPT = re.compile(
     rf"^/v2/five-quantity-submissions/(?P<id>{_UUID_PATH})/receipt$"
 )
+_TEN_SUBMISSION_RECEIPT = re.compile(
+    rf"^/v3/ten-quantity-submissions/(?P<id>{_UUID_PATH})/receipt$"
+)
 _REPORT = re.compile(rf"^/v2/analysis-reports/(?P<id>{_UUID_PATH})$")
+_TEN_REPORT = re.compile(rf"^/v3/analysis-reports/(?P<id>{_UUID_PATH})$")
 _REPORT_ACK = re.compile(rf"^/v2/analysis-reports/(?P<id>{_UUID_PATH})/delivery-ack$")
+_TEN_REPORT_ACK = re.compile(
+    rf"^/v3/analysis-reports/(?P<id>{_UUID_PATH})/delivery-ack$"
+)
 _REPORT_RESPONSE = re.compile(rf"^/v2/analysis-reports/(?P<id>{_UUID_PATH})/responses$")
+_TEN_REPORT_RESPONSE = re.compile(
+    rf"^/v3/analysis-reports/(?P<id>{_UUID_PATH})/responses$"
+)
 _RESPONSE_RECEIPT = re.compile(rf"^/v2/risk-responses/(?P<id>{_UUID_PATH})/receipt$")
+_TEN_RESPONSE_RECEIPT = re.compile(
+    rf"^/v3/risk-responses/(?P<id>{_UUID_PATH})/receipt$"
+)
 _MINE_DETAIL = re.compile(
     r"^/v2/regulatory/mines/(?P<id>[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$"
 )
@@ -139,7 +158,47 @@ _TRACE_EVENT_GROUPS: dict[str, frozenset[str]] = {
         }
     ),
 }
+
+
+def _affected_metrics_from_signals(
+    signals: Any,
+    applicable_metrics: tuple[str, ...],
+) -> list[str]:
+    """Resolve atomic metrics from atomic, multi-atom and relationship signals."""
+
+    resolved: set[str] = set()
+    for signal in signals:
+        for raw_metric in str(getattr(signal, "metric", None) or "").split(","):
+            metric = raw_metric.strip()
+            if not metric:
+                continue
+            try:
+                relationship = RelationshipCode(metric)
+            except ValueError:
+                if metric in applicable_metrics:
+                    resolved.add(metric)
+            else:
+                resolved.update(
+                    atom
+                    for atom in RELATIONSHIP_METRICS[relationship]
+                    if atom in applicable_metrics
+                )
+    return [metric for metric in applicable_metrics if metric in resolved]
+
+
 _TRACE_BUSINESS_EVENT_TYPES = frozenset().union(*_TRACE_EVENT_GROUPS.values())
+_TEN_QUANTITY_RELATIONSHIP_MODULES: dict[RelationshipCode, str] = {
+    RelationshipCode.PRODUCTION_PER_EXTRACTION: (
+        "production_extraction_reconciliation"
+    ),
+    RelationshipCode.SALES_PER_PRODUCTION: "production_sales_reconciliation",
+    RelationshipCode.TRANSPORT_PER_PRODUCTION: (
+        "production_transport_reconciliation"
+    ),
+    RelationshipCode.WASH_FEED_PER_PRODUCTION: "production_wash_reconciliation",
+    RelationshipCode.TRANSPORT_PER_SALES: "sales_transport_reconciliation",
+    RelationshipCode.INVOICED_QUANTITY_PER_SALES: "sales_invoice_reconciliation",
+}
 
 
 class PasswordChangeRequiredError(Exception):
@@ -242,17 +301,33 @@ _BUSINESS_TEXT_LABELS = {
     "mine_entry_persons": "入井人员量",
     "labor_persons": "入井人员量",
     "production_t": "产量",
+    "extraction_t": "开采量",
+    "sales_t": "销售量",
+    "transport_t": "运输量",
+    "wash_feed_t": "洗煤量（入洗原煤）",
+    "invoiced_quantity_t": "开票量（正常/蓝票实物吨数）",
     "ventilation_per_production": "单位产量风量",
     "electricity_per_production": "单位产量电耗",
     "detonators_per_production": "单位产量雷管用量",
     "explosives_per_production": "单位产量炸药用量",
     "mine_entry_persons_per_production": "单位产量入井人员量",
     "labor_per_production": "单位产量入井人员量",
+    "ventilation_per_extraction": "单位开采量风量",
+    "electricity_per_extraction": "单位开采量电耗",
+    "detonators_per_extraction": "单位开采量雷管用量",
+    "explosives_per_extraction": "单位开采量炸药用量",
+    "mine_entry_persons_per_extraction": "单位开采量入井人员量",
+    "production_per_extraction": "产出采出比",
+    "sales_per_production": "销售产量比",
+    "transport_per_production": "运输产量比",
+    "transport_per_sales": "运输销售比",
+    "wash_feed_per_production": "入洗产量比",
+    "invoiced_quantity_per_sales": "开票销售比",
     "anonymous_peer": "匿名同类矿",
     "same_mine_history": "本矿历史",
     "within_submission": "本期数据",
     "wire_quality_flags": "报送质量标记",
-    "required_metric_completeness": "五量完整性规则",
+    "required_metric_completeness": "规定指标完整性规则",
     "declared_vs_inferred_operating_state": "申报与推断工况",
     "weighted_l1": "加权偏差协调",
     "median_mad": "稳健中位数基线",
@@ -261,7 +336,7 @@ _BUSINESS_TEXT_LABELS = {
     "strict_profile_mcs_diagnostic_not_causation": "最小冲突集诊断",
     "state_aware_context_rule_not_physical_violation": "工况上下文规则",
     "qualified_measurement_requires_review": "测量值需复核",
-    "incomplete_five_quantity_days": "五量日数据不完整",
+    "incomplete_five_quantity_days": "日数据不完整",
     "soft_reference_interval_exceeded": "超出软参考区间",
     "robust_temporal_outlier": "稳健时序偏离",
     "strict_counterfactual_conflict_set": "最小放宽组合",
@@ -408,6 +483,7 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
         local_control_token: str | None,
         clock: Callable[[], datetime],
         production_mode: bool,
+        allow_legacy_v2_intake: bool | None = None,
         request_io_timeout_seconds: float = _REQUEST_IO_TIMEOUT_SECONDS,
         drain_timeout_seconds: float = _DRAIN_TIMEOUT_SECONDS,
     ) -> None:
@@ -458,6 +534,13 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
             raise ValueError("drain timeout must be between 0.1 and 300 seconds")
         self.clock = clock
         self.production_mode = bool(production_mode)
+        self.allow_legacy_v2_intake = (
+            not self.production_mode
+            if allow_legacy_v2_intake is None
+            else bool(allow_legacy_v2_intake)
+        )
+        if self.production_mode and self.allow_legacy_v2_intake:
+            raise ValueError("production server cannot enable legacy V2 intake")
         # RegulatoryV2Store performs the authoritative full scan at production
         # startup. The server consumes its trusted constant-size checkpoint.
         self.integrity_valid = store.verify_runtime_integrity()
@@ -703,6 +786,9 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             or path.startswith("/v2/analysis-reports")
             or path.startswith("/v2/five-quantity-submissions")
             or path.startswith("/v2/risk-responses")
+            or path.startswith("/v3/analysis-reports")
+            or path.startswith("/v3/ten-quantity-submissions")
+            or path.startswith("/v3/risk-responses")
         ):
             self._send_empty(405, {"Allow": "GET, POST, OPTIONS"})
             return
@@ -895,9 +981,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             principal = self._government_principal()
             with self.server.regulatory_read_snapshot():
                 payload = {"items": self._mine_rows(principal)}
-            self._send_json(
-                200, payload, head_only=head_only
-            )
+            self._send_json(200, payload, head_only=head_only)
             return
         mine_match = _MINE_DETAIL.fullmatch(path)
         if mine_match:
@@ -952,14 +1036,18 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             principal = self._government_principal()
             with self.server.regulatory_read_snapshot():
                 payload = self._trace_page(principal, parsed.query)
-            self._send_json(
-                200, payload, head_only=head_only
-            )
+            self._send_json(200, payload, head_only=head_only)
             return
 
-        if path == "/v2/analysis-reports/next":
+        if path in {"/v2/analysis-reports/next", "/v3/analysis-reports/next"}:
+            ten_route = path.startswith("/v3/")
             transport = self._authenticate_machine_transport(
-                body=b"", expected_contract="five-quantity-exchange-v2"
+                body=b"",
+                expected_contract=(
+                    "ten-quantity-exchange-v3"
+                    if ten_route
+                    else "five-quantity-exchange-v2"
+                ),
             )
             client = transport.client
             with self.server.store.controlled_write_scope():
@@ -967,12 +1055,23 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 after_cursor = self._single_query(parsed.query, "after_cursor")
                 after_sequence = self._cursor_sequence(client.mine_id, after_cursor)
                 item = self._next_response_required_report(
-                    client.mine_id, after_sequence
+                    client.mine_id,
+                    after_sequence,
+                    quantity_scope=(
+                        "ten_quantity_v3" if ten_route else "five_quantity_v2"
+                    ),
                 )
                 message = (
                     None
                     if item is None
-                    else self._analysis_report_message(client, item.aggregate_id, item)
+                    else self._analysis_report_message(
+                        client,
+                        item.aggregate_id,
+                        item,
+                        expected_quantity_scope=(
+                            "ten_quantity_v3" if ten_route else "five_quantity_v2"
+                        ),
+                    )
                 )
             if item is None:
                 self._send_empty(204)
@@ -980,11 +1079,19 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             assert message is not None
             self._send_json(200, message, head_only=head_only)
             return
-        receipt_match = _SUBMISSION_RECEIPT.fullmatch(path)
+        receipt_match = _SUBMISSION_RECEIPT.fullmatch(
+            path
+        ) or _TEN_SUBMISSION_RECEIPT.fullmatch(path)
         if receipt_match:
+            ten_route = path.startswith("/v3/")
             self._reject_query(parsed.query)
             transport = self._authenticate_machine_transport(
-                body=b"", expected_contract="five-quantity-exchange-v2"
+                body=b"",
+                expected_contract=(
+                    "ten-quantity-exchange-v3"
+                    if ten_route
+                    else "five-quantity-exchange-v2"
+                ),
             )
             client = transport.client
             with self.server.store.controlled_write_scope():
@@ -994,7 +1101,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 )
                 inbound = self._exchange_message(
                     direction="inbound",
-                    message_type="five_quantity_submission",
+                    message_type=(
+                        "ten_quantity_submission"
+                        if ten_route
+                        else "five_quantity_submission"
+                    ),
                     predicate=lambda item: (
                         item.get("message_id") == submission_receipt.submission_id
                     ),
@@ -1010,17 +1121,27 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 head_only=head_only,
             )
             return
-        report_match = _REPORT.fullmatch(path)
+        report_match = _REPORT.fullmatch(path) or _TEN_REPORT.fullmatch(path)
         if report_match:
+            ten_route = path.startswith("/v3/")
             self._reject_query(parsed.query)
             transport = self._authenticate_machine_transport(
-                body=b"", expected_contract="five-quantity-exchange-v2"
+                body=b"",
+                expected_contract=(
+                    "ten-quantity-exchange-v3"
+                    if ten_route
+                    else "five-quantity-exchange-v2"
+                ),
             )
             client = transport.client
             with self.server.store.controlled_write_scope():
                 self._claim_machine_transport(transport)
                 message = self._analysis_report_message(
-                    client, report_match.group("id")
+                    client,
+                    report_match.group("id"),
+                    expected_quantity_scope=(
+                        "ten_quantity_v3" if ten_route else "five_quantity_v2"
+                    ),
                 )
             self._send_json(
                 200,
@@ -1028,17 +1149,30 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 head_only=head_only,
             )
             return
-        response_match = _RESPONSE_RECEIPT.fullmatch(path)
+        response_match = _RESPONSE_RECEIPT.fullmatch(
+            path
+        ) or _TEN_RESPONSE_RECEIPT.fullmatch(path)
         if response_match:
+            ten_route = path.startswith("/v3/")
             self._reject_query(parsed.query)
             transport = self._authenticate_machine_transport(
-                body=b"", expected_contract="five-quantity-exchange-v2"
+                body=b"",
+                expected_contract=(
+                    "ten-quantity-exchange-v3"
+                    if ten_route
+                    else "five-quantity-exchange-v2"
+                ),
             )
             client = transport.client
             with self.server.store.controlled_write_scope():
                 self._claim_machine_transport(transport)
                 response_receipt = self.server.store.get_response_batch_receipt(
                     response_match.group("id"), mine_id=client.mine_id
+                )
+                self._assert_report_route_scope(
+                    response_receipt.report_id,
+                    client.mine_id,
+                    ten_route=ten_route,
                 )
                 message = self._response_receipt_message(client, response_receipt)
             self._send_json(
@@ -1157,19 +1291,42 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             return
 
         body = self._read_body()
-        if path == "/v2/five-quantity-submissions":
+        if path in {
+            "/v2/five-quantity-submissions",
+            "/v3/ten-quantity-submissions",
+        }:
+            ten_route = path.startswith("/v3/")
             self._reject_query(parsed.query)
             transport = self._authenticate_machine_transport(body=body)
             client = transport.client
             decoded = decode_inbound_message(body)
             message = decoded.message
-            if not isinstance(message, FiveQuantitySubmissionMessage):
-                raise ValueError("this path requires five_quantity_submission")
+            expected_message_type = (
+                TenQuantitySubmissionMessage
+                if ten_route
+                else FiveQuantitySubmissionMessage
+            )
+            if not isinstance(message, expected_message_type):
+                raise ValueError(
+                    "this path requires "
+                    + (
+                        "ten_quantity_submission"
+                        if ten_route
+                        else "five_quantity_submission"
+                    )
+                )
             self._assert_message_binding(message, client)
             self._validate_governed_context(message, client)
             payload_hash = verify_exchange_message_signature(
                 message, client, decoded.document
             )
+            if not ten_route and not self.server.allow_legacy_v2_intake:
+                self._send_error(
+                    410,
+                    "legacy_contract_read_only",
+                    "五量 V2 已冻结为历史只读契约；正式新报送必须使用十量 V3",
+                )
+                return
             document = decoded.document
             slot = self.server.analysis_slots[client.sender_id]
             if not slot.acquire(blocking=False):
@@ -1212,8 +1369,9 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        ack_match = _REPORT_ACK.fullmatch(path)
+        ack_match = _REPORT_ACK.fullmatch(path) or _TEN_REPORT_ACK.fullmatch(path)
         if ack_match:
+            ten_route = path.startswith("/v3/")
             self._reject_query(parsed.query)
             transport = self._authenticate_machine_transport(body=body)
             client = transport.client
@@ -1226,6 +1384,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             with self.server.store.controlled_write_scope():
                 if message.payload.report_id != ack_match.group("id"):
                     raise ValueError("path report_id differs from acknowledgement")
+                self._assert_report_route_scope(
+                    message.payload.report_id,
+                    client.mine_id,
+                    ten_route=ten_route,
+                )
                 item = self._report_outbox_item(
                     client.mine_id, message.payload.report_id
                 )
@@ -1255,8 +1418,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             self._send_empty(204)
             return
 
-        response_match = _REPORT_RESPONSE.fullmatch(path)
+        response_match = _REPORT_RESPONSE.fullmatch(
+            path
+        ) or _TEN_REPORT_RESPONSE.fullmatch(path)
         if response_match:
+            ten_route = path.startswith("/v3/")
             self._reject_query(parsed.query)
             transport = self._authenticate_machine_transport(body=body)
             client = transport.client
@@ -1269,6 +1435,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             with self.server.store.controlled_write_scope():
                 if message.payload.report_id != response_match.group("id"):
                     raise ValueError("path report_id differs from enterprise response")
+                self._assert_report_route_scope(
+                    message.payload.report_id,
+                    client.mine_id,
+                    ten_route=ten_route,
+                )
                 item = self._report_outbox_item(
                     client.mine_id, message.payload.report_id
                 )
@@ -1308,6 +1479,21 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------
     # Authentication and contract binding
+
+    def _assert_report_route_scope(
+        self,
+        report_id: str,
+        mine_id: str,
+        *,
+        ten_route: bool,
+    ) -> None:
+        report = self.server.store.get_analysis_report(report_id, mine_id=mine_id)
+        submission = self.server.store.get_submission(report.submission_id)
+        expected = "ten_quantity_v3" if ten_route else "five_quantity_v2"
+        if submission.quantity_scope != expected:
+            raise RegulatoryV2NotFoundError(
+                "analysis report does not belong to this contract route"
+            )
 
     def _authenticate_machine_transport(
         self,
@@ -1383,7 +1569,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
 
     def _validate_governed_context(
         self,
-        message: FiveQuantitySubmissionMessage,
+        message: FiveQuantitySubmissionMessage | TenQuantitySubmissionMessage,
         client: ExchangeClient,
     ) -> None:
         if client.comparison_context is None:
@@ -1406,7 +1592,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
 
     def _validate_submission_lineage(
         self,
-        message: FiveQuantitySubmissionMessage,
+        message: FiveQuantitySubmissionMessage | TenQuantitySubmissionMessage,
         client: ExchangeClient,
     ) -> None:
         if message.revision == 1:
@@ -1427,9 +1613,9 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             raise ExchangeLineageError(
                 "direct predecessor is not a verified submission in this mine"
             ) from error
-        if predecessor.get("message_type") != "five_quantity_submission":
+        if predecessor.get("message_type") != message.message_type:
             raise ExchangeLineageError(
-                "direct predecessor is not a five-quantity submission"
+                "direct predecessor is not the same submission contract family"
             )
         causes: list[Mapping[str, Any]] = []
         if message.causation_id != message.predecessor.message_id:
@@ -1444,7 +1630,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             if cause.get("message_type") not in {
                 "analysis_report",
                 "enterprise_risk_response",
-                "five_quantity_submission",
+                message.message_type,
             }:
                 raise ExchangeLineageError(
                     "causation message type cannot trigger a correction"
@@ -1492,7 +1678,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
 
     def _validate_submission_time(
         self,
-        message: FiveQuantitySubmissionMessage,
+        message: FiveQuantitySubmissionMessage | TenQuantitySubmissionMessage,
     ) -> None:
         now = self.server.clock().astimezone(UTC)
         maximum_future = now + timedelta(minutes=5)
@@ -1522,8 +1708,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         if self.server.production_mode and (
             principal.must_change_password
             or principal.temporary_demo
-            or principal.credential_policy_version
-            != CURRENT_CREDENTIAL_POLICY_VERSION
+            or principal.credential_policy_version != CURRENT_CREDENTIAL_POLICY_VERSION
         ):
             raise PasswordChangeRequiredError
         return principal
@@ -1591,7 +1776,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             "mine_id": client.mine_id,
             "payload": payload,
             "signature_envelope": {
-                "algorithm": "hmac-sha256-v2",
+                "algorithm": (
+                    "hmac-sha256-v3"
+                    if contract_version.endswith("-v3")
+                    else "hmac-sha256-v2"
+                ),
                 "canonicalization": "rfc8785-jcs",
                 "key_id": self.server.platform_key_id,
                 "signed_at": timestamp,
@@ -1654,7 +1843,20 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         client: ExchangeClient,
         report_id: str,
         outbox_item: OutboxItem | None = None,
+        *,
+        expected_quantity_scope: str | None = None,
     ) -> dict[str, Any]:
+        report = self.server.store.get_analysis_report(
+            report_id, mine_id=client.mine_id
+        )
+        submission = self.server.store.get_submission(report.submission_id)
+        if (
+            expected_quantity_scope is not None
+            and submission.quantity_scope != expected_quantity_scope
+        ):
+            raise RegulatoryV2NotFoundError(
+                "analysis report does not belong to this contract route"
+            )
         existing = self._exchange_message(
             direction="outbound",
             message_type="analysis_report",
@@ -1666,17 +1868,23 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         )
         if existing is not None:
             return existing
-        report = self.server.store.get_analysis_report(
-            report_id, mine_id=client.mine_id
-        )
         item = outbox_item or self._report_outbox_item(client.mine_id, report_id)
         inbound = self._exchange_message(
             direction="inbound",
             message_type="five_quantity_submission",
             predicate=lambda value: value.get("message_id") == report.submission_id,
             mine_id=client.mine_id,
+            required=False,
         )
+        if inbound is None:
+            inbound = self._exchange_message(
+                direction="inbound",
+                message_type="ten_quantity_submission",
+                predicate=lambda value: value.get("message_id") == report.submission_id,
+                mine_id=client.mine_id,
+            )
         assert inbound is not None
+        ten_quantity = inbound["message_type"] == "ten_quantity_submission"
         result = report.result
         run_metadata = self.server.store.get_run_metadata(report.run_id)
         history_bands = [
@@ -1687,6 +1895,33 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             item.model_dump(mode="json")
             for item in result.references.accepted_peer_bands
         ]
+        algorithm_modules = [
+            "data_quality",
+            "daily_shift_reconciliation",
+            "l1_reconciliation",
+            "minimal_conflict_set",
+            "robust_temporal_baseline",
+            "past_only_rolling_mad",
+            "past_only_ewma",
+            "past_only_cusum",
+            "past_only_page_hinkley",
+            "temporal_drift",
+            "change_point",
+            "operating_state_segmentation",
+            "evidence_calibration",
+        ]
+        if peer_bands:
+            algorithm_modules.append("anonymous_peer_baseline")
+        if ten_quantity:
+            evaluated_relationships = {
+                item.relationship
+                for item in result.reconciliation.soft_constraint_diagnostics
+            }
+            algorithm_modules.extend(
+                module
+                for relationship, module in _TEN_QUANTITY_RELATIONSHIP_MODULES.items()
+                if relationship in evaluated_relationships
+            )
         payload = {
             "report_id": report.report_id,
             "submission_message_id": report.submission_id,
@@ -1697,11 +1932,23 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             "period_end": inbound["payload"]["period_end"],
             "issued_at": _iso(report.issued_at),
             "algorithm": {
-                "engine_id": "mineguard-five-quantity-engine",
+                "engine_id": (
+                    "mineguard-ten-quantity-engine"
+                    if ten_quantity
+                    else "mineguard-five-quantity-engine"
+                ),
                 "engine_version": _semantic_engine_version(result.method_version),
                 "algorithm_run_id": report.run_id,
                 "config_sha256": result.configuration_sha256,
-                "input_snapshot_sha256": result.algorithm_input_sha256,
+                # V3 wire semantics bind this field to the exact enterprise
+                # payload snapshot that was application-signed.  The internal
+                # algorithm-input digest remains persisted with the run and is
+                # intentionally not substituted for this contract proof.
+                "input_snapshot_sha256": (
+                    inbound["signature_envelope"]["payload_sha256"]
+                    if ten_quantity
+                    else result.algorithm_input_sha256
+                ),
                 "own_history_snapshot_sha256": (
                     _hash_json(history_bands) if history_bands else None
                 ),
@@ -1710,22 +1957,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 "completed_at": _iso(
                     datetime.fromisoformat(run_metadata["completed_at"])
                 ),
-                "modules": [
-                    "data_quality",
-                    "daily_shift_reconciliation",
-                    "l1_reconciliation",
-                    "minimal_conflict_set",
-                    "robust_temporal_baseline",
-                    "past_only_rolling_mad",
-                    "past_only_ewma",
-                    "past_only_cusum",
-                    "past_only_page_hinkley",
-                    "temporal_drift",
-                    "change_point",
-                    "operating_state_segmentation",
-                    "anonymous_peer_baseline",
-                    "evidence_calibration",
-                ],
+                "modules": algorithm_modules,
             },
             "outcome": (
                 "data_insufficient"
@@ -1734,7 +1966,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             ),
             "summary": ("；".join(result.decision_reasons) or "分析完成")[:4000],
             "findings": [
-                self._wire_finding(finding_id, report)
+                self._wire_finding(
+                    finding_id,
+                    report,
+                    ten_quantity=ten_quantity,
+                )
                 for finding_id in report.finding_ids
             ],
             "response_required": report.response_required,
@@ -1747,7 +1983,9 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         }
         message = self._base_outbound_message(
             client,
-            contract_version="analysis-report-v2",
+            contract_version=(
+                "analysis-report-v3" if ten_quantity else "analysis-report-v2"
+            ),
             message_type="analysis_report",
             message_id=item.message_id,
             correlation_id=inbound["correlation_id"],
@@ -1759,8 +1997,16 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         self._record_outbound(client, message, report.issued_at)
         return message
 
-    def _wire_finding(self, finding_id: str, report: AnalysisReport) -> dict[str, Any]:
+    def _wire_finding(
+        self,
+        finding_id: str,
+        report: AnalysisReport,
+        *,
+        ten_quantity: bool,
+    ) -> dict[str, Any]:
         projection = self.server.store.get_finding(finding_id, mine_id=report.mine_id)
+        submission = self.server.store.get_submission(report.submission_id)
+        applicable_metrics = submission.applicable_metrics
         finding = projection.finding
         result = finding.result
         if finding.category == "data_quality":
@@ -1777,8 +2023,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             category = "data_quality"
         evidence: list[dict[str, Any]] = []
         for index, signal in enumerate(signals[:100], start=1):
+            evidence_method = self._evidence_method(signal.code, signal.basis)
+            if ten_quantity and evidence_method.startswith("past_only_"):
+                evidence_method = "robust_temporal_baseline"
             core = {
-                "method": self._evidence_method(signal.code, signal.basis),
+                "method": evidence_method,
                 "summary": signal.message[:2000],
                 "observed_value": signal.observed,
                 "expected_min": signal.expected_lower,
@@ -1813,20 +2062,29 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 )
         dates = sorted(
             {signal.date.isoformat() for signal in signals if signal.date is not None}
-        ) or [
-            self.server.store.get_submission(
-                report.submission_id
-            ).period_end.isoformat()
-        ]
-        metrics = sorted(
-            {signal.metric for signal in signals if signal.metric in METRICS}
-        ) or list(METRICS)
+        ) or [submission.period_end.isoformat()]
+        # Some legacy completeness findings carry no metric-level signal.  In
+        # that genuinely unlocatable case the conservative wire representation
+        # remains the full governed scope; relationship and multi-atom signals
+        # above must never be broadened this way.
+        metrics = _affected_metrics_from_signals(
+            signals, applicable_metrics
+        ) or list(applicable_metrics)
+        deterministic_conflict = any(
+            signal.basis.startswith("deterministic_")
+            or signal.code == "daily_shift_arithmetic_mismatch"
+            for signal in signals
+        )
+        severity = (
+            "high"
+            if finding.finding_type != "data_insufficient"
+            and deterministic_conflict
+            else "medium"
+        )
         return {
             "finding_id": finding.finding_id,
             "category": category,
-            "severity": "medium"
-            if finding.finding_type == "data_insufficient"
-            else "high",
+            "severity": severity,
             "title": finding.title[:256],
             "summary": finding.summary[:4000] or "需要企业核对并回复",
             "affected_dates": dates,
@@ -1959,6 +2217,24 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         report = self.server.store.get_analysis_report(
             response.payload.report_id, mine_id=client.mine_id
         )
+        original_submission = self._exchange_message(
+            direction="inbound",
+            message_type="five_quantity_submission",
+            predicate=lambda message: message.get("message_id") == report.submission_id,
+            mine_id=client.mine_id,
+            required=False,
+        )
+        submission_message_type = "five_quantity_submission"
+        if original_submission is None:
+            original_submission = self._exchange_message(
+                direction="inbound",
+                message_type="ten_quantity_submission",
+                predicate=lambda message: (
+                    message.get("message_id") == report.submission_id
+                ),
+                mine_id=client.mine_id,
+            )
+            submission_message_type = "ten_quantity_submission"
         corrected_references = {
             item.corrected_submission_message_id
             for item in response.payload.finding_responses
@@ -1976,7 +2252,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             self.server.store.get_submission_receipt(reference, mine_id=client.mine_id)
             corrected = self._exchange_message(
                 direction="inbound",
-                message_type="five_quantity_submission",
+                message_type=submission_message_type,
                 predicate=lambda message: message.get("message_id") == reference,
                 mine_id=client.mine_id,
             )
@@ -2043,6 +2319,8 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         self,
         mine_id: str,
         after_sequence: int,
+        *,
+        quantity_scope: str,
     ) -> OutboxItem | None:
         cursor = after_sequence
         while True:
@@ -2050,7 +2328,13 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 mine_id, after_sequence=cursor, limit=1000
             )
             for item in page.items:
-                if bool(item.payload.get("response_required")):
+                if not bool(item.payload.get("response_required")):
+                    continue
+                report = self.server.store.get_analysis_report(
+                    item.aggregate_id, mine_id=mine_id
+                )
+                submission = self.server.store.get_submission(report.submission_id)
+                if submission.quantity_scope == quantity_scope:
                     return item
             if not page.has_more:
                 return None
@@ -2305,10 +2589,10 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 event_label = "发现风险线索"
                 status = "risk"
                 summary = (
-                    f"本期五量数据研判发现 {finding_count} 项风险线索，"
+                    f"本期报送数据研判发现 {finding_count} 项风险线索，"
                     "等待企业核实或提交修订数据。"
                     if finding_count
-                    else "本期五量数据研判发现风险线索，等待企业核实或提交修订数据。"
+                    else "本期报送数据研判发现风险线索，等待企业核实或提交修订数据。"
                 )
             elif decision == "insufficient_data":
                 event_label = "数据待补充"
@@ -2322,7 +2606,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             elif decision == "normal_candidate":
                 event_label = "研判完成"
                 status = "normal_candidate"
-                summary = "本期五量数据研判完成，暂未发现需要企业核实的风险线索。"
+                summary = "本期报送数据研判完成，暂未发现需要企业核实的风险线索。"
             elif finding_events:
                 event_label = "形成待核事项"
                 finding_type = finding_events[0].payload.get("finding_type")
@@ -2339,7 +2623,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 summary = (
                     f"已收到企业提交的第 {revision} 版修订数据，系统正在重新分析。"
                     if isinstance(revision, int) and revision > 1
-                    else "已收到企业本期五量数据，系统正在分析。"
+                    else "已收到企业本期报送数据，系统正在分析。"
                 )
             return self._presented_audit_row(
                 anchor,
@@ -2429,7 +2713,20 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         report = detail.analysis_reports[0] if detail.analysis_reports else None
         latest_run = detail.runs[0] if detail.runs else {}
         latest_submission = detail.submissions[0] if detail.submissions else {}
-        findings = [self._finding_projection(item) for item in detail.findings]
+        latest_submission_id = str(latest_submission.get("submission_id") or "")
+        latest_submission_model = (
+            self.server.store.get_submission(latest_submission_id)
+            if latest_submission_id
+            else None
+        )
+        finding_projections = list(detail.findings)
+        findings = [self._finding_projection(item) for item in finding_projections]
+        current_findings = [
+            self._finding_projection(item)
+            for item in finding_projections
+            if item.finding.submission_id == latest_submission_id
+            and item.state != "cleared_by_reanalysis"
+        ]
         responses = [
             response.model_dump(mode="json")
             for item in detail.findings
@@ -2438,8 +2735,17 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         result = report.result if report is not None else None
         source_disclosure = self._submission_source_disclosure(
             mine_id,
-            str(latest_submission.get("submission_id") or ""),
+            latest_submission_id,
         )
+        daily_series = [
+            {**item, "wind_m3_min": item.get("ventilation_m3_min")}
+            for item in sorted(detail.daily_facts, key=lambda value: value["date"])
+        ]
+        current_period_series = [
+            item
+            for item in daily_series
+            if item.get("submission_id") == latest_submission_id
+        ]
         return {
             "mine": {
                 "mine_id": detail.overview.mine_id,
@@ -2457,6 +2763,16 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             },
             "latest_submission": {
                 **latest_submission,
+                "contract_version": (
+                    latest_submission_model.contract_version
+                    if latest_submission_model is not None
+                    else None
+                ),
+                "quantity_scope": (
+                    latest_submission_model.quantity_scope
+                    if latest_submission_model is not None
+                    else None
+                ),
                 "report_month": str(latest_submission.get("period_end", ""))[:7],
                 "data_as_of": latest_submission.get("period_end"),
                 "source_disclosure": source_disclosure,
@@ -2514,11 +2830,13 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                     None,
                 ),
             },
-            "daily_series": [
-                {**item, "wind_m3_min": item.get("ventilation_m3_min")}
-                for item in sorted(detail.daily_facts, key=lambda value: value["date"])
-            ],
+            # Full governed history remains available for trend context.  The
+            # separate current-period slice prevents historical non-null values
+            # from making the latest report appear complete.
+            "daily_series": daily_series,
+            "current_period_series": current_period_series,
             "findings": findings,
+            "current_findings": current_findings,
             "responses": responses,
             "timeline": [
                 {
@@ -2632,8 +2950,10 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             "temporal_pattern": finding.result.temporal_signals,
         }
         signals = signals_by_category.get(finding.category, ())
+        affected_metrics = _affected_metrics_from_signals(signals, METRICS)
         return {
             "finding_id": finding.finding_id,
+            "submission_id": finding.submission_id,
             "mine_id": finding.mine_id,
             "finding_type": finding.finding_type,
             # Kept for older API consumers. The leadership UI uses finding_type
@@ -2649,6 +2969,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             "evidence": [
                 _humanize_business_text(signal.message) for signal in signals[:20]
             ],
+            "affected_metrics": affected_metrics,
             "response_count": len(item.responses),
             "resolved_by_submission_id": item.resolved_by_submission_id,
         }
@@ -3072,11 +3393,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         decision_summaries = {
             "normal_candidate": (
                 "研判完成",
-                "本期五量数据研判完成，暂未发现需要企业核实的风险线索。",
+                "本期报送数据研判完成，暂未发现需要企业核实的风险线索。",
             ),
             "risk": (
                 "发现风险线索",
-                "本期五量数据研判发现风险线索，等待企业核实或提交修订数据。",
+                "本期报送数据研判发现风险线索，等待企业核实或提交修订数据。",
             ),
             "insufficient_data": (
                 "数据待补充",
@@ -3096,7 +3417,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             if isinstance(finding_ids, list) and finding_ids:
                 if decision == "risk":
                     summary = (
-                        f"本期五量数据研判发现 {len(finding_ids)} 项风险线索，"
+                        f"本期报送数据研判发现 {len(finding_ids)} 项风险线索，"
                         "等待企业核实或提交修订数据。"
                     )
                 elif decision == "insufficient_data":
@@ -3121,14 +3442,14 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             summary = (
                 f"已收到企业提交的第 {revision} 版修订数据，系统正在重新分析。"
                 if isinstance(revision, int) and revision > 1
-                else "已收到企业本期五量数据，系统正在分析。"
+                else "已收到企业本期报送数据，系统正在分析。"
             )
             return "数据已接收", "analyzing", summary
         if event_type == "finding_automatically_issued":
             category = {
                 "data_quality": "数据质量",
-                "relationship_consistency": "五量关系协调",
-                "temporal_pattern": "五量时序变化",
+                "relationship_consistency": "指标关系协调",
+                "temporal_pattern": "指标时序变化",
                 "data_completeness": "数据完整性",
             }.get(str(payload.get("category")), "数据")
             status = (
@@ -3425,6 +3746,7 @@ def create_server(
     platform_key_id: str | None = None,
     local_control_token: str | None = None,
     production_mode: bool = False,
+    allow_legacy_v2_intake: bool | None = None,
     clock: Callable[[], datetime] = _utc_now,
     request_io_timeout_seconds: float = _REQUEST_IO_TIMEOUT_SECONDS,
     drain_timeout_seconds: float = _DRAIN_TIMEOUT_SECONDS,
@@ -3464,6 +3786,13 @@ def create_server(
             resolved_platform_key_id,
             clients=registry,
         )
+    resolved_allow_legacy_v2_intake = (
+        not production_mode
+        if allow_legacy_v2_intake is None
+        else bool(allow_legacy_v2_intake)
+    )
+    if production_mode and resolved_allow_legacy_v2_intake:
+        raise ValueError("production server cannot enable legacy V2 intake")
     store = RegulatoryV2Store(
         database_path,
         now=clock,
@@ -3486,6 +3815,7 @@ def create_server(
             local_control_token=local_control_token,
             clock=clock,
             production_mode=production_mode,
+            allow_legacy_v2_intake=resolved_allow_legacy_v2_intake,
             request_io_timeout_seconds=request_io_timeout_seconds,
             drain_timeout_seconds=drain_timeout_seconds,
         )

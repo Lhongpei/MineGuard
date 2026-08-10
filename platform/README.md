@@ -1,27 +1,39 @@
-# MineGuard · 矿安智察 · 煤矿智能辅助监管系统 V2
+# MineGuard · 矿安智察 · 煤矿十量智能辅助监管系统 V3
 
-`platform/` 是政府侧独立软件。它只接收各煤矿企业智能体发送的规范五量报文，自动
+`platform/` 是政府侧独立软件。它只接收各煤矿企业智能体发送的规范十量 V3 报文，自动
 运行唯一监管算法，形成不可变报告、风险通知、企业回复和修订重算留痕，并向领导
 提供只读驾驶舱。
 
 它不负责企业填报，不连接矿区设备，不允许领导修改企业数据、算法参数或风险状态。
 企业端实现位于 `../agent/`，双方没有 Python import、数据库或文件目录依赖，只分别
-实现 `../contracts/` 发布的 V2 HTTPS/JSON/HMAC 协议。
+实现 `../contracts/` 发布的 V3 HTTPS/JSON/双 HMAC 协议。五量 V2 仅保留只读历史
+验签、审计和展示，不得补造新增字段或重新形成正式结论。
 
-## 五量口径
+## 十量口径
 
-正式五量固定为风量、电量、火工品量、入井人员量和产量。底层使用六个规范原子字段：
-火工品量分别保存雷管数量（`count`）、炸药质量（`kg`）等带单位子项，各子项不能跨
-单位相加；`mine_entry_persons` 表示统计范围内实际发生的入井人次，必须为整数并按
-`sum` 聚合，不表示泛用工、在册/排班人数或时点井下人数。六个原子字段只是五量的
-规范化表达，不是“六量”。
+正式十量固定为风量、电量、火工品量、入井人员量、产量、开采量、销售量、运输量、
+洗煤量和开票量。火工品量拆成不同单位的雷管与炸药，因此底层共 11 个原子字段：
+
+```text
+ventilation_m3_min  electricity_kwh   detonators_count   explosives_kg
+mine_entry_persons  production_t      extraction_t       sales_t
+transport_t         wash_feed_t       invoiced_quantity_t
+```
+
+`mine_entry_persons` 是实际入井人次；`production_t` 是企业报表产量，
+`extraction_t` 是采掘计量；`transport_t` 是出矿/外运净吨数，`wash_feed_t` 是入洗
+原煤量。`invoiced_quantity_t` 必须非负，只记录正常/蓝字发票对应实物吨数；红票、
+退票、作废、折让和退货在企业来源系统作为辅助明细独立留存，净额另算，不能把负数
+写进主字段；当前 V3 主报文不传这些辅助事件。
+完整单位、聚合和班次要求见
+[十量 V3 部署与运行](../docs/十量V3部署与运行.md#2-十量与-11-个原子字段)。
 
 ## 主流程
 
 ```text
 单矿 Agent 签名月报
   → 平台验签、幂等接收、追加留痕
-  → 自动运行 mineguard-five-quantity-engine
+  → 自动运行 mineguard-ten-quantity-engine
   → normal_candidate / risk / insufficient_data
   → 企业主动拉取需要回复的分析报告
   → 企业确认送达并提交人工确认的原因/证据/措施
@@ -34,33 +46,38 @@
 
 ## 唯一算法与求解器位置
 
-唯一公开算法入口是：
+当前兼容函数名仍可见于内部 Python 实现，但 V3 提交会按 `quantity_scope=ten_quantity_v3`
+进入十量管线。该管线依次完成：
 
-```python
-analyze_five_quantity(submission, history=..., peer_bands=..., parameters=...)
-```
-
-它在一条版本化管线内完成：
-
-1. 缺失、单位、非负值及日报—三班确定性核对；
+1. 11 原子字段的缺失、单位、非负值及日报—三班确定性核对；
 2. 停产、检修、复产爬坡和生产工况识别；
-3. 本矿正式准入历史的 Median/MAD、Rolling MAD、EWMA、CUSUM、Page-Hinkley、
+3. 产量、开采、洗煤进料、销售、运输、开票的同期间软关系核对，避免把合法库存、
+   在途和结算时差误写成简单等式；
+4. 本矿正式准入历史的 Median/MAD、Rolling MAD、EWMA、CUSUM、Page-Hinkley、
    漂移和 SSE/BIC 变化点；
-4. 至少三座可比矿、每矿等权且按报告截止日冻结的匿名同类矿参考区间；
-5. HiGHS 加权 L1 联合协调和严格反事实最小冲突集 MCS；
-6. 证据合并与三态结论；
-7. 独立的历史基线准入：首期完整正常数据只进入隔离参考候选；只有求解成功、没有
+5. 至少三座可比矿、每矿等权且按报告截止日冻结的匿名同类矿参考区间；
+6. HiGHS 加权 L1 联合协调和严格反事实最小冲突集 MCS；
+7. 证据合并与三态结论；十量主字段、必需班次或当前可执行模块的证据不足时返回
+   `insufficient_data`，不能把“无法验证”显示为冲突；
+8. 独立的历史基线准入：首期完整正常数据只进入隔离参考候选；只有求解成功、没有
    复核级/风险级信号，并有正式本矿历史或冻结匿名同类矿独立锚点的数据才进入正式
    历史基线。
 
-求解器只在第 5 步内部使用。班次窗口、汇总口径、非负性和日报—班次确定性差异检查
-先由规则层完成；随后 HiGHS 解“在各观测容差和软参考区间下，所有五量联合相容所需
-的最小加权 L1 调整”。它不直接预测真实产量，也不把历史关系当成物理真理。MCS 再用
+求解器只在第 6 步内部使用。班次窗口、汇总口径、非负性和日报—班次确定性差异检查
+先由规则层完成；随后 HiGHS 解“在各观测容差和软参考区间下，所有十量联合相容所需
+的最小加权 L1 调整”。它不直接预测真实产量，也不把历史关系当成物理真理。销售、
+运输和开票分别保留业务含义，不作为三次出库重复扣减。MCS 再用
 严格容差可行性问题回答“最少放松哪些观测或参考组后才可行”，用于给领导和企业指出
 优先核查的日期、指标及证据组合。既有时序算法仍在同一引擎内，与 L1/MCS 互补。
 
 `manual_import` 与 `direct_collection` 是并列合法的来源方式，只用于追溯；算法不会
 按采集方式设置权重、阈值或信任等级。
+
+本版 V3 主报文没有期初/期末库存、洗后产品与损耗、逐批运输/开票日期和来源依赖域。
+所以高级核心中的原煤收发存、洗选投入产出、逐批凭证账龄及窗口流网络在生产适配器中
+明确为 `skipped`，不会参与当前结论，也不会因缺少这些未发布字段而制造
+`insufficient_data`。要启用这些能力，必须新增独立、版本化的辅助证据合同、持久化与
+快照哈希，再完成单独验收；不得把当前 11 个主量静默解释成库存或逐批凭证。
 
 ## 最快开始：两条短路径
 
@@ -154,6 +171,10 @@ mineguard serve --host 127.0.0.1 --port 8080 \
   --state-directory .mineguard-v2
 ```
 
+政府客户端注册变量目前仍名为 `MINEGUARD_V2_CLIENTS_JSON`（Windows 推荐对应的
+`MINEGUARD_V2_CLIENTS_FILE`），这是兼容旧部署脚本的稳定运维名称；同一注册表会验证
+V3 客户端与 V3 双 HMAC，不代表提交路径仍是 V2。
+
 打开 <http://127.0.0.1:8080/>。全新本机状态目录的默认账号是
 `admin / 123123123`。这只用于回环地址演示；非本机监听首次启动必须预先设置至少
 8 个字符的 `MINEGUARD_ADMIN_PASSWORD`，生产应使用独立随机长口令和 HTTPS。
@@ -200,7 +221,7 @@ mineguard user change-password admin \
 不加 `--demo-default-password` 时会安全交互输入密码。正式状态必须在服务器
 本机附着的交互终端无回显输入；不接受命令行、管道或
 `MINEGUARD_NEW_USER_PASSWORD` 环境变量。该环境变量只保留给非正式兼容流程，
-命令读取时也会立即从当前进程环境中清除。`viewer`、`reviewer`、`supervisor` 在当前 V2
+命令读取时也会立即从当前进程环境中清除。`viewer`、`reviewer`、`supervisor` 在当前 V3
 领导端均为只读且受 `--mine-id` 限制；`admin` 查看全部煤矿，只应给系统管理员。
 正式状态中新建或管理员重置的账号标记为“待换密”；该账号完成自助改密前不能访问监管
 业务。正式启动会拒绝仍启用的 `123123123`/临时演示账号，但不会因普通领导账号等待首次
@@ -226,7 +247,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-需要直接查看多矿时序和风险场景时，可生成完全隔离的混合来源演示数据：
+需要查看五量 V2 历史兼容展示时，可生成完全隔离的混合来源演示数据：
 
 ```bash
 mineguard seed-v2-demo --state-directory .mineguard-v2-demo-v2 \
@@ -243,18 +264,21 @@ mineguard serve --state-directory .mineguard-v2-demo-v2
 逐字段来源、固定哈希和已知缺失见
 [太岳矿与梗阳矿样表演示说明](docs/太岳矿与梗阳矿样表演示说明.md)。
 
+该演示命令不为旧样表补造开采、销售、运输、洗煤或开票数据；这些记录在 V3 界面中
+明确显示为 Legacy/字段不足，不得用于十量算法验收。
+
 ## 接口边界
 
 企业交换接口与 OpenAPI 一致：
 
 ```text
-POST /v2/five-quantity-submissions
-GET  /v2/five-quantity-submissions/{message_id}/receipt
-GET  /v2/analysis-reports/next?after_cursor=...
-GET  /v2/analysis-reports/{report_id}
-POST /v2/analysis-reports/{report_id}/delivery-ack
-POST /v2/analysis-reports/{report_id}/responses
-GET  /v2/risk-responses/{response_id}/receipt
+POST /v3/ten-quantity-submissions
+GET  /v3/ten-quantity-submissions/{message_id}/receipt
+GET  /v3/analysis-reports/next?after_cursor=...
+GET  /v3/analysis-reports/{report_id}
+POST /v3/analysis-reports/{report_id}/delivery-ack
+POST /v3/analysis-reports/{report_id}/responses
+GET  /v3/risk-responses/{response_id}/receipt
 ```
 
 领导业务接口只有登录与只读查询：
@@ -284,7 +308,7 @@ http://<政府平台地址>:<端口>/wallboard
 
 ## 数据和安全
 
-- V2 表位于 `--state-directory` 下的 `mineguard.db`，与每矿 Agent 数据库完全分离；
+- V3 与只读 V2 历史表位于 `--state-directory` 下的 `mineguard.db`，与每矿 Agent 数据库完全分离；
 - 报文、日报事实、算法输入摘要、run、报告、投递确认、回复和状态迁移均追加保存；
 - SQLite 表有禁止 UPDATE/DELETE 的触发器，审计事件形成 SHA-256 链；
 - HTTP 时间窗和 nonce 防重放持久化，重启后仍生效；
@@ -292,9 +316,10 @@ http://<政府平台地址>:<端口>/wallboard
 - 同类矿输出只有匿名区间和样本数，不向企业泄露其他矿明细；
 - 原因回复只形成 `explanation_recorded`，风险结论不会因此被覆盖。
 
-生产部署、Nginx、systemd、密钥轮换、备份和故障验收见
-[V2 部署与运行](../docs/V2部署与运行.md)与
-[V2 验收清单](../docs/V2验收清单.md)。
+生产部署、字段、CSV、密钥轮换、备份和故障验收先见
+[十量 V3 部署与运行](../docs/十量V3部署与运行.md)。旧 `V2*.md` 只用于历史迁移和
+只读审计参考。
+领导日常查看与交办见 [领导端十量 V3 操作说明](docs/领导端十量V3操作说明.md)。
 
 政府端原生 Windows 安装、离线 wheelhouse、低权限 WinSW 服务、NTFS ACL、健康检查
 和备份恢复见 [Windows 原生部署与运维](docs/Windows原生部署与运维.md)。
@@ -312,9 +337,9 @@ ruff check src tests
 ruff format --check src tests
 ```
 
-`test_regulatory_v2_http.py` 会在随机本机端口真实完成报送、唯一算法、报告拉取、送达
+HTTP 端到端测试会在随机本机端口真实完成 V3 报送、唯一算法、报告拉取、送达
 确认、企业回复和只读大屏查询，并用中立 Schema 校验三个政府出站消息。
 
-生产命令 `mineguard` 只导入 V2 平台和备份组件，不导入旧 edge、安全、案件或多算法
+生产命令 `mineguard` 只导入当前 V3 平台和备份组件，不导入旧 edge、安全、案件或多算法
 运行栈，也不再安装第二套 legacy 命令。仓库中的旧源码只可用于受控数据迁移参考，
-不能作为新部署入口，也不能把旧 V1 API 当作 V2 主线。
+不能作为新部署入口，也不能把旧 V1 API 或五量 V2 当作 V3 主线。

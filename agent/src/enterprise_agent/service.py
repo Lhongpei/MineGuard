@@ -657,7 +657,7 @@ class EnterpriseAgentService:
     @property
     def five_quantity(self) -> FiveQuantityRuntime:
         if self._five_quantity is None:
-            raise RuntimeError("五量 V2 运行时未配置")
+            raise RuntimeError("十量 V3 运行时未配置")
         return self._five_quantity
 
     @property

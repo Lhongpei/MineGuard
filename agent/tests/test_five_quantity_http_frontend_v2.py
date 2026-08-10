@@ -488,6 +488,8 @@ def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
     assert "让 Agent 读取并生成草稿" in html
     assert "CSV_TEMPLATE_HEADER" in script
     assert "零点班" in script and "八点班" in script and "四点班" in script
+    assert "日期 + 11 个原子字段" in html
+    assert "十量日汇总 CSV 模板" in script
     assert "syncImportCapability" in script
     assert "当前尚未报送" in script
     assert "可信度分层" not in script
@@ -495,6 +497,18 @@ def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
     assert "入井人员量" in script
     assert "火工品量" in script
     assert "mine_entry_persons" in script
+    for metric, label in (
+        ("extraction_t", "开采量（采掘计量）"),
+        ("sales_t", "销售量"),
+        ("transport_t", "运输量"),
+        ("wash_feed_t", "洗煤量（入洗原煤）"),
+        ("invoiced_quantity_t", "开票量（吨）"),
+    ):
+        assert metric in script
+        assert label in script
+    assert "旧版 V2 五量数据：已到 5/10" in script
+    assert "班次高级明细" in script
+    assert "销售量、开票量不强制填班次" in script
     assert "逐日核对六项" not in html
     assert '["labor_persons", "用工量"' not in script
 

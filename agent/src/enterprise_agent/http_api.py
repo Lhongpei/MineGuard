@@ -767,14 +767,14 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             raise ValueError("completed_at 早于允许的 30 天健康事件窗口")
         runtime = getattr(self.server.service, "_five_quantity", None)
         if runtime is None:
-            raise ValueError("五量 V2 正式填报运行时未启用")
+            raise ValueError("十量 V3 正式填报运行时未启用")
         expected_draft_key = (
             f"draft:{runtime.identity.operator_id}:five-quantity:monthly:"
             f"{payload['reporting_month']}"
         )
         if payload["draft_key"] != expected_draft_key:
             raise ConnectorAuthorizationError(
-                "draft_key 不属于当前经营主体的权威五量月度范围"
+                "draft_key 不属于当前经营主体的权威十量月度范围"
             )
         if payload["coverage_as_of"] is not None:
             local_today = utc_now().astimezone(
@@ -1515,14 +1515,14 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
         path: str,
         context: AuthContext,
     ) -> bool:
-        """Narrow enterprise UI/API for the one-mine V2 workflow."""
+        """Enterprise-local API; new drafts are V3 and legacy V2 is read-only."""
 
         runtime = getattr(self.server.service, "_five_quantity", None)
         if runtime is None:
             self._error(
                 HTTPStatus.SERVICE_UNAVAILABLE,
-                "five_quantity_v2_unavailable",
-                "当前实例未配置五量 V2 运行时",
+                "ten_quantity_v3_unavailable",
+                "当前实例未配置十量 V3 运行时",
             )
             return True
         actor = context.principal.actor_id
@@ -1766,7 +1766,12 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                     preflight_is_current = bool(
                         isinstance(stored, dict)
                         and stored.get("contract_version")
-                        == "five-quantity-machine-preflight/v1"
+                        == (
+                            "ten-quantity-machine-preflight/v2"
+                            if draft.get("contract_version")
+                            == "ten-quantity-submission-v3"
+                            else "five-quantity-machine-preflight/v1"
+                        )
                         and stored.get("bound_revision") == draft["revision"]
                         and stored.get("payload_sha256")
                         == current_payload_sha256
@@ -2158,7 +2163,12 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                         )
                         is not None
                     ),
-                    "primary_contract_version": "five-quantity-submission-v2",
+                    "primary_contract_version": "ten-quantity-submission-v3",
+                    "legacy_contract_version": "five-quantity-submission-v2",
+                    "ten_quantity_v3_available": getattr(
+                        self.server.service, "_five_quantity", None
+                    )
+                    is not None,
                     "five_quantity_v2_available": getattr(
                         self.server.service, "_five_quantity", None
                     )

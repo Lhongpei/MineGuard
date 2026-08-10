@@ -318,6 +318,7 @@ def test_workbook_values_are_exact_one_month_source_mappings(
     assert all(
         value is None
         for quantity in taiyue.days[30].quantities().values()
+        if quantity is not None
         for value in (
             quantity.daily_total,
             *(

@@ -13,34 +13,17 @@ from zoneinfo import ZoneInfo
 
 from .errors import SourceError
 from .models import FieldMapping, NormalizedEvent, PipelineConfig, RawBatch, SourceConfig
+from .quantity_catalog import (
+    AGGREGATIONS,
+    INTEGER_METRICS,
+    METRICS,
+    TEN_QUANTITY_SOURCE_CONTRACT,
+    TEN_QUANTITY_SUBMISSION_CONTRACT,
+    UNITS,
+)
 from .reporting import reporting_cutoff
 
-METRICS = (
-    "ventilation_m3_min",
-    "electricity_kwh",
-    "detonators_count",
-    "explosives_kg",
-    "mine_entry_persons",
-    "production_t",
-)
 SCOPES = ("daily_total", "zero_shift", "eight_shift", "four_shift")
-UNITS = {
-    "ventilation_m3_min": "m3/min",
-    "electricity_kwh": "kWh",
-    "detonators_count": "count",
-    "explosives_kg": "kg",
-    "mine_entry_persons": "person",
-    "production_t": "t",
-}
-AGGREGATIONS = {
-    "ventilation_m3_min": "time_weighted_average",
-    "electricity_kwh": "sum",
-    "detonators_count": "sum",
-    "explosives_kg": "sum",
-    "mine_entry_persons": "sum",
-    "production_t": "sum",
-}
-_INTEGER_METRICS = {"detonators_count", "mine_entry_persons"}
 _MAX_AGENT_CONTENT_BYTES = 2 * 1024 * 1024
 _MAX_MEASUREMENT = Decimal("1000000000000000")
 _NUMBER_TEXT = re.compile(
@@ -114,7 +97,7 @@ def _scope_for(record: dict[str, Any], timestamp: datetime, pipeline: PipelineCo
             raise SourceError(f"班次范围字段缺失：{pipeline.scope_field}") from None
         scope = pipeline.scope_values.get(raw, raw)
         if scope not in SCOPES:
-            raise SourceError("来源范围值未配置为 V2 日报/三班映射")
+            raise SourceError("来源范围值未配置为日报/三班映射")
         return scope
     if pipeline.period_type == "daily":
         return "daily_total"
@@ -139,7 +122,7 @@ def _scope_for(record: dict[str, Any], timestamp: datetime, pipeline: PipelineCo
     return scope
 
 
-def _as_decimal(value: Any, field: str) -> Decimal:
+def _as_decimal(value: Any, field: str, *, invoice_main: bool = False) -> Decimal:
     if isinstance(value, bool):
         raise SourceError(f"字段 {field} 的布尔值不能转换为数字")
     if not isinstance(value, (str, int, float, Decimal)):
@@ -148,6 +131,12 @@ def _as_decimal(value: Any, field: str) -> Decimal:
         text = str(value).strip()
     except (ValueError, OverflowError) as exc:
         raise SourceError(f"字段 {field} 数字文本过大") from exc
+    if invoice_main and text.startswith("-"):
+        raise SourceError(
+            "invoiced_quantity_t 只能映射本期开具的普通/蓝票实物吨数，"
+            "必须为非负数；红票、退货或折让是辅助事件，"
+            "不得以负数混入十量主字段"
+        )
     if not text or len(text) > 128 or _NUMBER_TEXT.fullmatch(text) is None:
         raise SourceError(f"字段 {field} 不是合法十进制数字")
     exponent_match = _NUMBER_TEXT.fullmatch(text)
@@ -159,30 +148,47 @@ def _as_decimal(value: Any, field: str) -> Decimal:
         result = Decimal(text.replace(",", ""))
     except (InvalidOperation, DecimalException, ValueError, OverflowError) as exc:
         raise SourceError(f"字段 {field} 不能转换为数字") from exc
-    if not result.is_finite() or result < 0:
+    if not result.is_finite():
+        raise SourceError(f"字段 {field} 必须是有限非负数")
+    if result < 0:
+        if invoice_main:
+            raise SourceError(
+                "invoiced_quantity_t 只能映射本期开具的普通/蓝票实物吨数，"
+                "必须为非负数；红票、退货或折让是辅助事件，"
+                "不得以负数混入十量主字段"
+            )
         raise SourceError(f"字段 {field} 必须是有限非负数")
     return result
 
 
 def _convert(value: Any, mapping: FieldMapping, metric: str) -> int | float:
     try:
-        number = _as_decimal(value, mapping.target)
+        number = _as_decimal(
+            value,
+            mapping.target,
+            invoice_main=metric == "invoiced_quantity_t",
+        )
         number = number * Decimal(str(mapping.factor)) + Decimal(str(mapping.offset))
     except SourceError:
         raise
     except (InvalidOperation, DecimalException, ValueError, OverflowError) as exc:
         raise SourceError(f"字段 {mapping.target} 转换运算超出安全范围") from exc
     if not number.is_finite() or number < 0:
+        if metric == "invoiced_quantity_t":
+            raise SourceError(
+                "invoiced_quantity_t 转换后必须为非负数；"
+                "红票、退货或折让辅助事件不得净额混入十量主字段"
+            )
         raise SourceError(f"字段 {mapping.target} 转换后必须是有限非负数")
     if number > _MAX_MEASUREMENT:
-        raise SourceError(f"字段 {mapping.target} 超出 V2 数值上限")
-    if mapping.value_type == "integer" or metric in _INTEGER_METRICS:
+        raise SourceError(f"字段 {mapping.target} 超出十量 V3 数值上限")
+    if mapping.value_type == "integer" or metric in INTEGER_METRICS:
         if number != number.to_integral_value():
             raise SourceError(f"字段 {mapping.target} 必须是整数")
         return int(number)
     result = float(number)
     if not math.isfinite(result):
-        raise SourceError(f"字段 {mapping.target} 超出 V2 数值范围")
+        raise SourceError(f"字段 {mapping.target} 超出十量 V3 数值范围")
     return result
 
 
@@ -255,11 +261,13 @@ def normalize_batches(
     *,
     now: datetime | None = None,
 ) -> tuple[NormalizedEvent, ...]:
-    """Create one complete V2 source snapshot per reporting month.
+    """Create one complete ten-quantity V3 source snapshot per month.
 
-    Missing cells stay explicit null/missing. The Agent merges latest snapshots
-    from different ``source_id`` values; this connector never overwrites one
-    source with another or fabricates a value.
+    Every daily total carries all eleven atomic fields. Missing cells stay
+    explicit null/missing, including fields absent from a legacy six-column
+    source. The Agent merges latest snapshots from different ``source_id``
+    values; this connector never overwrites one source with another or
+    fabricates a value.
     """
 
     pipeline = replace(
@@ -310,7 +318,7 @@ def normalize_batches(
                     continue
                 scope, metric = _target(mapping, row_scope)
                 if scope not in SCOPES or metric not in METRICS:
-                    raise SourceError(f"映射目标不是正式五量 V2 单元格：{mapping.target}")
+                    raise SourceError(f"映射目标不是正式十量 V3 单元格：{mapping.target}")
                 cells[month][(day.isoformat(), scope, metric)].append(
                     (timestamp, _convert(raw_value, mapping, metric))
                 )
@@ -397,8 +405,9 @@ def normalize_batches(
             )
 
         content_document = {
+            "contract_version": TEN_QUANTITY_SUBMISSION_CONTRACT,
             "connector_snapshot": {
-                "contract_version": "enterprise-connector-five-quantity-source/v1",
+                "contract_version": TEN_QUANTITY_SOURCE_CONTRACT,
                 "pipeline_id": pipeline.id,
                 "source_id": source.id,
                 "source_system": source.source_system,
@@ -417,15 +426,16 @@ def normalize_batches(
                 },
                 "source_declaration": source.truth_statement,
                 "normalization": (
-                    "deterministic-v2-mapping; no imputation; missing cells remain null; "
-                    "conflicting values require an explicit reducer"
+                    "deterministic-ten-quantity-v3-mapping; no imputation; "
+                    "missing cells remain null; conflicting values require an explicit reducer; "
+                    "invoiced_quantity_t accepts nonnegative normal/blue-invoice tonnes only"
                 ),
             },
             "days": day_documents,
         }
         content = canonical_json(content_document)
         if len(content.encode("utf-8")) > _MAX_AGENT_CONTENT_BYTES:
-            raise SourceError("规范化后的月度 V2 来源快照超过 Agent 2 MiB 上限")
+            raise SourceError("规范化后的月度十量 V3 来源快照超过 Agent 2 MiB 上限")
         content_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
         draft_key = f"draft:{pipeline.enterprise_id}:{pipeline.report_type}:monthly:{month}"
         if len(draft_key) > 256:

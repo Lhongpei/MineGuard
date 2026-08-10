@@ -1,0 +1,121 @@
+{
+  "contract_version": "analysis-report-v3",
+  "message_type": "analysis_report",
+  "message_id": "73333333-3333-4333-8333-333333333334",
+  "correlation_id": "71111111-1111-4111-8111-111111111111",
+  "causation_id": "71111111-1111-4111-8111-111111111111",
+  "idempotency_key": "analysis-v3.73333333-3333-4333",
+  "revision": 1,
+  "predecessor": null,
+  "created_at": "2026-08-01T00:06:30Z",
+  "sender": {
+    "system_id": "mineguard-qinyuan",
+    "party_id": "regulator-qinyuan",
+    "role": "regulatory_platform"
+  },
+  "recipient": {
+    "system_id": "agent-mine-qy-001",
+    "party_id": "operator-qy-001",
+    "role": "enterprise_agent"
+  },
+  "mine_id": "MINE-QY-001",
+  "payload": {
+    "report_id": "73333333-3333-4333-8333-333333333331",
+    "submission_message_id": "71111111-1111-4111-8111-111111111111",
+    "submission_revision": 1,
+    "mine": {
+      "mine_id": "MINE-QY-001",
+      "mine_name": "示例一号煤矿",
+      "operator_id": "operator-qy-001",
+      "operator_name": "示例一号煤业有限公司"
+    },
+    "reporting_month": "2026-07",
+    "period_start": "2026-07-31",
+    "period_end": "2026-07-31",
+    "issued_at": "2026-08-01T00:06:30Z",
+    "algorithm": {
+      "engine_id": "mineguard-ten-quantity-engine",
+      "engine_version": "3.2.0",
+      "algorithm_run_id": "73333333-3333-4333-8333-333333333333",
+      "config_sha256": "8181818181818181818181818181818181818181818181818181818181818181",
+      "input_snapshot_sha256": "9a5467b816bd4d971ecab3dd4331f49aecc483ab35358b95f08456f8a1765dd3",
+      "own_history_snapshot_sha256": "8383838383838383838383838383838383838383838383838383838383838383",
+      "peer_snapshot_sha256": "8484848484848484848484848484848484848484848484848484848484848484",
+      "started_at": "2026-08-01T00:05:05Z",
+      "completed_at": "2026-08-01T00:06:20Z",
+      "modules": [
+        "data_quality",
+        "daily_shift_reconciliation",
+        "l1_reconciliation",
+        "minimal_conflict_set",
+        "robust_temporal_baseline",
+        "past_only_rolling_mad",
+        "past_only_ewma",
+        "past_only_cusum",
+        "past_only_page_hinkley",
+        "temporal_drift",
+        "change_point",
+        "operating_state_segmentation",
+        "evidence_calibration",
+        "anonymous_peer_baseline",
+        "production_extraction_reconciliation",
+        "production_sales_reconciliation",
+        "production_transport_reconciliation",
+        "production_wash_reconciliation",
+        "sales_transport_reconciliation",
+        "sales_invoice_reconciliation"
+      ]
+    },
+    "outcome": "data_insufficient",
+    "summary": "完整十量日不足",
+    "findings": [
+      {
+        "finding_id": "73333333-3333-4333-8333-333333333332",
+        "category": "data_quality",
+        "severity": "medium",
+        "title": "十量数据补充要求",
+        "summary": "完整十量日不足",
+        "affected_dates": ["2026-07-31"],
+        "affected_shifts": [],
+        "affected_metrics": [
+          "ventilation_m3_min",
+          "electricity_kwh",
+          "detonators_count",
+          "explosives_kg",
+          "mine_entry_persons",
+          "production_t",
+          "extraction_t",
+          "sales_t",
+          "transport_t",
+          "wash_feed_t",
+          "invoiced_quantity_t"
+        ],
+        "evidence": [
+          {
+            "evidence_id": "EV-73333333-001",
+            "method": "data_completeness",
+            "summary": "完整十量日不足",
+            "observed_value": null,
+            "expected_min": null,
+            "expected_max": null,
+            "score": null,
+            "evidence_sha256": "feed0cc13eb868f9d3014192f8cd2583b6fa6c01d550af3b4d2ed2917b575c39"
+          }
+        ],
+        "requires_response": true
+      }
+    ],
+    "response_required": true,
+    "response_due_at": "2026-08-04T16:00:00Z",
+    "delivery_cursor": "mine-qy-001.v3.cursor.00000001"
+  },
+  "signature_envelope": {
+    "algorithm": "hmac-sha256-v3",
+    "canonicalization": "rfc8785-jcs",
+    "key_id": "regulator-key-2026-02",
+    "signed_at": "2026-08-01T00:06:30Z",
+    "nonce": "VGVuUXVhbnRpdHlWZWN0b3IwMg",
+    "payload_sha256": "0a2580eb0ece19c1de0f9b2b9ba0cdc268a3800523c76d7d01eeb735b348b6f0",
+    "signature": "0c81e6689535ac7e7e18ec305943dd2e7c0e5eabb77fc644e0ae18a9a38fcdf3"
+  }
+}

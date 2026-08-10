@@ -22,6 +22,18 @@ def main() -> None:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE business_daily_readonly (
+            business_date TEXT NOT NULL,
+            scope_code TEXT NOT NULL,
+            sales_t REAL NOT NULL CHECK (sales_t >= 0),
+            outbound_transport_t REAL NOT NULL CHECK (outbound_transport_t >= 0),
+            wash_feed_t REAL NOT NULL CHECK (wash_feed_t >= 0),
+            blue_invoice_t REAL NOT NULL CHECK (blue_invoice_t >= 0)
+        )
+        """
+    )
     rows = []
     for index, day in enumerate(("2026-07-29", "2026-07-30", "2026-07-31")):
         daily_energy = 123000 + index * 2400
@@ -34,6 +46,21 @@ def main() -> None:
             )
         )
     connection.executemany("INSERT INTO energy_readonly VALUES (?,?,?,?)", rows)
+    business_rows = []
+    for index, day in enumerate(("2026-07-29", "2026-07-30", "2026-07-31")):
+        business_rows.append(
+            (
+                day,
+                "DAY",
+                2980 + index * 35,
+                2940 + index * 32,
+                1620 + index * 20,
+                2870 + index * 30,
+            )
+        )
+    connection.executemany(
+        "INSERT INTO business_daily_readonly VALUES (?,?,?,?,?,?)", business_rows
+    )
     connection.commit()
     connection.close()
     print(path)

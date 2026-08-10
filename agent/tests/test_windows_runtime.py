@@ -801,7 +801,7 @@ def test_windows_instance_operations_share_strict_path_and_identity_context() ->
     assert starter.count("Assert-EANoInstanceProcesses -Context $Context") >= 2
     assert '"--authoritative-env-file" "serve"' in starter
     assert "Assert-EAInstanceIsRunning -Context $Context" in health
-    assert 'primary_contract_version -ne "five-quantity-submission-v2"' in health
+    assert 'primary_contract_version -ne "ten-quantity-submission-v3"' in health
 
     backup = operations["Backup-EnterpriseAgent.ps1"]
     restore = operations["Restore-EnterpriseAgent.ps1"]

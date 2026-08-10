@@ -41,7 +41,7 @@ def _wait_for_port(process: subprocess.Popen[bytes], port: int) -> None:
     raise AssertionError("Agent did not start")
 
 
-def test_connector_writes_and_revises_one_real_v2_monthly_draft(
+def test_connector_writes_and_revises_one_real_v3_monthly_draft(
     tmp_path: Path,
     source_db: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -119,9 +119,15 @@ def test_connector_writes_and_revises_one_real_v2_monthly_draft(
         assert len(drafts) == 1
         draft_id = drafts[0]["draft_id"]
         payload = json.loads(drafts[0]["payload_json"])
+        assert drafts[0]["contract_version"] == "ten-quantity-submission-v3"
         assert payload["reporting_month"] == "2026-07"
         day_29 = next(item for item in payload["days"] if item["date"] == "2026-07-29")
         assert day_29["reported_quantity"]["daily_total"]["production_t"]["value"] == 350.0
+        assert day_29["reported_quantity"]["daily_total"]["extraction_t"]["value"] == 355.0
+        assert (
+            day_29["reported_quantity"]["daily_total"]["invoiced_quantity_t"]["value"]
+            == 285.0
+        )
         assert connection.execute("SELECT COUNT(*) FROM connector_ingestions").fetchone()[0] == 1
         connection.close()
 

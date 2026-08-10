@@ -9,6 +9,7 @@ import pytest
 
 from enterprise_agent.five_quantity_exchange import MineIdentity, sign_message
 from enterprise_agent.five_quantity_runtime import (
+    CURRENT_SUBMISSION_CONTRACT,
     FiveQuantityRuntime,
     validate_five_quantity_payload,
 )
@@ -68,6 +69,7 @@ def test_mine_entry_persons_requires_integer_sum_aggregation(tmp_path: Path) -> 
             draft["payload"],
             identity=identity(),
             confirmed=False,
+            contract_version=CURRENT_SUBMISSION_CONTRACT,
         )
 
     measurement["aggregation"] = "sum"
@@ -77,6 +79,7 @@ def test_mine_entry_persons_requires_integer_sum_aggregation(tmp_path: Path) -> 
             draft["payload"],
             identity=identity(),
             confirmed=False,
+            contract_version=CURRENT_SUBMISSION_CONTRACT,
         )
 
 
@@ -123,7 +126,14 @@ class FakeGovernment:
                 "mine_id": self.identity.mine_id,
                 "payload": payload,
                 "signature_envelope": {
-                    "algorithm": "hmac-sha256-v2",
+                    "algorithm": (
+                        "hmac-sha256-v3"
+                        if contract in {
+                            "ten-quantity-submission-v3",
+                            "analysis-report-v3",
+                        }
+                        else "hmac-sha256-v2"
+                    ),
                     "canonicalization": "rfc8785-jcs",
                     "key_id": self.identity.regulator_key_id,
                     "signed_at": timestamp,
@@ -172,7 +182,7 @@ class FakeGovernment:
             "period_end": submission_payload["period_end"],
             "issued_at": utc_text(),
             "algorithm": {
-                "engine_id": "mineguard-five-quantity-engine",
+                "engine_id": "mineguard-ten-quantity-engine",
                 "engine_version": "2.0.0",
                 "algorithm_run_id": str(uuid4()),
                 "config_sha256": "1" * 64,
@@ -229,7 +239,7 @@ class FakeGovernment:
             "delivery_cursor": "opaque.mine.cursor:00000001",
         }
         self.report = self._message(
-            "analysis-report-v2",
+            "analysis-report-v3",
             "analysis_report",
             payload,
             correlation_id=self.submission["correlation_id"],
@@ -237,12 +247,26 @@ class FakeGovernment:
         )
         return self.report
 
-    def acknowledge(self, report_id: str, message: dict[str, Any]) -> None:
+    def acknowledge(
+        self,
+        report_id: str,
+        message: dict[str, Any],
+        *,
+        legacy: bool = False,
+    ) -> None:
+        assert legacy is False
         assert self.report is not None
         assert report_id == self.report["payload"]["report_id"]
         self.acks.append(message)
 
-    def respond(self, report_id: str, message: dict[str, Any]) -> dict[str, Any]:
+    def respond(
+        self,
+        report_id: str,
+        message: dict[str, Any],
+        *,
+        legacy: bool = False,
+    ) -> dict[str, Any]:
+        assert legacy is False
         assert self.report is not None
         assert report_id == self.report["payload"]["report_id"]
         self.responses.append(message)

@@ -1,4 +1,4 @@
-"""Independent V2 exchange signing and HTTP transport.
+"""Independent V2/V3 exchange signing and HTTP transport.
 
 This module deliberately duplicates the neutral wire rules.  It never imports
 ``contracts`` or regulatory-platform code, so either product can be deployed
@@ -25,14 +25,87 @@ from .errors import PlatformError
 from .util import jcs_json, parse_aware_datetime, sha256_jcs, utc_now, utc_text
 
 MESSAGE_SIGNING_CONTEXT = "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2"
+MESSAGE_SIGNING_CONTEXT_V3 = "MINEGUARD-TEN-QUANTITY-EXCHANGE-HMAC-SHA256-V3"
 HTTP_SIGNING_CONTEXT = "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V2"
+HTTP_SIGNING_CONTEXT_V3 = "MINEGUARD-TEN-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V3"
 HTTP_SIGNATURE_VERSION = "hmac-sha256-v2"
+HTTP_SIGNATURE_VERSION_V3 = "hmac-sha256-v3"
 GENERIC_GET_CONTRACT = "five-quantity-exchange-v2"
+GENERIC_GET_CONTRACT_V3 = "ten-quantity-exchange-v3"
 EMPTY_BODY_SHA256 = hashlib.sha256(b"").hexdigest()
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_CURSOR = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+_V3_MESSAGE_CONTRACTS = frozenset(
+    {"ten-quantity-submission-v3", "analysis-report-v3"}
+)
+_V2_MESSAGE_CONTRACTS = frozenset(
+    {
+        "five-quantity-submission-v2",
+        "analysis-report-v2",
+        "intake-receipt-v2",
+        "risk-delivery-ack-v2",
+        "enterprise-risk-response-v2",
+        "response-receipt-v2",
+    }
+)
+_V3_HTTP_CONTRACTS = frozenset(
+    {"ten-quantity-submission-v3", GENERIC_GET_CONTRACT_V3}
+)
+_V2_HTTP_CONTRACTS = frozenset(
+    {
+        "five-quantity-submission-v2",
+        "risk-delivery-ack-v2",
+        "enterprise-risk-response-v2",
+        GENERIC_GET_CONTRACT,
+    }
+)
+
+
+def _message_signing_context(contract_version: str) -> str:
+    if contract_version in _V3_MESSAGE_CONTRACTS:
+        return MESSAGE_SIGNING_CONTEXT_V3
+    if contract_version in _V2_MESSAGE_CONTRACTS:
+        return MESSAGE_SIGNING_CONTEXT
+    raise ValueError("不支持的应用消息签名契约")
+
+
+def _is_v3_target(request_target: str) -> bool:
+    path = request_target.split("?", 1)[0]
+    return path == "/v3" or path.startswith("/v3/")
+
+
+def _http_signing_context(contract_version: str, request_target: str) -> str:
+    if _is_v3_target(request_target) and contract_version in (
+        _V3_HTTP_CONTRACTS
+        | {"risk-delivery-ack-v2", "enterprise-risk-response-v2"}
+    ):
+        return HTTP_SIGNING_CONTEXT_V3
+    if not _is_v3_target(request_target) and contract_version in _V2_HTTP_CONTRACTS:
+        return HTTP_SIGNING_CONTEXT
+    raise ValueError("不支持的 HTTP 运输签名契约")
+
+
+def _message_signature_version(contract_version: str) -> str:
+    if contract_version in _V3_MESSAGE_CONTRACTS:
+        return HTTP_SIGNATURE_VERSION_V3
+    if contract_version in _V2_MESSAGE_CONTRACTS:
+        return HTTP_SIGNATURE_VERSION
+    raise ValueError("不支持的应用消息签名契约")
+
+
+def _http_signature_version(contract_version: str, request_target: str) -> str:
+    if _is_v3_target(request_target) and contract_version in (
+        _V3_HTTP_CONTRACTS
+        | {"risk-delivery-ack-v2", "enterprise-risk-response-v2"}
+    ):
+        return HTTP_SIGNATURE_VERSION_V3
+    if not _is_v3_target(request_target) and contract_version in _V2_HTTP_CONTRACTS:
+        return HTTP_SIGNATURE_VERSION
+    raise ValueError("不支持的 HTTP 运输签名契约")
 
 
 def _identifier(value: Any, label: str) -> str:
@@ -134,8 +207,11 @@ class FiveQuantityPlatformConfig:
     sender_id: str
     transport_hmac_secret: str
     timeout_seconds: float = 20.0
-    submission_path: str = "/v2/five-quantity-submissions"
-    next_report_path: str = "/v2/analysis-reports/next"
+    submission_path: str = "/v3/ten-quantity-submissions"
+    next_report_path: str = "/v3/analysis-reports/next"
+    legacy_submission_path: str = "/v2/five-quantity-submissions"
+    legacy_analysis_path: str = "/v2/analysis-reports"
+    analysis_path: str = "/v3/analysis-reports"
     ca_bundle_path: str | None = None
 
     def __post_init__(self) -> None:
@@ -164,7 +240,13 @@ class FiveQuantityPlatformConfig:
         _secret(self.transport_hmac_secret, "transport_hmac_secret")
         if not 1 <= self.timeout_seconds <= 120:
             raise ValueError("timeout_seconds 必须在 1-120 秒")
-        for name in ("submission_path", "next_report_path"):
+        for name in (
+            "submission_path",
+            "next_report_path",
+            "legacy_submission_path",
+            "legacy_analysis_path",
+            "analysis_path",
+        ):
             path = getattr(self, name)
             parsed_path = urlsplit(path)
             if (
@@ -197,7 +279,7 @@ def _message_material(message: dict[str, Any], payload_hash: str) -> bytes:
     signature = message["signature_envelope"]
     predecessor = message.get("predecessor") or {}
     lines = [
-        MESSAGE_SIGNING_CONTEXT,
+        _message_signing_context(str(message["contract_version"])),
         str(message["contract_version"]),
         str(message["message_type"]),
         str(message["message_id"]),
@@ -226,10 +308,14 @@ def _message_material(message: dict[str, Any], payload_hash: str) -> bytes:
 
 
 def sign_message(message: dict[str, Any], *, secret: str) -> dict[str, Any]:
-    """Fill the payload digest and HMAC of a newly built V2 message in place."""
+    """Fill the payload digest and HMAC in the contract's exact signing domain."""
 
-    payload_hash = sha256_jcs(message["payload"])
+    contract_version = str(message.get("contract_version", ""))
+    expected_algorithm = _message_signature_version(contract_version)
     envelope = message["signature_envelope"]
+    if envelope.get("algorithm") != expected_algorithm:
+        raise ValueError("应用消息签名算法与 contract_version 不匹配")
+    payload_hash = sha256_jcs(message["payload"])
     envelope["payload_sha256"] = payload_hash
     envelope["signature"] = hmac.new(
         _secret(secret, "message secret"),
@@ -301,8 +387,12 @@ def verify_message(
         "signature",
     }:
         raise PlatformError("监管平台消息签名信封非法")
+    try:
+        expected_signature_version = _message_signature_version(expected_contract)
+    except ValueError as error:
+        raise PlatformError("监管平台消息契约没有已登记签名域") from error
     if (
-        signature.get("algorithm") != HTTP_SIGNATURE_VERSION
+        signature.get("algorithm") != expected_signature_version
         or signature.get("canonicalization") != "rfc8785-jcs"
     ):
         raise PlatformError("监管平台消息签名算法或密钥编号不匹配")
@@ -361,7 +451,7 @@ def http_transport_headers(
     signed_at = timestamp or utc_text()
     token = nonce or secrets.token_urlsafe(18)
     lines = [
-        HTTP_SIGNING_CONTEXT,
+        _http_signing_context(contract_version, target),
         method.upper(),
         target,
         _identifier(sender_id, "sender_id"),
@@ -380,7 +470,9 @@ def http_transport_headers(
         "X-Exchange-Timestamp": signed_at,
         "X-Exchange-Nonce": token,
         "X-Exchange-Contract-Version": contract_version,
-        "X-Exchange-Signature-Version": HTTP_SIGNATURE_VERSION,
+        "X-Exchange-Signature-Version": _http_signature_version(
+            contract_version, target
+        ),
         "X-Exchange-Content-SHA256": body_hash,
         "X-Exchange-Signature": signature,
     }
@@ -470,30 +562,57 @@ class FiveQuantityPlatformClient:
         return parsed
 
     def submit(self, message: dict[str, Any]) -> dict[str, Any]:
+        contract_version = str(message.get("contract_version", ""))
+        if contract_version == "ten-quantity-submission-v3":
+            path = self.config.submission_path
+        elif contract_version == "five-quantity-submission-v2":
+            # Only already-queued, immutable V2 messages use this compatibility
+            # route. New Agent drafts are always V3.
+            path = self.config.legacy_submission_path
+        else:
+            raise PlatformError("待发送报送消息契约不受支持")
         result = self._request(
             method="POST",
-            path=self.config.submission_path,
-            contract_version="five-quantity-submission-v2",
+            path=path,
+            contract_version=contract_version,
             message=message,
         )
         if result is None:
             raise PlatformError("监管平台提交接口未返回接收回执")
         return result
 
-    def submission_receipt(self, message_id: str) -> dict[str, Any]:
+    def submission_receipt(
+        self,
+        message_id: str,
+        *,
+        submission_contract: str = "ten-quantity-submission-v3",
+    ) -> dict[str, Any]:
         """Read a previously-issued intake receipt without changing state."""
 
         message_id = _identifier(message_id, "message_id")
+        if submission_contract == "ten-quantity-submission-v3":
+            base_path = self.config.submission_path
+            transport_contract = GENERIC_GET_CONTRACT_V3
+        elif submission_contract == "five-quantity-submission-v2":
+            base_path = self.config.legacy_submission_path
+            transport_contract = GENERIC_GET_CONTRACT
+        else:
+            raise ValueError("submission_contract 不受支持")
         result = self._request(
             method="GET",
-            path=f"/v2/five-quantity-submissions/{message_id}/receipt",
-            contract_version=GENERIC_GET_CONTRACT,
+            path=f"{base_path.rstrip('/')}/{message_id}/receipt",
+            contract_version=transport_contract,
         )
         if result is None:
             raise PlatformError("监管平台未找到报送接收回执")
         return result
 
-    def pull_next(self, *, after_cursor: str | None = None) -> dict[str, Any] | None:
+    def pull_next(
+        self,
+        *,
+        after_cursor: str | None = None,
+        legacy: bool = False,
+    ) -> dict[str, Any] | None:
         query = None
         if after_cursor is not None:
             if _SAFE_CURSOR.fullmatch(after_cursor) is None:
@@ -501,55 +620,100 @@ class FiveQuantityPlatformClient:
             query = {"after_cursor": after_cursor}
         return self._request(
             method="GET",
-            path=self.config.next_report_path,
-            contract_version=GENERIC_GET_CONTRACT,
+            path=(
+                f"{self.config.legacy_analysis_path.rstrip('/')}/next"
+                if legacy
+                else self.config.next_report_path
+            ),
+            contract_version=(
+                GENERIC_GET_CONTRACT if legacy else GENERIC_GET_CONTRACT_V3
+            ),
             query=query,
         )
 
-    def analysis_report(self, report_id: str) -> dict[str, Any]:
+    def analysis_report(
+        self, report_id: str, *, legacy: bool = False
+    ) -> dict[str, Any]:
         """Read one analysis report by its logical report identifier."""
 
         report_id = _identifier(report_id, "report_id")
         result = self._request(
             method="GET",
-            path=f"/v2/analysis-reports/{report_id}",
-            contract_version=GENERIC_GET_CONTRACT,
+            path=(
+                f"{self.config.legacy_analysis_path.rstrip('/')}/{report_id}"
+                if legacy
+                else f"{self.config.analysis_path.rstrip('/')}/{report_id}"
+            ),
+            contract_version=(
+                GENERIC_GET_CONTRACT if legacy else GENERIC_GET_CONTRACT_V3
+            ),
         )
         if result is None:
             raise PlatformError("监管平台未找到算法报告")
         return result
 
-    def acknowledge(self, report_id: str, message: dict[str, Any]) -> None:
+    def acknowledge(
+        self,
+        report_id: str,
+        message: dict[str, Any],
+        *,
+        legacy: bool = False,
+    ) -> None:
         if not isinstance(report_id, str) or _IDENTIFIER.fullmatch(report_id) is None:
             raise ValueError("report_id 格式非法")
         result = self._request(
             method="POST",
-            path=f"/v2/analysis-reports/{report_id}/delivery-ack",
-            contract_version="risk-delivery-ack-v2",
+            path=(
+                f"{self.config.legacy_analysis_path.rstrip('/')}/{report_id}/delivery-ack"
+                if legacy
+                else f"{self.config.analysis_path.rstrip('/')}/{report_id}/delivery-ack"
+            ),
+            # POST transport binding follows the signed body contract.  The
+            # V3 URL namespace does not turn a V2 lifecycle acknowledgement
+            # into a different application message.
+            contract_version=str(message.get("contract_version", "")),
             message=message,
         )
         if result is not None:
             raise PlatformError("风险投递确认接口应返回 HTTP 204")
 
-    def respond(self, report_id: str, message: dict[str, Any]) -> dict[str, Any]:
+    def respond(
+        self,
+        report_id: str,
+        message: dict[str, Any],
+        *,
+        legacy: bool = False,
+    ) -> dict[str, Any]:
         result = self._request(
             method="POST",
-            path=f"/v2/analysis-reports/{report_id}/responses",
-            contract_version="enterprise-risk-response-v2",
+            path=(
+                f"{self.config.legacy_analysis_path.rstrip('/')}/{report_id}/responses"
+                if legacy
+                else f"{self.config.analysis_path.rstrip('/')}/{report_id}/responses"
+            ),
+            contract_version=str(message.get("contract_version", "")),
             message=message,
         )
         if result is None:
             raise PlatformError("监管平台回复接口未返回回执")
         return result
 
-    def response_receipt(self, response_id: str) -> dict[str, Any]:
+    def response_receipt(
+        self, response_id: str, *, legacy: bool = False
+    ) -> dict[str, Any]:
         """Read a previously-issued enterprise-response receipt."""
 
         response_id = _identifier(response_id, "response_id")
         result = self._request(
             method="GET",
-            path=f"/v2/risk-responses/{response_id}/receipt",
-            contract_version=GENERIC_GET_CONTRACT,
+            path=(
+                f"/v2/risk-responses/{response_id}/receipt"
+                if legacy
+                else f"/v3/risk-responses/{response_id}/receipt"
+            ),
+            contract_version=(
+                GENERIC_GET_CONTRACT if legacy else GENERIC_GET_CONTRACT_V3
+            ),
         )
         if result is None:
             raise PlatformError("监管平台未找到风险回复回执")

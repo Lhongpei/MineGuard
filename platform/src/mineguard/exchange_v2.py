@@ -1,4 +1,4 @@
-"""Platform-owned implementation of the neutral five-quantity V2 wire contract.
+"""Platform-owned implementation of the neutral V2/V3 exchange contracts.
 
 The enterprise product implements the same files independently.  This module
 never imports executable code from ``agent/`` or ``contracts/``; conformance is
@@ -20,6 +20,7 @@ import re
 import secrets
 import stat
 from typing import Annotated, Any, Iterable, Literal, Mapping
+from urllib.parse import urlsplit
 from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -40,6 +41,7 @@ from .regulatory_v2 import (
     ComparisonContext,
     FiveQuantityDay,
     FiveQuantitySubmission,
+    LEGACY_METRICS,
     METRICS,
     ReportedQuality,
     ReportedQuantity,
@@ -56,9 +58,12 @@ from .regulatory_v2_store import (
 
 
 EXCHANGE_SIGNATURE_VERSION = "hmac-sha256-v2"
+EXCHANGE_SIGNATURE_VERSION_V3 = "hmac-sha256-v3"
 EXCHANGE_CANONICALIZATION = "rfc8785-jcs"
 EXCHANGE_SIGNATURE_CONTEXT = "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2"
+EXCHANGE_SIGNATURE_CONTEXT_V3 = "MINEGUARD-TEN-QUANTITY-EXCHANGE-HMAC-SHA256-V3"
 EXCHANGE_TRANSPORT_CONTEXT = "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V2"
+EXCHANGE_TRANSPORT_CONTEXT_V3 = "MINEGUARD-TEN-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V3"
 EXCHANGE_AUTH_WINDOW_SECONDS = 300
 EXCHANGE_NONCE_RETENTION_SECONDS = 600
 EXCHANGE_CLIENTS_FILE_MAX_BYTES = 4 * 1024 * 1024
@@ -157,12 +162,64 @@ _PRODUCTION_PUBLIC_IDENTITY_TOKENS = frozenset(
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{22,86}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MONTH = re.compile(r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")
-_CONTRACT = re.compile(r"^[a-z][a-z0-9-]*-v2$")
+_CONTRACT = re.compile(r"^[a-z][a-z0-9-]*-v(?:2|3)$")
 _TIMEZONE = re.compile(
     r"^(?:UTC|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]|"
     r"[A-Za-z][A-Za-z0-9._+-]*(?:/[A-Za-z0-9._+-]+)+)$"
 )
 _MISSING_FLAGS = frozenset({"missing", "unavailable", "not_applicable"})
+
+
+def _is_v3_contract(contract_version: str) -> bool:
+    return contract_version.endswith("-v3")
+
+
+def _signature_version_for_contract(contract_version: str) -> str:
+    return (
+        EXCHANGE_SIGNATURE_VERSION_V3
+        if _is_v3_contract(contract_version)
+        else EXCHANGE_SIGNATURE_VERSION
+    )
+
+
+def _message_signature_context(contract_version: str) -> str:
+    return (
+        EXCHANGE_SIGNATURE_CONTEXT_V3
+        if _is_v3_contract(contract_version)
+        else EXCHANGE_SIGNATURE_CONTEXT
+    )
+
+
+def _is_v3_request_target(request_target: str) -> bool:
+    # BaseHTTPRequestHandler can receive either origin-form or absolute-form
+    # request targets. Routing already uses the parsed path, so transport-domain
+    # selection must do the same; otherwise an absolute V3 URL could be signed
+    # in the V2 domain while still reaching a V3 handler.
+    path = urlsplit(request_target).path
+    return path == "/v3" or path.startswith("/v3/")
+
+
+def _transport_signature_context(
+    contract_version: str,
+    request_target: str,
+) -> str:
+    return (
+        EXCHANGE_TRANSPORT_CONTEXT_V3
+        if _is_v3_request_target(request_target)
+        else EXCHANGE_TRANSPORT_CONTEXT
+    )
+
+
+def _transport_signature_version(
+    contract_version: str,
+    request_target: str,
+) -> str:
+    return (
+        EXCHANGE_SIGNATURE_VERSION_V3
+        if _is_v3_request_target(request_target)
+        else EXCHANGE_SIGNATURE_VERSION
+    )
+
 
 MetricCode = Literal[
     "ventilation_m3_min",
@@ -171,6 +228,11 @@ MetricCode = Literal[
     "explosives_kg",
     "mine_entry_persons",
     "production_t",
+    "extraction_t",
+    "sales_t",
+    "transport_t",
+    "wash_feed_t",
+    "invoiced_quantity_t",
 ]
 QualityFlag = Literal[
     "reported",
@@ -305,7 +367,7 @@ class ExchangePredecessor(WireContractModel):
 
 
 class ExchangeSignatureEnvelope(WireContractModel):
-    algorithm: Literal["hmac-sha256-v2"] = "hmac-sha256-v2"
+    algorithm: Literal["hmac-sha256-v2", "hmac-sha256-v3"] = "hmac-sha256-v2"
     canonicalization: Literal["rfc8785-jcs"] = "rfc8785-jcs"
     key_id: Identifier
     signed_at: WireDateTime
@@ -320,7 +382,7 @@ class ExchangeSignatureEnvelope(WireContractModel):
 class ExchangeMessageBase(WireContractModel):
     contract_version: Annotated[
         str,
-        Field(pattern=r"^[a-z][a-z0-9-]*-v2$"),
+        Field(pattern=r"^[a-z][a-z0-9-]*-v(?:2|3)$"),
     ]
     message_type: str
     message_id: CanonicalUUID
@@ -349,6 +411,9 @@ class ExchangeMessageBase(WireContractModel):
             raise ValueError("sender and recipient roles must differ")
         if self.signature_envelope.signed_at < self.created_at:
             raise ValueError("signature cannot predate message creation")
+        expected_algorithm = _signature_version_for_contract(self.contract_version)
+        if self.signature_envelope.algorithm != expected_algorithm:
+            raise ValueError("signature algorithm does not match contract version")
         return self
 
 
@@ -433,6 +498,88 @@ class WireMeasurementSet(WireContractModel):
         return self
 
 
+_TEN_MEASUREMENT_RULES: dict[str, tuple[str, frozenset[str]]] = {
+    "ventilation_m3_min": (
+        "m3/min",
+        frozenset({"time_weighted_average", "snapshot"}),
+    ),
+    "electricity_kwh": ("kWh", frozenset({"sum"})),
+    "detonators_count": ("count", frozenset({"sum"})),
+    "explosives_kg": ("kg", frozenset({"sum"})),
+    "mine_entry_persons": ("person", frozenset({"sum"})),
+    "production_t": ("t", frozenset({"sum"})),
+    "extraction_t": ("t", frozenset({"sum"})),
+    "sales_t": ("t", frozenset({"sum"})),
+    "transport_t": ("t", frozenset({"sum"})),
+    "wash_feed_t": ("t", frozenset({"sum"})),
+    "invoiced_quantity_t": ("t", frozenset({"sum"})),
+}
+_TEN_DAILY_METRICS = tuple(_TEN_MEASUREMENT_RULES)
+_TEN_SHIFT_REQUIRED_METRICS = _TEN_DAILY_METRICS[:7]
+_TEN_SHIFT_OPTIONAL_METRICS = _TEN_DAILY_METRICS[7:]
+
+
+def _validate_ten_measurements(
+    value: Any,
+    *,
+    metric_names: Iterable[str],
+) -> None:
+    for code in metric_names:
+        measurement = getattr(value, code, None)
+        if measurement is None:
+            continue
+        unit, aggregations = _TEN_MEASUREMENT_RULES[code]
+        if measurement.metric_code != code:
+            raise ValueError(f"{code} metric_code mismatch")
+        if measurement.unit != unit or measurement.aggregation not in aggregations:
+            raise ValueError(f"{code} unit or aggregation mismatch")
+
+
+class WireTenMeasurementSetDaily(WireContractModel):
+    """All eleven atoms implementing the ten V3 business quantities."""
+
+    ventilation_m3_min: WireMeasurement
+    electricity_kwh: WireMeasurement
+    detonators_count: WireMeasurement
+    explosives_kg: WireMeasurement
+    mine_entry_persons: WireMeasurement
+    production_t: WireMeasurement
+    extraction_t: WireMeasurement
+    sales_t: WireMeasurement
+    transport_t: WireMeasurement
+    wash_feed_t: WireMeasurement
+    invoiced_quantity_t: WireMeasurement
+
+    @model_validator(mode="after")
+    def validate_codes_and_units(self) -> "WireTenMeasurementSetDaily":
+        _validate_ten_measurements(self, metric_names=_TEN_DAILY_METRICS)
+        return self
+
+
+class WireTenMeasurementSetShift(WireContractModel):
+    """Operational atoms are required; commercial atoms are cadence-optional."""
+
+    ventilation_m3_min: WireMeasurement
+    electricity_kwh: WireMeasurement
+    detonators_count: WireMeasurement
+    explosives_kg: WireMeasurement
+    mine_entry_persons: WireMeasurement
+    production_t: WireMeasurement
+    extraction_t: WireMeasurement
+    sales_t: WireMeasurement | None = None
+    transport_t: WireMeasurement | None = None
+    wash_feed_t: WireMeasurement | None = None
+    invoiced_quantity_t: WireMeasurement | None = None
+
+    @model_validator(mode="after")
+    def validate_codes_and_units(self) -> "WireTenMeasurementSetShift":
+        for code in _TEN_SHIFT_OPTIONAL_METRICS:
+            if code in self.model_fields_set and getattr(self, code) is None:
+                raise ValueError(f"{code} cannot be explicit null")
+        _validate_ten_measurements(self, metric_names=_TEN_DAILY_METRICS)
+        return self
+
+
 class WireShift(WireContractModel):
     shift_code: Annotated[
         str,
@@ -470,7 +617,44 @@ class WireDay(WireContractModel):
     reported_quantity: WireReportedQuantity
 
 
-def _validate_three_shift_day(day: WireDay, timezone_name: str) -> None:
+class WireTenShift(WireContractModel):
+    shift_code: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=64,
+            pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        ),
+    ]
+    start_at: WireDateTime
+    end_at: WireDateTime
+    measurements: WireTenMeasurementSetShift
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "WireTenShift":
+        if self.end_at <= self.start_at:
+            raise ValueError("shift end_at must be later than start_at")
+        return self
+
+
+class WireTenShifts(WireContractModel):
+    zero_shift: WireTenShift
+    eight_shift: WireTenShift
+    four_shift: WireTenShift
+
+
+class WireTenReportedQuantity(WireContractModel):
+    daily_total: WireTenMeasurementSetDaily
+    shifts: WireTenShifts
+
+
+class WireTenDay(WireContractModel):
+    date: WireDate
+    operating_state: OperatingState
+    reported_quantity: WireTenReportedQuantity
+
+
+def _validate_three_shift_day(day: WireDay | WireTenDay, timezone_name: str) -> None:
     shifts = (
         day.reported_quantity.shifts.zero_shift,
         day.reported_quantity.shifts.eight_shift,
@@ -652,6 +836,74 @@ class FiveQuantitySubmissionPayload(WireContractModel):
         return self
 
 
+class TenQuantitySubmissionPayload(WireContractModel):
+    """V3 submission payload for ten business quantities / eleven atoms."""
+
+    mine: WireMine
+    reporting_month: Annotated[str, Field(pattern=r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")]
+    timezone: TimezoneText
+    period_start: WireDate
+    period_end: WireDate
+    closed_at: WireDateTime
+    comparison_context: WireComparisonContext
+    days: Annotated[list[WireTenDay], Field(min_length=1, max_length=366)]
+    sources: Annotated[list[WireSource], Field(min_length=1, max_length=256)]
+    agent_processing: WireAgentProcessing
+    human_confirmation: WireHumanConfirmation
+
+    @model_validator(mode="after")
+    def validate_reporting_window(self) -> "TenQuantitySubmissionPayload":
+        if self.period_end < self.period_start:
+            raise ValueError("period_end cannot predate period_start")
+        if (
+            self.period_start.strftime("%Y-%m") != self.reporting_month
+            or self.period_end.strftime("%Y-%m") != self.reporting_month
+        ):
+            raise ValueError("period window must stay inside reporting_month")
+        dates = [item.date for item in self.days]
+        if dates != sorted(dates) or len(dates) != len(set(dates)):
+            raise ValueError("days must be unique and chronological")
+        if any(
+            item < self.period_start
+            or item > self.period_end
+            or item.strftime("%Y-%m") != self.reporting_month
+            for item in dates
+        ):
+            raise ValueError(
+                "daily date is outside the declared reporting month/window"
+            )
+        source_ids = [item.source_id for item in self.sources]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("source_id values must be unique")
+        source_set = set(source_ids)
+        for day in self.days:
+            _validate_three_shift_day(day, self.timezone)
+            measurement_sets = [day.reported_quantity.daily_total]
+            measurement_sets.extend(
+                (
+                    day.reported_quantity.shifts.zero_shift.measurements,
+                    day.reported_quantity.shifts.eight_shift.measurements,
+                    day.reported_quantity.shifts.four_shift.measurements,
+                )
+            )
+            for measurements in measurement_sets:
+                for code in _TEN_DAILY_METRICS:
+                    measurement = getattr(measurements, code, None)
+                    if (
+                        measurement is not None
+                        and not set(measurement.source_refs) <= source_set
+                    ):
+                        raise ValueError("measurement references an unknown source")
+        if self.human_confirmation.confirmed_at < self.closed_at:
+            raise ValueError("human confirmation cannot predate report closing")
+        if any(
+            source.captured_at > self.human_confirmation.confirmed_at
+            for source in self.sources
+        ):
+            raise ValueError("human confirmation cannot predate source capture")
+        return self
+
+
 class FiveQuantitySubmissionMessage(ExchangeMessageBase):
     contract_version: Literal["five-quantity-submission-v2"]
     message_type: Literal["five_quantity_submission"]
@@ -685,7 +937,7 @@ class FiveQuantitySubmissionMessage(ExchangeMessageBase):
                 end_at=shift.end_at,
                 aggregations={
                     metric: getattr(shift.measurements, metric).aggregation
-                    for metric in METRICS
+                    for metric in LEGACY_METRICS
                 },
             )
 
@@ -745,6 +997,163 @@ class FiveQuantitySubmissionMessage(ExchangeMessageBase):
                     explosives_kg=quantity(day, "explosives_kg"),
                     mine_entry_persons=quantity(day, "mine_entry_persons"),
                     production_t=quantity(day, "production_t"),
+                    declared_operating_state=day.operating_state,
+                    quality={metric: quality(day, metric) for metric in LEGACY_METRICS},
+                    shift_metadata=ShiftMetadata(
+                        zero_shift=shift_metadata(
+                            day.reported_quantity.shifts.zero_shift
+                        ),
+                        eight_shift=shift_metadata(
+                            day.reported_quantity.shifts.eight_shift
+                        ),
+                        four_shift=shift_metadata(
+                            day.reported_quantity.shifts.four_shift
+                        ),
+                    ),
+                )
+                for day in self.payload.days
+            ],
+            provenance=[
+                SubmissionProvenance(
+                    acquisition_mode=AcquisitionMode(source.acquisition_mode),
+                    source_name=source.source_system,
+                    evidence_sha256=source.evidence_sha256,
+                    source_record_id=source.source_record_id,
+                )
+                for source in self.payload.sources
+            ],
+        )
+
+
+class TenQuantitySubmissionMessage(ExchangeMessageBase):
+    contract_version: Literal["ten-quantity-submission-v3"]
+    message_type: Literal["ten_quantity_submission"]
+    payload: TenQuantitySubmissionPayload
+
+    @model_validator(mode="after")
+    def validate_submission_binding(self) -> "TenQuantitySubmissionMessage":
+        if (
+            self.sender.role != "enterprise_agent"
+            or self.recipient.role != "regulatory_platform"
+        ):
+            raise ValueError("submission direction is invalid")
+        if self.mine_id != self.payload.mine.mine_id:
+            raise ValueError("envelope and payload mine_id differ")
+        if self.sender.party_id != self.payload.mine.operator_id:
+            raise ValueError("sender party must be the mine operator")
+        if self.revision == 1:
+            if self.correlation_id != self.message_id or self.causation_id is not None:
+                raise ValueError("initial submission has invalid correlation/causation")
+        elif self.causation_id is None:
+            raise ValueError("corrected submission requires causation_id")
+        if self.created_at < self.payload.human_confirmation.confirmed_at:
+            raise ValueError("message cannot predate human confirmation")
+        return self
+
+    def to_regulatory_submission(self) -> FiveQuantitySubmission:
+        def shift_metadata(shift: WireTenShift) -> ShiftWindowMetadata:
+            aggregations: dict[
+                str,
+                Literal["time_weighted_average", "sum", "snapshot"],
+            ] = {}
+            for metric in METRICS:
+                measurement = getattr(shift.measurements, metric, None)
+                if measurement is not None:
+                    aggregations[metric] = measurement.aggregation
+            return ShiftWindowMetadata(
+                shift_code=shift.shift_code,
+                start_at=shift.start_at,
+                end_at=shift.end_at,
+                aggregations=aggregations,
+            )
+
+        def quantity(day: WireTenDay, metric: str) -> ReportedQuantity:
+            daily_measurement = getattr(day.reported_quantity.daily_total, metric)
+            shifts = day.reported_quantity.shifts
+            shift_measurements = (
+                getattr(shifts.zero_shift.measurements, metric, None),
+                getattr(shifts.eight_shift.measurements, metric, None),
+                getattr(shifts.four_shift.measurements, metric, None),
+            )
+            shift_values = None
+            if any(item is not None for item in shift_measurements):
+                shift_values = ShiftValues(
+                    zero_shift=(
+                        shift_measurements[0].value
+                        if shift_measurements[0] is not None
+                        else None
+                    ),
+                    eight_shift=(
+                        shift_measurements[1].value
+                        if shift_measurements[1] is not None
+                        else None
+                    ),
+                    four_shift=(
+                        shift_measurements[2].value
+                        if shift_measurements[2] is not None
+                        else None
+                    ),
+                )
+            return ReportedQuantity(
+                daily_total=daily_measurement.value,
+                daily_aggregation=daily_measurement.aggregation,
+                shifts=shift_values,
+            )
+
+        def quality(day: WireTenDay, metric: str) -> ReportedQuality:
+            shifts = day.reported_quantity.shifts
+
+            def shift_flags(shift: WireTenShift) -> tuple[str, ...]:
+                measurement = getattr(shift.measurements, metric, None)
+                return (
+                    tuple(measurement.quality_flags)
+                    if measurement is not None
+                    # Omission means the enterprise did not declare this
+                    # optional shift cadence.  Only an explicit null
+                    # measurement carrying not_applicable may assert that
+                    # business meaning.
+                    else ()
+                )
+
+            return ReportedQuality(
+                daily_total=tuple(
+                    getattr(day.reported_quantity.daily_total, metric).quality_flags
+                ),
+                zero_shift=shift_flags(shifts.zero_shift),
+                eight_shift=shift_flags(shifts.eight_shift),
+                four_shift=shift_flags(shifts.four_shift),
+            )
+
+        return FiveQuantitySubmission(
+            contract_version="enterprise-ten-quantity-submission-v3",
+            quantity_scope="ten_quantity_v3",
+            submission_id=self.message_id,
+            mine_id=self.mine_id,
+            mine_name=self.payload.mine.mine_name,
+            reporting_timezone=self.payload.timezone,
+            revision=self.revision,
+            supersedes_submission_id=(
+                self.predecessor.message_id if self.predecessor is not None else None
+            ),
+            period_start=self.payload.period_start,
+            period_end=self.payload.period_end,
+            comparison_context=ComparisonContext(
+                **self.payload.comparison_context.model_dump()
+            ),
+            days=[
+                FiveQuantityDay(
+                    date=day.date,
+                    ventilation_m3_min=quantity(day, "ventilation_m3_min"),
+                    electricity_kwh=quantity(day, "electricity_kwh"),
+                    detonators_count=quantity(day, "detonators_count"),
+                    explosives_kg=quantity(day, "explosives_kg"),
+                    mine_entry_persons=quantity(day, "mine_entry_persons"),
+                    production_t=quantity(day, "production_t"),
+                    extraction_t=quantity(day, "extraction_t"),
+                    sales_t=quantity(day, "sales_t"),
+                    transport_t=quantity(day, "transport_t"),
+                    wash_feed_t=quantity(day, "wash_feed_t"),
+                    invoiced_quantity_t=quantity(day, "invoiced_quantity_t"),
                     declared_operating_state=day.operating_state,
                     quality={metric: quality(day, metric) for metric in METRICS},
                     shift_metadata=ShiftMetadata(
@@ -1016,6 +1425,7 @@ class EnterpriseRiskResponseMessage(ExchangeMessageBase):
 
 WireInboundMessage = (
     FiveQuantitySubmissionMessage
+    | TenQuantitySubmissionMessage
     | RiskDeliveryAckMessage
     | EnterpriseRiskResponseMessage
 )
@@ -1592,9 +2002,7 @@ def _production_placeholder_public_identity(value: str) -> bool:
         )
     ):
         return True
-    tokens = {
-        token for token in re.split(r"[^a-z0-9]+", folded) if token
-    }
+    tokens = {token for token in re.split(r"[^a-z0-9]+", folded) if token}
     if tokens & _PRODUCTION_PUBLIC_IDENTITY_TOKENS:
         return True
     return any(
@@ -1811,7 +2219,7 @@ def exchange_signature_material(message: Mapping[str, Any], payload_hash: str) -
     signature = message["signature_envelope"]
     predecessor = message.get("predecessor") or {}
     lines = [
-        EXCHANGE_SIGNATURE_CONTEXT,
+        _message_signature_context(str(message["contract_version"])),
         str(message["contract_version"]),
         str(message["message_type"]),
         str(message["message_id"]),
@@ -1902,12 +2310,14 @@ def _validate_inbound_document(document: dict[str, Any]) -> WireInboundMessage:
     model: type[WireInboundMessage]
     if message_type == "five_quantity_submission":
         model = FiveQuantitySubmissionMessage
+    elif message_type == "ten_quantity_submission":
+        model = TenQuantitySubmissionMessage
     elif message_type == "risk_delivery_ack":
         model = RiskDeliveryAckMessage
     elif message_type == "enterprise_risk_response":
         model = EnterpriseRiskResponseMessage
     else:
-        raise ValueError("unsupported inbound V2 message type")
+        raise ValueError("unsupported inbound exchange message type")
     return model.model_validate(document)
 
 
@@ -1946,7 +2356,7 @@ def transport_signature(
 ) -> str:
     material = "\n".join(
         (
-            EXCHANGE_TRANSPORT_CONTEXT,
+            _transport_signature_context(contract_version, request_target),
             method.upper(),
             request_target,
             sender_id,
@@ -1981,7 +2391,9 @@ def sign_transport_headers(
         NONCE_HEADER: nonce_text,
         CONTENT_SHA256_HEADER: content_hash,
         CONTRACT_VERSION_HEADER: contract_version,
-        SIGNATURE_VERSION_HEADER: EXCHANGE_SIGNATURE_VERSION,
+        SIGNATURE_VERSION_HEADER: _transport_signature_version(
+            contract_version, request_target
+        ),
         SIGNATURE_HEADER: transport_signature(
             client.active_transport_secret,
             method=method,
@@ -2018,7 +2430,8 @@ def authenticate_transport(
             or _SHA256.fullmatch(content_hash) is None
             or _SHA256.fullmatch(signature) is None
             or _CONTRACT.fullmatch(contract_version) is None
-            or signature_version != EXCHANGE_SIGNATURE_VERSION
+            or signature_version
+            != _transport_signature_version(contract_version, request_target)
             or sha256_bytes(body) != content_hash
         ):
             raise ValueError("malformed transport authentication")
@@ -2099,6 +2512,7 @@ __all__ = [
     "SIGNATURE_HEADER",
     "SIGNATURE_VERSION_HEADER",
     "TIMESTAMP_HEADER",
+    "TenQuantitySubmissionMessage",
     "authenticate_transport",
     "decode_inbound_message",
     "exchange_signature_material",

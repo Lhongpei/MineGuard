@@ -651,7 +651,7 @@ class MachineAutofillCoordinator:
         actor_id = authenticated.actor_id
         runtime = getattr(self.service, "_five_quantity", None)
         if runtime is None:
-            raise ConnectorUnavailableError("五量 V2 正式填报运行时未启用")
+            raise ConnectorUnavailableError("十量 V3 正式填报运行时未启用")
         lease_owner = secrets.token_hex(16)
         ingestion, acquired, created = self.repository.claim_connector_ingestion(
             client_id=authenticated.client_id,
@@ -743,7 +743,7 @@ class MachineAutofillCoordinator:
                 "workflow": {
                     "triggered": payload["trigger_workflow"],
                     "workflow_name": payload["workflow_name"],
-                    "display_name": "五量数据就绪预检",
+                    "display_name": "十量数据就绪预检",
                     "execution_mode": "v2_data_readiness_preflight",
                     "status": (
                         preflight.get("status") if preflight is not None else None

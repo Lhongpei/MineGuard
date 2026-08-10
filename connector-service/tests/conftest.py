@@ -20,7 +20,12 @@ def source_db(tmp_path: Path) -> Path:
             ventilation REAL,
             detonators INTEGER,
             explosives REAL,
-            persons INTEGER
+            persons INTEGER,
+            extraction REAL,
+            sales REAL,
+            transport REAL,
+            wash_feed REAL,
+            invoiced_quantity REAL
         )
         """
     )
@@ -28,13 +33,71 @@ def source_db(tmp_path: Path) -> Path:
     for day in ("2026-07-29", "2026-07-30"):
         rows.extend(
             [
-                (f"{day}T00:00:00+08:00", "zero_shift", 100.0, 30.0, 8000.0, 3, 1.5, 10),
-                (f"{day}T08:00:00+08:00", "eight_shift", 120.0, 35.0, 8100.0, 4, 2.0, 12),
-                (f"{day}T16:00:00+08:00", "four_shift", 130.0, 40.0, 8200.0, 5, 2.5, 13),
-                (f"{day}T23:59:00+08:00", "daily_total", 350.0, 105.0, 8100.0, 12, 6.0, 35),
+                (
+                    f"{day}T00:00:00+08:00",
+                    "zero_shift",
+                    100.0,
+                    30.0,
+                    8000.0,
+                    3,
+                    1.5,
+                    10,
+                    102.0,
+                    90.0,
+                    88.0,
+                    45.0,
+                    85.0,
+                ),
+                (
+                    f"{day}T08:00:00+08:00",
+                    "eight_shift",
+                    120.0,
+                    35.0,
+                    8100.0,
+                    4,
+                    2.0,
+                    12,
+                    121.0,
+                    100.0,
+                    98.0,
+                    50.0,
+                    95.0,
+                ),
+                (
+                    f"{day}T16:00:00+08:00",
+                    "four_shift",
+                    130.0,
+                    40.0,
+                    8200.0,
+                    5,
+                    2.5,
+                    13,
+                    132.0,
+                    110.0,
+                    109.0,
+                    55.0,
+                    105.0,
+                ),
+                (
+                    f"{day}T23:59:00+08:00",
+                    "daily_total",
+                    350.0,
+                    105.0,
+                    8100.0,
+                    12,
+                    6.0,
+                    35,
+                    355.0,
+                    300.0,
+                    295.0,
+                    150.0,
+                    285.0,
+                ),
             ]
         )
-    connection.executemany("INSERT INTO five_quantity VALUES (?,?,?,?,?,?,?,?)", rows)
+    connection.executemany(
+        "INSERT INTO five_quantity VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows
+    )
     connection.commit()
     connection.close()
     return path
@@ -104,6 +167,11 @@ daily = "daily_total"
 
 [pipelines.mapping]
 production_t = {{ source = "production", type = "number" }}
+extraction_t = {{ source = "extraction", type = "number" }}
+sales_t = {{ source = "sales", type = "number" }}
+transport_t = {{ source = "transport", type = "number" }}
+wash_feed_t = {{ source = "wash_feed", type = "number" }}
+invoiced_quantity_t = {{ source = "invoiced_quantity", type = "number" }}
 electricity_kwh = {{ source = "electricity", type = "number" }}
 ventilation_m3_min = {{ source = "ventilation", type = "number" }}
 detonators_count = {{ source = "detonators", type = "integer" }}

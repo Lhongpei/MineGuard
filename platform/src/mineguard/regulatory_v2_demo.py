@@ -46,7 +46,7 @@ from .regulatory_v2 import (
     DecisionStatus,
     FiveQuantityDay,
     FiveQuantitySubmission,
-    METRICS,
+    LEGACY_METRICS,
     ReportedQuality,
     ReportedQuantity,
     RegulatoryFiveQuantityResult,
@@ -1235,8 +1235,11 @@ def _build_day(
         return FiveQuantityDay(
             date=observed_date,
             declared_operating_state="unknown",
-            quality={metric: missing_quality for metric in METRICS},
-            **{metric: ReportedQuantity(shifts=ShiftValues()) for metric in METRICS},
+            quality={metric: missing_quality for metric in LEGACY_METRICS},
+            **{
+                metric: ReportedQuantity(shifts=ShiftValues())
+                for metric in LEGACY_METRICS
+            },
         )
 
     # Do not derive every quantity from one daily multiplier.  The dashboard

@@ -1,4 +1,4 @@
-"""Safe file parsing and deterministic five-quantity normalisation suggestions."""
+"""Safe file parsing and deterministic ten-quantity normalisation suggestions."""
 
 from __future__ import annotations
 
@@ -17,6 +17,13 @@ from zoneinfo import ZoneInfo
 
 from .errors import ImportContentError
 from .five_quantity_exchange import MineIdentity
+from .quantity_catalog import (
+    AGGREGATIONS,
+    LEGACY_V2_METRICS,
+    METRICS,
+    OPTIONAL_SHIFT_METRICS,
+    UNITS,
+)
 from .util import jcs_json, utc_text
 
 MAX_IMPORT_BYTES = 20 * 1024 * 1024
@@ -27,32 +34,8 @@ MAX_CELLS = 500000
 MAX_ZIP_ENTRIES = 5000
 MAX_ZIP_UNCOMPRESSED = 80 * 1024 * 1024
 ALLOWED_SUFFIXES = {".et", ".xls", ".xlsx", ".csv", ".json", ".jsonl"}
-METRICS = (
-    "ventilation_m3_min",
-    "electricity_kwh",
-    "detonators_count",
-    "explosives_kg",
-    "mine_entry_persons",
-    "production_t",
-)
 SHIFT_KEYS = ("zero_shift", "eight_shift", "four_shift")
 PERIOD_KEYS = ("daily_total", *SHIFT_KEYS)
-UNITS = {
-    "ventilation_m3_min": "m3/min",
-    "electricity_kwh": "kWh",
-    "detonators_count": "count",
-    "explosives_kg": "kg",
-    "mine_entry_persons": "person",
-    "production_t": "t",
-}
-AGGREGATIONS = {
-    "ventilation_m3_min": "time_weighted_average",
-    "electricity_kwh": "sum",
-    "detonators_count": "sum",
-    "explosives_kg": "sum",
-    "mine_entry_persons": "sum",
-    "production_t": "sum",
-}
 _VALUE_UNIT_SUFFIXES = {
     "ventilation_m3_min": ("m3/min", "m³/min", "立方米/分钟", "立方米每分钟"),
     "electricity_kwh": ("kwh", "千瓦时", "度"),
@@ -60,6 +43,11 @@ _VALUE_UNIT_SUFFIXES = {
     "explosives_kg": ("kg", "千克", "公斤"),
     "mine_entry_persons": ("人次", "人"),
     "production_t": ("t", "吨"),
+    "extraction_t": ("t", "吨"),
+    "sales_t": ("t", "吨"),
+    "transport_t": ("t", "吨"),
+    "wash_feed_t": ("t", "吨"),
+    "invoiced_quantity_t": ("t", "吨"),
 }
 _DATE_ALIASES = {"日期", "date", "统计日期"}
 _INFERRED_DATE_HEADER_HINTS = (
@@ -112,14 +100,62 @@ _METRIC_ALIASES = (
     ("用电量", "electricity_kwh", False),
     ("电量", "electricity_kwh", False),
     ("electricity", "electricity_kwh", False),
+    ("invoiced_quantity_t", "invoiced_quantity_t", False),
+    ("开票量", "invoiced_quantity_t", False),
+    ("开票吨数", "invoiced_quantity_t", False),
+    ("开票煤量", "invoiced_quantity_t", False),
+    ("发票煤量", "invoiced_quantity_t", False),
+    ("sales_t", "sales_t", False),
+    ("销售出库量", "sales_t", False),
+    ("销售发运量", "sales_t", False),
+    ("销售量", "sales_t", False),
+    ("销量", "sales_t", False),
+    ("transport_t", "transport_t", False),
+    ("运输量", "transport_t", False),
+    ("出矿运输量", "transport_t", False),
+    ("出矿运输", "transport_t", False),
+    ("外运量", "transport_t", False),
+    ("外运煤量", "transport_t", False),
+    ("wash_feed_t", "wash_feed_t", False),
+    ("洗煤量", "wash_feed_t", False),
+    ("入洗原煤量", "wash_feed_t", False),
+    ("入洗量", "wash_feed_t", False),
+    ("入洗煤量", "wash_feed_t", False),
+    ("extraction_t", "extraction_t", False),
+    ("工作面采出量", "extraction_t", False),
+    ("采掘计量", "extraction_t", False),
+    ("开采量", "extraction_t", False),
     ("production_t", "production_t", False),
-    ("原煤产量", "production_t", False),
-    ("产量", "production_t", False),
+    ("企业报表产量", "production_t", False),
+    ("报表产量", "production_t", False),
     ("production", "production_t", False),
+    ("产量", "production_t", False),
     ("爆破器材量", "fire_material", False),
     ("民爆物品量", "fire_material", False),
     ("火工品量", "fire_material", False),
     ("火工品", "fire_material", False),
+)
+
+# These headers do not provide enough business semantics for a safe automatic
+# mapping.  They remain visible in the preview but must be confirmed by a
+# person; the deterministic bulk importer never guesses their target.
+_AMBIGUOUS_HEADER_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("开票金额", "发票金额", "含税金额", "不含税金额", "销售金额"),
+        "该列是金额口径，不能映射为按吨计量的开票量",
+    ),
+    (
+        ("净开票量", "红字开票量", "红冲数量", "红票数量"),
+        "该列可能包含红字或红冲净额；主开票量只接收非负发票煤炭吨数",
+    ),
+    (
+        ("洗选量", "洗后产品", "精煤产量", "洗后产量"),
+        "洗选字段未明确是入洗原煤还是洗后产品，不能自动映射",
+    ),
+    (
+        ("井下运输", "主运输", "皮带运输"),
+        "运输字段未明确是井下运输还是出矿外运，不能自动映射",
+    ),
 )
 _SHIFT_ALIASES = {
     "zero_shift": "zero_shift",
@@ -151,6 +187,9 @@ _UNSUPPORTED_FIRE_COMPONENT_ALIASES = ("导爆索", "导爆管", "起爆具")
 _EXPLICIT_MISSING_VALUES = {"", "-", "—", "/", "无", "缺失"}
 _FORMULA_PREFIXES = ("=", "+", "@")
 _GROUPED_NUMBER = re.compile(r"^[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?$")
+_PLAIN_SIGNED_NUMBER = re.compile(
+    r"^[+-]?(?:[0-9]+(?:\.[0-9]+)?|[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|\.[0-9]+)$"
+)
 _HEADER_NUMBER_WITH_UNIT = re.compile(
     r"^\s*[+-]?(?:[0-9]+(?:[,.][0-9]+)*|\.[0-9]+)\s*"
     r"(?:m3/min|m³/min|kwh|kg|t|立方米/分钟|千瓦时|千克|公斤|"
@@ -389,7 +428,11 @@ def _normal_text(value: Any) -> str:
     return str(value).strip().replace(" ", "").replace("\u3000", "").casefold()
 
 
-def _number(value: Any, *, integer: bool = False) -> int | float | None:
+def _number(
+    value: Any,
+    *,
+    integer: bool = False,
+) -> int | float | None:
     if value is None or value == "":
         return None
     if isinstance(value, bool):
@@ -440,9 +483,12 @@ def _explicit_missing(value: Any) -> bool:
 
 
 def _formula_like(value: Any) -> bool:
-    return isinstance(value, str) and value.lstrip().startswith(
-        (*_FORMULA_PREFIXES, "-")
-    )
+    if not isinstance(value, str):
+        return False
+    clean = value.strip()
+    if _PLAIN_SIGNED_NUMBER.fullmatch(clean):
+        return False
+    return clean.startswith((*_FORMULA_PREFIXES, "-"))
 
 
 def _date_value(value: Any) -> date | None:
@@ -527,8 +573,16 @@ def _measurement(metric: str, value: Any, source_id: str) -> dict[str, Any]:
     }
 
 
-def _empty_set(source_id: str) -> dict[str, dict[str, Any]]:
-    return {metric: _measurement(metric, None, source_id) for metric in METRICS}
+def _empty_set(
+    source_id: str, *, shift_scope: bool = False
+) -> dict[str, dict[str, Any]]:
+    measurements = {
+        metric: _measurement(metric, None, source_id) for metric in METRICS
+    }
+    if shift_scope:
+        for metric in OPTIONAL_SHIFT_METRICS:
+            measurements[metric]["quality_flags"] = ["not_applicable"]
+    return measurements
 
 
 def _shift_window(day: date, key: str, timezone: str) -> tuple[str, str]:
@@ -553,14 +607,14 @@ def _source(
     return {
         "source_id": source_id,
         "acquisition_mode": acquisition_mode,
-        "source_system": "enterprise-five-quantity-import",
+        "source_system": "enterprise-ten-quantity-import",
         "source_record_id": f"{filename}#{sheet}!row-{row_number}",
         "source_location": f"{sheet}!row-{row_number}",
         "captured_at": captured_at,
         "media_type": media_type,
         "evidence_sha256": content_hash,
         "normalization": (
-            "Locally validated header mapping to V2 fixed units; missing values "
+            "Locally validated header mapping to V3 fixed units; missing values "
             "remain null and no value is estimated or imputed."
         ),
     }
@@ -573,6 +627,47 @@ def _metric_match(value: str) -> tuple[str, bool, str] | None:
     return None
 
 
+def ambiguous_header_reason(value: str) -> str | None:
+    """Explain why a source header is unsafe to map without a person.
+
+    More-specific canonical wording wins before generic substring checks.  In
+    particular, ``出矿运输量`` contains ``运输量`` and ``企业报表产量`` contains
+    ``产量`` but both state the missing business semantics explicitly.
+    """
+
+    normal = _normal_text(value)
+    if not normal:
+        return None
+    explicit = (
+        "production_t",
+        "企业报表产量",
+        "报表产量",
+        "extraction_t",
+        "工作面采出量",
+        "采掘计量",
+        "开采量",
+        "invoiced_quantity_t",
+        "开票吨数",
+        "开票煤量",
+        "发票煤量",
+        "transport_t",
+        "出矿运输量",
+        "出矿运输",
+        "外运量",
+        "外运煤量",
+        "wash_feed_t",
+        "入洗原煤量",
+        "入洗煤量",
+        "入洗量",
+    )
+    if any(token in normal for token in explicit):
+        return None
+    for aliases, reason in _AMBIGUOUS_HEADER_RULES:
+        if any(alias in normal for alias in aliases):
+            return reason
+    return None
+
+
 def _shift_match(value: str) -> str | None:
     return next(
         (shift for alias, shift in _SHIFT_ALIASES.items() if alias in value),
@@ -581,15 +676,43 @@ def _shift_match(value: str) -> str | None:
 
 
 def csv_header_unit_issue(metric: str, source_header: str) -> str | None:
-    """Reject explicit source units that cannot be silently treated as V2 units."""
+    """Reject source semantics/units that cannot be silently treated as V3."""
 
     if metric not in METRICS or not isinstance(source_header, str):
         return "来源字段或规范指标非法"
     normal = _normal_text(source_header)
+    if metric == "invoiced_quantity_t" and any(
+        token in normal
+        for token in ("金额", "价税", "人民币", "元", "万元", "票数", "张数")
+    ):
+        return "开票来源是金额或票数口径，不能作为吨数导入"
+    if metric == "wash_feed_t" and any(
+        token in normal for token in ("洗后", "精煤", "中煤", "煤泥", "矸石", "产品")
+    ):
+        return "来源表示洗后产品而非入洗原煤，不能作为洗煤量（入洗量）导入"
+    if metric == "transport_t" and any(
+        token in normal for token in ("井下", "主运输", "皮带", "工作面运输")
+    ):
+        return "来源表示井下运输而非出矿外运，不能作为监管运输量导入"
     if metric == "production_t" and any(
+        token in normal for token in ("开采", "采掘", "工作面采出")
+    ):
+        return "来源表示开采计量，不能作为企业报表产量导入"
+    if metric == "extraction_t" and any(
+        token in normal for token in ("企业报表产量", "报表产量")
+    ):
+        return "来源表示企业报表产量，不能作为开采量导入"
+    if metric in {
+        "production_t",
+        "extraction_t",
+        "sales_t",
+        "transport_t",
+        "wash_feed_t",
+        "invoiced_quantity_t",
+    } and any(
         token in normal for token in ("万吨", "千吨", "公斤", "千克", "(kg)", "（kg）")
     ):
-        return "来源产量单位不是吨；系统不会静默换算，请先按吨导出"
+        return "来源煤量单位不是吨；系统不会静默换算，请先按吨导出"
     if metric == "explosives_kg" and any(
         token in normal for token in ("万吨", "千吨", "(t)", "（t）", "吨")
     ):
@@ -914,6 +1037,18 @@ def _find_table(
                     }
                 )
             continue
+        ambiguity = ambiguous_header_reason(combined)
+        if ambiguity is not None:
+            warnings.append(
+                {
+                    "kind": "ambiguous_business_header",
+                    "source_column": column,
+                    "source_header": layout.display_headers[column],
+                    "reason": ambiguity,
+                    "requires_human_review": True,
+                }
+            )
+            continue
         matched = _metric_match(combined)
         if matched is None:
             unsupported = next(
@@ -944,7 +1079,7 @@ def _find_table(
                         "source_column": column,
                         "source_header": layout.display_headers[column],
                         "reason": (
-                            "来源列未映射到日期、五量或班次字段，未自动写入草稿："
+                            "来源列未映射到日期、十量或班次字段，未自动写入草稿："
                             f"{layout.display_headers[column][:80]}"
                         ),
                         "requires_human_review": True,
@@ -985,8 +1120,8 @@ def _find_table(
     if mapping:
         return layout.data_start, layout.date_column, mapping, warnings
     if mapping_override is not None:
-        raise ImportContentError("至少需要确认一个五量字段映射")
-    raise ImportContentError("未找到可识别的五量表头")
+        raise ImportContentError("至少需要确认一个十量字段映射")
+    raise ImportContentError("未找到可识别的十量表头")
 
 
 def _normalise_sheet(
@@ -1088,7 +1223,9 @@ def _normalise_sheet(
         )
         sources.append(source)
         daily = _empty_set(source_id)
-        shifts = {key: _empty_set(source_id) for key in SHIFT_KEYS}
+        shifts = {
+            key: _empty_set(source_id, shift_scope=True) for key in SHIFT_KEYS
+        }
         for column, (group, period) in mapping.items():
             if column in blocked_columns:
                 continue
@@ -1131,10 +1268,13 @@ def _normalise_sheet(
                             "metric": group,
                             "period": period,
                             "reason": (
-                                "单元格疑似公式、命令前缀或不允许的负数，"
+                                "单元格疑似公式、命令前缀或非法数值格式，"
                                 "未执行且未写入数值"
                                 if formula_like
-                                else "单元格不是可安全确定的非负数，未猜测或写入数值"
+                                else (
+                                    "单元格不符合该字段的安全数值范围，"
+                                    "未猜测或写入数值"
+                                )
                             ),
                             "requires_human_review": True,
                         }
@@ -1188,6 +1328,16 @@ def _json_payload(
         parsed = _strict_json_loads(_decode_text(content))
     except json.JSONDecodeError as error:
         raise ImportContentError("JSON 文件格式非法") from error
+    if isinstance(parsed, dict) and parsed.get("contract_version") == (
+        "five-quantity-submission-v2"
+    ):
+        raise ImportContentError(
+            "已签名的五量 V2 报文不能补字段升级为十量 V3；请从原始凭证重新生成"
+        )
+    if isinstance(parsed, dict) and "contract_version" in parsed and parsed.get(
+        "contract_version"
+    ) != "ten-quantity-submission-v3":
+        raise ImportContentError("JSON 报文 contract_version 不受支持")
     candidate = parsed.get("payload") if isinstance(parsed, dict) else None
     if candidate is None and isinstance(parsed, dict) and "days" in parsed:
         candidate = parsed
@@ -1222,10 +1372,17 @@ def _json_payload(
         # Round-trip through the strict local validator later.  Replace all
         # source refs so the imported document cannot claim another authority.
         copied = json.loads(jcs_json(item))
-        for measurement_set in [copied["reported_quantity"]["daily_total"]] + [
-            copied["reported_quantity"]["shifts"][key]["measurements"]
-            for key in SHIFT_KEYS
-        ]:
+        measurement_sets = [
+            ("daily_total", copied["reported_quantity"]["daily_total"]),
+            *[
+                (
+                    key,
+                    copied["reported_quantity"]["shifts"][key]["measurements"],
+                )
+                for key in SHIFT_KEYS
+            ],
+        ]
+        for scope, measurement_set in measurement_sets:
             if "labor_persons" in measurement_set:
                 if "mine_entry_persons" in measurement_set:
                     raise ImportContentError(
@@ -1239,7 +1396,13 @@ def _json_payload(
                 measurement_set["mine_entry_persons"] = legacy
             for metric in METRICS:
                 if metric not in measurement_set:
-                    raise ImportContentError(f"JSON 缺少规范数据项 {metric}")
+                    if metric in LEGACY_V2_METRICS:
+                        raise ImportContentError(f"JSON 缺少规范数据项 {metric}")
+                    measurement_set[metric] = _measurement(metric, None, source_id)
+                    if scope != "daily_total":
+                        measurement_set[metric]["quality_flags"] = [
+                            "not_applicable"
+                        ]
                 measurement_set[metric]["source_refs"] = [source_id]
         clean_days.append(copied)
     clean_days.sort(key=lambda item: item["date"])
@@ -1282,6 +1445,16 @@ def _jsonl_payload(
             ) from error
         if not isinstance(item, dict):
             raise ImportContentError(f"JSONL 第 {line_number} 行必须是对象")
+        if item.get("contract_version") == "five-quantity-submission-v2":
+            raise ImportContentError(
+                f"JSONL 第 {line_number} 行是五量 V2 报文，不能自动升级为十量 V3"
+            )
+        if "contract_version" in item and item.get("contract_version") != (
+            "ten-quantity-submission-v3"
+        ):
+            raise ImportContentError(
+                f"JSONL 第 {line_number} 行 contract_version 不受支持"
+            )
         candidate = (
             item.get("payload") if isinstance(item.get("payload"), dict) else item
         )
@@ -1321,7 +1494,7 @@ def _draft_payload(
     suggestions: list[dict[str, Any]],
     model_assistance_used: bool = False,
     model_output_sha256: str | None = None,
-    processing_rule: str = "five-quantity-deterministic-normalizer-v2",
+    processing_rule: str = "ten-quantity-deterministic-normalizer-v3",
 ) -> dict[str, Any]:
     if not days:
         raise ImportContentError("未提取到任何有效日报")
@@ -1437,7 +1610,8 @@ def inspect_five_quantity_csv(
         source = "deterministic"
         status = "unmapped"
         reason = "本地规则尚不能确定该列含义，请人工选择或明确忽略"
-        matched = _metric_match(normalized)
+        ambiguity = ambiguous_header_reason(normalized)
+        matched = None if ambiguity is not None else _metric_match(normalized)
         unsupported = next(
             (
                 alias
@@ -1446,7 +1620,10 @@ def inspect_five_quantity_csv(
             ),
             None,
         )
-        if matched is not None:
+        if ambiguity is not None:
+            status = "blocked"
+            reason = ambiguity
+        elif matched is not None:
             target_metric, legacy, alias = matched
             if target_metric == "fire_material":
                 target_metric = None
@@ -1475,7 +1652,7 @@ def inspect_five_quantity_csv(
                     reason = unit_issue
         elif unsupported is not None:
             status = "blocked"
-            reason = f"“{unsupported}”没有已批准的五量目标字段，不能自动归类"
+            reason = f"“{unsupported}”没有已批准的十量目标字段，不能自动归类"
         columns.append(
             {
                 "source_index": column,
@@ -1538,7 +1715,7 @@ def inspect_five_quantity_csv(
         f"第 {layout.date_column + 1} 列"
     )
     return {
-        "contract_version": "five-quantity-csv-inspection/v1",
+        "contract_version": "ten-quantity-csv-inspection/v2",
         "content_sha256": content_hash,
         "schema_fingerprint": schema_fingerprint,
         "filename": name,
@@ -1587,7 +1764,7 @@ def _column_mapping_override(
         ):
             raise ImportContentError("CSV 来源列编号非法")
         if metric not in {*METRICS, "fire_material"} or period not in PERIOD_KEYS:
-            raise ImportContentError("CSV 字段映射目标不在五量白名单内")
+            raise ImportContentError("CSV 字段映射目标不在十量白名单内")
         target = (metric, period)
         if column in result:
             raise ImportContentError("同一 CSV 来源列不能重复映射")
@@ -1632,6 +1809,7 @@ def import_five_quantity_bytes(
             identity=identity,
         )
         return {
+            "contract_version": "ten-quantity-submission-v3",
             "content_sha256": content_hash,
             "filename": name,
             "acquisition_mode": acquisition_mode,
@@ -1655,6 +1833,7 @@ def import_five_quantity_bytes(
         )
         if structured is not None:
             return {
+                "contract_version": "ten-quantity-submission-v3",
                 "content_sha256": content_hash,
                 "filename": name,
                 "acquisition_mode": acquisition_mode,
@@ -1667,7 +1846,7 @@ def import_five_quantity_bytes(
                     }
                 ],
             }
-        raise ImportContentError("JSON 必须包含 V2 payload.days 或 days")
+        raise ImportContentError("JSON 必须包含 V3 payload.days 或 days")
     if suffix == ".csv":
         sheets = _csv_sheets(content)
         media_type = "text/csv"
@@ -1708,7 +1887,7 @@ def import_five_quantity_bytes(
             all_sources.extend(sources)
             all_suggestions.extend(suggestions)
     if not all_days:
-        detail = "；".join(errors[:5]) if errors else "没有包含五量数据的 sheet"
+        detail = "；".join(errors[:5]) if errors else "没有包含十量数据的 sheet"
         raise ImportContentError(f"未能规范化工作簿：{detail}")
     payload = _draft_payload(
         identity=identity,
@@ -1719,12 +1898,13 @@ def import_five_quantity_bytes(
         model_assistance_used=model_assistance_used,
         model_output_sha256=model_output_sha256,
         processing_rule=(
-            "five-quantity-reviewed-csv-mapping-v1"
+            "ten-quantity-reviewed-csv-mapping-v2"
             if mapping_override is not None
-            else "five-quantity-deterministic-normalizer-v2"
+            else "ten-quantity-deterministic-normalizer-v3"
         ),
     )
     return {
+        "contract_version": "ten-quantity-submission-v3",
         "content_sha256": content_hash,
         "filename": name,
         "acquisition_mode": acquisition_mode,

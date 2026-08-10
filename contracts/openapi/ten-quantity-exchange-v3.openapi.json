@@ -1,0 +1,464 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MineGuard Neutral Ten-Quantity Exchange API",
+    "version": "3.0.0",
+    "description": "Parallel V3 HTTP/JSON boundary for ten business quantities. It does not replace or widen V2. New V3 submission and analysis messages use the V3 application-signature domain; explicitly reused generic V2 workflow messages retain their V2 application-signature domain. Every request on these V3 routes uses the V3 HTTP-signature domain."
+  },
+  "servers": [{"url": "https://regulator.example.invalid"}],
+  "x-http-signing": {
+    "domain": "MINEGUARD-TEN-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V3",
+    "signature_version": "hmac-sha256-v3"
+  },
+  "x-application-signing-domains": {
+    "ten-quantity-submission-v3": "MINEGUARD-TEN-QUANTITY-EXCHANGE-HMAC-SHA256-V3",
+    "analysis-report-v3": "MINEGUARD-TEN-QUANTITY-EXCHANGE-HMAC-SHA256-V3",
+    "intake-receipt-v2": "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2",
+    "risk-delivery-ack-v2": "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2",
+    "enterprise-risk-response-v2": "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2",
+    "response-receipt-v2": "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2"
+  },
+  "x-message-compatibility": {
+    "ten-quantity-submission-v3": "native-v3",
+    "intake-receipt-v2": "reused-unchanged",
+    "analysis-report-v3": "native-v3",
+    "risk-delivery-ack-v2": "reused-unchanged",
+    "enterprise-risk-response-v2": "reused-unchanged",
+    "response-receipt-v2": "reused-unchanged"
+  },
+  "tags": [
+    {"name": "ten-quantity-submissions"},
+    {"name": "analysis-delivery"},
+    {"name": "risk-responses"}
+  ],
+  "paths": {
+    "/v3/ten-quantity-submissions": {
+      "post": {
+        "operationId": "submitTenQuantityReportV3",
+        "tags": ["ten-quantity-submissions"],
+        "summary": "Submit one mine's human-confirmed ten-quantity report",
+        "description": "At-least-once transport with exactly-once business effect. The unchanged intake-receipt-v2 response proves durable intake only.",
+        "security": [{"ExchangeHmac": []}],
+        "parameters": [
+          {"$ref": "#/components/parameters/SenderId"},
+          {"$ref": "#/components/parameters/Timestamp"},
+          {"$ref": "#/components/parameters/Nonce"},
+          {"$ref": "#/components/parameters/ContentSha256"},
+          {"$ref": "#/components/parameters/ContractVersionSubmissionV3"},
+          {"$ref": "#/components/parameters/SignatureVersion"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "../schemas/ten-quantity-submission-v3.schema.json"},
+              "examples": {
+                "dailyAndShiftReport": {
+                  "externalValue": "../examples/ten-quantity-submission-v3.json"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Durably accepted and queued for V3 analysis",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../schemas/intake-receipt-v2.schema.json"},
+                "examples": {
+                  "shapeOnly": {"externalValue": "../examples/intake-receipt-v2.json"}
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Exact idempotent retry; returns the original signed receipt",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../schemas/intake-receipt-v2.schema.json"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "422": {"$ref": "#/components/responses/UnprocessableEntity"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        },
+        "x-request-application-signing-domain": "MINEGUARD-TEN-QUANTITY-EXCHANGE-HMAC-SHA256-V3",
+        "x-response-application-signing-domain": "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2",
+        "x-message-signing-spec": "../specs/ten-quantity-exchange-v3.md"
+      }
+    },
+    "/v3/ten-quantity-submissions/{message_id}/receipt": {
+      "get": {
+        "operationId": "getTenQuantityIntakeReceiptV3",
+        "tags": ["ten-quantity-submissions"],
+        "summary": "Read the immutable signed intake receipt",
+        "security": [{"ExchangeHmac": []}],
+        "parameters": [
+          {"$ref": "#/components/parameters/MessageId"},
+          {"$ref": "#/components/parameters/SenderId"},
+          {"$ref": "#/components/parameters/Timestamp"},
+          {"$ref": "#/components/parameters/Nonce"},
+          {"$ref": "#/components/parameters/ContentSha256"},
+          {"$ref": "#/components/parameters/ContractVersionExchangeV3"},
+          {"$ref": "#/components/parameters/SignatureVersion"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Original intake-receipt-v2 bound to the V3 submission ID and payload digest",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../schemas/intake-receipt-v2.schema.json"}
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        },
+        "x-response-application-signing-domain": "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2"
+      }
+    },
+    "/v3/analysis-reports/next": {
+      "get": {
+        "operationId": "pullNextTenQuantityAnalysisReportV3",
+        "tags": ["analysis-delivery"],
+        "summary": "Pull the next signed V3 analysis report for the authenticated mine",
+        "security": [{"ExchangeHmac": []}],
+        "parameters": [
+          {
+            "name": "after_cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:-]+$"
+            }
+          },
+          {"$ref": "#/components/parameters/SenderId"},
+          {"$ref": "#/components/parameters/Timestamp"},
+          {"$ref": "#/components/parameters/Nonce"},
+          {"$ref": "#/components/parameters/ContentSha256"},
+          {"$ref": "#/components/parameters/ContractVersionExchangeV3"},
+          {"$ref": "#/components/parameters/SignatureVersion"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Next immutable signed V3 report",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../schemas/analysis-report-v3.schema.json"},
+                "examples": {
+                  "risk": {"externalValue": "../examples/analysis-report-v3.json"}
+                }
+              }
+            }
+          },
+          "204": {"description": "No later response-required report is available"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        },
+        "x-response-application-signing-domain": "MINEGUARD-TEN-QUANTITY-EXCHANGE-HMAC-SHA256-V3"
+      }
+    },
+    "/v3/analysis-reports/{report_id}": {
+      "get": {
+        "operationId": "getTenQuantityAnalysisReportV3",
+        "tags": ["analysis-delivery"],
+        "summary": "Read one immutable V3 report belonging to the authenticated mine",
+        "security": [{"ExchangeHmac": []}],
+        "parameters": [
+          {"$ref": "#/components/parameters/ReportId"},
+          {"$ref": "#/components/parameters/SenderId"},
+          {"$ref": "#/components/parameters/Timestamp"},
+          {"$ref": "#/components/parameters/Nonce"},
+          {"$ref": "#/components/parameters/ContentSha256"},
+          {"$ref": "#/components/parameters/ContractVersionExchangeV3"},
+          {"$ref": "#/components/parameters/SignatureVersion"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Immutable signed V3 report",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../schemas/analysis-report-v3.schema.json"}
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        },
+        "x-response-application-signing-domain": "MINEGUARD-TEN-QUANTITY-EXCHANGE-HMAC-SHA256-V3"
+      }
+    },
+    "/v3/analysis-reports/{report_id}/delivery-ack": {
+      "post": {
+        "operationId": "acknowledgeTenQuantityReportDeliveryV3",
+        "tags": ["analysis-delivery"],
+        "summary": "Acknowledge durable local storage using the unchanged generic V2 message",
+        "security": [{"ExchangeHmac": []}],
+        "parameters": [
+          {"$ref": "#/components/parameters/ReportId"},
+          {"$ref": "#/components/parameters/SenderId"},
+          {"$ref": "#/components/parameters/Timestamp"},
+          {"$ref": "#/components/parameters/Nonce"},
+          {"$ref": "#/components/parameters/ContentSha256"},
+          {"$ref": "#/components/parameters/ContractVersionDeliveryAckV2"},
+          {"$ref": "#/components/parameters/SignatureVersion"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "../schemas/risk-delivery-ack-v2.schema.json"}
+            }
+          }
+        },
+        "responses": {
+          "204": {"description": "Acknowledgement durably recorded"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "422": {"$ref": "#/components/responses/UnprocessableEntity"},
+          "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        },
+        "x-request-application-signing-domain": "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2"
+      }
+    },
+    "/v3/analysis-reports/{report_id}/responses": {
+      "post": {
+        "operationId": "submitTenQuantityRiskResponseV3",
+        "tags": ["risk-responses"],
+        "summary": "Submit an enterprise response using the unchanged generic V2 message",
+        "security": [{"ExchangeHmac": []}],
+        "parameters": [
+          {"$ref": "#/components/parameters/ReportId"},
+          {"$ref": "#/components/parameters/SenderId"},
+          {"$ref": "#/components/parameters/Timestamp"},
+          {"$ref": "#/components/parameters/Nonce"},
+          {"$ref": "#/components/parameters/ContentSha256"},
+          {"$ref": "#/components/parameters/ContractVersionRiskResponseV2"},
+          {"$ref": "#/components/parameters/SignatureVersion"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "../schemas/enterprise-risk-response-v2.schema.json"}
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Response recorded",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../schemas/response-receipt-v2.schema.json"}
+              }
+            }
+          },
+          "200": {
+            "description": "Exact idempotent retry",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../schemas/response-receipt-v2.schema.json"}
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "422": {"$ref": "#/components/responses/UnprocessableEntity"},
+          "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        },
+        "x-request-application-signing-domain": "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2",
+        "x-response-application-signing-domain": "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2"
+      }
+    },
+    "/v3/risk-responses/{response_id}/receipt": {
+      "get": {
+        "operationId": "getTenQuantityRiskResponseReceiptV3",
+        "tags": ["risk-responses"],
+        "summary": "Read the immutable receipt for a V3-flow enterprise response",
+        "description": "The receipt remains the unchanged response-receipt-v2 application message, while this V3 URL uses the V3 HTTP-signature domain.",
+        "security": [{"ExchangeHmac": []}],
+        "parameters": [
+          {"$ref": "#/components/parameters/ResponseId"},
+          {"$ref": "#/components/parameters/SenderId"},
+          {"$ref": "#/components/parameters/Timestamp"},
+          {"$ref": "#/components/parameters/Nonce"},
+          {"$ref": "#/components/parameters/ContentSha256"},
+          {"$ref": "#/components/parameters/ContractVersionExchangeV3"},
+          {"$ref": "#/components/parameters/SignatureVersion"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Original response-receipt-v2 bound to the enterprise response ID",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../schemas/response-receipt-v2.schema.json"}
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        },
+        "x-response-application-signing-domain": "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2"
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ExchangeHmac": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Exchange-Signature",
+        "description": "V3 HTTP request authentication. Application-message verification is separately dispatched by exact contract_version."
+      }
+    },
+    "parameters": {
+      "MessageId": {
+        "name": "message_id",
+        "in": "path",
+        "required": true,
+        "schema": {"type": "string", "format": "uuid"}
+      },
+      "ReportId": {
+        "name": "report_id",
+        "in": "path",
+        "required": true,
+        "schema": {"type": "string", "format": "uuid"}
+      },
+      "ResponseId": {
+        "name": "response_id",
+        "in": "path",
+        "required": true,
+        "schema": {"type": "string", "format": "uuid"}
+      },
+      "SenderId": {
+        "name": "X-Exchange-Sender-Id",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        }
+      },
+      "Timestamp": {
+        "name": "X-Exchange-Timestamp",
+        "in": "header",
+        "required": true,
+        "schema": {"type": "string", "format": "date-time"}
+      },
+      "Nonce": {
+        "name": "X-Exchange-Nonce",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 22,
+          "maxLength": 86,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      },
+      "ContentSha256": {
+        "name": "X-Exchange-Content-SHA256",
+        "in": "header",
+        "required": true,
+        "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description": "SHA-256 of exact request body bytes; GET uses the empty-byte digest."
+      },
+      "ContractVersionSubmissionV3": {
+        "name": "X-Exchange-Contract-Version",
+        "in": "header",
+        "required": true,
+        "schema": {"const": "ten-quantity-submission-v3"},
+        "description": "Must equal the submitted body contract_version."
+      },
+      "ContractVersionExchangeV3": {
+        "name": "X-Exchange-Contract-Version",
+        "in": "header",
+        "required": true,
+        "schema": {"const": "ten-quantity-exchange-v3"},
+        "description": "Contract selector for bodyless V3 exchange GET requests."
+      },
+      "ContractVersionDeliveryAckV2": {
+        "name": "X-Exchange-Contract-Version",
+        "in": "header",
+        "required": true,
+        "schema": {"const": "risk-delivery-ack-v2"},
+        "description": "Must equal the unchanged generic V2 acknowledgement body version."
+      },
+      "ContractVersionRiskResponseV2": {
+        "name": "X-Exchange-Contract-Version",
+        "in": "header",
+        "required": true,
+        "schema": {"const": "enterprise-risk-response-v2"},
+        "description": "Must equal the unchanged generic V2 response body version."
+      },
+      "SignatureVersion": {
+        "name": "X-Exchange-Signature-Version",
+        "in": "header",
+        "required": true,
+        "schema": {"const": "hmac-sha256-v3"}
+      }
+    },
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "title", "status", "code", "detail", "trace_id"],
+        "properties": {
+          "type": {"type": "string", "format": "uri-reference"},
+          "title": {"type": "string", "minLength": 1, "maxLength": 256},
+          "status": {"type": "integer", "minimum": 400, "maximum": 599},
+          "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,127}$"},
+          "detail": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "trace_id": {"type": "string", "minLength": 1, "maxLength": 128}
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Malformed request",
+        "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}
+      },
+      "Unauthorized": {
+        "description": "Authentication, signature, replay, mine binding, or key validation failed",
+        "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}
+      },
+      "NotFound": {
+        "description": "Not found within the authenticated mine scope",
+        "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}
+      },
+      "Conflict": {
+        "description": "Idempotency key or immutable revision conflict",
+        "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}
+      },
+      "UnprocessableEntity": {
+        "description": "Schema-valid transport but invalid cross-field or state-machine semantics",
+        "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}
+      },
+      "TooManyRequests": {
+        "description": "Rate limited",
+        "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}
+      },
+      "ServiceUnavailable": {
+        "description": "Temporarily unavailable; retry with the same immutable message identity",
+        "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}
+      }
+    }
+  }
+}

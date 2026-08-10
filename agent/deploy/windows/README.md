@@ -176,16 +176,21 @@ PowerShell 脚本，不支持变量展开或命令替换，也不要 dot-source�
 演示账号
 `demo / 123123123` 只允许回环演示，不能确认或报送。
 
-政府 V2 接口至少配置：
+政府十量 V3 接口至少配置：
 
 ```text
-PLATFORM_V2_BASE_URL=https://regulator.example
-PLATFORM_V2_SENDER_ID=agent-mine-qy-001
-ENTERPRISE_EXCHANGE_KEY_ID=enterprise-key-v2
-REGULATORY_EXCHANGE_KEY_ID=regulator-key-v2
+PLATFORM_V3_BASE_URL=https://regulator.example
+PLATFORM_V3_SENDER_ID=agent-mine-qy-001
+ENTERPRISE_EXCHANGE_KEY_ID=enterprise-key-v3
+REGULATORY_EXCHANGE_KEY_ID=regulator-key-v3
 ENTERPRISE_EXCHANGE_HMAC_SECRET=<由密钥系统注入的应用消息密钥>
-PLATFORM_V2_TRANSPORT_HMAC_SECRET=<不同的运输密钥>
+PLATFORM_V3_TRANSPORT_HMAC_SECRET=<不同的运输密钥>
 ```
+
+程序暂时接受 `PLATFORM_V2_*` 作为迁移别名，但新实例必须写 V3 名称。标准 CSV、11 个
+原子字段和开票非负口径见
+[十量 V3 部署与运行](../../../docs/十量V3部署与运行.md)。五量 V2 只读保留，不能补造
+新字段后重新报送。
 
 两把 HMAC 密钥必须不同且至少 32 字节。模型只影响可选对话/新闻功能：
 
@@ -259,7 +264,7 @@ signed/unsigned 分类、主 EXE 的实际 Authenticode `Valid` 状态和时间�
 签名者匹配线下批准指纹。服务安装默认强制生产模式与四眼复核，并执行
 `config-check --production`：必须有两个
 权限分离的具名正式账号、可信凭据来源、HTTPS 浏览器 origin、
-Secure Cookie、HTTPS 政府 V2 地址、两把不同 HMAC 密钥、正式 key ID 和完整同类矿分组。
+Secure Cookie、HTTPS 政府 V3 地址、两把不同 HMAC 密钥、正式 key ID 和完整同类矿分组。
 其中浏览器/政府地址会拒绝 `.example/.invalid/.test`、example.com/net/org、localhost 和回环
 IP；允许真实内网 DNS 或内网 IP 的 HTTPS。矿井、经营主体、Agent/政府系统、发送者及连接器
 来源标识也会拒绝 demo/example/sample/test/replace 等默认或占位值。
@@ -371,7 +376,7 @@ Stop-Service MineGuardEnterpriseAgent-qinyuan-001
 .\Test-EnterpriseAgentHealth.ps1 -InstanceName qinyuan-001
 ```
 
-回滚材料保存在实例的 `backups\restore-rollbacks`。恢复完成后还要登录检查 V2 audit、
+回滚材料保存在实例的 `backups\restore-rollbacks`。恢复完成后还要登录检查当前 audit、
 outbox、cursor、风险报告回执和隔离记录，不能只看 health 为 200。
 恢复的目录创建、复制和替换全部位于 `ShouldProcess` 确认之后；`-WhatIf` 不会写磁盘。
 数据库和隔离证据使用 GUID 事务目录切换，失败时保留恢复材料并优先恢复原隔离证据。
@@ -403,7 +408,7 @@ fail-close；标记列出 live 路径、两个候选事务材料目录和精确�
 - API 设置修改后无变化：配置只在进程启动时加载，重启对应服务。
 
 政府 Platform 另有独立的 Windows 原生基线；实际可按单位运维、备份和高可用能力选择
-Windows 或 Linux。企业 Agent 与政府 Platform 只通过 V2 HTTP/JSON 合同通信，不共享
+Windows 或 Linux。企业 Agent 与政府 Platform 只通过 V3 HTTP/JSON 合同通信，不共享
 代码、数据库或服务账号。
 
 ## 9. 内部构建二进制发行目录

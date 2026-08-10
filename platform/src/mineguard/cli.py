@@ -462,7 +462,7 @@ def _build_product_parser() -> argparse.ArgumentParser:
     """Return the deployable V2 surface without legacy analysis commands."""
 
     parser = _build_parser()
-    parser.description = "政府五量监管平台 V2（唯一算法、只读业务前端）"
+    parser.description = "政府十量监管平台 V3（五量 V2 历史只读）"
     allowed = {
         "serve",
         "backup",

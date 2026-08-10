@@ -32,6 +32,7 @@ from .five_quantity_import import (
     PERIOD_KEYS,
     SHIFT_KEYS,
     UNITS,
+    csv_header_unit_issue,
     inspect_five_quantity_csv,
 )
 from .five_quantity_mapping import (
@@ -40,7 +41,7 @@ from .five_quantity_mapping import (
 )
 from .util import jcs_json, sha256_jcs, utc_now, utc_text
 
-CSV_MAPPING_PROFILE_CONTRACT = "five-quantity-approved-column-mapping-profile-v1"
+CSV_MAPPING_PROFILE_CONTRACT = "ten-quantity-approved-column-mapping-profile-v2"
 DEFAULT_PREVIEW_TTL_SECONDS = 15 * 60
 MIN_PREVIEW_TTL_SECONDS = 60
 MAX_PREVIEW_TTL_SECONDS = 60 * 60
@@ -259,7 +260,7 @@ def _validate_mapping_advice(
         if (metric is None) != (period is None):
             raise ValueError("mapping_advice 目标必须完整或同时为空")
         if metric is not None and (metric not in METRICS or period not in PERIOD_KEYS):
-            raise ValueError("mapping_advice 目标不在五量白名单")
+            raise ValueError("mapping_advice 目标不在十量白名单")
         source = raw["source"]
         if source not in {"deterministic", "rule", "approved_profile", "llm"}:
             raise ValueError("mapping_advice source 非法")
@@ -369,6 +370,11 @@ def _validate_mapping_document(value: Any) -> dict[str, Any]:
             raise ValueError("班次映射的 shift 不在白名单")
         if raw.get("unit") != UNITS[metric]:
             raise ValueError(f"mapping columns[{index}].unit 不是规范单位")
+        semantic_issue = csv_header_unit_issue(str(metric), header)
+        if semantic_issue is not None:
+            raise ValueError(
+                f"mapping columns[{index}] 与来源口径不兼容：{semantic_issue}"
+            )
         target = (str(metric), str(scope), None if shift is None else str(shift))
         if target in seen_targets:
             raise ValueError("mapping profile 包含重复目标")

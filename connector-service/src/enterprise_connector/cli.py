@@ -12,6 +12,7 @@ from . import __version__
 from .client import validate_agent_base_url
 from .config import load_config
 from .errors import ConnectorError
+from .quantity_catalog import METRICS, TEN_QUANTITY_SUBMISSION_CONTRACT
 from .service import ConnectorService
 from .state import StateStore
 
@@ -97,13 +98,46 @@ def main(argv: list[str] | None = None) -> int:
                 for source in pipeline.sources
                 if source.revision_seed > 0
             ]
+            mapping_coverage = []
+            for pipeline in config.pipelines:
+                mapped = {
+                    mapping.target.split(".", 1)[-1]
+                    for source in pipeline.sources
+                    for mapping in (source.mappings or pipeline.mappings)
+                }
+                mapping_coverage.append(
+                    {
+                        "pipeline_id": pipeline.id,
+                        "mapped_metrics": [metric for metric in METRICS if metric in mapped],
+                        "unmapped_metrics": [
+                            metric for metric in METRICS if metric not in mapped
+                        ],
+                    }
+                )
+            warnings: list[str] = []
+            if seeded:
+                warnings.append(
+                    "检测到非零 revision_seed 灾备配置："
+                    + ", ".join(seeded)
+                    + "；必须以 Agent 导入证据和双人记录为依据"
+                )
+            for coverage in mapping_coverage:
+                if coverage["unmapped_metrics"]:
+                    warnings.append(
+                        f"{coverage['pipeline_id']} 尚未配置字段："
+                        + ", ".join(coverage["unmapped_metrics"])
+                        + "；这些字段只会输出 null + missing，不会自动估算"
+                    )
             print(
                 json.dumps(
                     {
                         "ok": True,
                         "config": str(config.config_path),
+                        "data_contract": TEN_QUANTITY_SUBMISSION_CONTRACT,
+                        "atomic_metrics": list(METRICS),
                         "pipelines": len(config.pipelines),
                         "sources": sum(len(item.sources) for item in config.pipelines),
+                        "mapping_coverage": mapping_coverage,
                         "source_policies": [
                             {
                                 "pipeline_id": pipeline.id,
@@ -116,15 +150,7 @@ def main(argv: list[str] | None = None) -> int:
                             for pipeline in config.pipelines
                             for source in pipeline.sources
                         ],
-                        "warnings": (
-                            [
-                                "检测到非零 revision_seed 灾备配置："
-                                + ", ".join(seeded)
-                                + "；必须以 Agent 导入证据和双人记录为依据"
-                            ]
-                            if seeded
-                            else []
-                        ),
+                        "warnings": warnings,
                     },
                     ensure_ascii=False,
                 )

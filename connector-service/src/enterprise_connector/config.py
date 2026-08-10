@@ -17,19 +17,19 @@ from .models import (
     Shift,
     SourceConfig,
 )
+from .quantity_catalog import METRICS
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _ENV_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _ALLOWED_MAPPING_TYPES = {"preserve", "integer", "number"}
-_V2_METRICS = {
-    "ventilation_m3_min",
-    "electricity_kwh",
-    "detonators_count",
-    "explosives_kg",
-    "mine_entry_persons",
-    "production_t",
+_TEN_QUANTITY_METRICS = frozenset(METRICS)
+_REPORTING_SCOPES = {
+    "daily_total",
+    "zero_shift",
+    "eight_shift",
+    "four_shift",
+    "current_shift",
 }
-_V2_SCOPES = {"daily_total", "zero_shift", "eight_shift", "four_shift", "current_shift"}
 
 _ROOT_KEYS = {"service", "pipelines"}
 _SERVICE_KEYS = {
@@ -203,8 +203,12 @@ def _parse_shift(value: Any, context: str) -> Shift:
 def _parse_mapping(target: str, value: Any, context: str) -> FieldMapping:
     target_parts = target.split(".", 1)
     metric = target_parts[-1]
-    if metric not in _V2_METRICS or (len(target_parts) == 2 and target_parts[0] not in _V2_SCOPES):
-        raise ConfigurationError(f"{context} 目标必须是六个五量原子字段，或 scope.metric 形式")
+    if metric not in _TEN_QUANTITY_METRICS or (
+        len(target_parts) == 2 and target_parts[0] not in _REPORTING_SCOPES
+    ):
+        raise ConfigurationError(
+            f"{context} 目标必须是十量 V3 的 11 个原子字段，或 scope.metric 形式"
+        )
     if isinstance(value, str):
         return FieldMapping(target=target, source=_string(value, context), value_type="number")
     item = _table(value, context)
@@ -275,10 +279,10 @@ def _parse_scope_values(value: Any, context: str) -> dict[str, str]:
         _string(key, f"{context} key"): _string(raw, f"{context}.{key}")
         for key, raw in table.items()
     }
-    invalid = sorted(set(result.values()) - (_V2_SCOPES - {"current_shift"}))
+    invalid = sorted(set(result.values()) - (_REPORTING_SCOPES - {"current_shift"}))
     if invalid:
         raise ConfigurationError(
-            f"{context} 包含非法 V2 scope：{', '.join(invalid)}"
+            f"{context} 包含非法日报/班次 scope：{', '.join(invalid)}"
         )
     return result
 
@@ -539,7 +543,7 @@ def load_config(path: str | os.PathLike[str]) -> ServiceConfig:
         raise ConfigurationError("至少需要一个 [[pipelines]]")
     if len(raw_pipelines) != 1:
         raise ConfigurationError(
-            "V1 one-mine 合同只允许一个 five-quantity pipeline；"
+            "one-mine 合同只允许一个 ten-quantity V3 pipeline；"
             "多个上游系统应配为同一 pipeline 下的 sources"
         )
     pipelines: list[PipelineConfig] = []
@@ -595,7 +599,8 @@ def load_config(path: str | os.PathLike[str]) -> ServiceConfig:
         )
         if report_type != "five-quantity":
             raise ConfigurationError(
-                f"{context}.report_type 必须是 five-quantity，以匹配 Agent V2 合同"
+                f"{context}.report_type 必须保持 five-quantity，"
+                "这是 Agent 月度 draft_key 的兼容路由名，不代表 V2 数据合同"
             )
         workflow_name = _identifier(
             item.get("workflow_name", "daily_coal_health"),

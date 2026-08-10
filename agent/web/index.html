@@ -8,18 +8,18 @@
       name="description"
       content="企业可信数据智能填报助手。自动提取、逐项溯源、人工确认后提交监管平台。"
     >
-    <title>煤矿五量报送智能体</title>
+    <title>煤矿十量报送智能体</title>
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body class="is-simple-mode">
-    <a class="skip-link" href="#fiveQuantityWorkspace">跳到五量工作区</a>
+    <a class="skip-link" href="#fiveQuantityWorkspace">跳到十量工作区</a>
 
     <header class="topbar">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">矿</span>
         <div>
           <p class="eyebrow">一矿一智能体 · 与政府监管平台独立运行</p>
-          <h1>煤矿五量报送智能体</h1>
+          <h1>煤矿十量报送智能体</h1>
         </div>
       </div>
       <div class="topbar-actions">
@@ -109,7 +109,7 @@
     </section>
 
     <main class="fq-shell" id="fiveQuantityWorkspace">
-      <nav class="fq-nav" aria-label="五量报送工作区">
+      <nav class="fq-nav" aria-label="十量报送工作区">
         <button class="fq-nav-button is-active" type="button" data-fq-tab="inbox" aria-pressed="true">
           <span>1</span> 数据收件箱
         </button>
@@ -132,9 +132,9 @@
       <section class="fq-panel is-active" id="fqPanelInbox" data-fq-panel="inbox">
         <div class="fq-page-head">
           <div>
-            <p class="eyebrow">第一步 · 获取五量</p>
+            <p class="eyebrow">第一步 · 获取十量</p>
             <h2>数据收件箱</h2>
-            <p>五量包括风量、电量、火工品量、入井人员量和产量；火工品量按雷管、炸药子项填写。</p>
+            <p>十量包括风量、电量、火工品量、入井人员量、产量、开采量、销售量、运输量、洗煤量和开票量；火工品量仍按雷管、炸药两个子项填写。</p>
           </div>
           <button class="button button-secondary" id="fqRefreshInbox" type="button">刷新</button>
         </div>
@@ -143,7 +143,7 @@
           <form class="fq-card fq-upload-card" id="fqUploadForm">
             <span class="fq-card-icon" aria-hidden="true">↑</span>
             <h3>上传 CSV，自动生成填报草稿</h3>
-            <p>把企业系统导出的五量表交给 Agent，系统会识别表头、日期和单位，并将可核对内容写入草稿。</p>
+            <p>把企业系统导出的十量表交给 Agent，系统会识别表头、日期和单位，并将可核对内容写入草稿。</p>
             <ol class="fq-upload-steps" aria-label="CSV 智能建稿流程">
               <li><span>1</span><strong>选择 CSV</strong><small>使用标准模板最稳妥</small></li>
               <li><span>2</span><strong>预览映射</strong><small>黄色项必须人工选择</small></li>
@@ -151,9 +151,9 @@
               <li><span>4</span><strong>人工复核</strong><small>最终确认后才能报送</small></li>
             </ol>
             <button class="button button-secondary fq-template-button" id="fqDownloadCsvTemplate" type="button">
-              下载标准 CSV 模板
+              下载十量日汇总 CSV 模板
             </button>
-            <small class="fq-template-hint">模板包含日报合计和零点、八点、四点三个班次；没有的数据保持空白。</small>
+            <small class="fq-template-hint">默认模板只有“日期 + 11 个原子字段”共 12 列，适合日常填报；班次明细在草稿复核页按需展开，没有的数据保持空白。</small>
             <label class="field">
               <span>选择 CSV 文件（最大 20 MiB）</span>
               <input id="fqUploadFile" type="file" accept=".et,.xls,.xlsx,.csv,.json,.jsonl" required disabled>
@@ -255,7 +255,7 @@
           <div class="fq-detail-card" id="fqDraftDetail">
             <div class="fq-empty-state">
               <strong>请选择一份草稿</strong>
-              <span>先从收件箱导入文件，再逐日核对五类业务量；火工品量需核对雷管、炸药子项。</span>
+              <span>先从收件箱导入文件，再按“安全生产支撑、生产煤流、经营票据”三组逐日核对十量；火工品量需核对雷管、炸药子项。</span>
             </div>
           </div>
         </div>

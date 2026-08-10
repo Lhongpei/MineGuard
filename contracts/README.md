@@ -5,7 +5,39 @@
 物理关系、历史证据和时序证据，并独立作出监管判断。两边不得互相 import 代码，
 也不得共享数据库模型。
 
-## 当前目标契约：五量双向交换 V2
+## 当前目标契约：十量交换 V3
+
+V3 在不改写 V2 的前提下，把监管业务组扩展为风量、电量、火工品量、入井人员量、
+产量、开采量、销售量、运输量、洗煤量和开票量。十个业务组由十一个原子字段表达；
+火工品仍分别保存雷管数量和炸药质量，不能相加成无单位总量。
+
+11 个规范原子字段固定为 `ventilation_m3_min`、`electricity_kwh`、
+`detonators_count`、`explosives_kg`、`mine_entry_persons`、`production_t`、
+`extraction_t`、`sales_t`、`transport_t`、`wash_feed_t` 和
+`invoiced_quantity_t`。日报必须包含全部 11 项；每班必须包含前 7 项，后 4 项可省略，
+也可用 `null + not_applicable` 明确表示该班次口径不适用。
+
+其中 `sales_t` 是以完成销售出库并交付为确认点的吨数，`transport_t` 是出矿对外运输净吨数，
+`wash_feed_t` 是入洗原煤吨数，`invoiced_quantity_t` 是本期已开具正常/蓝票所载的
+煤炭实物吨数，不是金额、税额或红冲净额。全部 11 项非空数值必须非负；红字发票、
+退货和折让在企业来源系统作为辅助逐笔事件单列；当前 V3 主报文不承载这些事件。
+
+V3 本次新增：
+
+- `ten-quantity-submission-v3`
+- `analysis-report-v3`
+- `ten-quantity-exchange-v3` HTTP 边界
+
+提交路径固定为 `/v3/ten-quantity-submissions`。V3 新增消息和 HTTP 运输分别使用
+独立 V3 签名域与 `hmac-sha256-v3`，不能拿 V2 域作失败回退。接收回执、风险落库
+确认、企业回复和回复回执继续使用不可变 V2 通用消息，并通过消息 ID、报告 ID 和
+correlation 与 V3 流程绑定；这些复用消息仍按自身 V2 应用签名域验签。
+
+权威字段、单位、日/班次空值语义、签名材料和双版本迁移规则见
+[`specs/ten-quantity-exchange-v3.md`](specs/ten-quantity-exchange-v3.md)，HTTP 路径见
+[`openapi/ten-quantity-exchange-v3.openapi.json`](openapi/ten-quantity-exchange-v3.openapi.json)。
+
+## 保留兼容契约：五量双向交换 V2
 
 V2 是“两套运行软件、一个煤矿一个智能体、政府唯一算法”的目标边界：企业智能体
 发送整月逐日/班次五量，政府返回签名回执和唯一算法报告；企业主动拉取风险，智能体
@@ -51,6 +83,9 @@ V2 的完整跨字段、签名、幂等、修订、求解器/时序模块和风�
 ```text
 contracts/
 ├── schemas/
+│   ├── exchange-common-v3.schema.json
+│   ├── ten-quantity-submission-v3.schema.json
+│   ├── analysis-report-v3.schema.json
 │   ├── exchange-common-v2.schema.json
 │   ├── five-quantity-submission-v2.schema.json
 │   ├── intake-receipt-v2.schema.json
@@ -68,10 +103,12 @@ contracts/
 │   ├── edge-telemetry-receipt-v1.schema.json
 │   └── edge-telemetry-capabilities-v1.schema.json
 ├── openapi/
+│   ├── ten-quantity-exchange-v3.openapi.json
 │   ├── five-quantity-exchange-v2.openapi.json
 │   ├── enterprise-submission-v1.openapi.json
 │   └── edge-telemetry-v1.openapi.json
 ├── specs/
+│   ├── ten-quantity-exchange-v3.md
 │   ├── five-quantity-exchange-v2.md
 │   ├── enterprise-autofill-hmac-v1.md
 │   ├── hmac-transport-auth-v1.md
@@ -81,6 +118,14 @@ contracts/
 ├── VERSIONING.md
 └── scripts/validate_contracts.py
 ```
+
+## 历史 V1 与 edge 契约专用说明
+
+以下内容只说明保留的 V1/edge 兼容契约，不是 V3 报文形状或 V3 调用步骤。V3 不使用
+`field_provenance`、`approved_event_codes`、`payload.window/profile/observations` 或
+`confirmation_evidence_sha256`；V3 分别使用 `payload.sources`、measurement 的
+`source_refs`、`human_confirmation.content_sha256`、`signature_envelope` 和 `/v3/*`
+路径，具体以十量 V3 schema 与规范为准。
 
 矿端边缘采集服务使用独立的 `edge-telemetry-batch-v1` 边界。它面向人员、甲烷、
 通风、用电、产量和火工品等只读遥测，运输签名见
@@ -108,7 +153,7 @@ V1 还定义了可选 `interval` 统计窗口，以及皮带瞬时产量/速度/
 JSON Schema 使用 Draft 2020-12，OpenAPI 使用 3.1。schema 是权威约束；
 OpenAPI 描述 HTTP 行为；Markdown 规范补充跨字段、哈希、重放和信任边界语义。
 
-## 信任边界
+### V1 信任边界
 
 企业智能体可以：
 
@@ -147,7 +192,7 @@ OpenAPI 描述 HTTP 行为；Markdown 规范补充跨字段、哈希、重放和
 等同于监管端已经取回或验证个人数字签名；个人身份仍由企业账号会话、企业运输
 签名和监管备案三者共同约束。
 
-## 三层完整性
+### V1 三层完整性
 
 | 层 | 覆盖范围 | 算法 | 密钥 |
 |---|---|---|---|
@@ -159,7 +204,7 @@ OpenAPI 描述 HTTP 行为；Markdown 规范补充跨字段、哈希、重放和
 `payload_sha256`、`submission_id`、幂等键和发送时间。HTTP body 摘要则覆盖
 实际传输的完整 JSON 字节，两者不可互换。详细算法和固定向量见 `specs/`。
 
-## 接口映射
+### V1 接口映射
 
 监管端应在自己的适配层完成以下转换，不能让契约包 import 监管领域代码：
 
@@ -188,7 +233,7 @@ payload.observations[]                -> GovernedObservation 字段
 - 确认人有企业报送权限，确认发生在所有数据和模型处理完成之后；
 - 同一客户端的提交 ID 和幂等键没有被用于不同内容。
 
-## 幂等调用
+### V1 幂等调用
 
 1. 读取 `GET /v1/enterprise-submission-capabilities`。
 2. 构建并本地验证 `enterprise-submission-v1`。

@@ -91,7 +91,7 @@ def _mark_fresh(state: StateStore, event, timestamp: float, maximum: float = 100
     state.mark_health_delivered(health_id, 202, now=timestamp)
 
 
-def test_month_snapshot_is_complete_v2_and_deterministic(tmp_path: Path, source_db: Path) -> None:
+def test_month_snapshot_is_complete_v3_and_deterministic(tmp_path: Path, source_db: Path) -> None:
     _config, pipeline, source, event = _event(tmp_path, source_db)
     assert event.draft_key.endswith(":monthly:2026-07")
     assert event.period_key == "2026-07"
@@ -99,6 +99,11 @@ def test_month_snapshot_is_complete_v2_and_deterministic(tmp_path: Path, source_
     assert event.payload["source"]["truth_statement"] is True
     assert event.payload["workflow_name"] == "daily_coal_health"
     content = json.loads(event.payload["source"]["content"])
+    assert content["contract_version"] == "ten-quantity-submission-v3"
+    assert (
+        content["connector_snapshot"]["contract_version"]
+        == "enterprise-connector-ten-quantity-source/v1"
+    )
     assert content["connector_snapshot"]["source_id"] == source.id
     assert content["days"][0]["date"] == "2026-07-01"
     assert content["days"][-1]["date"] == "2026-07-31"
@@ -286,6 +291,84 @@ def test_missing_values_are_null_not_imputed(tmp_path: Path, source_db: Path) ->
     assert measurements["production_t"]["value"] == 10.0
     assert measurements["electricity_kwh"]["value"] is None
     assert measurements["electricity_kwh"]["quality_flags"] == ["missing"]
+
+
+def test_legacy_six_field_source_becomes_v3_with_new_fields_explicitly_missing(
+    tmp_path: Path, source_db: Path
+) -> None:
+    config = load_config(write_config(tmp_path / "connector.toml", source_db))
+    pipeline = config.pipelines[0]
+    source = replace(
+        pipeline.sources[0],
+        mappings=tuple(
+            mapping
+            for mapping in pipeline.mappings
+            if mapping.target
+            in {
+                "ventilation_m3_min",
+                "electricity_kwh",
+                "detonators_count",
+                "explosives_kg",
+                "mine_entry_persons",
+                "production_t",
+            }
+        ),
+    )
+    event = normalize_batches(pipeline, source, collect_sqlite_query(source))[0]
+    content = json.loads(event.payload["source"]["content"])
+    assert content["contract_version"] == "ten-quantity-submission-v3"
+    day = next(item for item in content["days"] if item["date"] == "2026-07-29")
+    daily = day["reported_quantity"]["daily_total"]
+    assert daily["production_t"]["value"] == 350.0
+    for metric in (
+        "extraction_t",
+        "sales_t",
+        "transport_t",
+        "wash_feed_t",
+        "invoiced_quantity_t",
+    ):
+        assert daily[metric]["value"] is None
+        assert daily[metric]["quality_flags"] == ["missing"]
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "factor", "offset"),
+    [(-12.5, 1.0, 0.0), (12.5, -1.0, 0.0), (12.5, 1.0, -20.0)],
+)
+def test_negative_red_invoice_delta_cannot_enter_main_invoice_quantity(
+    tmp_path: Path,
+    source_db: Path,
+    raw_value: float,
+    factor: float,
+    offset: float,
+) -> None:
+    config = load_config(write_config(tmp_path / "connector.toml", source_db))
+    pipeline = config.pipelines[0]
+    source = replace(
+        pipeline.sources[0],
+        mappings=(
+            FieldMapping(
+                target="invoiced_quantity_t",
+                source="signed_invoice_delta_t",
+                factor=factor,
+                offset=offset,
+                reduce="sum",
+            ),
+        ),
+    )
+    batch = RawBatch(
+        source_id=source.id,
+        original_filename="invoice-ledger.json",
+        records=(
+            {
+                "observed_at": "2026-07-29",
+                "scope": "daily_total",
+                "signed_invoice_delta_t": raw_value,
+            },
+        ),
+    )
+    with pytest.raises(SourceError, match="红票.*不得.*混入"):
+        normalize_batches(pipeline, source, (batch,))
 
 
 def test_complete_source_field_drift_cannot_create_a_fresh_all_null_snapshot(
@@ -1078,6 +1161,62 @@ def test_disaster_replay_and_revision_seed_recovery(tmp_path: Path, source_db: P
         assert revision == 8
     finally:
         recovered.close()
+
+
+def test_legacy_v2_outbox_body_is_replayed_without_field_upgrade(
+    tmp_path: Path, source_db: Path
+) -> None:
+    _config, _pipeline, _source, event = _event(tmp_path, source_db)
+    payload = copy.deepcopy(event.payload)
+    source_document = json.loads(payload["source"]["content"])
+    source_document["contract_version"] = "five-quantity-submission-v2"
+    source_document["connector_snapshot"]["contract_version"] = (
+        "enterprise-connector-five-quantity-source/v1"
+    )
+    new_metrics = {
+        "extraction_t",
+        "sales_t",
+        "transport_t",
+        "wash_feed_t",
+        "invoiced_quantity_t",
+    }
+    for day in source_document["days"]:
+        quantity = day["reported_quantity"]
+        for metric in new_metrics:
+            quantity["daily_total"].pop(metric)
+        for shift in quantity["shifts"].values():
+            for metric in new_metrics:
+                shift["measurements"].pop(metric)
+    legacy_content = canonical_json(source_document)
+    payload["source"]["content"] = legacy_content
+    legacy_event = replace(
+        event,
+        content_sha256=hashlib.sha256(legacy_content.encode()).hexdigest(),
+        payload=payload,
+    )
+    path = tmp_path / "legacy-v2-state.sqlite3"
+    state = StateStore(path)
+    event_id = state.register(legacy_event)
+    assert event_id
+    state.mark_delivered(event_id, 202)
+    before = state.connection.execute(
+        "SELECT payload_json FROM observations WHERE event_id=?", (event_id,)
+    ).fetchone()[0]
+    state.close()
+
+    reopened = StateStore(path)
+    try:
+        assert reopened.replay_delivered(event_id) == 1
+        after = reopened.connection.execute(
+            "SELECT payload_json FROM observations WHERE event_id=?", (event_id,)
+        ).fetchone()[0]
+        assert after == before
+        replayed_source = json.loads(json.loads(after)["source"]["content"])
+        assert replayed_source["contract_version"] == "five-quantity-submission-v2"
+        daily = replayed_source["days"][0]["reported_quantity"]["daily_total"]
+        assert new_metrics.isdisjoint(daily)
+    finally:
+        reopened.close()
 
 
 def test_durable_rejection_requires_audited_new_event_supersede(

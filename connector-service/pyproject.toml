@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "enterprise-connector-service"
-version = "0.1.0"
-description = "Independent read-only enterprise data connector for the coal reporting agent"
+version = "0.2.0"
+description = "Independent read-only ten-quantity V3 connector for the coal reporting agent"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "LicenseRef-Proprietary"

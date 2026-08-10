@@ -1,6 +1,6 @@
 # Legacy：通用煤炭 Agent V2 耐久任务流与治理说明
 
-> **Legacy 文档。** 当前默认产品是“一矿一智能体”的五量报送 V2，主流程和部署
+> **Legacy 文档。** 当前默认产品是“一矿一智能体”的十量报送 V3，主流程和部署
 > 说明见 [README](../README.md) 与 [部署与运维](部署与运维.md)。本文描述的通用
 > 任务、调度、记忆和技能治理只为历史迁移保留，不在默认前端和启动配置中使用。
 
@@ -427,7 +427,7 @@ curl -sS \
 所有变更接口仍受登录 Cookie、同源检查和 CSRF 保护。请求体中的 `actor_id` 不会
 替代登录身份。
 
-## 7. Legacy 环境变量参考（不要用于五量 V2 默认启动）
+## 7. Legacy 环境变量参考（不要用于十量 V3 默认启动）
 
 服务不会自动读取 `.env`。应由 systemd `EnvironmentFile`、容器 Secret 或单位
 密钥系统在启动前注入；修改后需要重启。
@@ -473,7 +473,7 @@ curl -sS \
 
 只要设置了任一平台核心项，就必须同时设置
 `PLATFORM_BASE_URL + PLATFORM_CLIENT_ID + PLATFORM_TRANSPORT_HMAC_SECRET`。
-历史通用体检不依赖这些变量。当前五量交换必须改用 `PLATFORM_V2_*` 与
+历史通用体检不依赖这些变量。当前十量交换必须改用 `PLATFORM_V3_*` 与
 `ENTERPRISE_EXCHANGE_*`，详见主 README；不要把本表复制到默认环境文件。
 
 ### 7.4 可选模型

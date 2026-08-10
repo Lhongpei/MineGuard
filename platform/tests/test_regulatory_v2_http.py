@@ -30,6 +30,8 @@ from mineguard.external_submission import jcs_canonical_json
 from mineguard.regulatory_v2_http import (
     RegulatoryV2HTTPServer,
     RegulatoryV2RequestHandler,
+    _TEN_QUANTITY_RELATIONSHIP_MODULES,
+    _affected_metrics_from_signals,
     _humanize_business_text,
     _humanize_finding_summary,
     create_server,
@@ -40,6 +42,7 @@ from mineguard.regulatory_v2_store import AuditProjection, RegulatoryV2Store
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = ROOT / "contracts"
 EXAMPLE_SECRET = b"example-v2-exchange-secret-not-for-production"
+V3_EXAMPLE_SECRET = b"example-v3-exchange-secret-not-for-production"
 FIXED_NOW = datetime(2026, 8, 1, 0, 20, tzinfo=UTC)
 LOCAL_CONTROL_TOKEN = "a" * 64
 PRODUCTION_MESSAGE_SECRET = b"mG8xQ2pL9vR4sT7wY3kN6cD1fH5jB0zA"
@@ -101,7 +104,9 @@ def test_production_server_boundary_rejects_insecure_or_incomplete_setup(
         create_server(
             "127.0.0.1",
             0,
-            **(common | {"clients": {placeholder_client.sender_id: placeholder_client}}),
+            **(
+                common | {"clients": {placeholder_client.sender_id: placeholder_client}}
+            ),
         )
     with pytest.raises(ValueError, match="platform_system_id.*placeholder"):
         create_server(
@@ -114,6 +119,12 @@ def test_production_server_boundary_rejects_insecure_or_incomplete_setup(
             "127.0.0.1",
             0,
             **(common | {"platform_key_id": PRODUCTION_MESSAGE_KEY_ID}),
+        )
+    with pytest.raises(ValueError, match="cannot enable legacy V2 intake"):
+        create_server(
+            "127.0.0.1",
+            0,
+            **(common | {"allow_legacy_v2_intake": True}),
         )
 
     empty_auth = tmp_path / "empty-auth.db"
@@ -328,6 +339,60 @@ def test_local_control_shutdown_refuses_non_loopback_listener(tmp_path: Path) ->
             clients={},
             local_control_token=LOCAL_CONTROL_TOKEN,
         )
+
+
+def test_production_v2_submission_is_authenticated_but_read_only(
+    tmp_path: Path,
+) -> None:
+    document = json.loads(
+        (CONTRACTS / "examples" / "five-quantity-submission-v2.json").read_text()
+    )
+    document["payload"]["mine"]["mine_name"] = "沁源一号煤矿"
+    document["payload"]["comparison_context"] = PRODUCTION_COMPARISON_CONTEXT
+    document["signature_envelope"]["key_id"] = PRODUCTION_MESSAGE_KEY_ID
+    sign_exchange_message(document, PRODUCTION_MESSAGE_SECRET)
+    body = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+    client = _minimal_exchange_client()
+    auth_database = tmp_path / "v2-read-only-auth.db"
+    _seed_ready_production_admin(auth_database)
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "v2-read-only.db",
+        auth_database_path=auth_database,
+        auth_required=True,
+        secure_cookie=True,
+        clients={client.sender_id: client},
+        production_mode=True,
+        clock=lambda: FIXED_NOW,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    target = "/v2/five-quantity-submissions"
+    headers = sign_transport_headers(
+        client,
+        method="POST",
+        request_target=target,
+        body=body,
+        contract_version="five-quantity-submission-v2",
+        timestamp=FIXED_NOW,
+        nonce="bGVnYWN5LXYyLXJlYWQtb25seQ",
+    )
+    headers["Content-Type"] = "application/json"
+    try:
+        connection.request("POST", target, body=body, headers=headers)
+        response = connection.getresponse()
+        problem = json.loads(response.read())
+
+        assert response.status == 410
+        assert problem["code"] == "LEGACY_CONTRACT_READ_ONLY"
+        assert server.store.list_submissions() == []
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 def test_production_hmac_failure_is_persistently_audited_without_secrets(
@@ -635,9 +700,7 @@ def test_production_ready_and_machine_intake_fail_closed_after_runtime_tamper(
             ("f" * 64,),
         )
 
-        connection.request(
-            "GET", "/v2/regulatory/overview", headers={"Cookie": cookie}
-        )
+        connection.request("GET", "/v2/regulatory/overview", headers={"Cookie": cookie})
         refused_overview = connection.getresponse()
         overview_problem = json.loads(refused_overview.read())
         assert refused_overview.status == 503
@@ -786,7 +849,9 @@ def test_machine_get_rechecks_checkpoint_inside_controlled_operation(
                     (FIXED_NOW.isoformat(),),
                 )
 
-    monkeypatch.setattr(server, "require_machine_write_integrity", commit_after_transport_gate)
+    monkeypatch.setattr(
+        server, "require_machine_write_integrity", commit_after_transport_gate
+    )
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
@@ -986,12 +1051,13 @@ def test_government_business_text_translates_complete_algorithm_phrases_naturall
 
 
 def test_finding_projection_only_exposes_evidence_for_its_own_category() -> None:
-    def signal(message: str) -> SimpleNamespace:
-        return SimpleNamespace(message=message)
+    def signal(message: str, metric: str | None = None) -> SimpleNamespace:
+        return SimpleNamespace(message=message, metric=metric)
 
     item = SimpleNamespace(
         finding=SimpleNamespace(
             finding_id="finding-001",
+            submission_id="submission-001",
             mine_id="MINE-QY-001",
             finding_type="risk",
             category="relationship_consistency",
@@ -1001,7 +1067,10 @@ def test_finding_projection_only_exposes_evidence_for_its_own_category() -> None
             result=SimpleNamespace(
                 data_quality_signals=[signal("wire_quality_flags存在格式提示")],
                 relationship_signals=[
-                    signal("electricity_per_production超出anonymous_peer参考区间")
+                    signal(
+                        "electricity_per_production超出anonymous_peer参考区间",
+                        "electricity_per_production",
+                    )
                 ],
                 temporal_signals=[signal("CUSUM发现持续偏移")],
             ),
@@ -1015,9 +1084,65 @@ def test_finding_projection_only_exposes_evidence_for_its_own_category() -> None
 
     assert projected["summary"] == "单位产量电耗偏离匿名同类矿稳健基线"
     assert projected["evidence"] == ["单位产量电耗超出匿名同类矿参考区间"]
+    assert projected["affected_metrics"] == ["electricity_kwh", "production_t"]
     serialized = json.dumps(projected, ensure_ascii=False)
     assert "wire_quality_flags" not in serialized
     assert "CUSUM" not in serialized
+
+
+def test_signal_metric_resolution_keeps_relationships_and_fire_materials_narrow() -> (
+    None
+):
+    relationship = _affected_metrics_from_signals(
+        [SimpleNamespace(metric="electricity_per_production")],
+        (
+            "ventilation_m3_min",
+            "electricity_kwh",
+            "detonators_count",
+            "explosives_kg",
+            "mine_entry_persons",
+            "production_t",
+            "extraction_t",
+            "sales_t",
+            "transport_t",
+            "wash_feed_t",
+            "invoiced_quantity_t",
+        ),
+    )
+    fire_materials = _affected_metrics_from_signals(
+        [SimpleNamespace(metric="detonators_count,explosives_kg")],
+        (
+            "ventilation_m3_min",
+            "electricity_kwh",
+            "detonators_count",
+            "explosives_kg",
+            "mine_entry_persons",
+            "production_t",
+            "extraction_t",
+            "sales_t",
+            "transport_t",
+            "wash_feed_t",
+            "invoiced_quantity_t",
+        ),
+    )
+
+    assert relationship == ["electricity_kwh", "production_t"]
+    assert fire_materials == ["detonators_count", "explosives_kg"]
+
+
+def test_v3_report_discloses_every_evaluated_business_chain_relationship() -> None:
+    assert set(_TEN_QUANTITY_RELATIONSHIP_MODULES.values()) == {
+        "production_extraction_reconciliation",
+        "production_sales_reconciliation",
+        "production_transport_reconciliation",
+        "production_wash_reconciliation",
+        "sales_transport_reconciliation",
+        "sales_invoice_reconciliation",
+    }
+    assert all(
+        "inventory" not in module
+        for module in _TEN_QUANTITY_RELATIONSHIP_MODULES.values()
+    )
 
 
 def _schema_registry() -> Registry:
@@ -1047,13 +1172,17 @@ def _assert_problem(document: dict[str, Any]) -> None:
     Draft202012Validator(openapi["components"]["schemas"]["Problem"]).validate(document)
 
 
-def _assert_application_signature(document: dict[str, Any]) -> None:
+def _assert_application_signature(
+    document: dict[str, Any],
+    *,
+    secret: bytes = EXAMPLE_SECRET,
+) -> None:
     digest = hashlib.sha256(
         jcs_canonical_json(document["payload"]).encode("utf-8")
     ).hexdigest()
     assert digest == document["signature_envelope"]["payload_sha256"]
     expected = hmac.new(
-        EXAMPLE_SECRET,
+        secret,
         exchange_signature_material(document, digest),
         hashlib.sha256,
     ).hexdigest()
@@ -1085,6 +1214,149 @@ def test_v2_report_preserves_specific_temporal_evidence_method(
         )
         == expected
     )
+
+
+def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated(
+    tmp_path: Path,
+) -> None:
+    import base64
+
+    submission_body = (
+        CONTRACTS / "examples" / "ten-quantity-submission-v3.json"
+    ).read_bytes()
+    submission = json.loads(submission_body)
+    client = ExchangeClient(
+        sender_id=submission["sender"]["system_id"],
+        party_id=submission["sender"]["party_id"],
+        mine_id=submission["mine_id"],
+        secret=V3_EXAMPLE_SECRET,
+        transport_secret=b"example-v3-transport-secret-not-for-production",
+        mine_name=submission["payload"]["mine"]["mine_name"],
+        comparison_context=submission["payload"]["comparison_context"],
+        message_key_id=submission["signature_envelope"]["key_id"],
+    )
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "regulatory-v3.db",
+        auth_database_path=tmp_path / "auth-v3.db",
+        auth_required=False,
+        clients={client.sender_id: client},
+        clock=lambda: FIXED_NOW,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    nonce_counter = 100
+
+    def request(
+        method: str,
+        target: str,
+        *,
+        body: bytes = b"",
+        contract_version: str,
+    ) -> tuple[int, dict[str, Any] | None]:
+        nonlocal nonce_counter
+        nonce_counter += 1
+        nonce = base64.urlsafe_b64encode(nonce_counter.to_bytes(16, "big"))
+        headers = sign_transport_headers(
+            client,
+            method=method,
+            request_target=target,
+            body=body,
+            contract_version=contract_version,
+            timestamp=FIXED_NOW,
+            nonce=nonce.decode().rstrip("="),
+        )
+        if body:
+            headers["Content-Type"] = "application/json"
+        connection.request(method, target, body=body or None, headers=headers)
+        response = connection.getresponse()
+        raw = response.read()
+        return response.status, json.loads(raw) if raw else None
+
+    try:
+        status, intake = request(
+            "POST",
+            "/v3/ten-quantity-submissions",
+            body=submission_body,
+            contract_version="ten-quantity-submission-v3",
+        )
+        assert status == 202
+        assert intake is not None
+        _assert_contract(intake, "intake-receipt-v2.schema.json")
+        _assert_application_signature(intake, secret=V3_EXAMPLE_SECRET)
+
+        stored = server.store.get_submission(submission["message_id"])
+        assert stored.quantity_scope == "ten_quantity_v3"
+        day = stored.days[0]
+        assert day.extraction_t is not None
+        assert day.sales_t is not None
+        assert day.transport_t is not None
+        assert day.wash_feed_t is not None
+        assert day.invoiced_quantity_t is not None
+        assert day.sales_t.daily_total == 2510.0
+        assert day.invoiced_quantity_t.daily_total == 2440.0
+        assert day.quality["sales_t"].zero_shift == ("reported",)
+        assert day.quality["sales_t"].eight_shift == ()
+        assert day.quality["sales_t"].four_shift == ("not_applicable",)
+
+        legacy_status, legacy_payload = request(
+            "GET",
+            "/v2/analysis-reports/next",
+            contract_version="five-quantity-exchange-v2",
+        )
+        assert legacy_status == 204
+        assert legacy_payload is None
+
+        status, report = request(
+            "GET",
+            "/v3/analysis-reports/next",
+            contract_version="ten-quantity-exchange-v3",
+        )
+        assert status == 200
+        assert report is not None
+        _assert_contract(report, "analysis-report-v3.schema.json")
+        _assert_application_signature(report, secret=V3_EXAMPLE_SECRET)
+        assert report["payload"]["algorithm"]["engine_id"] == (
+            "mineguard-ten-quantity-engine"
+        )
+        assert report["payload"]["algorithm"]["engine_version"].startswith("3.")
+        assert report["payload"]["algorithm"]["input_snapshot_sha256"] == (
+            submission["signature_envelope"]["payload_sha256"]
+        )
+        assert report["payload"]["outcome"] == "data_insufficient"
+        assert report["payload"]["findings"]
+        assert all(
+            finding["title"].startswith("十量")
+            for finding in report["payload"]["findings"]
+        )
+        assert "inventory_flow_reconciliation" not in report["payload"][
+            "algorithm"
+        ]["modules"]
+
+        wrong_route_status, wrong_route_problem = request(
+            "GET",
+            f"/v2/analysis-reports/{report['payload']['report_id']}",
+            contract_version="five-quantity-exchange-v2",
+        )
+        assert wrong_route_status == 404
+        assert wrong_route_problem is not None
+        assert wrong_route_problem["code"] == "NOT_FOUND"
+
+        receipt_status, receipt = request(
+            "GET",
+            f"/v3/ten-quantity-submissions/{submission['message_id']}/receipt",
+            contract_version="ten-quantity-exchange-v3",
+        )
+        assert receipt_status == 200
+        assert receipt is not None
+        _assert_contract(receipt, "intake-receipt-v2.schema.json")
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -> None:

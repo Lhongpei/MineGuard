@@ -40,6 +40,7 @@ jobs:
             platform/pyproject.toml
             agent/constraints.txt
             agent/pyproject.toml
+            connector-service/pyproject.toml
             contracts/requirements-validation.txt
 
       - name: Set up Node for static JavaScript checks
@@ -53,11 +54,14 @@ jobs:
         run: |
           $platformVenv = Join-Path $env:RUNNER_TEMP 'MineGuard Platform Runtime'
           $agentVenv = Join-Path $env:RUNNER_TEMP 'MineGuard Agent Runtime'
+          $connectorVenv = Join-Path $env:RUNNER_TEMP 'MineGuard Connector Runtime'
           @(
             "PLATFORM_VENV=$platformVenv"
             "PLATFORM_PYTHON=$(Join-Path $platformVenv 'Scripts\python.exe')"
             "AGENT_VENV=$agentVenv"
             "AGENT_PYTHON=$(Join-Path $agentVenv 'Scripts\python.exe')"
+            "CONNECTOR_VENV=$connectorVenv"
+            "CONNECTOR_PYTHON=$(Join-Path $connectorVenv 'Scripts\python.exe')"
           ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install both independent products and verification tools
@@ -84,11 +88,21 @@ jobs:
             Pop-Location
           }
 
+          python -m venv "$env:CONNECTOR_VENV"
+          & $env:CONNECTOR_PYTHON -m pip install --upgrade pip
+          & $env:CONNECTOR_PYTHON -m pip install -e "./connector-service[test]"
+          # Connector repository tests launch the real Agent from source in a
+          # subprocess. Install only its third-party runtime libraries here;
+          # the deployable Connector package still has no Agent code dependency.
+          & $env:CONNECTOR_PYTHON -m pip install `
+            --constraint agent/constraints.txt openpyxl xlrd tzdata
+
       - name: Verify independent 64-bit runtimes and Asia Shanghai timezone
         shell: pwsh
         run: |
           & $env:PLATFORM_PYTHON -c "import importlib.util, struct; from zoneinfo import ZoneInfo; assert struct.calcsize('P') == 8; assert importlib.util.find_spec('enterprise_agent') is None; print(ZoneInfo('Asia/Shanghai'))"
           & $env:AGENT_PYTHON -c "import importlib.util, struct; from zoneinfo import ZoneInfo; assert struct.calcsize('P') == 8; assert importlib.util.find_spec('mineguard') is None; print(ZoneInfo('Asia/Shanghai'))"
+          & $env:CONNECTOR_PYTHON -c "import importlib.util, struct; assert struct.calcsize('P') == 8; assert importlib.util.find_spec('mineguard') is None; assert importlib.util.find_spec('enterprise_agent') is None"
 
       - name: Parse every Windows deployment script with PowerShell 5.1
         shell: powershell
@@ -171,6 +185,14 @@ jobs:
           & $env:AGENT_PYTHON -m ruff check agent/src agent/tests
           & $env:AGENT_PYTHON -m pytest -q agent/tests
           & $env:AGENT_PYTHON -m enterprise_agent --help
+
+      - name: Compile, lint and test the enterprise connector
+        shell: pwsh
+        run: |
+          & $env:CONNECTOR_PYTHON -m compileall -q connector-service/src
+          & $env:CONNECTOR_PYTHON -m ruff check connector-service/src connector-service/tests
+          & $env:CONNECTOR_PYTHON -m pytest -q connector-service/tests
+          & $env:CONNECTOR_PYTHON -m enterprise_connector --help
 
       - name: Check browser JavaScript syntax
         shell: pwsh

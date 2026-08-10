@@ -91,6 +91,35 @@ def _submission(
     )
 
 
+def _ten_submission(
+    submission_id: str,
+    *,
+    mine_id: str = "mine-a",
+    start: date = date(2026, 1, 1),
+) -> FiveQuantitySubmission:
+    base = _submission(submission_id, mine_id=mine_id, start=start)
+    days = [
+        day.model_copy(
+            update={
+                "extraction_t": _q(105),
+                "sales_t": _q(90),
+                "transport_t": _q(90),
+                "wash_feed_t": _q(70),
+                "invoiced_quantity_t": _q(88),
+            }
+        )
+        for day in base.days
+    ]
+    return FiveQuantitySubmission.model_validate(
+        {
+            **base.model_dump(mode="python"),
+            "contract_version": "enterprise-ten-quantity-submission-v3",
+            "quantity_scope": "ten_quantity_v3",
+            "days": days,
+        }
+    )
+
+
 def _record_exchange_audit(
     store: RegulatoryV2Store,
     *,
@@ -304,6 +333,62 @@ def test_store_builds_anonymous_equal_mine_peer_reference() -> None:
         assert "peer-1" not in serialized
         assert "peer-2" not in serialized
         assert "peer-3" not in serialized
+
+
+def test_v2_and_v3_peer_cohorts_are_strictly_isolated() -> None:
+    with RegulatoryV2Store(":memory:", now=lambda: NOW) as store:
+        for index in range(3):
+            receipt = store.submit_and_analyze(
+                _ten_submission(
+                    str(uuid4()),
+                    mine_id=f"v3-peer-{index}",
+                    start=date(2025, 12, 1),
+                )
+            )
+            assert receipt.decision is DecisionStatus.NORMAL_CANDIDATE
+
+        v2_target = store.submit_and_analyze(
+            _submission(str(uuid4()), mine_id="v2-target")
+        )
+        result = store.get_run(v2_target.run_id)
+
+        assert result.method_version.startswith("regulatory-five-quantity-v2.")
+        assert result.references.accepted_peer_bands == []
+
+
+def test_same_mine_history_never_crosses_v3_to_v2_scope() -> None:
+    with RegulatoryV2Store(":memory:", now=lambda: NOW) as store:
+        # Establish a V3 peer anchor so the November V3 run is genuinely
+        # baseline-eligible; this proves the later V2 query excludes it by
+        # contract scope rather than merely because admission was unavailable.
+        for index in range(3):
+            store.submit_and_analyze(
+                _ten_submission(
+                    str(uuid4()),
+                    mine_id=f"anchor-v3-{index}",
+                    start=date(2025, 10, 1),
+                )
+            )
+        v3_source = store.submit_and_analyze(
+            _ten_submission(
+                str(uuid4()),
+                mine_id="scope-mine",
+                start=date(2025, 11, 1),
+            )
+        )
+        assert store.list_runs(mine_id="scope-mine")[0]["baseline_eligible"] == 1
+
+        v2_target = store.submit_and_analyze(
+            _submission(
+                str(uuid4()),
+                mine_id="scope-mine",
+                start=date(2025, 12, 1),
+            )
+        )
+        result = store.get_run(v2_target.run_id)
+
+        assert v3_source.submission_id != v2_target.submission_id
+        assert result.references.same_mine_history_day_count == 0
 
 
 def test_same_period_peer_arrival_order_cannot_change_analysis() -> None:

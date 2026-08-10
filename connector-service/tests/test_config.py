@@ -7,6 +7,7 @@ from conftest import write_config
 
 from enterprise_connector.config import load_config, require_secret
 from enterprise_connector.errors import ConfigurationError
+from enterprise_connector.quantity_catalog import METRICS
 
 
 def test_loads_strict_config(
@@ -15,7 +16,7 @@ def test_loads_strict_config(
     config = load_config(write_config(tmp_path / "connector.toml", source_db))
     assert config.client_id == "test-connector"
     assert config.pipelines[0].required_sources == ("ledger",)
-    assert len(config.pipelines[0].mappings) == 6
+    assert len(config.pipelines[0].mappings) == 11
     monkeypatch.setenv("TEST_CONNECTOR_SECRET", "x" * 32)
     assert require_secret(config) == b"x" * 32
 
@@ -49,7 +50,7 @@ def test_unknown_metric_mapping_is_rejected(tmp_path: Path, source_db: Path) -> 
     path = write_config(tmp_path / "connector.toml", source_db)
     text = path.read_text(encoding="utf-8").replace("production_t =", "made_up_metric =", 1)
     path.write_text(text, encoding="utf-8")
-    with pytest.raises(ConfigurationError, match="六个五量原子字段"):
+    with pytest.raises(ConfigurationError, match="十量 V3 的 11 个原子字段"):
         load_config(path)
 
 
@@ -229,3 +230,28 @@ def test_source_freshness_ttl_minimum_is_accepted(tmp_path: Path, source_db: Pat
         encoding="utf-8",
     )
     assert load_config(path).pipelines[0].sources[0].max_staleness_seconds == 300
+
+
+def test_shipped_example_maps_every_ten_quantity_v3_atom() -> None:
+    example = Path(__file__).resolve().parents[1] / "examples" / "config.toml"
+    pipeline = load_config(example).pipelines[0]
+    targets = [
+        mapping.target
+        for source in pipeline.sources
+        for mapping in (source.mappings or pipeline.mappings)
+    ]
+    assert set(targets) == set(METRICS)
+    assert len(targets) == len(METRICS)
+    assert {source.id for source in pipeline.sources} == {
+        "blasting-file",
+        "production-http",
+        "energy-sqlite",
+        "business-sqlite",
+    }
+    invoice_mapping = next(
+        mapping
+        for source in pipeline.sources
+        for mapping in (source.mappings or ())
+        if mapping.target == "invoiced_quantity_t"
+    )
+    assert invoice_mapping.source == "blue_invoice_t"

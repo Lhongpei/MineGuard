@@ -1,5 +1,5 @@
 [Unit]
-Description=MineGuard government five-quantity V2 regulatory service
+Description=MineGuard government ten-quantity V3 regulatory service
 After=network.target
 
 [Service]

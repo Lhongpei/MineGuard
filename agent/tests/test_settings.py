@@ -141,6 +141,32 @@ def test_v2_requires_explicit_distinct_application_and_transport_secrets(
     assert settings.five_quantity_demo_secret is False
 
 
+def test_v3_platform_environment_selects_ten_quantity_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ENTERPRISE_SYSTEM_ID", "agent-ten-001")
+    monkeypatch.setenv("PLATFORM_V3_BASE_URL", "https://regulator.example")
+    monkeypatch.setenv("PLATFORM_V3_SENDER_ID", "agent-ten-001")
+    monkeypatch.setenv(
+        "ENTERPRISE_EXCHANGE_HMAC_SECRET",
+        "application-secret-at-least-thirty-two-bytes",
+    )
+    monkeypatch.setenv(
+        "PLATFORM_V3_TRANSPORT_HMAC_SECRET",
+        "different-transport-secret-at-least-32-bytes",
+    )
+
+    settings = Settings.from_environment()
+
+    assert settings.five_quantity_platform is not None
+    assert settings.five_quantity_platform.submission_path == (
+        "/v3/ten-quantity-submissions"
+    )
+    assert settings.five_quantity_platform.next_report_path == (
+        "/v3/analysis-reports/next"
+    )
+
+
 def test_public_origin_is_strictly_validated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

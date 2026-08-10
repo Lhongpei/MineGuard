@@ -1,0 +1,465 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:exchange-common:v3",
+  "title": "MineGuard Ten-Quantity Exchange Common Definitions V3",
+  "description": "Neutral definitions for the ten-business-quantity V3 exchange. Ten business groups use eleven atomic measurements because blasting materials retain detonator count and explosive mass separately. V2 remains immutable and is not widened by this schema.",
+  "x-ten-quantity-groups": {
+    "airflow": ["ventilation_m3_min"],
+    "electricity": ["electricity_kwh"],
+    "blasting_materials": ["detonators_count", "explosives_kg"],
+    "mine_entry_personnel": ["mine_entry_persons"],
+    "production": ["production_t"],
+    "extraction": ["extraction_t"],
+    "sales": ["sales_t"],
+    "transport": ["transport_t"],
+    "coal_washing": ["wash_feed_t"],
+    "invoicing": ["invoiced_quantity_t"]
+  },
+  "x-daily-required-metrics": [
+    "ventilation_m3_min",
+    "electricity_kwh",
+    "detonators_count",
+    "explosives_kg",
+    "mine_entry_persons",
+    "production_t",
+    "extraction_t",
+    "sales_t",
+    "transport_t",
+    "wash_feed_t",
+    "invoiced_quantity_t"
+  ],
+  "x-shift-required-metrics": [
+    "ventilation_m3_min",
+    "electricity_kwh",
+    "detonators_count",
+    "explosives_kg",
+    "mine_entry_persons",
+    "production_t",
+    "extraction_t"
+  ],
+  "x-business-semantics": {
+    "sales_t": {
+      "basis": "delivered_sales_outbound_tonnage",
+      "negative_allowed": false
+    },
+    "transport_t": {
+      "basis": "mine_outbound_external_transport_net_tonnage",
+      "negative_allowed": false
+    },
+    "wash_feed_t": {
+      "basis": "raw_coal_feed_to_washing_tonnage",
+      "negative_allowed": false
+    },
+    "invoiced_quantity_t": {
+      "basis": "normal_or_blue_invoice_coal_quantity_tonnage",
+      "negative_allowed": false
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "uuid": {"type": "string", "format": "uuid"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "dateTime": {"type": "string", "format": "date-time"},
+    "safePositiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "participant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system_id", "party_id", "role"],
+      "properties": {
+        "system_id": {"$ref": "#/$defs/identifier"},
+        "party_id": {"$ref": "#/$defs/identifier"},
+        "role": {
+          "type": "string",
+          "enum": ["enterprise_agent", "regulatory_platform"]
+        }
+      }
+    },
+    "predecessor": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["message_id", "payload_sha256"],
+      "properties": {
+        "message_id": {"$ref": "#/$defs/uuid"},
+        "payload_sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "description": "Null for revision 1; later revisions identify the immediately preceding immutable V3 message."
+    },
+    "signatureEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "canonicalization",
+        "key_id",
+        "signed_at",
+        "nonce",
+        "payload_sha256",
+        "signature"
+      ],
+      "properties": {
+        "algorithm": {"const": "hmac-sha256-v3"},
+        "canonicalization": {"const": "rfc8785-jcs"},
+        "key_id": {"$ref": "#/$defs/identifier"},
+        "signed_at": {"$ref": "#/$defs/dateTime"},
+        "nonce": {
+          "type": "string",
+          "minLength": 22,
+          "maxLength": 86,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "payload_sha256": {"$ref": "#/$defs/sha256"},
+        "signature": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "mine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mine_id", "mine_name", "operator_id", "operator_name"],
+      "properties": {
+        "mine_id": {"$ref": "#/$defs/identifier"},
+        "mine_name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "operator_id": {"$ref": "#/$defs/identifier"},
+        "operator_name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "unified_social_credit_code": {
+          "type": "string",
+          "pattern": "^[0-9A-HJ-NPQRTUWXY]{18}$"
+        }
+      }
+    },
+    "qualityFlag": {
+      "type": "string",
+      "enum": [
+        "reported",
+        "missing",
+        "unavailable",
+        "not_applicable",
+        "partial",
+        "unit_converted",
+        "corrected",
+        "source_format_warning"
+      ]
+    },
+    "metricCode": {
+      "type": "string",
+      "enum": [
+        "ventilation_m3_min",
+        "electricity_kwh",
+        "detonators_count",
+        "explosives_kg",
+        "mine_entry_persons",
+        "production_t",
+        "extraction_t",
+        "sales_t",
+        "transport_t",
+        "wash_feed_t",
+        "invoiced_quantity_t"
+      ]
+    },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metric_code",
+        "value",
+        "unit",
+        "aggregation",
+        "quality_flags",
+        "source_refs"
+      ],
+      "properties": {
+        "metric_code": {"$ref": "#/$defs/metricCode"},
+        "value": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1000000000000000
+        },
+        "unit": {
+          "type": "string",
+          "enum": ["m3/min", "kWh", "count", "kg", "person", "t"]
+        },
+        "aggregation": {
+          "type": "string",
+          "enum": ["time_weighted_average", "sum", "snapshot"]
+        },
+        "quality_flags": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/qualityFlag"}
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/identifier"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"value": {"type": "null"}}, "required": ["value"]},
+          "then": {
+            "properties": {
+              "quality_flags": {
+                "contains": {
+                  "enum": ["missing", "unavailable", "not_applicable"]
+                },
+                "minContains": 1,
+                "not": {"contains": {"const": "reported"}}
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "quality_flags": {
+                "not": {
+                  "contains": {
+                    "enum": ["missing", "unavailable", "not_applicable"]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ventilationMeasurement": {
+      "allOf": [
+        {"$ref": "#/$defs/measurement"},
+        {
+          "properties": {
+            "metric_code": {"const": "ventilation_m3_min"},
+            "unit": {"const": "m3/min"},
+            "aggregation": {"enum": ["time_weighted_average", "snapshot"]},
+            "value": {"type": ["number", "null"], "minimum": 0}
+          }
+        }
+      ]
+    },
+    "electricityMeasurement": {
+      "allOf": [
+        {"$ref": "#/$defs/measurement"},
+        {
+          "properties": {
+            "metric_code": {"const": "electricity_kwh"},
+            "unit": {"const": "kWh"},
+            "aggregation": {"const": "sum"},
+            "value": {"type": ["number", "null"], "minimum": 0}
+          }
+        }
+      ]
+    },
+    "detonatorMeasurement": {
+      "allOf": [
+        {"$ref": "#/$defs/measurement"},
+        {
+          "properties": {
+            "metric_code": {"const": "detonators_count"},
+            "unit": {"const": "count"},
+            "aggregation": {"const": "sum"},
+            "value": {"type": ["integer", "null"], "minimum": 0}
+          }
+        }
+      ]
+    },
+    "explosivesMeasurement": {
+      "allOf": [
+        {"$ref": "#/$defs/measurement"},
+        {
+          "properties": {
+            "metric_code": {"const": "explosives_kg"},
+            "unit": {"const": "kg"},
+            "aggregation": {"const": "sum"},
+            "value": {"type": ["number", "null"], "minimum": 0}
+          }
+        }
+      ]
+    },
+    "mineEntryMeasurement": {
+      "allOf": [
+        {"$ref": "#/$defs/measurement"},
+        {
+          "properties": {
+            "metric_code": {"const": "mine_entry_persons"},
+            "unit": {"const": "person"},
+            "aggregation": {"const": "sum"},
+            "value": {"type": ["integer", "null"], "minimum": 0}
+          }
+        }
+      ]
+    },
+    "tonnageMeasurement": {
+      "allOf": [
+        {"$ref": "#/$defs/measurement"},
+        {
+          "properties": {
+            "unit": {"const": "t"},
+            "aggregation": {"const": "sum"},
+            "value": {"type": ["number", "null"], "minimum": 0}
+          }
+        }
+      ]
+    },
+    "productionMeasurement": {
+      "allOf": [
+        {"$ref": "#/$defs/tonnageMeasurement"},
+        {"properties": {"metric_code": {"const": "production_t"}}}
+      ]
+    },
+    "extractionMeasurement": {
+      "allOf": [
+        {"$ref": "#/$defs/tonnageMeasurement"},
+        {"properties": {"metric_code": {"const": "extraction_t"}}}
+      ]
+    },
+    "salesMeasurement": {
+      "description": "以完成销售出库并交付为确认点的煤炭实物吨数；不是合同、订单或尚未交付数量。",
+      "allOf": [
+        {"$ref": "#/$defs/tonnageMeasurement"},
+        {"properties": {"metric_code": {"const": "sales_t"}}}
+      ]
+    },
+    "transportMeasurement": {
+      "description": "完成出矿并用于对外运输的煤炭净吨数；不是矿内倒运毛重。",
+      "allOf": [
+        {"$ref": "#/$defs/tonnageMeasurement"},
+        {"properties": {"metric_code": {"const": "transport_t"}}}
+      ]
+    },
+    "washFeedMeasurement": {
+      "description": "进入洗选环节的原煤入料吨数；不是精煤产出或洗损。",
+      "allOf": [
+        {"$ref": "#/$defs/tonnageMeasurement"},
+        {"properties": {"metric_code": {"const": "wash_feed_t"}}}
+      ]
+    },
+    "invoicedQuantityMeasurement": {
+      "description": "本期已开具正常或蓝字发票所载的煤炭实物吨数；不是发票金额、税额或红冲净额。",
+      "allOf": [
+        {"$ref": "#/$defs/tonnageMeasurement"},
+        {"properties": {"metric_code": {"const": "invoiced_quantity_t"}}}
+      ]
+    },
+    "dailyMeasurementSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Daily totals require all eleven atomic measurements implementing exactly ten business groups.",
+      "required": [
+        "ventilation_m3_min",
+        "electricity_kwh",
+        "detonators_count",
+        "explosives_kg",
+        "mine_entry_persons",
+        "production_t",
+        "extraction_t",
+        "sales_t",
+        "transport_t",
+        "wash_feed_t",
+        "invoiced_quantity_t"
+      ],
+      "properties": {
+        "ventilation_m3_min": {"$ref": "#/$defs/ventilationMeasurement"},
+        "electricity_kwh": {"$ref": "#/$defs/electricityMeasurement"},
+        "detonators_count": {"$ref": "#/$defs/detonatorMeasurement"},
+        "explosives_kg": {"$ref": "#/$defs/explosivesMeasurement"},
+        "mine_entry_persons": {"$ref": "#/$defs/mineEntryMeasurement"},
+        "production_t": {"$ref": "#/$defs/productionMeasurement"},
+        "extraction_t": {"$ref": "#/$defs/extractionMeasurement"},
+        "sales_t": {"$ref": "#/$defs/salesMeasurement"},
+        "transport_t": {"$ref": "#/$defs/transportMeasurement"},
+        "wash_feed_t": {"$ref": "#/$defs/washFeedMeasurement"},
+        "invoiced_quantity_t": {"$ref": "#/$defs/invoicedQuantityMeasurement"}
+      }
+    },
+    "shiftMeasurementSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Each shift requires the first seven atomic measurements. Sales, transport, wash feed and invoiced quantity are optional at shift granularity; when explicitly inapplicable they use null plus not_applicable.",
+      "required": [
+        "ventilation_m3_min",
+        "electricity_kwh",
+        "detonators_count",
+        "explosives_kg",
+        "mine_entry_persons",
+        "production_t",
+        "extraction_t"
+      ],
+      "properties": {
+        "ventilation_m3_min": {"$ref": "#/$defs/ventilationMeasurement"},
+        "electricity_kwh": {"$ref": "#/$defs/electricityMeasurement"},
+        "detonators_count": {"$ref": "#/$defs/detonatorMeasurement"},
+        "explosives_kg": {"$ref": "#/$defs/explosivesMeasurement"},
+        "mine_entry_persons": {"$ref": "#/$defs/mineEntryMeasurement"},
+        "production_t": {"$ref": "#/$defs/productionMeasurement"},
+        "extraction_t": {"$ref": "#/$defs/extractionMeasurement"},
+        "sales_t": {"$ref": "#/$defs/salesMeasurement"},
+        "transport_t": {"$ref": "#/$defs/transportMeasurement"},
+        "wash_feed_t": {"$ref": "#/$defs/washFeedMeasurement"},
+        "invoiced_quantity_t": {"$ref": "#/$defs/invoicedQuantityMeasurement"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "acquisition_mode",
+        "source_system",
+        "source_record_id",
+        "captured_at",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "source_id": {"$ref": "#/$defs/identifier"},
+        "acquisition_mode": {
+          "type": "string",
+          "enum": ["direct_collection", "manual_import"]
+        },
+        "source_system": {"type": "string", "minLength": 1, "maxLength": 128},
+        "source_record_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "source_location": {"type": "string", "minLength": 1, "maxLength": 512},
+        "captured_at": {"$ref": "#/$defs/dateTime"},
+        "media_type": {"type": "string", "minLength": 1, "maxLength": 128},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "normalization": {"type": "string", "minLength": 1, "maxLength": 1000}
+      }
+    },
+    "humanConfirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "confirmed",
+        "confirmer_id",
+        "confirmer_name",
+        "role",
+        "confirmed_at",
+        "content_sha256"
+      ],
+      "properties": {
+        "confirmed": {"const": true},
+        "confirmer_id": {"$ref": "#/$defs/identifier"},
+        "confirmer_name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "role": {"type": "string", "minLength": 1, "maxLength": 128},
+        "confirmed_at": {"$ref": "#/$defs/dateTime"},
+        "content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "metricCodeList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 11,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/metricCode"}
+    }
+  }
+}

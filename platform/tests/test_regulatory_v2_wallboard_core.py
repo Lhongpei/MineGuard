@@ -106,13 +106,13 @@ const surface = sandbox.__wallboardCoreSurface;
     assert completed.returncode == 0, completed.stderr
 
 
-def test_wallboard_middle_contains_an_intelligent_five_quantity_core() -> None:
+def test_wallboard_middle_contains_an_intelligent_ten_quantity_core() -> None:
     wallboard = _wallboard_markup(_asset("index.html"))
 
     assert 'id="wallboardCorePanel"' in wallboard
     assert 'id="wallboardCoreBody"' in wallboard
     assert "智能研判核心" in wallboard
-    assert "五量联动核验" in wallboard
+    assert "十量分组核验" in wallboard
 
     # The core is the visual centre between the jurisdiction summary and live
     # updates, rather than another strip appended below the screen fold.
@@ -122,18 +122,23 @@ def test_wallboard_middle_contains_an_intelligent_five_quantity_core() -> None:
     assert situation < core < activity
 
 
-def test_core_names_all_five_quantities_and_keeps_explosives_as_one_quantity() -> None:
+def test_core_names_all_ten_quantities_in_three_plain_language_groups() -> None:
     combined = _asset("index.html") + _asset("app.js")
 
-    for quantity in ("风量", "电量", "火工品量", "入井人员量", "产量"):
+    for quantity in (
+        "风量", "电量", "火工品量", "入井人员量", "产量",
+        "开采量", "运输量", "洗煤量", "销售量", "开票量",
+    ):
         assert quantity in combined
 
-    # 火工品是五量之一，雷管与炸药只是同一量下面的两个业务分项。
+    # 火工品是十量之一，雷管与炸药只是同一量下面的两个业务分项。
     assert re.search(r"火工品量[^\n]{0,80}雷管", combined)
     assert re.search(r"火工品量[^\n]{0,120}炸药", combined)
     assert "雷管（发）" in combined
     assert "炸药（kg）" in combined
-    for wrong in ("六量", "雷管量", "炸药量"):
+    for group in ("安全运行", "生产煤流", "票据核验"):
+        assert group in combined
+    for wrong in ("六量", "十一量", "雷管量", "炸药量"):
         assert wrong not in _wallboard_markup(_asset("index.html"))
 
 
@@ -167,8 +172,8 @@ const html = element("wallboardCoreBody").innerHTML;
 if (!html.includes("status-risk")) process.exit(3);
 if (!html.includes("存在风险")) process.exit(4);
 
-for (const label of ["风量", "电量", "火工品量", "入井人员量", "产量",
-                     "雷管（发）", "炸药（kg）"]) {
+  for (const label of ["风量", "电量", "火工品量", "入井人员量", "产量",
+                     "开采量", "运输量", "洗煤量", "销售量", "开票量"]) {
   if (!html.includes(label)) process.exit(5);
 }
 if (!html.includes("关系约束") && !html.includes("物理关系")) process.exit(6);
@@ -208,7 +213,7 @@ for (const entry of cases) {
     )
 
 
-def test_quantity_nodes_only_show_inclusion_not_fake_individual_statuses() -> None:
+def test_three_group_nodes_do_not_fake_individual_statuses() -> None:
     _run_core_probe(
         r'''
 const {renderWallboardFocus, state} = surface;
@@ -221,9 +226,9 @@ renderWallboardFocus([{
 const html = element("wallboardCoreBody").innerHTML;
 const nodes = (html.match(/<[^>]+>/g) || []).filter((tag) => {
   const matched = tag.match(/\bclass="([^"]*)"/);
-  return matched && matched[1].split(/\s+/).includes("wallboard-core-quantity");
+  return matched && matched[1].split(/\s+/).includes("wallboard-core-group");
 });
-if (nodes.length !== 5) process.exit(2);
+if (nodes.length !== 3) process.exit(2);
 for (const node of nodes) {
   if (/\bstatus-(?:risk|positive|warning|info|neutral)\b/.test(node)) process.exit(3);
 }

@@ -11,14 +11,17 @@ import pytest
 from mineguard.external_submission import jcs_canonical_json
 from mineguard.exchange_v2 import (
     EXCHANGE_TRANSPORT_CONTEXT,
+    EXCHANGE_TRANSPORT_CONTEXT_V3,
     ExchangeAuthenticationError,
     ExchangeClient,
     ExchangeLineageError,
+    authenticate_transport,
     decode_inbound_message,
     load_exchange_clients,
     parse_exchange_clients,
     parse_inbound_message,
     sign_exchange_message,
+    sign_transport_headers,
     transport_signature,
     validate_exchange_lineage,
     validate_production_exchange_clients,
@@ -49,12 +52,8 @@ def _production_registry_document() -> dict[str, object]:
                 "mine_name": "沁源一号煤矿",
                 "active_message_key_id": "mine001-msg-2026q3-a7f4",
                 "message_keys": {
-                    "mine001-msg-2026q3-a7f4": (
-                        "mG8xQ2pL9vR4sT7wY3kN6cD1fH5jB0zA"
-                    ),
-                    "mine001-msg-2026q2-b9e1": (
-                        "R7cN2yK9mV4qH6xD1sP8aJ3wF5tB0zLu"
-                    ),
+                    "mine001-msg-2026q3-a7f4": ("mG8xQ2pL9vR4sT7wY3kN6cD1fH5jB0zA"),
+                    "mine001-msg-2026q2-b9e1": ("R7cN2yK9mV4qH6xD1sP8aJ3wF5tB0zLu"),
                 },
                 "transport_secrets": [
                     "uC7nP2aX9dK4qW6rE1vM8sJ3hF5bT0yZ",
@@ -739,3 +738,62 @@ def test_transport_signature_uses_contract_domain_and_exact_query() -> None:
         "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V2"
     )
     assert first != second
+
+
+def test_v3_route_uses_v3_transport_domain_for_reused_v2_message_contract() -> None:
+    client = ExchangeClient(
+        sender_id="agent-mine-qy-001",
+        party_id="operator-qy-001",
+        mine_id="MINE-QY-001",
+        secret=b"message-secret-material-that-is-long-enough",
+        transport_secret=b"transport-secret-material-that-is-long-enough",
+    )
+    target = "/v3/analysis-reports/11111111-1111-4111-8111-111111111111/delivery-ack"
+    body = b'{"contract_version":"risk-delivery-ack-v2"}'
+    headers = sign_transport_headers(
+        client,
+        method="POST",
+        request_target=target,
+        body=body,
+        contract_version="risk-delivery-ack-v2",
+    )
+
+    assert EXCHANGE_TRANSPORT_CONTEXT_V3 == (
+        "MINEGUARD-TEN-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V3"
+    )
+    assert headers["X-Exchange-Signature-Version"] == "hmac-sha256-v3"
+    authenticated, _timestamp, _nonce, contract = authenticate_transport(
+        {client.sender_id: client},
+        headers,
+        method="POST",
+        request_target=target,
+        body=body,
+    )
+    assert authenticated is client
+    assert contract == "risk-delivery-ack-v2"
+
+    absolute_target = f"http://127.0.0.1:8080{target}"
+    absolute_headers = sign_transport_headers(
+        client,
+        method="POST",
+        request_target=absolute_target,
+        body=body,
+        contract_version="risk-delivery-ack-v2",
+    )
+    assert absolute_headers["X-Exchange-Signature-Version"] == "hmac-sha256-v3"
+    assert authenticate_transport(
+        {client.sender_id: client},
+        absolute_headers,
+        method="POST",
+        request_target=absolute_target,
+        body=body,
+    )[0] is client
+
+    with pytest.raises(ExchangeAuthenticationError):
+        authenticate_transport(
+            {client.sender_id: client},
+            headers,
+            method="POST",
+            request_target=target.replace("/v3/", "/v2/"),
+            body=body,
+        )

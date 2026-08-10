@@ -292,7 +292,7 @@ def _startup_banner(
         f"({settings.five_quantity_identity.operator_id})\n"
         f"企业智能体：{settings.five_quantity_identity.system_id}（一矿一实例）\n"
         f"前端资源：{web_root.resolve()}\n"
-        "五量 V2 监管接口："
+        "十量 V3 监管接口："
         + (
             "已配置；应用消息与运输使用显式、不同的 HMAC 密钥"
             if settings.five_quantity_platform is not None
@@ -306,7 +306,7 @@ def _startup_banner(
     )
     if settings.five_quantity_demo_secret:
         print(
-            "警告：五量 V2 当前使用本机演示消息密钥，只能离线体验；连接监管平台前"
+            "警告：十量 V3 当前使用本机演示消息密钥，只能离线体验；连接监管平台前"
             "必须配置 ENTERPRISE_EXCHANGE_HMAC_SECRET。",
             file=sys.stderr,
         )
@@ -335,14 +335,14 @@ def _configuration_errors(
             or (callable(is_junction) and is_junction())
             or not path.is_dir()
         ):
-            errors.append(f"五量监听目录不存在、不是目录或为重解析点：{path}")
+            errors.append(f"十量监听目录不存在、不是目录或为重解析点：{path}")
             continue
         resolved = path.resolve()
         if resolved == Path(resolved.anchor):
-            errors.append("五量监听目录不能是文件系统根目录")
+            errors.append("十量监听目录不能是文件系统根目录")
         folded = str(resolved).casefold()
         if folded in seen_directories:
-            errors.append(f"五量监听目录重复：{resolved}")
+            errors.append(f"十量监听目录重复：{resolved}")
         seen_directories.add(folded)
     if settings.database_path == ":memory:":
         errors.append("服务配置不能使用内存数据库")
@@ -473,7 +473,7 @@ def _configuration_errors(
                 errors.append(f"{left_label} 与 {right_label} 不得复用")
 
     secrets_to_check: list[tuple[str, str]] = [
-        ("五量应用消息密钥", identity.message_hmac_secret),
+        ("十量应用消息密钥", identity.message_hmac_secret),
     ]
     if identity.previous_message_hmac_secret is not None:
         secrets_to_check.append(
@@ -482,7 +482,7 @@ def _configuration_errors(
     if settings.five_quantity_platform is not None:
         secrets_to_check.append(
             (
-                "五量运输密钥",
+                "十量运输密钥",
                 settings.five_quantity_platform.transport_hmac_secret,
             )
         )

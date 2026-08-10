@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+import json
 
 import pytest
 
@@ -9,6 +10,10 @@ from mineguard.regulatory_v2 import (
     ComparisonContext,
     DecisionStatus,
     FIVE_QUANTITY_GROUPS,
+    LEGACY_METRICS,
+    METRICS,
+    SHIFT_REQUIRED_METRICS,
+    TEN_QUANTITY_GROUPS,
     FiveQuantityDay,
     FiveQuantitySubmission,
     HistoricalFiveQuantityDay,
@@ -21,6 +26,7 @@ from mineguard.regulatory_v2 import (
     ShiftWindowMetadata,
     SubmissionProvenance,
     analyze_five_quantity,
+    effective_reported_value,
 )
 
 
@@ -86,6 +92,55 @@ def _submission(
     )
 
 
+def _ten_submission(
+    *,
+    day_count: int = 14,
+    invoiced_values: list[float] | None = None,
+) -> FiveQuantitySubmission:
+    base = _submission(day_count=day_count)
+    invoices = invoiced_values or [90.0] * day_count
+    days = [
+        day.model_copy(
+            update={
+                "extraction_t": _quantity(110.0),
+                "sales_t": _quantity(90.0),
+                "transport_t": _quantity(90.0),
+                "wash_feed_t": _quantity(70.0),
+                "invoiced_quantity_t": _quantity(invoices[index]),
+            }
+        )
+        for index, day in enumerate(base.days)
+    ]
+    return FiveQuantitySubmission.model_validate(
+        {
+            **base.model_dump(mode="python"),
+            "contract_version": "enterprise-ten-quantity-submission-v3",
+            "quantity_scope": "ten_quantity_v3",
+            "days": days,
+        }
+    )
+
+
+def _ten_history(day_count: int = 30) -> list[HistoricalFiveQuantityDay]:
+    return [
+        HistoricalFiveQuantityDay(
+            date=date(2025, 10, 1) + timedelta(days=index),
+            ventilation_m3_min=3_000.0,
+            electricity_kwh=2_000.0,
+            detonators_count=10.0,
+            explosives_kg=50.0,
+            mine_entry_persons=100.0,
+            production_t=100.0,
+            extraction_t=110.0,
+            sales_t=90.0,
+            transport_t=90.0,
+            wash_feed_t=70.0,
+            invoiced_quantity_t=90.0,
+        )
+        for index in range(day_count)
+    ]
+
+
 def test_stable_period_is_normal_candidate_and_acquisition_mode_has_no_weight() -> None:
     manual = analyze_five_quantity(_submission(mode="manual_import"))
     direct = analyze_five_quantity(_submission(mode="direct_collection"))
@@ -109,6 +164,239 @@ def test_five_business_quantities_keep_fire_material_units_separate() -> None:
         "detonators_count",
         "explosives_kg",
     )
+
+
+def test_v3_catalog_has_ten_business_quantities_and_eleven_atoms() -> None:
+    assert len(TEN_QUANTITY_GROUPS) == 10
+    assert len(METRICS) == 11
+    assert len(LEGACY_METRICS) == 6
+    assert SHIFT_REQUIRED_METRICS == (*LEGACY_METRICS, "extraction_t")
+    assert TEN_QUANTITY_GROUPS["blasting_materials"] == (
+        "detonators_count",
+        "explosives_kg",
+    )
+
+
+def test_legacy_v2_document_remains_readable_under_v3_engine() -> None:
+    document = _submission().model_dump(mode="python", exclude_defaults=True)
+    restored = FiveQuantitySubmission.model_validate(document)
+    result = analyze_five_quantity(restored)
+
+    assert restored.contract_version == "enterprise-five-quantity-submission-v2"
+    assert restored.quantity_scope == "five_quantity_v2"
+    assert restored.days[0].extraction_t is None
+    assert restored.applicable_metrics == LEGACY_METRICS
+    assert result.method_version == "regulatory-five-quantity-v2.3.0"
+    assert result.runtime_manifest["baseline_admission_rule_version"] == (
+        "baseline-admission-v2.2"
+    )
+    assert result.coverage.complete_day_count == 14
+    assert {item.metric for item in result.reconciliation.adjustments} == set(
+        LEGACY_METRICS
+    )
+
+
+def test_complete_v3_daily_report_does_not_require_commercial_shift_values() -> None:
+    submission = _ten_submission()
+
+    result = analyze_five_quantity(submission)
+
+    assert submission.applicable_metrics == METRICS
+    assert result.method_version.startswith("regulatory-ten-quantity-v3.")
+    assert result.coverage.complete_day_count == 14
+    assert result.coverage.completeness_ratio == 1.0
+    assert result.decision is DecisionStatus.NORMAL_CANDIDATE
+    assert all(
+        item.code != "partial_shift_values"
+        for item in result.data_quality_signals
+        if item.metric in {"sales_t", "transport_t", "wash_feed_t", "invoiced_quantity_t"}
+    )
+    assert {item.metric for item in result.reconciliation.adjustments} == set(METRICS)
+    assert result.method_version == "regulatory-ten-quantity-v3.2.0"
+    assert result.runtime_manifest["advanced_evidence_method_version"] == (
+        "regulatory-ten-quantity-v3.1.0"
+    )
+    advanced_modules = json.loads(
+        result.runtime_manifest["advanced_evidence_modules"]
+    )
+    assert advanced_modules["daily_shift_aggregation"] == "evaluated"
+    assert advanced_modules["raw_coal_balance"] == "skipped"
+    assert advanced_modules["wash_mass_balance"] == "skipped"
+    assert advanced_modules["sales_transport_invoice_credentials"] == "skipped"
+    assert result.runtime_manifest["advanced_support_policy"].startswith(
+        "base_v3_exchange_has_no_auxiliary"
+    )
+
+
+def test_advanced_evidence_layer_dispatches_only_for_v3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = regulatory_v2_module._run_advanced_v3_evidence_layer
+    calls: list[str] = []
+
+    def capture(submission, history):
+        calls.append(submission.quantity_scope)
+        return original(submission, history)
+
+    monkeypatch.setattr(
+        regulatory_v2_module,
+        "_run_advanced_v3_evidence_layer",
+        capture,
+    )
+
+    legacy = analyze_five_quantity(_submission())
+    current = analyze_five_quantity(_ten_submission())
+
+    assert calls == ["ten_quantity_v3"]
+    assert "advanced_evidence_method_version" not in legacy.runtime_manifest
+    assert current.runtime_manifest["advanced_evidence_input_sha256"]
+
+
+def test_v3_shift_metadata_requires_seven_atoms_but_allows_commercial_subset() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    aggregations = {
+        metric: ("time_weighted_average" if metric == "ventilation_m3_min" else "sum")
+        for metric in (*SHIFT_REQUIRED_METRICS, "sales_t")
+    }
+
+    metadata = ShiftWindowMetadata(
+        shift_code="SHIFT-1",
+        start_at=start,
+        end_at=start + timedelta(hours=8),
+        aggregations=aggregations,
+    )
+
+    assert set(metadata.aggregations) == set(SHIFT_REQUIRED_METRICS) | {"sales_t"}
+
+
+def test_provided_commercial_shift_values_are_preserved_and_checked() -> None:
+    submission = _ten_submission()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    aggregations = {
+        metric: ("time_weighted_average" if metric == "ventilation_m3_min" else "sum")
+        for metric in (*SHIFT_REQUIRED_METRICS, "sales_t")
+    }
+    windows = [
+        ShiftWindowMetadata(
+            shift_code=f"SHIFT-{index + 1}",
+            start_at=start + timedelta(hours=index * 8),
+            end_at=start + timedelta(hours=(index + 1) * 8),
+            aggregations=aggregations,
+        )
+        for index in range(3)
+    ]
+    day = submission.days[0].model_copy(
+        update={
+            "sales_t": ReportedQuantity(
+                daily_total=90.0,
+                daily_aggregation="sum",
+                shifts=ShiftValues(
+                    zero_shift=30.0,
+                    eight_shift=30.0,
+                    four_shift=30.0,
+                ),
+            ),
+            "shift_metadata": ShiftMetadata(
+                zero_shift=windows[0],
+                eight_shift=windows[1],
+                four_shift=windows[2],
+            ),
+        }
+    )
+    submission.days[0] = FiveQuantityDay.model_validate(day.model_dump(mode="python"))
+
+    result = analyze_five_quantity(submission)
+
+    assert submission.days[0].sales_t is not None
+    assert submission.days[0].sales_t.shifts is not None
+    assert effective_reported_value(submission.days[0], "sales_t") == 90.0
+    assert not any(
+        signal.code == "daily_shift_arithmetic_mismatch" and signal.metric == "sales_t"
+        for signal in result.data_quality_signals
+    )
+
+
+def test_v3_invoice_sales_anomaly_is_a_soft_reference_not_physical_law() -> None:
+    result = analyze_five_quantity(
+        _ten_submission(invoiced_values=[180.0] * 14),
+        history=_ten_history(),
+    )
+
+    diagnostic = next(
+        item
+        for item in result.reconciliation.soft_constraint_diagnostics
+        if item.relationship is RelationshipCode.INVOICED_QUANTITY_PER_SALES
+    )
+    reference = next(
+        item
+        for item in result.references.accepted_history_bands
+        if item.relationship is RelationshipCode.INVOICED_QUANTITY_PER_SALES
+    )
+    assert reference.numerator_metric == "invoiced_quantity_t"
+    assert reference.denominator_metric == "sales_t"
+    assert diagnostic.upper_slack > 0.0
+    assert result.decision is DecisionStatus.RISK
+    assert result.reconciliation.note.endswith("not_physical_laws")
+    assert any(
+        RelationshipCode.INVOICED_QUANTITY_PER_SALES.value in group
+        for conflict in result.reconciliation.minimal_conflict_sets
+        for group in conflict.relaxed_groups
+    )
+    assert {
+        "past_only_rolling_mad",
+        "past_only_ewma",
+        "past_only_cusum",
+        "past_only_page_hinkley",
+    } <= {
+        signal.code
+        for signal in result.temporal_signals
+        if signal.metric == RelationshipCode.INVOICED_QUANTITY_PER_SALES.value
+    }
+
+
+def test_v3_missing_relationship_denominator_is_skipped_safely() -> None:
+    submission = _ten_submission()
+    submission.days[0] = submission.days[0].model_copy(
+        update={"sales_t": ReportedQuantity(daily_total=None)}
+    )
+
+    result = analyze_five_quantity(submission, history=_ten_history())
+
+    assert result.reconciliation.success
+    assert result.coverage.complete_day_count == 13
+    assert not any(
+        item.date == submission.days[0].date
+        and item.relationship
+        in {
+            RelationshipCode.TRANSPORT_PER_SALES,
+            RelationshipCode.INVOICED_QUANTITY_PER_SALES,
+        }
+        for item in result.reconciliation.soft_constraint_diagnostics
+    )
+
+
+def test_v3_l1_solver_uses_eleven_metric_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = regulatory_v2_module._run_linprog_with_fallback
+    objective_sizes: list[int] = []
+
+    def capture_dimension(objective, **kwargs):
+        objective_sizes.append(len(objective))
+        return original(objective, **kwargs)
+
+    monkeypatch.setattr(
+        regulatory_v2_module,
+        "_run_linprog_with_fallback",
+        capture_dimension,
+    )
+
+    result = analyze_five_quantity(_ten_submission())
+
+    # No active prior bands: 11 reconciled values + two L1 error variables for
+    # each of the eleven daily observations.
+    assert objective_sizes[0] == len(METRICS) * 3
+    assert len({item.metric for item in result.reconciliation.adjustments}) == 11
 
 
 def test_legacy_internal_personnel_records_read_as_canonical_term() -> None:
@@ -193,9 +481,7 @@ def test_daily_shift_mismatch_is_risk_and_has_l1_mcs_diagnosis() -> None:
 
 
 def test_explicit_risk_is_not_downgraded_by_short_or_incomplete_reporting() -> None:
-    result = analyze_five_quantity(
-        _submission(day_count=3, mismatch_day=1)
-    )
+    result = analyze_five_quantity(_submission(day_count=3, mismatch_day=1))
 
     assert result.decision is DecisionStatus.RISK
     assert result.data_sufficiency_reasons

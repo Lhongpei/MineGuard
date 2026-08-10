@@ -160,16 +160,16 @@ def _item_summary(
         ]
         if unverified_labels:
             return (
-                "现有五量技术模型一致，但"
+                "现有报送指标技术模型一致，但"
                 f"{'、'.join(unverified_labels)}未验证，"
                 "需补充验证证据并安排抽查。"
             )
         if priority == "DATA":
             return (
-                "现有五量技术模型一致，但数据质量处于降级状态，"
+                "现有报送指标技术模型一致，但数据质量处于降级状态，"
                 "需补充质量证据并安排抽查。"
             )
-        return "现有五量技术模型一致，当前无需进入人工复核队列。"
+        return "现有报送指标技术模型一致，当前无需进入人工复核队列。"
     if technical_status == "inconclusive":
         return "数据质量未达到分析门槛，需先处理数据问题。"
     if technical_status == "solver_error":

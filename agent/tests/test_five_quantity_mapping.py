@@ -211,7 +211,7 @@ def test_masked_parser_inspection_is_the_preferred_mapping_boundary() -> None:
     inspection = inspect_five_quantity_csv(
         filename="企业日报.csv",
         content=(
-            "日期,产量,矿端A17\n"
+            "日期,企业报表产量,矿端A17\n"
             "2026-07-01,2600,96000\n"
             "2026-07-02,2700,97000\n"
         ).encode(),
@@ -239,7 +239,7 @@ def test_masked_parser_inspection_is_the_preferred_mapping_boundary() -> None:
         "content_sha256": inspection["content_sha256"],
         "schema_fingerprint": inspection["schema_fingerprint"],
     }
-    rule = candidate_by_header(result, "产量")
+    rule = candidate_by_header(result, "企业报表产量")
     assert rule["source"] == "rule"
     assert rule["source_index"] == 1
     assert rule["target_metric"] == "production_t"
@@ -391,11 +391,14 @@ def test_invalid_llm_output_is_rejected_as_a_whole_and_safely_degrades(
 
 def test_llm_failure_preserves_rule_results_without_leaking_exception() -> None:
     result = map_csv_columns(
-        ["日期", "产量", "陌生列"],
+        ["日期", "企业报表产量", "陌生列"],
         llm_provider=FailingProvider(),
     )
 
-    assert candidate_by_header(result, "产量")["target"]["metric"] == "production_t"
+    assert (
+        candidate_by_header(result, "企业报表产量")["target"]["metric"]
+        == "production_t"
+    )
     assert result["unmapped_columns"] == [
         {"source_column": 2, "source_header": "陌生列"}
     ]
@@ -404,7 +407,7 @@ def test_llm_failure_preserves_rule_results_without_leaking_exception() -> None:
 
 
 def test_duplicate_targets_are_blocked_instead_of_overwritten_or_summed() -> None:
-    result = map_csv_columns(["日期", "产量", "原煤产量"])
+    result = map_csv_columns(["日期", "企业报表产量", "报表产量"])
 
     assert result["candidates"] == []
     assert result["blocked_columns"] == [1, 2]

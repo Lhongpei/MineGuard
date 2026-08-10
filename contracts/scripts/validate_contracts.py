@@ -13,7 +13,7 @@ import hashlib
 import hmac
 import json
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import re
 import sys
@@ -42,6 +42,8 @@ EXAMPLES = {
     "risk-delivery-ack-v2.json": "risk-delivery-ack-v2.schema.json",
     "enterprise-risk-response-v2.json": "enterprise-risk-response-v2.schema.json",
     "response-receipt-v2.json": "response-receipt-v2.schema.json",
+    "ten-quantity-submission-v3.json": "ten-quantity-submission-v3.schema.json",
+    "analysis-report-v3.json": "analysis-report-v3.schema.json",
 }
 EXPECTED_PAYLOAD_SHA256 = (
     "f730ae0a8c047c6d094f81eac048f94e46f287bf9cabe7c5b5732f84230b7ac1"
@@ -117,6 +119,115 @@ V2_FIVE_QUANTITY_GROUPS = {
     "mine_entry_personnel": ["mine_entry_persons"],
     "production": ["production_t"],
 }
+EXPECTED_V3_VECTORS = {
+    "ten-quantity-submission-v3.json": (
+        "9a5467b816bd4d971ecab3dd4331f49aecc483ab35358b95f08456f8a1765dd3",
+        "71381f3e912547d34f33b4748e513448c4c06cec1db6b1f58620202818a05d40",
+    ),
+    "analysis-report-v3.json": (
+        "0a2580eb0ece19c1de0f9b2b9ba0cdc268a3800523c76d7d01eeb735b348b6f0",
+        "0c81e6689535ac7e7e18ec305943dd2e7c0e5eabb77fc644e0ae18a9a38fcdf3",
+    ),
+}
+V3_EXAMPLE_SECRET = b"example-v3-exchange-secret-not-for-production"
+V3_APPLICATION_SIGNATURE_DOMAIN = (
+    "MINEGUARD-TEN-QUANTITY-EXCHANGE-HMAC-SHA256-V3"
+)
+V3_HTTP_SIGNATURE_DOMAIN = (
+    "MINEGUARD-TEN-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V3"
+)
+V2_APPLICATION_SIGNATURE_DOMAIN = (
+    "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2"
+)
+V3_TEN_QUANTITY_GROUPS = {
+    "airflow": ["ventilation_m3_min"],
+    "electricity": ["electricity_kwh"],
+    "blasting_materials": ["detonators_count", "explosives_kg"],
+    "mine_entry_personnel": ["mine_entry_persons"],
+    "production": ["production_t"],
+    "extraction": ["extraction_t"],
+    "sales": ["sales_t"],
+    "transport": ["transport_t"],
+    "coal_washing": ["wash_feed_t"],
+    "invoicing": ["invoiced_quantity_t"],
+}
+V3_DAILY_METRICS = [
+    metric_code
+    for group_metrics in V3_TEN_QUANTITY_GROUPS.values()
+    for metric_code in group_metrics
+]
+V3_SHIFT_REQUIRED_METRICS = V3_DAILY_METRICS[:7]
+V3_SHIFT_OPTIONAL_METRICS = V3_DAILY_METRICS[7:]
+V3_ENGINE_VERSION = "3.2.0"
+V3_RUNTIME_BASE_MODULES = {
+    "data_quality",
+    "daily_shift_reconciliation",
+    "l1_reconciliation",
+    "minimal_conflict_set",
+    "robust_temporal_baseline",
+    "past_only_rolling_mad",
+    "past_only_ewma",
+    "past_only_cusum",
+    "past_only_page_hinkley",
+    "temporal_drift",
+    "change_point",
+    "operating_state_segmentation",
+    "evidence_calibration",
+}
+V3_RUNTIME_RELATIONSHIP_MODULES = {
+    "production_extraction_reconciliation",
+    "production_sales_reconciliation",
+    "production_transport_reconciliation",
+    "production_wash_reconciliation",
+    "sales_transport_reconciliation",
+    "sales_invoice_reconciliation",
+}
+V3_RUNTIME_CONDITIONAL_MODULES = {
+    "anonymous_peer_baseline",
+    *V3_RUNTIME_RELATIONSHIP_MODULES,
+}
+V3_RUNTIME_FINDING_CATEGORIES = {
+    "data_quality",
+    "joint_consistency",
+    "temporal_anomaly",
+}
+V3_RUNTIME_EVIDENCE_METHODS = {
+    "data_completeness",
+    "deterministic_reconciliation",
+    "l1_reconciliation",
+    "robust_temporal_baseline",
+    "temporal_drift",
+    "change_point",
+    "anonymous_peer_baseline",
+    "combined_calibration",
+}
+V3_BUSINESS_SEMANTICS = {
+    "sales_t": {
+        "basis": "delivered_sales_outbound_tonnage",
+        "negative_allowed": False,
+    },
+    "transport_t": {
+        "basis": "mine_outbound_external_transport_net_tonnage",
+        "negative_allowed": False,
+    },
+    "wash_feed_t": {
+        "basis": "raw_coal_feed_to_washing_tonnage",
+        "negative_allowed": False,
+    },
+    "invoiced_quantity_t": {
+        "basis": "normal_or_blue_invoice_coal_quantity_tonnage",
+        "negative_allowed": False,
+    },
+}
+V3_EXPECTED_BODY_SHA256 = (
+    "4286f4e0bac39f090d3c3805f233a33de3f322d1c7cbcf5593438410fdd801e4"
+)
+V3_EXPECTED_TRANSPORT_SIGNATURE = (
+    "8db2b067cbe5af7cabfe40cbb0887e42ec0384cbbac48cba3cab6e4ce11b7165"
+)
+V3_TRANSPORT_EXAMPLE_SECRET = (
+    b"example-v3-transport-secret-not-for-production"
+)
 
 
 class ContractValidationError(RuntimeError):
@@ -781,6 +892,618 @@ def _check_v2_workflow_semantics(messages: dict[str, dict[str, Any]]) -> None:
     _check_v2_fixed_vectors(messages)
 
 
+def _v3_signature_material(message: dict[str, Any], payload_hash: str) -> bytes:
+    signature = message["signature_envelope"]
+    predecessor = message.get("predecessor") or {}
+    lines = [
+        V3_APPLICATION_SIGNATURE_DOMAIN,
+        message["contract_version"],
+        message["message_type"],
+        message["message_id"],
+        message["correlation_id"],
+        message.get("causation_id") or "",
+        message["idempotency_key"],
+        str(message["revision"]),
+        predecessor.get("message_id", ""),
+        predecessor.get("payload_sha256", ""),
+        message["created_at"],
+        message["sender"]["system_id"],
+        message["sender"]["party_id"],
+        message["sender"]["role"],
+        message["recipient"]["system_id"],
+        message["recipient"]["party_id"],
+        message["recipient"]["role"],
+        message["mine_id"],
+        signature["algorithm"],
+        signature["canonicalization"],
+        signature["key_id"],
+        signature["signed_at"],
+        signature["nonce"],
+        payload_hash,
+    ]
+    return "\n".join(lines).encode("utf-8")
+
+
+def _check_v3_fixed_vectors(messages: dict[str, dict[str, Any]]) -> None:
+    for filename, (
+        expected_payload_hash,
+        expected_signature,
+    ) in EXPECTED_V3_VECTORS.items():
+        message = messages[filename]
+        payload_hash = hashlib.sha256(
+            _jcs_example(message["payload"]).encode("utf-8")
+        ).hexdigest()
+        if payload_hash != expected_payload_hash:
+            raise ContractValidationError(
+                f"{filename}: V3 payload vector changed; expected "
+                f"{expected_payload_hash}, got {payload_hash}"
+            )
+        envelope = message["signature_envelope"]
+        if envelope["algorithm"] != "hmac-sha256-v3":
+            raise ContractValidationError(
+                f"{filename}: V3 application signature version is incorrect"
+            )
+        if envelope["payload_sha256"] != payload_hash:
+            raise ContractValidationError(
+                f"{filename}: declared V3 payload_sha256 is incorrect"
+            )
+        calculated_signature = hmac.new(
+            V3_EXAMPLE_SECRET,
+            _v3_signature_material(message, payload_hash),
+            hashlib.sha256,
+        ).hexdigest()
+        if calculated_signature != expected_signature:
+            raise ContractValidationError(f"{filename}: V3 signature vector changed")
+        if envelope["signature"] != calculated_signature:
+            raise ContractValidationError(
+                f"{filename}: declared V3 signature is incorrect"
+            )
+    submission_path = (
+        CONTRACT_ROOT / "examples" / "ten-quantity-submission-v3.json"
+    )
+    body_sha256 = hashlib.sha256(submission_path.read_bytes()).hexdigest()
+    if body_sha256 != V3_EXPECTED_BODY_SHA256:
+        raise ContractValidationError(
+            "ten-quantity-submission-v3.json: V3 raw-body vector changed"
+        )
+    transport_lines = [
+        V3_HTTP_SIGNATURE_DOMAIN,
+        "POST",
+        "/v3/ten-quantity-submissions",
+        "agent-mine-qy-001",
+        "2026-08-01T00:05:00Z",
+        "VGVuUXVhbnRpdHlIVFRQVmVjdG9yMQ",
+        "ten-quantity-submission-v3",
+        body_sha256,
+    ]
+    transport_signature = hmac.new(
+        V3_TRANSPORT_EXAMPLE_SECRET,
+        "\n".join(transport_lines).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if transport_signature != V3_EXPECTED_TRANSPORT_SIGNATURE:
+        raise ContractValidationError("V3 HTTP transport signature vector changed")
+
+
+def _check_v3_metric_catalog(common_schema: dict[str, Any]) -> None:
+    groups = common_schema.get("x-ten-quantity-groups")
+    if groups != V3_TEN_QUANTITY_GROUPS:
+        raise ContractValidationError(
+            "V3 schema must define the exact ten business quantity groups"
+        )
+    if groups["blasting_materials"] != [
+        "detonators_count",
+        "explosives_kg",
+    ]:
+        raise ContractValidationError(
+            "V3 blasting materials must retain unlike-unit atomic components"
+        )
+    atomic_metrics = V3_DAILY_METRICS
+    if len(groups) != 10 or len(atomic_metrics) != 11 or len(set(atomic_metrics)) != 11:
+        raise ContractValidationError(
+            "V3 must contain ten groups and eleven unique atomic metrics"
+        )
+    definitions = common_schema.get("$defs", {})
+    metric_enum = definitions.get("metricCode", {}).get("enum", [])
+    if metric_enum != atomic_metrics:
+        raise ContractValidationError(
+            "V3 metricCode order and values must exactly match the group catalog"
+        )
+    daily_set = definitions.get("dailyMeasurementSet", {})
+    shift_set = definitions.get("shiftMeasurementSet", {})
+    daily_required = daily_set.get("required", [])
+    daily_properties = daily_set.get("properties", {})
+    shift_required = shift_set.get("required", [])
+    shift_properties = shift_set.get("properties", {})
+    if (
+        daily_required != V3_DAILY_METRICS
+        or list(daily_properties) != V3_DAILY_METRICS
+    ):
+        raise ContractValidationError(
+            "V3 dailyMeasurementSet must require exactly all eleven catalog metrics"
+        )
+    if (
+        shift_required != V3_SHIFT_REQUIRED_METRICS
+        or list(shift_properties) != V3_DAILY_METRICS
+        or set(V3_SHIFT_OPTIONAL_METRICS) & set(shift_required)
+    ):
+        raise ContractValidationError(
+            "V3 shiftMeasurementSet must require the first seven metrics and "
+            "allow only the final four as optional"
+        )
+    if common_schema.get("x-daily-required-metrics") != V3_DAILY_METRICS:
+        raise ContractValidationError("V3 daily metric metadata drifted")
+    if common_schema.get("x-shift-required-metrics") != V3_SHIFT_REQUIRED_METRICS:
+        raise ContractValidationError("V3 shift metric metadata drifted")
+    if common_schema.get("x-business-semantics") != V3_BUSINESS_SEMANTICS:
+        raise ContractValidationError("V3 frozen business semantics drifted")
+    if definitions.get("metricCodeList", {}).get("maxItems") != 11:
+        raise ContractValidationError("V3 affected metric lists must allow 11 metrics")
+    for metric, definition_name in {
+        "production_t": "productionMeasurement",
+        "extraction_t": "extractionMeasurement",
+        "sales_t": "salesMeasurement",
+        "transport_t": "transportMeasurement",
+        "wash_feed_t": "washFeedMeasurement",
+        "invoiced_quantity_t": "invoicedQuantityMeasurement",
+    }.items():
+        expected_ref = f"#/$defs/{definition_name}"
+        if daily_properties.get(metric) != {"$ref": expected_ref}:
+            raise ContractValidationError(f"V3 {metric} definition is not governed")
+        constraints = definitions[definition_name]["allOf"][1]["properties"]
+        if constraints.get("metric_code", {}).get("const") != metric:
+            raise ContractValidationError(f"V3 {metric} metric code drifted")
+    tonnage_constraints = definitions["tonnageMeasurement"]["allOf"][1][
+        "properties"
+    ]
+    if (
+        tonnage_constraints.get("unit", {}).get("const") != "t"
+        or tonnage_constraints.get("aggregation", {}).get("const") != "sum"
+        or tonnage_constraints.get("value", {}).get("minimum") != 0
+    ):
+        raise ContractValidationError(
+            "V3 tonnage metrics must be non-negative t/sum"
+        )
+    for definition_name in (
+        "ventilationMeasurement",
+        "electricityMeasurement",
+        "detonatorMeasurement",
+        "explosivesMeasurement",
+        "mineEntryMeasurement",
+    ):
+        value_constraints = definitions[definition_name]["allOf"][1]["properties"][
+            "value"
+        ]
+        if value_constraints.get("minimum") != 0:
+            raise ContractValidationError(
+                f"V3 {definition_name} must reject negative values"
+            )
+    for metric, definition_name in {
+        "detonators_count": "detonatorMeasurement",
+        "mine_entry_persons": "mineEntryMeasurement",
+    }.items():
+        constraints = definitions[definition_name]["allOf"][1]["properties"]
+        if constraints.get("value", {}).get("type") != ["integer", "null"]:
+            raise ContractValidationError(f"V3 {metric} must be integer|null")
+
+
+def _check_v3_report_schema_semantics(report_schema: dict[str, Any]) -> None:
+    definitions = report_schema.get("$defs", {})
+    module_enum = set(
+        definitions.get("algorithm", {})
+        .get("properties", {})
+        .get("modules", {})
+        .get("items", {})
+        .get("enum", [])
+    )
+    expected_modules = V3_RUNTIME_BASE_MODULES | V3_RUNTIME_CONDITIONAL_MODULES
+    if module_enum != expected_modules:
+        raise ContractValidationError(
+            "V3 analysis module enum must exactly match runtime output capability"
+        )
+    category_enum = set(
+        definitions.get("finding", {})
+        .get("properties", {})
+        .get("category", {})
+        .get("enum", [])
+    )
+    if category_enum != V3_RUNTIME_FINDING_CATEGORIES:
+        raise ContractValidationError(
+            "V3 finding categories must exactly match runtime wire projections"
+        )
+    method_enum = set(
+        definitions.get("evidence", {})
+        .get("properties", {})
+        .get("method", {})
+        .get("enum", [])
+    )
+    if method_enum != V3_RUNTIME_EVIDENCE_METHODS:
+        raise ContractValidationError(
+            "V3 evidence methods must exactly match runtime wire projections"
+        )
+
+
+def _check_v3_openapi_semantics(openapi: dict[str, Any]) -> None:
+    if openapi.get("x-http-signing") != {
+        "domain": V3_HTTP_SIGNATURE_DOMAIN,
+        "signature_version": "hmac-sha256-v3",
+    }:
+        raise ContractValidationError("V3 OpenAPI HTTP signing metadata drifted")
+    expected_application_domains = {
+        "ten-quantity-submission-v3": V3_APPLICATION_SIGNATURE_DOMAIN,
+        "analysis-report-v3": V3_APPLICATION_SIGNATURE_DOMAIN,
+        "intake-receipt-v2": V2_APPLICATION_SIGNATURE_DOMAIN,
+        "risk-delivery-ack-v2": V2_APPLICATION_SIGNATURE_DOMAIN,
+        "enterprise-risk-response-v2": V2_APPLICATION_SIGNATURE_DOMAIN,
+        "response-receipt-v2": V2_APPLICATION_SIGNATURE_DOMAIN,
+    }
+    if openapi.get("x-application-signing-domains") != expected_application_domains:
+        raise ContractValidationError(
+            "V3 OpenAPI application signing-domain dispatch drifted"
+        )
+
+    expected_parameters = {
+        "ContractVersionSubmissionV3": "ten-quantity-submission-v3",
+        "ContractVersionExchangeV3": "ten-quantity-exchange-v3",
+        "ContractVersionDeliveryAckV2": "risk-delivery-ack-v2",
+        "ContractVersionRiskResponseV2": "enterprise-risk-response-v2",
+    }
+    parameters = openapi.get("components", {}).get("parameters", {})
+    for parameter_name, contract_version in expected_parameters.items():
+        parameter = parameters.get(parameter_name, {})
+        if (
+            parameter.get("name") != "X-Exchange-Contract-Version"
+            or parameter.get("schema") != {"const": contract_version}
+        ):
+            raise ContractValidationError(
+                f"V3 OpenAPI {parameter_name} must freeze {contract_version}"
+            )
+
+    operations = {
+        ("/v3/ten-quantity-submissions", "post"): (
+            "ContractVersionSubmissionV3",
+            V3_APPLICATION_SIGNATURE_DOMAIN,
+            V2_APPLICATION_SIGNATURE_DOMAIN,
+        ),
+        ("/v3/ten-quantity-submissions/{message_id}/receipt", "get"): (
+            "ContractVersionExchangeV3",
+            None,
+            V2_APPLICATION_SIGNATURE_DOMAIN,
+        ),
+        ("/v3/analysis-reports/next", "get"): (
+            "ContractVersionExchangeV3",
+            None,
+            V3_APPLICATION_SIGNATURE_DOMAIN,
+        ),
+        ("/v3/analysis-reports/{report_id}", "get"): (
+            "ContractVersionExchangeV3",
+            None,
+            V3_APPLICATION_SIGNATURE_DOMAIN,
+        ),
+        ("/v3/analysis-reports/{report_id}/delivery-ack", "post"): (
+            "ContractVersionDeliveryAckV2",
+            V2_APPLICATION_SIGNATURE_DOMAIN,
+            None,
+        ),
+        ("/v3/analysis-reports/{report_id}/responses", "post"): (
+            "ContractVersionRiskResponseV2",
+            V2_APPLICATION_SIGNATURE_DOMAIN,
+            V2_APPLICATION_SIGNATURE_DOMAIN,
+        ),
+        ("/v3/risk-responses/{response_id}/receipt", "get"): (
+            "ContractVersionExchangeV3",
+            None,
+            V2_APPLICATION_SIGNATURE_DOMAIN,
+        ),
+    }
+    paths = openapi.get("paths", {})
+    for (path, method), (
+        parameter_name,
+        request_domain,
+        response_domain,
+    ) in operations.items():
+        operation = paths.get(path, {}).get(method, {})
+        parameter_refs = {
+            parameter.get("$ref")
+            for parameter in operation.get("parameters", [])
+            if isinstance(parameter, dict)
+        }
+        expected_ref = f"#/components/parameters/{parameter_name}"
+        if expected_ref not in parameter_refs:
+            raise ContractValidationError(
+                f"V3 OpenAPI {method.upper()} {path} has a loose contract version"
+            )
+        if operation.get("x-request-application-signing-domain") != request_domain:
+            raise ContractValidationError(
+                f"V3 OpenAPI {method.upper()} {path} request signing domain drifted"
+            )
+        if operation.get("x-response-application-signing-domain") != response_domain:
+            raise ContractValidationError(
+                f"V3 OpenAPI {method.upper()} {path} response signing domain drifted"
+            )
+
+
+def _check_v3_submission_semantics(submission: dict[str, Any]) -> None:
+    payload = submission["payload"]
+    if submission["mine_id"] != payload["mine"]["mine_id"]:
+        raise ContractValidationError(
+            "V3 submission envelope and payload mine_id differ"
+        )
+    if submission["correlation_id"] != submission["message_id"]:
+        raise ContractValidationError(
+            "initial V3 submission correlation_id must equal message_id"
+        )
+    if submission["causation_id"] is not None or submission["predecessor"] is not None:
+        raise ContractValidationError(
+            "initial V3 submission causation_id and predecessor must be null"
+        )
+    if submission["revision"] != 1:
+        raise ContractValidationError("V3 example submission must be revision 1")
+    created_at = _aware_datetime(submission["created_at"], "created_at")
+    signed_at = _aware_datetime(
+        submission["signature_envelope"]["signed_at"], "signed_at"
+    )
+    closed_at = _aware_datetime(payload["closed_at"], "closed_at")
+    confirmed_at = _aware_datetime(
+        payload["human_confirmation"]["confirmed_at"], "confirmed_at"
+    )
+    if not closed_at <= confirmed_at <= created_at <= signed_at:
+        raise ContractValidationError(
+            "V3 closing, confirmation, creation and signing times are misordered"
+        )
+
+    period_start = _parse_date(payload["period_start"], "period_start")
+    period_end = _parse_date(payload["period_end"], "period_end")
+    if period_end < period_start:
+        raise ContractValidationError("V3 reporting period ends before it starts")
+    days = payload["days"]
+    day_values = [_parse_date(day["date"], "days[].date") for day in days]
+    expected_days = [
+        period_start + timedelta(days=offset)
+        for offset in range((period_end - period_start).days + 1)
+    ]
+    if day_values != expected_days:
+        raise ContractValidationError(
+            "V3 days must chronologically and contiguously cover the period"
+        )
+    if any(day.strftime("%Y-%m") != payload["reporting_month"] for day in day_values):
+        raise ContractValidationError("V3 day does not match reporting_month")
+
+    sources = payload["sources"]
+    source_ids = [source["source_id"] for source in sources]
+    if len(source_ids) != len(set(source_ids)):
+        raise ContractValidationError("V3 source_id values must be unique")
+    source_id_set = set(source_ids)
+    if {source["acquisition_mode"] for source in sources} != {
+        "direct_collection",
+        "manual_import",
+    }:
+        raise ContractValidationError(
+            "V3 example must exercise equal direct and manual acquisition modes"
+        )
+    if any(
+        _aware_datetime(source["captured_at"], "source.captured_at") > confirmed_at
+        for source in sources
+    ):
+        raise ContractValidationError("V3 confirmation predates a source capture")
+
+    metric_codes = set(V3_DAILY_METRICS)
+    units = {
+        "ventilation_m3_min": "m3/min",
+        "electricity_kwh": "kWh",
+        "detonators_count": "count",
+        "explosives_kg": "kg",
+        "mine_entry_persons": "person",
+        "production_t": "t",
+        "extraction_t": "t",
+        "sales_t": "t",
+        "transport_t": "t",
+        "wash_feed_t": "t",
+        "invoiced_quantity_t": "t",
+    }
+    shift_keys = ("zero_shift", "eight_shift", "four_shift")
+    missing_flags = {"missing", "unavailable", "not_applicable"}
+    for day_index, day in enumerate(days):
+        quantity = day["reported_quantity"]
+        daily_measurements = quantity["daily_total"]
+        if (
+            len(daily_measurements) != len(V3_DAILY_METRICS)
+            or set(daily_measurements) != set(V3_DAILY_METRICS)
+        ):
+            raise ContractValidationError(
+                f"days[{day_index}].daily_total must contain exact V3 metrics"
+            )
+        measurement_sets = [("daily_total", daily_measurements)]
+        for shift_key in shift_keys:
+            shift = quantity["shifts"][shift_key]
+            start = _aware_datetime(
+                shift["start_at"], f"days[{day_index}].{shift_key}.start_at"
+            )
+            end = _aware_datetime(
+                shift["end_at"], f"days[{day_index}].{shift_key}.end_at"
+            )
+            if end <= start:
+                raise ContractValidationError(
+                    f"days[{day_index}].{shift_key} has a non-positive interval"
+                )
+            shift_measurements = shift["measurements"]
+            shift_codes = set(shift_measurements)
+            if not set(V3_SHIFT_REQUIRED_METRICS) <= shift_codes:
+                raise ContractValidationError(
+                    f"days[{day_index}].{shift_key} lacks a required V3 metric"
+                )
+            if not shift_codes <= metric_codes:
+                raise ContractValidationError(
+                    f"days[{day_index}].{shift_key} contains an unknown V3 metric"
+                )
+            measurement_sets.append((shift_key, shift_measurements))
+        for set_name, measurements in measurement_sets:
+            for metric_code, measurement in measurements.items():
+                if (
+                    measurement["metric_code"] != metric_code
+                    or measurement["unit"] != units[metric_code]
+                ):
+                    raise ContractValidationError(
+                        f"days[{day_index}].{set_name}.{metric_code} code/unit mismatch"
+                    )
+                if metric_code == "ventilation_m3_min":
+                    if measurement["aggregation"] not in {
+                        "time_weighted_average",
+                        "snapshot",
+                    }:
+                        raise ContractValidationError("V3 airflow aggregation is invalid")
+                elif measurement["aggregation"] != "sum":
+                    raise ContractValidationError(
+                        f"V3 {metric_code} aggregation must be sum"
+                    )
+                if not set(measurement["source_refs"]) <= source_id_set:
+                    raise ContractValidationError(
+                        f"days[{day_index}].{set_name}.{metric_code} has unknown source"
+                    )
+                value = measurement["value"]
+                flags = set(measurement["quality_flags"])
+                if value is None and not flags & missing_flags:
+                    raise ContractValidationError(
+                        f"days[{day_index}].{set_name}.{metric_code} null lacks flag"
+                    )
+                if value is None and "reported" in flags:
+                    raise ContractValidationError(
+                        f"days[{day_index}].{set_name}.{metric_code} null is reported"
+                    )
+                if value is not None and flags & missing_flags:
+                    raise ContractValidationError(
+                        f"days[{day_index}].{set_name}.{metric_code} conflicts with flag"
+                    )
+                if value is not None and value < 0:
+                    raise ContractValidationError(
+                        f"V3 {metric_code} cannot be negative"
+                    )
+                if (
+                    metric_code in {"detonators_count", "mine_entry_persons"}
+                    and value is not None
+                    and (isinstance(value, bool) or not isinstance(value, int))
+                ):
+                    raise ContractValidationError(
+                        f"V3 {metric_code} must be an integer when present"
+                    )
+
+
+def _check_v3_workflow_semantics(messages: dict[str, dict[str, Any]]) -> None:
+    submission = messages["ten-quantity-submission-v3.json"]
+    report = messages["analysis-report-v3.json"]
+    _check_v3_submission_semantics(submission)
+    report_payload = report["payload"]
+    if (
+        report["mine_id"] != submission["mine_id"]
+        or report["mine_id"] != report_payload["mine"]["mine_id"]
+        or report["correlation_id"] != submission["correlation_id"]
+        or report["causation_id"] != submission["message_id"]
+        or report_payload["submission_message_id"] != submission["message_id"]
+        or report_payload["submission_revision"] != submission["revision"]
+        or report_payload["reporting_month"] != submission["payload"]["reporting_month"]
+        or report_payload["period_start"] != submission["payload"]["period_start"]
+        or report_payload["period_end"] != submission["payload"]["period_end"]
+    ):
+        raise ContractValidationError("V3 report is not bound to its submission")
+    submission_payload_sha256 = hashlib.sha256(
+        _jcs_example(submission["payload"]).encode("utf-8")
+    ).hexdigest()
+    if (
+        report_payload["algorithm"]["input_snapshot_sha256"]
+        != submission_payload_sha256
+    ):
+        raise ContractValidationError(
+            "V3 report input snapshot is not the submission payload hash"
+        )
+    algorithm = report_payload["algorithm"]
+    if (
+        algorithm["engine_id"] != "mineguard-ten-quantity-engine"
+        or algorithm["engine_version"] != V3_ENGINE_VERSION
+    ):
+        raise ContractValidationError("V3 report engine identity or version drifted")
+    modules = set(algorithm["modules"])
+    allowed_modules = V3_RUNTIME_BASE_MODULES | V3_RUNTIME_CONDITIONAL_MODULES
+    if not modules <= allowed_modules:
+        raise ContractValidationError(
+            "V3 report example contains a module the runtime cannot emit"
+        )
+    required_modules = V3_RUNTIME_BASE_MODULES | V3_RUNTIME_RELATIONSHIP_MODULES
+    if algorithm["peer_snapshot_sha256"] is not None:
+        required_modules.add("anonymous_peer_baseline")
+    if not required_modules.issubset(modules):
+        raise ContractValidationError(
+            "V3 report example must exercise solver, soft business relations, "
+            "timing and history modules"
+        )
+    known_metrics = {
+        metric
+        for values in V3_TEN_QUANTITY_GROUPS.values()
+        for metric in values
+    }
+    if any(
+        not set(finding["affected_metrics"]) <= known_metrics
+        for finding in report_payload["findings"]
+    ):
+        raise ContractValidationError("V3 report references an unknown metric")
+    for finding in report_payload["findings"]:
+        if finding["category"] not in V3_RUNTIME_FINDING_CATEGORIES:
+            raise ContractValidationError(
+                "V3 report uses a finding category the runtime cannot emit"
+            )
+        for index, evidence in enumerate(finding["evidence"], start=1):
+            if evidence["method"] not in V3_RUNTIME_EVIDENCE_METHODS:
+                raise ContractValidationError(
+                    "V3 report uses an evidence method the runtime cannot emit"
+                )
+            expected_id = f"EV-{finding['finding_id'][:8]}-{index:03d}"
+            if evidence["evidence_id"] != expected_id:
+                raise ContractValidationError("V3 evidence ID is not runtime-shaped")
+            if evidence["score"] is not None:
+                raise ContractValidationError(
+                    "V3 runtime does not currently emit an evidence score"
+                )
+            core = {
+                key: value
+                for key, value in evidence.items()
+                if key not in {"evidence_id", "evidence_sha256"}
+            }
+            evidence_sha256 = hashlib.sha256(
+                _jcs_example(core).encode("utf-8")
+            ).hexdigest()
+            if evidence["evidence_sha256"] != evidence_sha256:
+                raise ContractValidationError("V3 evidence digest is incorrect")
+    if report_payload["outcome"] == "normal_candidate":
+        if (
+            report_payload["findings"]
+            or report_payload["response_required"]
+            or report_payload["response_due_at"] is not None
+        ):
+            raise ContractValidationError("V3 normal report has risk response state")
+    elif (
+        not report_payload["findings"]
+        or report_payload["response_required"] is not True
+        or report_payload["response_due_at"] is None
+    ):
+        raise ContractValidationError("V3 non-normal report lacks response state")
+    if _aware_datetime(report["created_at"], "report.created_at") > _aware_datetime(
+        report["signature_envelope"]["signed_at"], "report.signed_at"
+    ):
+        raise ContractValidationError("V3 report signature predates report creation")
+    forbidden_provenance_keys = {
+        "trust_level",
+        "trust_score",
+        "reliability_weight",
+        "acquisition_confidence",
+    }
+    for filename, message in messages.items():
+        for node in _walk(message):
+            if forbidden_provenance_keys & set(node):
+                raise ContractValidationError(
+                    f"{filename}: V3 acquisition must not carry a trust tier"
+                )
+    _check_v3_fixed_vectors(messages)
+
+
 def _aware_datetime(value: Any, field: str) -> datetime:
     if not isinstance(value, str):
         raise ContractValidationError(f"{field} must be a date-time string")
@@ -863,6 +1586,11 @@ def main() -> int:
             raise ContractValidationError(
                 f"{openapi_path}: OpenAPI document must use version 3.1.0"
             )
+    _check_v3_openapi_semantics(
+        documents[
+            CONTRACT_ROOT / "openapi" / "ten-quantity-exchange-v3.openapi.json"
+        ]
+    )
 
     submission_schema = documents[
         CONTRACT_ROOT / "schemas" / "enterprise-submission-v1.schema.json"
@@ -897,6 +1625,17 @@ def main() -> int:
         documents[CONTRACT_ROOT / "schemas" / "exchange-common-v2.schema.json"]
     )
     _check_v2_workflow_semantics(v2_messages)
+    v3_messages = {
+        filename: documents[CONTRACT_ROOT / "examples" / filename]
+        for filename in EXPECTED_V3_VECTORS
+    }
+    _check_v3_metric_catalog(
+        documents[CONTRACT_ROOT / "schemas" / "exchange-common-v3.schema.json"]
+    )
+    _check_v3_report_schema_semantics(
+        documents[CONTRACT_ROOT / "schemas" / "analysis-report-v3.schema.json"]
+    )
+    _check_v3_workflow_semantics(v3_messages)
 
     text_suffixes = {".json", ".md", ".py", ".txt", ".yaml", ".yml"}
     all_text = "\n".join(
@@ -915,7 +1654,7 @@ def main() -> int:
     print(
         f"OK: {len(json_paths)} 个 JSON 文件可解析；"
         f"{len(ids)} 个 schema ID 唯一；本地引用、V1 三层完整性和 "
-        "V2 双向消息签名/状态绑定向量通过。"
+        "V2 双向消息及 V3 十量提交/报告签名与状态绑定向量通过。"
     )
     print(f"OK: {schema_result}。")
     return 0

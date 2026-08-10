@@ -4,7 +4,8 @@
 The script deliberately uses only Python's standard library.  It starts each
 application in its own subprocess with an application-specific ``PYTHONPATH``
 and exercises the public HTTP/JSON contracts.  It does not import either
-application package.  The default workflow covers the current V2 exchange;
+application package.  The default workflow covers the current ten-quantity V3
+exchange while retaining the signed five-quantity V2 path as read-only history;
 the retired V1 workflow is available only through an explicit legacy flag.
 """
 
@@ -2866,7 +2867,8 @@ def _previous_complete_month_csv() -> tuple[str, str, str, int, bytes]:
     month_start = month_end.replace(day=1)
     lines = [
         "date,ventilation_m3_min,mine_entry_persons,electricity_kwh,"
-        "detonators_count,explosives_kg,production_t"
+        "detonators_count,explosives_kg,production_t,extraction_t,sales_t,"
+        "transport_t,wash_feed_t,invoiced_quantity_t"
     ]
     current = month_start
     while current <= month_end:
@@ -2886,6 +2888,11 @@ def _previous_complete_month_csv() -> tuple[str, str, str, int, bytes]:
                     str(120 + (offset % 3)),
                     str(240 + (offset % 3) * 2),
                     "2600",
+                    "2700",
+                    "2200",
+                    "2200",
+                    "1800",
+                    "2150",
                 )
             )
         )
@@ -2921,7 +2928,7 @@ def _assert_agent_principal(
         or principal.get("must_change_password") is not False
         or principal.get("temporary_demo") is not False
     ):
-        raise VerificationError(f"{label} 的具名身份或最小权限不符合 V2 验收配置")
+        raise VerificationError(f"{label} 的具名身份或最小权限不符合十量 V3 验收配置")
 
 
 def _matching_analysis_report(
@@ -2950,7 +2957,7 @@ def verify_v2(
     platform_python: str | None,
     agent_python: str | None,
 ) -> dict[str, Any]:
-    """Exercise the current one-mine V2 exchange as two black-box processes."""
+    """Exercise the current one-mine ten-quantity V3 exchange end to end."""
 
     platform_port = _unused_port()
     agent_port = _unused_port()
@@ -2959,9 +2966,9 @@ def verify_v2(
 
     token = secrets.token_hex(8)
     mine_id = f"e2e-mine-{token}"
-    mine_name = "V2 双进程验收煤矿"
+    mine_name = "十量 V3 双进程验收煤矿"
     operator_id = f"e2e-operator-{token}"
-    operator_name = "V2 双进程验收煤业有限公司"
+    operator_name = "十量 V3 双进程验收煤业有限公司"
     enterprise_system_id = f"agent-e2e-{token}"
     regulatory_system_id = "mineguard-qinyuan"
     regulatory_party_id = "regulator-qinyuan"
@@ -3034,7 +3041,7 @@ def verify_v2(
     result: dict[str, Any] | None = None
 
     with tempfile.TemporaryDirectory(
-        prefix="MineGuard V2 Two Process 验收 "
+        prefix="MineGuard Ten Quantity V3 Two Process 验收 "
     ) as temporary:
         temporary_root = Path(temporary)
         platform_state = temporary_root / "Platform V2 状态"
@@ -3098,7 +3105,7 @@ def verify_v2(
 
         try:
             platform = _start_process(
-                name="V2 监管平台",
+                name="十量 V3 监管平台",
                 command=[
                     platform_executable,
                     "-m",
@@ -3129,7 +3136,7 @@ def verify_v2(
             )
 
             agent = _start_process(
-                name="V2 企业智能体",
+                name="十量 V3 企业智能体",
                 command=[
                     agent_executable,
                     "-m",
@@ -3181,7 +3188,7 @@ def verify_v2(
                     "POST",
                     "/api/v2/imports",
                     payload={
-                        "filename": f"five-quantity-{reporting_month}.csv",
+                        "filename": f"ten-quantity-{reporting_month}.csv",
                         "content_base64": base64.b64encode(csv_content).decode(
                             "ascii"
                         ),
@@ -3208,7 +3215,7 @@ def verify_v2(
                 or not isinstance(payload.get("days"), list)
                 or len(payload["days"]) != day_count
             ):
-                raise VerificationError("CSV 未形成无缺日的目标月份 V2 草稿")
+                raise VerificationError("CSV 未形成无缺日的目标月份十量 V3 草稿")
             processing = payload.get("agent_processing")
             if (
                 not isinstance(processing, dict)
@@ -3288,9 +3295,9 @@ def verify_v2(
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if platform.process.poll() is not None:
-                    raise VerificationError("V2 监管平台在交换闭环期间退出")
+                    raise VerificationError("十量 V3 监管平台在交换闭环期间退出")
                 if agent.process.poll() is not None:
-                    raise VerificationError("V2 企业智能体在交换闭环期间退出")
+                    raise VerificationError("十量 V3 企业智能体在交换闭环期间退出")
                 exchange_attempts += 1
                 _expect(
                     _request(
@@ -3383,7 +3390,7 @@ def verify_v2(
                     if isinstance(summary, dict):
                         delivered_count = summary.get("delivered")
                 raise VerificationError(
-                    "V2 闭环超时："
+                    "十量 V3 闭环超时："
                     f"draft={status_text}, risk={report_record is not None}, "
                     f"platform={mine_detail is not None}, ack={delivered_count}"
                 )
@@ -3393,7 +3400,7 @@ def verify_v2(
                 or report_record is None
                 or mine_detail is None
             ):
-                raise VerificationError("V2 闭环完成条件与最终状态不一致")
+                raise VerificationError("十量 V3 闭环完成条件与最终状态不一致")
             receipt = _object_payload(submitted.get("receipt"), "企业接入回执")
             receipt_payload = _object_payload(
                 receipt.get("payload"), "企业接入回执 payload"
@@ -3448,10 +3455,10 @@ def verify_v2(
             if (
                 not isinstance(algorithm_version, str)
                 or not algorithm_version.startswith(
-                    "regulatory-five-quantity-v2"
+                    "regulatory-ten-quantity-v3"
                 )
             ):
-                raise VerificationError("监管平台未形成 V2 算法分析结果")
+                raise VerificationError("监管平台未形成十量 V3 算法分析结果")
             if response_summary.get("delivered", 0) < 1:
                 raise VerificationError("监管平台未确认分析报告送达回执")
 
@@ -3487,7 +3494,7 @@ def verify_v2(
                     for item in mine_items
                 )
             ):
-                raise VerificationError("监管总览和矿井列表未呈现本次 V2 报送")
+                raise VerificationError("监管总览和矿井列表未呈现本次十量 V3 报送")
 
             audit_value, _ = _expect(
                 _request(
@@ -3523,11 +3530,11 @@ def verify_v2(
             )
             ready = _object_payload(ready_value, "闭环后监管就绪状态")
             if ready.get("status") != "ready":
-                raise VerificationError("闭环后监管平台未保持 V2 ready")
+                raise VerificationError("闭环后监管平台未保持十量 V3 ready")
 
             result = {
                 "result": "passed",
-                "mode": "v2-full",
+                "mode": "ten-quantity-v3-full",
                 "processes": {
                     "platform": "independent subprocess",
                     "agent": "independent subprocess",
@@ -3543,7 +3550,7 @@ def verify_v2(
                 "delivery_acknowledged": response_summary["delivered"],
                 "exchange_attempts": exchange_attempts,
                 "checks": [
-                    "platform_readyz_with_v2_client_registry",
+                    "platform_readyz_with_governed_client_registry",
                     "two_named_least_privilege_accounts",
                     "complete_prior_month_csv_without_model",
                     "human_preparer_saved_current_revision",
@@ -3567,12 +3574,12 @@ def verify_v2(
                 managed.stop()
 
         if _port_accepts_connections(platform_port):
-            raise VerificationError("V2 监管平台验收后仍残留监听进程")
+            raise VerificationError("十量 V3 监管平台验收后仍残留监听进程")
         if _port_accepts_connections(agent_port):
-            raise VerificationError("V2 企业智能体验收后仍残留监听进程")
+            raise VerificationError("十量 V3 企业智能体验收后仍残留监听进程")
 
     if result is None:
-        raise VerificationError("V2 验收未产生结果")
+        raise VerificationError("十量 V3 验收未产生结果")
     return result
 
 
@@ -3729,7 +3736,7 @@ def verify_runtime_smoke(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "以两个独立子进程黑盒验收当前 V2 监管平台与企业智能体的 "
+            "以两个独立子进程黑盒验收当前十量 V3 监管平台与企业智能体的 "
             "HTTP/JSON/双 HMAC 链路"
         )
     )
@@ -3790,7 +3797,7 @@ def main() -> int:
     elif args.legacy:
         print("双进程退役 V1 端到端验收通过")
     else:
-        print("双进程 V2 端到端验收通过")
+        print("双进程十量 V3 端到端验收通过")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

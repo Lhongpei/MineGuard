@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#07111f">
   <title>MineGuard · 矿安智察 · 煤矿智能辅助监管系统</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=2.9.0">
+  <link rel="stylesheet" href="/assets/styles.css?v=3.0.0">
 </head>
 <body>
   <div id="frontendBootGuard" class="frontend-boot-guard" role="alert">
@@ -23,7 +23,7 @@
         <div>
           <p class="eyebrow">COAL MINE INTELLIGENT SUPERVISION</p>
           <h1>MineGuard · 矿安智察</h1>
-          <p class="subtitle">煤矿智能辅助监管系统 · 政府只读监管端 · 五量智能研判 · 全程留痕</p>
+          <p class="subtitle">煤矿智能辅助监管系统 · 政府只读监管端 · 十量智能研判 · 全程留痕</p>
         </div>
       </div>
       <div class="topbar-actions">
@@ -78,7 +78,7 @@
           </header>
           <div class="jurisdiction-body">
             <div class="radar-ring" aria-hidden="true">
-              <div class="radar-sweep"></div><div class="radar-core">五量<br>监管</div>
+              <div class="radar-sweep"></div><div class="radar-core">十量<br>监管</div>
               <span class="radar-point point-a"></span><span class="radar-point point-b"></span>
               <span class="radar-point point-c"></span><span class="radar-point point-d"></span>
             </div>
@@ -138,20 +138,27 @@
 
     <section id="mineView" class="view" data-view-panel="mine">
       <div class="section-toolbar panel">
-        <div><p class="panel-kicker">MINE DRILLDOWN</p><h2>单矿五量研判</h2></div>
+        <div><p class="panel-kicker">MINE DRILLDOWN</p><h2>单矿十量研判</h2></div>
         <label>选择煤矿<select id="mineSelector"><option value="">请选择</option></select></label>
       </div>
       <div id="mineEmpty" class="empty-state panel">从监管矩阵或上方选择一座煤矿查看。</div>
       <div id="mineDetail" class="hidden">
         <div class="mine-summary-grid">
           <article class="panel mine-identity"><p class="panel-kicker">MINE PROFILE</p><h2 id="mineName">—</h2><p id="mineMeta">—</p><p id="mineSourceNotice" class="mine-source-notice hidden"></p><div id="mineStatus"></div></article>
-          <article class="panel algorithm-card"><p class="panel-kicker">UNIFIED ENGINE</p><h2>唯一五量监管引擎</h2><dl id="algorithmMeta"></dl></article>
+          <article class="panel algorithm-card"><p class="panel-kicker">UNIFIED ENGINE</p><h2>唯一十量监管引擎</h2><dl id="algorithmMeta"></dl></article>
           <article class="panel response-card"><p class="panel-kicker">RESPONSE LOOP</p><h2>风险回执</h2><dl id="responseMeta"></dl></article>
         </div>
+        <article class="panel ten-quantity-summary-panel">
+          <header class="panel-header"><div><p class="panel-kicker">TEN QUANTITY STATUS</p><h2>十量一眼看懂</h2></div><span id="tenQuantityCoverage" class="status-pill status-neutral">十量已到 0/10</span></header>
+          <p id="tenQuantitySummary" class="ten-quantity-summary">正在汇总本期十量状态。</p>
+          <p id="tenQuantityLegacyNote" class="ten-quantity-legacy-note"></p>
+          <div id="tenQuantityStatusGroups" class="ten-quantity-status-groups" aria-label="十量分组状态"></div>
+        </article>
         <article class="panel chart-panel">
-          <header class="panel-header chart-panel-header"><div><p class="panel-kicker">TIME SERIES</p><h2>五量时序（火工品分项）</h2><p class="chart-note">按五量分轨展示；火工品量分为雷管、炸药两个子项，共用同一日期轴。</p></div></header>
-          <div id="seriesLegend" class="series-legend" role="list" aria-label="五量时序图例"></div>
-          <div id="seriesChart" class="series-chart" role="img" aria-label="五量分轨时序图；火工品包含雷管和炸药子项"></div>
+          <header class="panel-header chart-panel-header"><div><p class="panel-kicker">TIME SERIES</p><h2>十量风险优先趋势</h2><p class="chart-note">默认最多显示三个业务量并优先展示风险项；点击下方指标可切换。火工品量的雷管、炸药保持独立轨道。</p></div></header>
+          <div id="seriesLegend" class="series-legend" role="list" aria-label="十量趋势选择"></div>
+          <p id="seriesSelectionNote" class="series-selection-note">当前尚未选择趋势。</p>
+          <div id="seriesChart" class="series-chart tracks-1" role="img" aria-label="十量风险优先分轨时序图"></div>
           <p class="chart-note">每条轨道只表示该项在当前窗口内的自身高低，不代表不同单位可以直接比较；恒定值位于轨道中线，数据空缺处断开，悬停可查看原始数值。</p>
         </article>
         <div class="detail-grid">
@@ -251,7 +258,7 @@
         </div>
         <div class="wallboard-title">
           <h1>煤矿智能辅助监管态势大屏</h1>
-          <p>政府只读监管 · 五量统一研判 · 风险闭环 · 全程留痕</p>
+          <p>政府只读监管 · 十量统一研判 · 风险闭环 · 全程留痕</p>
         </div>
         <div class="wallboard-header-status">
           <div><span class="pulse-dot" aria-hidden="true"></span><strong>实时监测</strong></div>
@@ -289,7 +296,7 @@
         </article>
 
         <article id="wallboardCorePanel" class="wallboard-panel wallboard-focus-panel wallboard-core-panel">
-          <header><div><p>FIVE QUANTITY INTELLIGENCE CORE</p><h2>智能研判核心 · 五量联动核验</h2></div><span id="wallboardFocusProgress">—</span></header>
+          <header><div><p>TEN QUANTITY INTELLIGENCE CORE</p><h2>智能研判核心 · 十量分组核验</h2></div><span id="wallboardFocusProgress">—</span></header>
           <div id="wallboardFocusBody" class="wallboard-focus-body" aria-live="polite"><div id="wallboardCoreBody" class="wallboard-core-body"></div></div>
         </article>
 
@@ -334,6 +341,6 @@
     </form>
   </dialog>
 
-  <script src="/assets/app.js?v=2.9.0" defer></script>
+  <script src="/assets/app.js?v=3.0.0" defer></script>
 </body>
 </html>

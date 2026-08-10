@@ -13,7 +13,7 @@ from enterprise_connector.config import load_config
 from enterprise_connector.normalize import normalize_batches
 
 
-def test_normalized_content_is_consumed_by_real_agent_v2_importer(
+def test_normalized_content_is_consumed_by_real_agent_v3_importer(
     tmp_path: Path, source_db: Path
 ) -> None:
     repository = Path(__file__).resolve().parents[2]
@@ -43,12 +43,18 @@ imported = import_five_quantity_bytes(
     acquisition_mode="direct_collection", identity=identity,
     captured_at="2026-08-01T00:00:00Z",
 )
-validate_five_quantity_payload(imported["payload"], identity=identity, confirmed=False)
+validate_five_quantity_payload(
+    imported["payload"], identity=identity, confirmed=False,
+    contract_version=imported["contract_version"],
+)
 day = next(item for item in imported["payload"]["days"] if item["date"] == "2026-07-29")
 print(json.dumps({
+    "contract": imported["contract_version"],
     "month": imported["payload"]["reporting_month"],
     "days": len(imported["payload"]["days"]),
     "production": day["reported_quantity"]["daily_total"]["production_t"]["value"],
+    "extraction": day["reported_quantity"]["daily_total"]["extraction_t"]["value"],
+    "invoice": day["reported_quantity"]["daily_total"]["invoiced_quantity_t"]["value"],
     "zero_production": (
         day["reported_quantity"]["shifts"]["zero_shift"]
         ["measurements"]["production_t"]["value"]
@@ -68,8 +74,11 @@ print(json.dumps({
     assert completed.returncode == 0, completed.stderr.decode()
     result = json.loads(completed.stdout)
     assert result == {
+        "contract": "ten-quantity-submission-v3",
         "month": "2026-07",
         "days": 31,
         "production": 350.0,
+        "extraction": 355.0,
+        "invoice": 285.0,
         "zero_production": 100.0,
     }

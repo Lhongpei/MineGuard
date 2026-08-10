@@ -82,18 +82,39 @@ def test_regulatory_frontend_is_a_read_only_business_surface() -> None:
     script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
 
     assert "政府只读监管端" in index
-    assert "单矿五量研判" in index
-    assert "五量时序（火工品分项）" in index
+    assert "单矿十量研判" in index
+    assert "十量风险优先趋势" in index
     assert "风险台账" in index
     assert "交换留痕" in index
     assert "/v2/regulatory/overview" in script
     assert "/v2/regulatory/mines" in script
     assert "/v2/regulatory/findings" in script
     assert "/v2/regulatory/exchanges" in script
-    for label in ("风量", "电量", "火工品量", "入井人员量", "产量"):
+    for label in (
+        "风量",
+        "电量",
+        "火工品量",
+        "入井人员量",
+        "产量（企业报表）",
+        "开采量（采掘计量）",
+        "销售量",
+        "运输量",
+        "洗煤量（入洗原煤）",
+        "开票量（吨）",
+    ):
         assert label in script
     assert "火工品量·雷管" in script
     assert "火工品量·炸药" in script
+    for element_id in (
+        "tenQuantityCoverage",
+        "tenQuantitySummary",
+        "tenQuantityLegacyNote",
+        "tenQuantityStatusGroups",
+        "seriesSelectionNote",
+    ):
+        assert f'id="{element_id}"' in index
+    assert "当前为旧版 V2 五量报文" in script
+    assert "最多同时选择 3 项" in script
     assert 'showNotice(overview.notice || "")' not in script
     # The production CSP deliberately disallows inline styles. All dynamic
     # colours and progress fills must use CSS classes or SVG attributes.
@@ -432,7 +453,7 @@ let html = element("activityList").innerHTML;
 if ((html.match(/<li\b/g) || []).length !== 1) process.exit(3);
 if (!html.includes("沁源一号煤矿&lt;script&gt;alert(1)&lt;/script&gt;")) process.exit(4);
 if (html.includes("<script>") || html.includes("alert(1)</script>")) process.exit(5);
-if (!html.includes("本期五量核验发现风险线索")) process.exit(6);
+if (!html.includes("本期十量核验发现风险线索")) process.exit(6);
 const visibleText = html.replace(/<[^>]*>/g, " ");
 for (const rawCode of [
   "analysis_report_automatically_issued",
@@ -930,26 +951,30 @@ def test_finding_ledger_panel_has_the_same_top_inset_as_other_main_panels() -> N
     ) in styles
 
 
-def test_five_quantity_legend_has_equal_groups_and_visible_series_lines() -> None:
+def test_ten_quantity_legend_has_equal_groups_and_visible_series_lines() -> None:
     index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
     script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
     styles = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
 
     assert 'class="series-legend" role="list"' in index
-    assert 'class="series-legend-item"' in script
+    assert 'class="series-legend-item ${active ? "is-active" : ""}"' in script
     assert 'class="series-legend-swatch"' in script
     assert 'code: "blasting_materials"' in script
-    assert "const FIVE_QUANTITY_GROUPS" in script
+    assert "const TEN_QUANTITY_GROUPS" in script
     assert "fire-material-legend" not in script
-    assert "grid-template-columns: repeat(5, minmax(132px, 1fr))" in styles
+    assert "grid-template-columns: repeat(10, minmax(132px, 1fr))" in styles
     assert 'viewBox="0 0 30 10"' in script
     assert 'style="--series-color:' not in script
     assert "width: 30px" in styles
-    for color in ("#45d7ff", "#ffbd59", "#ff7864", "#f1a1ff", "#ae80ff", "#36dfa1"):
+    for color in (
+        "#45d7ff", "#ffbd59", "#ff7864", "#f1a1ff", "#ae80ff",
+        "#36dfa1", "#22c59a", "#4c9aff", "#48c6b0", "#f4d35e",
+        "#ff8fb3",
+    ):
         assert color in script
 
 
-def test_five_quantity_legend_matches_all_chart_series_colors() -> None:
+def test_ten_quantity_legend_and_risk_first_chart_share_series_colors() -> None:
     script_path = WEB_ROOT / "app.js"
     probe = f"""
 const fs = require("fs");
@@ -993,12 +1018,14 @@ const chartColors = [...chart.matchAll(
   /<polyline class="series-line[^\"]*"[^>]*stroke="(#[0-9a-f]{{6}})"/g,
 )].map((item) => item[1]);
 const expectedGroups = [
-  "airflow", "electricity", "blasting_materials",
-  "mine_entry_personnel", "production",
+  "airflow", "electricity", "blasting_materials", "mine_entry_personnel",
+  "production", "extraction", "sales", "transport", "washing", "invoiced",
 ];
 if (JSON.stringify(groups) !== JSON.stringify(expectedGroups)) process.exit(2);
-if ((legend.match(/class="series-legend-swatch"/g) || []).length !== 6) process.exit(3);
-if (JSON.stringify(legendColors.sort()) !== JSON.stringify(chartColors.sort())) process.exit(4);
+if ((legend.match(/class="series-legend-swatch"/g) || []).length !== 11) process.exit(3);
+if (chartColors.length < 1 || chartColors.length > 4) process.exit(4);
+if (chartColors.some((color) => !legendColors.includes(color))) process.exit(5);
+if ((legend.match(/class="series-legend-item is-active"/g) || []).length > 3) process.exit(6);
 """
     subprocess.run(
         ["node", "-e", probe],
@@ -1008,7 +1035,7 @@ if (JSON.stringify(legendColors.sort()) !== JSON.stringify(chartColors.sort())) 
     )
 
 
-def test_five_quantity_series_are_six_gap_safe_independent_tracks() -> None:
+def test_ten_quantity_series_are_risk_first_gap_safe_independent_tracks() -> None:
     script_path = WEB_ROOT / "app.js"
     probe = f"""
 const fs = require("fs");
@@ -1031,8 +1058,7 @@ const sandbox = {{
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox);
 const metricCodes = [
-  "ventilation_m3_min", "electricity_kwh", "detonators_count",
-  "explosives_kg", "mine_entry_persons", "production_t",
+  "detonators_count", "explosives_kg", "production_t", "extraction_t",
 ];
 function rowsFor(values) {{
   return values.map((factor, index) => ({{
@@ -1043,6 +1069,11 @@ function rowsFor(values) {{
     explosives_kg: factor === null ? null : factor * 30,
     mine_entry_persons: factor === null ? null : factor * 40,
     production_t: factor === null ? null : factor * 50,
+    extraction_t: factor === null ? null : factor * 51,
+    sales_t: factor === null ? null : factor * 43,
+    transport_t: factor === null ? null : factor * 48,
+    wash_feed_t: factor === null ? null : factor * 31,
+    invoiced_quantity_t: factor === null ? null : factor * 41,
   }}));
 }}
 function tracks(chart) {{
@@ -1051,24 +1082,25 @@ function tracks(chart) {{
   )];
 }}
 
-// Even perfectly proportional inputs must occupy six visibly separate tracks.
-sandbox.__renderSeries(rowsFor([1, 2, 3]));
+// Risk first selects at most three business quantities. Fire materials keep
+// two independent atomic tracks, so the selected three groups use four tracks.
+sandbox.__renderSeries(rowsFor([1, 2, 3]), [{{affected_metrics:["detonators_count"]}}]);
 let chart = element("seriesChart").innerHTML;
 let foundTracks = tracks(chart);
-if (foundTracks.length !== 6 || chart.includes("NaN")) process.exit(2);
-if (!chart.includes('viewBox="0 0 1984 458"')) process.exit(11);
+if (foundTracks.length !== 4 || chart.includes("NaN")) process.exit(2);
+if (!chart.includes('viewBox="0 0 1984 318"')) process.exit(11);
 if (JSON.stringify(foundTracks.map((item) => item[1])) !== JSON.stringify(metricCodes)) process.exit(3);
 const firstPointY = foundTracks.map((item) => {{
   const match = item[3].match(/<circle [^>]*cy="([0-9.]+)"/);
   return match && Number(match[1]);
 }});
-if (new Set(firstPointY).size !== 6) process.exit(4);
+if (new Set(firstPointY).size !== 4) process.exit(4);
 
 // A constant window belongs on the middle of each track and is labelled clearly.
-sandbox.__renderSeries(rowsFor([7, 7, 7]));
+sandbox.__renderSeries(rowsFor([7, 7, 7]), [{{affected_metrics:["detonators_count"]}}]);
 chart = element("seriesChart").innerHTML;
 foundTracks = tracks(chart);
-if (foundTracks.length !== 6 || chart.includes("NaN")) process.exit(5);
+if (foundTracks.length !== 4 || chart.includes("NaN")) process.exit(5);
 for (const item of foundTracks) {{
   const body = item[3];
   const rect = body.match(/<rect [^>]*y="([0-9.]+)"[^>]*height="([0-9.]+)"/);
@@ -1079,10 +1111,10 @@ for (const item of foundTracks) {{
 }}
 
 // A single valid sample must also use the safe middle position, never divide by zero.
-sandbox.__renderSeries(rowsFor([null, 7, null]));
+sandbox.__renderSeries(rowsFor([null, 7, null]), [{{affected_metrics:["detonators_count"]}}]);
 chart = element("seriesChart").innerHTML;
 foundTracks = tracks(chart);
-if (foundTracks.length !== 6 || chart.includes("NaN")) process.exit(12);
+if (foundTracks.length !== 4 || chart.includes("NaN")) process.exit(12);
 for (const item of foundTracks) {{
   const body = item[3];
   const rect = body.match(/<rect [^>]*y="([0-9.]+)"[^>]*height="([0-9.]+)"/);
@@ -1094,7 +1126,7 @@ for (const item of foundTracks) {{
 // A null day splits a series into segments; no line may bridge that gap.
 const gapRows = rowsFor([1, 2, 3, 4, 5]);
 gapRows[2].ventilation_m3_min = null;
-sandbox.__renderSeries(gapRows);
+sandbox.__renderSeries(gapRows, [{{affected_metrics:["ventilation_m3_min"]}}]);
 chart = element("seriesChart").innerHTML;
 const airflow = tracks(chart).find((item) => item[1] === "ventilation_m3_min")[3];
 const segments = [...airflow.matchAll(/<polyline class="series-line[^\"]*"[^>]*points="([^\"]+)"/g)];
@@ -1110,16 +1142,99 @@ if (chart.includes("NaN")) process.exit(10);
     )
 
 
-def test_five_quantity_chart_explains_tracks_and_busts_static_cache() -> None:
+def test_ten_quantity_status_uses_canonical_fields_and_keeps_v2_missing() -> None:
+    script_path = WEB_ROOT / "app.js"
+    probe = f"""
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync({json.dumps(str(script_path))}, "utf8")
+  + "\\nglobalThis.__renderStatus = renderQuantityStatusSummary;"
+  + "\\nglobalThis.__renderSeries = renderSeries;";
+const elements = new Map();
+function element(id) {{
+  if (!elements.has(id)) elements.set(id, {{
+    innerHTML: "", textContent: "", clientWidth: 1200,
+    className: "", classList: {{add() {{}}, remove() {{}}}},
+  }});
+  return elements.get(id);
+}}
+const sandbox = {{
+  document: {{
+    getElementById: element,
+    addEventListener() {{}},
+    querySelectorAll() {{ return []; }},
+  }},
+  window: {{ setInterval() {{ return 0; }} }},
+}};
+vm.createContext(sandbox);
+vm.runInContext(source, sandbox);
+
+const v2 = [{{
+  date:"2026-07-01", ventilation_m3_min:100, electricity_kwh:200,
+  detonators_count:3, explosives_kg:4, mine_entry_persons:5, production_t:6,
+}}];
+sandbox.__renderStatus(v2, []);
+if (element("tenQuantityCoverage").textContent !== "十量已到 5/10") process.exit(2);
+if (!element("tenQuantityLegacyNote").textContent.includes("旧版 V2 五量报文")) process.exit(3);
+const v2Status = element("tenQuantityStatusGroups").innerHTML;
+if (v2Status.split(">未提供</small>").length - 1 !== 5) process.exit(4);
+for (const section of ["安全运行", "生产煤流", "票据核验"]) {{
+  if (!v2Status.includes(section)) process.exit(5);
+}}
+
+const v3 = [{{...v2[0], extraction_t:7, sales_t:8, transport_t:9,
+  wash_feed_t:10, invoiced_quantity_t:11}}];
+sandbox.__renderStatus(v3, [{{finding_type:"risk", affected_metrics:["sales_t"]}}]);
+if (element("tenQuantityCoverage").textContent !== "十量已到 10/10") process.exit(6);
+const v3Status = element("tenQuantityStatusGroups").innerHTML;
+if (!v3Status.includes('data-quantity-code="sales"')) process.exit(7);
+if (!v3Status.includes('data-quantity-code="sales"') || !v3Status.includes("需关注")) process.exit(8);
+if ((v3Status.match(/class="ten-quantity-status /g) || []).length !== 10) process.exit(9);
+
+sandbox.__renderSeries(v3, [{{finding_type:"risk", affected_metrics:["sales_t"]}}]);
+const chart = element("seriesChart").innerHTML;
+for (const code of ["production_t", "extraction_t", "sales_t"]) {{
+  if (!chart.includes(`data-series-code="${{code}}"`)) process.exit(10);
+}}
+// 模型升级可能为旧 V2 行补齐 null 键；前端仍须显示“未提供”。
+const v2WithNullKeys = [{{...v2[0], extraction_t:null, sales_t:null,
+  transport_t:null, wash_feed_t:null, invoiced_quantity_t:null}}];
+sandbox.__renderStatus(v2WithNullKeys, []);
+if (element("tenQuantityCoverage").textContent !== "十量已到 5/10") process.exit(12);
+if (element("tenQuantityStatusGroups").innerHTML.split(">未提供</small>").length - 1 !== 5) process.exit(13);
+
+// 火工品是一个业务量、两个不可混加原子；缺任一原子都不能显示已提供。
+const partialBlasting = [{{...v3[0], explosives_kg:null}}];
+sandbox.__renderStatus(partialBlasting, [], "ten_quantity_v3");
+if (element("tenQuantityCoverage").textContent !== "十量已到 9/10") process.exit(14);
+const partialStatus = element("tenQuantityStatusGroups").innerHTML;
+const blastingStart = partialStatus.indexOf('data-quantity-code="blasting_materials"');
+if (blastingStart < 0 || !partialStatus.slice(blastingStart, blastingStart + 260).includes("数据不足")) process.exit(15);
+
+// V3 required fields that are explicitly null are data-insufficient, not a V2 report.
+sandbox.__renderStatus(v2WithNullKeys, [], "ten_quantity_v3");
+if (element("tenQuantityLegacyNote").textContent.includes("旧版 V2")) process.exit(16);
+if (element("tenQuantityStatusGroups").innerHTML.split(">数据不足</small>").length - 1 !== 5) process.exit(17);
+"""
+    subprocess.run(
+        ["node", "-e", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_ten_quantity_chart_explains_risk_first_tracks_and_busts_static_cache() -> None:
     index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
 
-    assert "按五量分轨展示；火工品量分为雷管、炸药两个子项" in index
+    assert "默认最多显示三个业务量并优先展示风险项" in index
+    assert "火工品量的雷管、炸药保持独立轨道" in index
     assert "恒定值位于轨道中线" in index
-    assert 'aria-label="五量分轨时序图；火工品包含雷管和炸药子项"' in index
+    assert 'aria-label="十量风险优先分轨时序图"' in index
     assert "SIX TRACKS" not in index
     assert "六条原子序列" not in index
-    assert "/assets/styles.css?v=2.9.0" in index
-    assert "/assets/app.js?v=2.9.0" in index
+    assert "/assets/styles.css?v=3.0.0" in index
+    assert "/assets/app.js?v=3.0.0" in index
 
 
 def test_frontend_boot_failure_is_visible_without_running_application_js() -> None:

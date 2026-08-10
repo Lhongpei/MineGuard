@@ -10,11 +10,11 @@ from openpyxl import Workbook
 from enterprise_agent.errors import ImportContentError
 from enterprise_agent.five_quantity_exchange import MineIdentity
 from enterprise_agent.five_quantity_import import (
-    METRICS,
     SHIFT_KEYS,
     import_five_quantity_bytes,
     inspect_five_quantity_csv,
 )
+from enterprise_agent.quantity_catalog import LEGACY_V2_METRICS, METRICS
 
 
 def identity() -> MineIdentity:
@@ -84,7 +84,7 @@ def test_csv_normalisation_never_invents_missing_values_or_trust_tiers() -> None
 
 def test_preferred_chinese_five_quantity_header_keeps_first_and_only_day() -> None:
     content = (
-        "日期,风量,电量,雷管,炸药,入井人员量,产量\n"
+        "日期,风量,电量,雷管,炸药,入井人员量,企业报表产量\n"
         "2026-07-01,4800,96000,120,240,320,2600\n"
     ).encode()
     imported = import_five_quantity_bytes(
@@ -98,7 +98,7 @@ def test_preferred_chinese_five_quantity_header_keeps_first_and_only_day() -> No
         "2026-07-01"
     ]
     values = imported["payload"]["days"][0]["reported_quantity"]["daily_total"]
-    assert {metric: item["value"] for metric, item in values.items()} == {
+    assert {metric: values[metric]["value"] for metric in LEGACY_V2_METRICS} == {
         "ventilation_m3_min": 4800,
         "electricity_kwh": 96000,
         "detonators_count": 120,
@@ -106,13 +106,18 @@ def test_preferred_chinese_five_quantity_header_keeps_first_and_only_day() -> No
         "mine_entry_persons": 320,
         "production_t": 2600,
     }
+    assert all(
+        values[metric]["value"] is None
+        for metric in METRICS
+        if metric not in LEGACY_V2_METRICS
+    )
 
 
 def test_csv_accepts_gb18030_and_semicolon_delimiter() -> None:
     imported = import_five_quantity_bytes(
         filename="业务系统导出.csv",
         content=(
-            "日期;风量(m3/min);电量(kWh);雷管(发);炸药(kg);入井人员量(人次);产量(t)\n"
+            "日期;风量(m3/min);电量(kWh);雷管(发);炸药(kg);入井人员量(人次);企业报表产量(t)\n"
             "2026-07-01;4800;96000;120;240;320;2600\n"
         ).encode("gb18030"),
         acquisition_mode="manual_import",
@@ -132,7 +137,7 @@ def test_complete_three_shift_csv_template_maps_every_scope() -> None:
         "雷管(发)",
         "炸药(kg)",
         "入井人员量(人次)",
-        "产量(t)",
+        "企业报表产量(t)",
     )
     header = ["日期"] + [
         f"{scope}_{metric}" for scope in scopes for metric in metrics
@@ -146,7 +151,10 @@ def test_complete_three_shift_csv_template_maps_every_scope() -> None:
         captured_at="2026-08-01T00:00:00Z",
     )
     reported = imported["payload"]["days"][0]["reported_quantity"]
-    assert [reported["daily_total"][metric]["value"] for metric in METRICS] == [
+    assert [
+        reported["daily_total"][metric]["value"]
+        for metric in LEGACY_V2_METRICS
+    ] == [
         1,
         2,
         3,
@@ -156,23 +164,27 @@ def test_complete_three_shift_csv_template_maps_every_scope() -> None:
     ]
     assert [
         reported["shifts"]["zero_shift"]["measurements"][metric]["value"]
-        for metric in METRICS
+        for metric in LEGACY_V2_METRICS
     ] == [7, 8, 9, 10, 11, 12]
     assert [
         reported["shifts"]["eight_shift"]["measurements"][metric]["value"]
-        for metric in METRICS
+        for metric in LEGACY_V2_METRICS
     ] == [13, 14, 15, 16, 17, 18]
     assert [
         reported["shifts"]["four_shift"]["measurements"][metric]["value"]
-        for metric in METRICS
+        for metric in LEGACY_V2_METRICS
     ] == [19, 20, 21, 22, 23, 24]
+    for metric in METRICS:
+        if metric in LEGACY_V2_METRICS:
+            continue
+        assert reported["daily_total"][metric]["value"] is None
 
 
 def test_csv_reports_unmapped_and_unsafe_numeric_cells_without_executing() -> None:
     imported = import_five_quantity_bytes(
         filename="待核对.csv",
         content=(
-            '日期,产量,电量,企业备注\n'
+            '日期,企业报表产量,电量,企业备注\n'
             '2026-07-01,=1+1,"1,2",不得自动采用\n'
         ).encode(),
         acquisition_mode="manual_import",
@@ -384,7 +396,7 @@ def test_reviewed_csv_mapping_rejects_duplicate_or_unknown_targets() -> None:
 
 
 def test_csv_mapping_never_silently_treats_incompatible_units_as_canonical() -> None:
-    content = "日期,原煤产量(kg),风量(m3/s)\n2026-07-01,2600000,80\n".encode()
+    content = "日期,企业报表产量(kg),风量(m3/s)\n2026-07-01,2600000,80\n".encode()
     preview = inspect_five_quantity_csv(filename="wrong-units.csv", content=content)
     assert {item["status"] for item in preview["columns"]} == {"blocked"}
     assert all("不会静默换算" in item["reason"] for item in preview["columns"])
@@ -414,7 +426,7 @@ def test_separate_columns_accept_unambiguous_business_unit_suffixes() -> None:
     imported = import_five_quantity_bytes(
         filename="带单位五量.csv",
         content=(
-            "日期,风量,电量,雷管,炸药,入井人员量,产量\n"
+            "日期,风量,电量,雷管,炸药,入井人员量,企业报表产量\n"
             "2026-07-01,4800m3/min,96000kWh,120发,240kg,320人次,2600吨\n"
         ).encode(),
         acquisition_mode="manual_import",

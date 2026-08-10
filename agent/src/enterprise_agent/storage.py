@@ -2749,7 +2749,7 @@ class Repository:
             (draft_id,),
         ).fetchone()
         if draft is None:
-            raise NotFoundError("五量草稿不存在")
+            raise NotFoundError("报送草稿不存在")
         binding = db.execute(
             "SELECT * FROM connector_draft_bindings WHERE draft_id=?",
             (draft_id,),
@@ -3131,7 +3131,7 @@ class Repository:
                 (draft_id,),
             ).fetchone()
             if draft is None:
-                raise NotFoundError("五量草稿不存在")
+                raise NotFoundError("报送草稿不存在")
             rows = db.execute(
                 """
                 SELECT * FROM connector_ingestions

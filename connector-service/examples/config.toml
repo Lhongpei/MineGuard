@@ -16,15 +16,17 @@ retry_max_seconds = 900
 lease_seconds = 120
 
 [[pipelines]]
-id = "mine-qy-001-five-quantity"
+id = "mine-qy-001-ten-quantity-v3"
 enterprise_id = "operator-qy-001"
+# 兼容路由名：Agent 的月度 draft_key 仍使用 five-quantity；实际来源快照
+# contract_version 明确为 ten-quantity-submission-v3。
 report_type = "five-quantity"
 period_type = "daily"
 timezone = "Asia/Shanghai"
 timestamp_field = "observed_at"
 scope_field = "scope"
 reporting_lag_days = 0
-required_sources = ["blasting-file", "production-http", "energy-sqlite"]
+required_sources = ["blasting-file", "production-http", "energy-sqlite", "business-sqlite"]
 workflow_name = "daily_coal_health"
 
 [pipelines.scope_values]
@@ -35,6 +37,11 @@ workflow_name = "daily_coal_health"
 
 [pipelines.mapping]
 production_t = { source = "production_t", type = "number" }
+extraction_t = { source = "extraction_t", type = "number" }
+sales_t = { source = "sales_t", type = "number" }
+transport_t = { source = "transport_t", type = "number" }
+wash_feed_t = { source = "wash_feed_t", type = "number" }
+invoiced_quantity_t = { source = "invoiced_quantity_t", type = "number" }
 electricity_kwh = { source = "electricity_kwh", type = "number" }
 ventilation_m3_min = { source = "ventilation_m3_min", type = "number" }
 detonators_count = { source = "detonators_count", type = "integer" }
@@ -101,6 +108,7 @@ SHIFT_16 = "four_shift"
 
 [pipelines.sources.mapping]
 production_t = { source = "rawTonnes", type = "number", required = true }
+extraction_t = { source = "faceExtractedTonnes", type = "number", required = true }
 
 [[pipelines.sources]]
 id = "energy-sqlite"
@@ -125,3 +133,28 @@ Z16 = "four_shift"
 [pipelines.sources.mapping]
 electricity_kwh = { source = "active_energy_kwh", type = "number", required = true }
 ventilation_m3_min = { source = "airflow_avg", type = "number", required = true }
+
+[[pipelines.sources]]
+id = "business-sqlite"
+adapter = "sqlite-query"
+source_name = "销售外运入洗与普通发票只读视图"
+source_system = "business-sqlite"
+truth_statement = "只读获取日报总量；开票字段仅含普通/蓝票实物吨数，不含红票净额"
+database = "./demo-source.sqlite3"
+# 红票、退货、折让留在来源系统辅助事件表中，不得以负数净额进入主字段。
+query = "SELECT business_date, scope_code, sales_t, outbound_transport_t, wash_feed_t, blue_invoice_t FROM business_daily_readonly"
+timeout_seconds = 5
+max_records = 10000
+max_staleness_seconds = 3600
+timestamp_field = "business_date"
+period_type = "daily"
+scope_field = "scope_code"
+
+[pipelines.sources.scope_values]
+DAY = "daily_total"
+
+[pipelines.sources.mapping]
+sales_t = { source = "sales_t", type = "number", required = true }
+transport_t = { source = "outbound_transport_t", type = "number", required = true }
+wash_feed_t = { source = "wash_feed_t", type = "number", required = true }
+invoiced_quantity_t = { source = "blue_invoice_t", type = "number", required = true }

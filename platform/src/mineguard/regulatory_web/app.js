@@ -23,6 +23,11 @@ const state = {
     requestSerial: 0,
   },
   selectedMine: null,
+  seriesView: {
+    rows: [],
+    findings: [],
+    selectedGroups: [],
+  },
   activeView: "overview",
   refreshTimer: null,
   refreshing: false,
@@ -60,18 +65,34 @@ const BUSINESS_TERM_LABELS = Object.freeze({
   explosives_kg: "火工品量（炸药）",
   mine_entry_persons: "入井人员量",
   labor_persons: "入井人员量",
-  production_t: "产量",
+  production_t: "产量（企业报表）",
+  extraction_t: "开采量（采掘计量）",
+  sales_t: "销售量",
+  transport_t: "运输量",
+  wash_feed_t: "洗煤量（入洗原煤）",
+  invoiced_quantity_t: "开票量（吨）",
   ventilation_per_production: "单位产量风量",
   electricity_per_production: "单位产量电耗",
   detonators_per_production: "单位产量雷管用量",
   explosives_per_production: "单位产量炸药用量",
   mine_entry_persons_per_production: "单位产量入井人员量",
   labor_per_production: "单位产量入井人员量",
+  ventilation_per_extraction: "单位开采量风量",
+  electricity_per_extraction: "单位开采量电耗",
+  detonators_per_extraction: "单位开采量雷管用量",
+  explosives_per_extraction: "单位开采量炸药用量",
+  mine_entry_persons_per_extraction: "单位开采量入井人员量",
+  production_per_extraction: "产量/开采量",
+  sales_per_production: "销售量/产量",
+  transport_per_production: "运输量/产量",
+  transport_per_sales: "运输量/销售量",
+  wash_feed_per_production: "洗煤量/产量",
+  invoiced_quantity_per_sales: "开票量/销售量",
   anonymous_peer: "匿名同类矿",
   same_mine_history: "本矿历史",
   within_submission: "本期数据",
   wire_quality_flags: "报送质量标记",
-  required_metric_completeness: "五量完整性规则",
+  required_metric_completeness: "十量完整性规则",
   declared_vs_inferred_operating_state: "申报与推断工况",
   weighted_l1: "加权偏差协调",
   median_mad: "稳健中位数基线",
@@ -80,7 +101,7 @@ const BUSINESS_TERM_LABELS = Object.freeze({
   strict_profile_mcs_diagnostic_not_causation: "最小冲突集诊断",
   state_aware_context_rule_not_physical_violation: "工况上下文规则",
   qualified_measurement_requires_review: "测量值需复核",
-  incomplete_five_quantity_days: "五量日数据不完整",
+  incomplete_five_quantity_days: "十量日数据不完整",
   soft_reference_interval_exceeded: "超出软参考区间",
   robust_temporal_outlier: "稳健时序偏离",
   strict_counterfactual_conflict_set: "最小放宽组合",
@@ -167,7 +188,7 @@ const findingTypeInfo = (type) => type === "data_insufficient"
   : ["风险线索", "risk"];
 const findingCategoryLabel = (category) => ({
   data_quality: "数据质量",
-  relationship_consistency: "五量关系",
+  relationship_consistency: "十量关系",
   temporal_pattern: "时序变化",
   data_completeness: "数据完整性",
 }[category] || "其他待核事项");
@@ -243,19 +264,19 @@ function activityPresentation(item) {
   let summary = "系统已记录一项业务变化，详细信息可在交换留痕中查看。";
   let tone = "info";
   if (eventType === "submission_received" || eventType === "exchange_inbound_recorded") {
-    title = "本期五量数据已收到";
+    title = "本期十量数据已收到";
     summary = "数据已通过基本验收，并进入统一监管算法分析。";
   } else if (eventType === "analysis_completed" || eventType === "analysis_report_automatically_issued") {
     if (decision === "risk") {
-      title = "本期五量核验发现风险线索";
+      title = "本期十量核验发现风险线索";
       summary = "风险报告已发送企业，等待企业说明原因或修订数据。";
       tone = "risk";
     } else if (decision === "insufficient_data") {
-      title = "本期五量数据不足，暂不能形成判断";
+      title = "本期十量数据不足，暂不能形成判断";
       summary = "已通知企业补充或核对缺失数据。";
       tone = "warning";
     } else {
-      title = "本期五量核验完成：暂未发现异常";
+      title = "本期十量核验完成：暂未发现异常";
       summary = "本期自动核验已完成，继续按期观察后续数据。";
       tone = "positive";
     }
@@ -319,21 +340,29 @@ function selectLeaderActivities(items) {
   return selected;
 }
 
-// 五个业务量、六个不可混加的原子序列共用这一份展示定义。
-// 图例和轨道均直接读取这里的色值，避免两处配置漂移。
-const FIVE_QUANTITY_GROUPS = [
+// 十个业务量、十一个不可混加的原子序列共用这一份展示定义。
+// 图例、状态胶囊和轨道直接读取这里的分组与色值，避免多处配置漂移。
+const TEN_QUANTITY_SECTIONS = Object.freeze([
+  {code:"safety_operation", label:"安全运行", quantityCodes:["airflow","electricity","blasting_materials","mine_entry_personnel"]},
+  {code:"production_flow", label:"生产煤流", quantityCodes:["production","extraction","sales","transport","washing"]},
+  {code:"invoice_verification", label:"票据核验", quantityCodes:["invoiced"]},
+]);
+const TEN_QUANTITY_GROUPS = [
   {
     code: "airflow",
+    section: "safety_operation",
     label: "风量",
     series: [{code:"ventilation_m3_min", keys:["ventilation_m3_min","wind_m3_min"], label:"风量", trackLabel:"风量", legend:"m³/min", color:"#45d7ff"}],
   },
   {
     code: "electricity",
+    section: "safety_operation",
     label: "电量",
     series: [{code:"electricity_kwh", keys:["electricity_kwh"], label:"电量", trackLabel:"电量", legend:"kWh", color:"#ffbd59"}],
   },
   {
     code: "blasting_materials",
+    section: "safety_operation",
     label: "火工品量",
     series: [
       {code:"detonators_count", keys:["detonators_count"], label:"火工品量·雷管（发）", trackLabel:"雷管（火工品）", legend:"雷管（发）", unit:"发", color:"#ff7864"},
@@ -342,13 +371,45 @@ const FIVE_QUANTITY_GROUPS = [
   },
   {
     code: "mine_entry_personnel",
+    section: "safety_operation",
     label: "入井人员量",
     series: [{code:"mine_entry_persons", keys:["mine_entry_persons","labor_persons"], label:"入井人员量", trackLabel:"入井人员量", legend:"人次", color:"#ae80ff"}],
   },
   {
     code: "production",
-    label: "产量",
-    series: [{code:"production_t", keys:["production_t"], label:"产量", trackLabel:"产量", legend:"吨（t）", unit:"t", color:"#36dfa1"}],
+    section: "production_flow",
+    label: "产量（企业报表）",
+    series: [{code:"production_t", keys:["production_t"], label:"产量（企业报表）", trackLabel:"产量（报表）", legend:"吨（t）", unit:"t", color:"#36dfa1"}],
+  },
+  {
+    code: "extraction",
+    section: "production_flow",
+    label: "开采量（采掘计量）",
+    series: [{code:"extraction_t", keys:["extraction_t"], label:"开采量（采掘计量）", trackLabel:"开采量（采掘）", legend:"吨（t）", unit:"t", color:"#22c59a"}],
+  },
+  {
+    code: "sales",
+    section: "production_flow",
+    label: "销售量",
+    series: [{code:"sales_t", keys:["sales_t"], label:"销售量", trackLabel:"销售量", legend:"吨（t）", unit:"t", color:"#f4d35e"}],
+  },
+  {
+    code: "transport",
+    section: "production_flow",
+    label: "运输量",
+    series: [{code:"transport_t", keys:["transport_t"], label:"运输量", trackLabel:"运输量", legend:"吨（t）", unit:"t", color:"#4c9aff"}],
+  },
+  {
+    code: "washing",
+    section: "production_flow",
+    label: "洗煤量（入洗原煤）",
+    series: [{code:"wash_feed_t", keys:["wash_feed_t"], label:"洗煤量（入洗原煤）", trackLabel:"洗煤量（入洗）", legend:"吨（t）", unit:"t", color:"#48c6b0"}],
+  },
+  {
+    code: "invoiced",
+    section: "invoice_verification",
+    label: "开票量（吨）",
+    series: [{code:"invoiced_quantity_t", keys:["invoiced_quantity_t"], label:"开票量（吨）", trackLabel:"开票量", legend:"吨（t）", unit:"t", color:"#ff8fb3"}],
   },
 ];
 
@@ -391,6 +452,9 @@ function clearAuthenticatedClientState() {
   state.mines = [];
   state.findings = [];
   state.selectedMine = null;
+  state.seriesView.rows = [];
+  state.seriesView.findings = [];
+  state.seriesView.selectedGroups = [];
   state.activeView = "overview";
   state.refreshTimer = null;
   state.refreshing = false;
@@ -646,7 +710,7 @@ function sparkline(values, color) {
 
 function renderMines() {
   const query = $("mineSearch").value.trim().toLowerCase();
-  const filtered = state.mines.filter((mine) => !query || `${mine.mine_name || ""} ${mine.mine_id || ""}`.toLowerCase().includes(query));
+  const filtered = wallboardOrderedMines().filter((mine) => !query || `${mine.mine_name || ""} ${mine.mine_id || ""}`.toLowerCase().includes(query));
   $("mineTableBody").innerHTML = filtered.length ? filtered.map((mine) => {
     const status = mine.status || mine.analysis_status || "not_reported";
     const [label,color,tone] = statusInfo(status);
@@ -725,18 +789,16 @@ function renderWallboardCore(mine) {
     ? `${formatNumber(openFindings)} 项未解除事项`
     : "当前无未解除事项";
   $("wallboardCoreBody").innerHTML = `
-    <div class="wallboard-core-stage status-${statusTone}" role="img" aria-label="五量统一交叉核验；当前结论：${escapeHtml(statusLabel)}">
+    <div class="wallboard-core-stage status-${statusTone}" role="img" aria-label="十量三组统一交叉核验；当前结论：${escapeHtml(statusLabel)}">
       <div class="wallboard-core-grid" aria-hidden="true"></div>
       <svg class="wallboard-core-network" viewBox="0 0 520 300" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false">
         <circle class="wallboard-core-orbit orbit-outer" cx="260" cy="150" r="125"></circle>
         <circle class="wallboard-core-orbit orbit-inner" cx="260" cy="150" r="78"></circle>
-        <polygon class="wallboard-core-pentagon" points="260,25 379,111 334,251 186,251 141,111"></polygon>
+        <polygon class="wallboard-core-triangle" points="260,24 402,248 118,248"></polygon>
         <g class="wallboard-core-links">
-          <path d="M260 150 L260 25"></path>
-          <path d="M260 150 L379 111"></path>
-          <path d="M260 150 L334 251"></path>
-          <path d="M260 150 L186 251"></path>
-          <path d="M260 150 L141 111"></path>
+          <path d="M260 150 L260 24"></path>
+          <path d="M260 150 L402 248"></path>
+          <path d="M260 150 L118 248"></path>
         </g>
         <g class="wallboard-core-scan">
           <path d="M260 150 L260 25 A125 125 0 0 1 379 111 Z"></path>
@@ -748,11 +810,9 @@ function renderWallboardCore(mine) {
         <strong>${escapeHtml(statusLabel)}</strong>
         <small>${escapeHtml(findingText)} · ${escapeHtml(reportPeriod)}</small>
       </div>
-      <div class="wallboard-core-quantity quantity-ventilation"><strong>风量</strong><span>已纳入核验</span></div>
-      <div class="wallboard-core-quantity quantity-electricity"><strong>电量</strong><span>已纳入核验</span></div>
-      <div class="wallboard-core-quantity quantity-production"><strong>产量</strong><span>已纳入核验</span></div>
-      <div class="wallboard-core-quantity quantity-personnel"><strong>入井人员量</strong><span>已纳入核验</span></div>
-      <div class="wallboard-core-quantity quantity-explosives"><strong>火工品量</strong><span>雷管（发） · 炸药（kg）</span></div>
+      <div class="wallboard-core-group group-safety"><strong>安全运行 · 4项</strong><span>风量 · 电量 · 火工品量 · 入井人员量</span></div>
+      <div class="wallboard-core-group group-flow"><strong>生产煤流 · 5项</strong><span>产量 · 开采量 · 销售量 · 运输量 · 洗煤量</span></div>
+      <div class="wallboard-core-group group-business"><strong>票据核验 · 1项</strong><span>开票量（吨）</span></div>
     </div>
     <div class="wallboard-core-layers" aria-label="交叉核验依据">
       <span><i aria-hidden="true"></i>物理关系 · 关系约束</span>
@@ -760,7 +820,7 @@ function renderWallboardCore(mine) {
       <span><i aria-hidden="true"></i>匿名同类参照</span>
       <span><i aria-hidden="true"></i>时序漂移识别</span>
     </div>
-    <p class="wallboard-core-note">星环表示五量核验链路与当前整体结论，不代表各指标数值大小。</p>`;
+    <p class="wallboard-core-note">三组节点表示十量核验范围与当前整体结论，不代表各指标数值大小，也不虚构单项状态。</p>`;
 }
 
 function renderWallboardFocus(orderedMines = wallboardOrderedMines()) {
@@ -785,7 +845,7 @@ function renderWallboardFocus(orderedMines = wallboardOrderedMines()) {
     : "当前无需企业回复";
   const freshness = humanizeBusinessText(firstDefined(mine.freshness_label, formatTime(mine.data_as_of || mine.updated_at), "—"));
   const focusBody = $("wallboardFocusBody");
-  focusBody.innerHTML = `<div class="wallboard-focus-name"><div><h3>${escapeHtml(mine.mine_name || mine.mine_id || "未命名煤矿")}</h3><p>${escapeHtml(mine.mine_id || "—")} · ${escapeHtml(mine.report_month || mine.latest_report_month || "尚未报送")}</p></div><span class="status-pill status-${statusTone}">${escapeHtml(statusLabel)}</span></div><div class="wallboard-focus-score"><div><span>未解除事项</span><strong>${formatNumber(openFindings)} 项</strong></div><div><span>企业回复状态</span><strong>${escapeHtml(responseLabel)}</strong></div><div><span>数据新鲜度</span><strong>${escapeHtml(freshness)}</strong></div></div><section class="wallboard-core-visual" aria-label="五量智能研判核心"><div id="wallboardCoreBody" class="wallboard-core-body"></div></section><div class="wallboard-completeness"><div><span>五量数据完整率</span><strong>${completeness.toFixed(0)}%</strong></div><svg class="wallboard-completeness-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="track" x="0" y="0" width="100" height="7" rx="3.5"></rect><rect class="value" x="0" y="0" width="${completeness.toFixed(2)}" height="7" rx="3.5"></rect></svg></div><div class="wallboard-focus-trend" aria-label="产量近期趋势">${sparkline(mine.trend || mine.production_trend || [], statusColor)}</div>`;
+  focusBody.innerHTML = `<div class="wallboard-focus-name"><div><h3>${escapeHtml(mine.mine_name || mine.mine_id || "未命名煤矿")}</h3><p>${escapeHtml(mine.mine_id || "—")} · ${escapeHtml(mine.report_month || mine.latest_report_month || "尚未报送")}</p></div><span class="status-pill status-${statusTone}">${escapeHtml(statusLabel)}</span></div><div class="wallboard-focus-score"><div><span>未解除事项</span><strong>${formatNumber(openFindings)} 项</strong></div><div><span>企业回复状态</span><strong>${escapeHtml(responseLabel)}</strong></div><div><span>数据新鲜度</span><strong>${escapeHtml(freshness)}</strong></div></div><section class="wallboard-core-visual" aria-label="十量智能研判核心"><div id="wallboardCoreBody" class="wallboard-core-body"></div></section><div class="wallboard-completeness"><div><span>本期报送完整率</span><strong>${completeness.toFixed(0)}%</strong></div><svg class="wallboard-completeness-track" viewBox="0 0 100 7" preserveAspectRatio="none" aria-hidden="true"><rect class="track" x="0" y="0" width="100" height="7" rx="3.5"></rect><rect class="value" x="0" y="0" width="${completeness.toFixed(2)}" height="7" rx="3.5"></rect></svg></div><div class="wallboard-focus-trend" aria-label="产量近期趋势">${sparkline(mine.trend || mine.production_trend || [], statusColor)}</div>`;
   renderWallboardCore(mine);
   focusBody.classList.remove("is-rotating");
   void focusBody.offsetWidth;
@@ -957,29 +1017,221 @@ function renderMineDetail(detail) {
   const findings = detail.findings || [];
   const responses = detail.responses || [];
   $("responseMeta").innerHTML = `<dt>开放风险</dt><dd>${formatNumber(firstDefined(response.open, findings.filter((x) => !["cleared_by_reanalysis"].includes(x.state)).length))}</dd><dt>已送达</dt><dd>${formatNumber(response.delivered)}</dd><dt>已回复</dt><dd>${formatNumber(firstDefined(response.replied, responses.length))}</dd><dt>最后回复</dt><dd>${escapeHtml(formatTime(response.last_response_at))}</dd>`;
-  renderSeries(detail.daily_series || detail.series || []);
+  const rows = detail.daily_series || detail.series || [];
+  const latestSubmissionId = latestSubmission.submission_id;
+  const currentRows = Array.isArray(detail.current_period_series)
+    ? detail.current_period_series
+    : (latestSubmissionId && rows.some((row) => owns(row, "submission_id"))
+      ? rows.filter((row) => row.submission_id === latestSubmissionId)
+      : rows);
+  const currentFindings = Array.isArray(detail.current_findings)
+    ? detail.current_findings
+    : findings.filter((finding) =>
+      finding.state !== "cleared_by_reanalysis" &&
+      (!latestSubmissionId || !finding.submission_id || finding.submission_id === latestSubmissionId));
+  renderQuantityStatusSummary(
+    currentRows,
+    currentFindings,
+    latestSubmission.quantity_scope,
+  );
+  renderSeries(rows, currentFindings);
   renderMineFindings(detail.findings || []);
   renderTimeline(detail.timeline || detail.audit_events || []);
 }
 
-function renderSeries(rows) {
-  const definitions = FIVE_QUANTITY_GROUPS.flatMap((group) => group.series);
-  $("seriesLegend").innerHTML = FIVE_QUANTITY_GROUPS.map((group) => `
-    <span class="series-legend-item" data-quantity-group="${group.code}" role="listitem">
-      <strong>${group.label}</strong>
+function owns(object, key) {
+  return Boolean(object && Object.prototype.hasOwnProperty.call(object, key));
+}
+
+function rawSeriesValue(row, keys) {
+  for (const key of keys) {
+    if (owns(row, key) && row[key] !== null && row[key] !== undefined && row[key] !== "") {
+      return row[key];
+    }
+    if (
+      owns(row && row.metrics, key) &&
+      row.metrics[key] !== null && row.metrics[key] !== undefined &&
+      row.metrics[key] !== ""
+    ) {
+      return row.metrics[key];
+    }
+  }
+  return null;
+}
+
+function numericSeriesValue(row, keys) {
+  const raw = rawSeriesValue(row, keys);
+  if (raw === null || raw === undefined || raw === "") return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function seriesStructurallyPresent(rows, definition) {
+  return rows.some((row) => definition.keys.some((key) =>
+    owns(row, key) || owns(row && row.metrics, key),
+  ));
+}
+
+function quantityStructurallyPresent(rows, group) {
+  return group.series.every((definition) =>
+    seriesStructurallyPresent(rows, definition),
+  );
+}
+
+function quantityHasNumericData(rows, group) {
+  return group.series.every((definition) =>
+    rows.some((row) => numericSeriesValue(row, definition.keys) !== null),
+  );
+}
+
+function quantityHasAnyNumericData(rows, group) {
+  return group.series.some((definition) =>
+    rows.some((row) => numericSeriesValue(row, definition.keys) !== null),
+  );
+}
+
+const LEGACY_QUANTITY_CODES = new Set([
+  "airflow", "electricity", "blasting_materials",
+  "mine_entry_personnel", "production",
+]);
+
+function effectiveQuantityScope(rows, declaredScope) {
+  if (["five_quantity_v2", "ten_quantity_v3"].includes(declaredScope)) {
+    return declaredScope;
+  }
+  // Compatibility only for older leadership APIs that did not expose scope.
+  // Null keys added by model migration never upgrade a V2 report to V3.
+  const newGroups = TEN_QUANTITY_GROUPS.filter((group) =>
+    !LEGACY_QUANTITY_CODES.has(group.code));
+  return newGroups.some((group) => quantityHasAnyNumericData(rows, group))
+    ? "ten_quantity_v3"
+    : "five_quantity_v2";
+}
+
+function findingMetricCodes(findings) {
+  const result = new Set();
+  (findings || []).forEach((finding) => {
+    if (finding.finding_type === "data_insufficient") return;
+    [finding.affected_metrics, finding.metrics].forEach((values) => {
+      if (Array.isArray(values)) values.forEach((value) => result.add(String(value)));
+    });
+    (finding.evidence || []).forEach((evidence) => {
+      const value = firstDefined(evidence.metric_code, evidence.metric);
+      if (value) result.add(String(value));
+    });
+  });
+  return result;
+}
+
+function findingAffectsQuantity(metricCodes, group) {
+  const identifiers = new Set([
+    group.code,
+    ...group.series.flatMap((definition) => [definition.code, ...definition.keys]),
+  ]);
+  return [...metricCodes].some((code) => identifiers.has(code));
+}
+
+function tenQuantityStatuses(rows, findings, declaredScope) {
+  const riskMetrics = findingMetricCodes(findings);
+  const quantityScope = effectiveQuantityScope(rows, declaredScope);
+  return TEN_QUANTITY_GROUPS.map((group) => {
+    if (
+      quantityScope === "five_quantity_v2" &&
+      !LEGACY_QUANTITY_CODES.has(group.code)
+    ) {
+      return {group, state:"neutral", label:"未提供"};
+    }
+    const hasAnyData = quantityHasAnyNumericData(rows, group);
+    const hasData = quantityHasNumericData(rows, group);
+    const structurallyPresent = quantityStructurallyPresent(rows, group);
+    if (!hasAnyData) {
+      return structurallyPresent || quantityScope === "ten_quantity_v3"
+        ? {group, state:"warning", label:"数据不足"}
+        : {group, state:"neutral", label:"未提供"};
+    }
+    if (!hasData) return {group, state:"warning", label:"数据不足"};
+    const risk = findingAffectsQuantity(riskMetrics, group);
+    if (risk) return {group, state:"risk", label:"需关注"};
+    return {group, state:"info", label:"已提供"};
+  });
+}
+
+function renderQuantityStatusSummary(rows, findings, declaredScope) {
+  const statuses = tenQuantityStatuses(rows, findings, declaredScope);
+  const received = statuses.filter((item) => ["risk", "info"].includes(item.state)).length;
+  const risk = statuses.filter((item) => item.state === "risk").length;
+  const provided = statuses.filter((item) => item.state === "info").length;
+  const insufficient = statuses.filter((item) => ["warning", "neutral"].includes(item.state)).length;
+  $("tenQuantityCoverage").textContent = `十量已到 ${received}/10`;
+  $("tenQuantitySummary").textContent = risk
+    ? `本期 ${risk} 项需关注，${provided} 项已提供，${insufficient} 项数据不足或未提供。请先看红色项目。`
+    : `本期暂无可定位到单项的风险；${provided} 项已提供，${insufficient} 项数据不足或未提供。`;
+  const quantityScope = effectiveQuantityScope(rows, declaredScope);
+  $("tenQuantityLegacyNote").textContent = quantityScope === "five_quantity_v2"
+    ? "当前为旧版 V2 五量报文：新增的开采量、销售量、运输量、洗煤量和开票量未提供，平台不会补数。"
+    : received < 10
+      ? `当前仍有 ${10 - received} 项未提供；缺数不能解释为 0 或正常。`
+      : "十量字段已接入；是否可形成判断仍取决于来源、口径和时间覆盖。";
+  $("tenQuantityStatusGroups").innerHTML = TEN_QUANTITY_SECTIONS.map((section) => {
+    const items = statuses.filter((item) => item.group.section === section.code);
+    return `<section class="ten-quantity-status-section" data-quantity-section="${section.code}"><h3>${escapeHtml(section.label)}<small>${items.length} 项</small></h3><div>${items.map((item) => `<span class="ten-quantity-status status-${item.state}" data-quantity-code="${item.group.code}"><strong>${escapeHtml(item.group.label)}</strong><small>${escapeHtml(item.label)}</small></span>`).join("")}</div></section>`;
+  }).join("");
+}
+
+function defaultSeriesGroups(rows, findings) {
+  const statuses = tenQuantityStatuses(rows, findings);
+  const available = statuses.filter((item) => item.state !== "neutral");
+  const preferredCodes = [
+    ...available.filter((item) => item.state === "risk").map((item) => item.group.code),
+    "production", "extraction", "sales", "transport", "washing", "invoiced",
+    "airflow", "electricity", "blasting_materials", "mine_entry_personnel",
+  ];
+  const selected = [];
+  preferredCodes.forEach((code) => {
+    if (
+      selected.length < 3 &&
+      !selected.includes(code) &&
+      available.some((item) => item.group.code === code)
+    ) selected.push(code);
+  });
+  return selected;
+}
+
+function renderSeriesLegend() {
+  const rows = state.seriesView.rows;
+  const selected = state.seriesView.selectedGroups;
+  $("seriesLegend").innerHTML = TEN_QUANTITY_GROUPS.map((group) => {
+    const available = quantityHasAnyNumericData(rows, group);
+    const active = selected.includes(group.code);
+    return `<button class="series-legend-item ${active ? "is-active" : ""}" data-quantity-group="${group.code}" role="listitem" type="button" aria-pressed="${active}" ${available ? "" : "disabled"}>
+      <strong>${escapeHtml(group.label)}</strong>
       <span class="series-legend-keys">
         ${group.series.map((series) => `
-          <span class="series-legend-key" aria-label="${series.label}">
+          <span class="series-legend-key" aria-label="${escapeHtml(series.label)}">
             <svg class="series-legend-swatch" viewBox="0 0 30 10" aria-hidden="true" focusable="false">
               <line x1="1" y1="5" x2="29" y2="5" stroke="${series.color}" stroke-width="3" stroke-linecap="round"></line>
               <circle cx="15" cy="5" r="3.5" fill="${series.color}" stroke="#0a1b2d" stroke-width="1"></circle>
             </svg>
-            <small>${series.legend}</small>
+            <small>${escapeHtml(series.legend)}</small>
           </span>`).join("")}
       </span>
-    </span>`).join("");
+      <em>${available ? active ? "正在显示" : "点击查看" : "未提供"}</em>
+    </button>`;
+  }).join("");
+  $("seriesSelectionNote").textContent = selected.length
+    ? `当前显示 ${selected.length} 项；最多同时选择 3 项，优先展示风险项目。`
+    : "当前报文没有可展示的十量时序。";
+}
+
+function renderSelectedSeriesChart() {
+  const rows = state.seriesView.rows;
+  const selected = state.seriesView.selectedGroups;
+  const definitions = TEN_QUANTITY_GROUPS
+    .filter((group) => selected.includes(group.code))
+    .flatMap((group) => group.series);
   const chartElement = $("seriesChart");
-  if (!rows.length) { chartElement.innerHTML = `<div class="empty-state">暂无逐日五量数据</div>`; return; }
+  chartElement.className = `series-chart tracks-${Math.max(1, Math.min(4, definitions.length))}`;
+  if (!rows.length || !definitions.length) { chartElement.innerHTML = `<div class="empty-state">暂无可展示的逐日十量数据</div>`; return; }
   const measuredWidth = Number(chartElement.clientWidth);
   const width = Math.max(760, Number.isFinite(measuredWidth) && measuredWidth > 0 ? Math.round(measuredWidth) : 1100);
   const left = 132, right = 78, top = 8, bottom = 38;
@@ -987,23 +1239,9 @@ function renderSeries(rows) {
   const height = top + definitions.length * trackHeight + (definitions.length - 1) * trackGap + bottom;
   const plotWidth = width - left - right;
   const x = (index) => left + index / Math.max(1, rows.length - 1) * plotWidth;
-  const own = (object, key) => object && Object.prototype.hasOwnProperty.call(object, key);
-  const rawValue = (row, keys) => {
-    for (const key of keys) {
-      if (own(row, key)) return row[key];
-      if (own(row && row.metrics, key)) return row.metrics[key];
-    }
-    return null;
-  };
-  const numericValue = (row, keys) => {
-    const raw = rawValue(row, keys);
-    if (raw === null || raw === undefined || raw === "") return null;
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) ? parsed : null;
-  };
   const trackBottom = top + definitions.length * trackHeight + (definitions.length - 1) * trackGap;
   let svg = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-labelledby="seriesChartTitle seriesChartDescription">`;
-  svg += `<title id="seriesChartTitle">五量分轨趋势图</title><desc id="seriesChartDescription">五量分别展示走势；火工品量分为雷管和炸药两个子项，各轨道共用日期轴并按当前窗口缩放。</desc>`;
+  svg += `<title id="seriesChartTitle">十量风险优先趋势图</title><desc id="seriesChartDescription">默认最多展示三个十量业务项；火工品量的雷管和炸药保持独立轨道，各轨道共用日期轴并按当前窗口缩放。</desc>`;
   const labelIndexes = [...new Set([0, Math.floor((rows.length-1)/2), rows.length-1])];
   svg += labelIndexes.map((index) => `<line class="date-grid" x1="${x(index)}" y1="${top}" x2="${x(index)}" y2="${trackBottom}"/>`).join("");
   definitions.forEach((definition, trackIndex) => {
@@ -1013,7 +1251,7 @@ function renderSeries(rows) {
     const yMiddle = (yTop + yBottom) / 2;
     const innerTop = yTop + 9;
     const innerBottom = yBottom - 9;
-    const samples = rows.map((row) => numericValue(row, keys));
+    const samples = rows.map((row) => numericSeriesValue(row, keys));
     const values = samples.filter((value) => value !== null);
     const min = values.length ? Math.min(...values) : null;
     const max = values.length ? Math.max(...values) : null;
@@ -1056,6 +1294,35 @@ function renderSeries(rows) {
   });
   svg += labelIndexes.map((index, position) => `<text class="axis-label" x="${x(index)}" y="${height-10}" text-anchor="${position === 0 ? "start" : position === labelIndexes.length-1 ? "end" : "middle"}">${escapeHtml((rows[index] && rows[index].date) || "")}</text>`).join("") + `</svg>`;
   chartElement.innerHTML = svg;
+}
+
+function renderSeries(rows, findings = []) {
+  state.seriesView.rows = Array.isArray(rows) ? rows : [];
+  state.seriesView.findings = Array.isArray(findings) ? findings : [];
+  state.seriesView.selectedGroups = defaultSeriesGroups(
+    state.seriesView.rows,
+    state.seriesView.findings,
+  );
+  renderSeriesLegend();
+  renderSelectedSeriesChart();
+}
+
+function handleSeriesLegendClick(event) {
+  const button = event.target.closest("[data-quantity-group]");
+  if (!button || button.disabled) return;
+  const code = button.dataset.quantityGroup;
+  const selected = [...state.seriesView.selectedGroups];
+  const index = selected.indexOf(code);
+  if (index >= 0) {
+    if (selected.length === 1) return;
+    selected.splice(index, 1);
+  } else {
+    if (selected.length >= 3) selected.shift();
+    selected.push(code);
+  }
+  state.seriesView.selectedGroups = selected;
+  renderSeriesLegend();
+  renderSelectedSeriesChart();
 }
 
 function findingCard(item) {
@@ -1421,6 +1688,7 @@ function bindEvents() {
   $("wallboardExitButton").addEventListener("click", () => exitWallboard());
   $("mineSearch").addEventListener("input", renderMines);
   $("mineSelector").addEventListener("change", (event) => openMine(event.target.value));
+  $("seriesLegend").addEventListener("click", handleSeriesLegendClick);
   $("findingSeverity").addEventListener("change", renderFindings);
   $("findingState").addEventListener("change", renderFindings);
   $("traceRangePresets").querySelectorAll("[data-trace-range]").forEach((button) => {

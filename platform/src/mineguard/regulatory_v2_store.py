@@ -33,7 +33,9 @@ from .regulatory_v2 import (
     DecisionStatus,
     FiveQuantitySubmission,
     HistoricalFiveQuantityDay,
+    LEGACY_METRICS,
     ReferenceBand,
+    RELATIONSHIP_METRICS,
     RegulatoryFiveQuantityParameters,
     RegulatoryFiveQuantityResult,
     RelationshipCode,
@@ -111,6 +113,14 @@ _ZERO_HASH = "0" * 64
 _MAX_ACTIVE_TRANSPORT_NONCES_PER_SENDER = 4096
 
 
+def _analysis_method_scope_glob(quantity_scope: str) -> str:
+    if quantity_scope == "five_quantity_v2":
+        return "regulatory-five-quantity-v2.*"
+    if quantity_scope == "ten_quantity_v3":
+        return "regulatory-ten-quantity-v3.*"
+    raise ValueError(f"unknown quantity scope: {quantity_scope}")
+
+
 @dataclass(frozen=True)
 class _IntegrityCheckpoint:
     """Trusted local state after a complete or controlled incremental check."""
@@ -146,9 +156,7 @@ class _ManagedTableContract:
     name: str
     sql: str
     columns: tuple[tuple[int, str, str, int, str | None, int, int], ...]
-    foreign_keys: tuple[
-        tuple[int, int, str, str, str | None, str, str, str], ...
-    ]
+    foreign_keys: tuple[tuple[int, int, str, str, str | None, str, str, str], ...]
     indexes: tuple[_ManagedIndexContract, ...]
 
 
@@ -741,8 +749,7 @@ class RegulatoryV2Store:
                 origin = str(index_row["origin"])
                 quoted_index = '"' + index_name.replace('"', '""') + '"'
                 sql_row = connection.execute(
-                    "SELECT sql FROM sqlite_master "
-                    "WHERE type='index' AND name=?",
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
                     (index_name,),
                 ).fetchone()
                 index_sql = (
@@ -837,10 +844,13 @@ class RegulatoryV2Store:
         try:
             # A V2-named view is not part of the extension surface and could
             # shadow a missing table in unsafe diagnostic code.
-            if self._connection.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type='view' AND name GLOB 'v2_*' LIMIT 1"
-            ).fetchone() is not None:
+            if (
+                self._connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='view' AND name GLOB 'v2_*' LIMIT 1"
+                ).fetchone()
+                is not None
+            ):
                 return False
             actual = self._capture_managed_schema_contract_from(self._connection)
         except (sqlite3.DatabaseError, IndexError, KeyError, TypeError, ValueError):
@@ -848,11 +858,14 @@ class RegulatoryV2Store:
         return actual == expected
 
     def _database_is_pristine_empty_locked(self) -> bool:
-        return self._connection.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE name NOT LIKE 'sqlite_%' "
-            "AND type IN ('table','index','trigger','view') LIMIT 1"
-        ).fetchone() is None
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%' "
+                "AND type IN ('table','index','trigger','view') LIMIT 1"
+            ).fetchone()
+            is None
+        )
 
     def _preflight_schema_version(self) -> None:
         """Reject an unknown future or internally inconsistent schema first.
@@ -1623,6 +1636,7 @@ class RegulatoryV2Store:
                 before=submission.period_start,
                 excluded_submission_id=submission.submission_id,
                 comparison_group=submission.comparison_context.group_key,
+                quantity_scope=submission.quantity_scope,
             )
             peer_bands = self._anonymous_peer_bands(
                 connection,
@@ -3461,9 +3475,7 @@ class RegulatoryV2Store:
         """Validate SQLite structure and every declared foreign-key relation."""
 
         try:
-            quick_check_rows = self._connection.execute(
-                "PRAGMA quick_check"
-            ).fetchall()
+            quick_check_rows = self._connection.execute("PRAGMA quick_check").fetchall()
             if (
                 len(quick_check_rows) != 1
                 or len(quick_check_rows[0]) != 1
@@ -3471,8 +3483,7 @@ class RegulatoryV2Store:
             ):
                 return False
             return (
-                self._connection.execute("PRAGMA foreign_key_check").fetchone()
-                is None
+                self._connection.execute("PRAGMA foreign_key_check").fetchone() is None
             )
         except (sqlite3.DatabaseError, IndexError, TypeError):
             return False
@@ -4086,6 +4097,7 @@ class RegulatoryV2Store:
         before: date,
         excluded_submission_id: str,
         comparison_group: str,
+        quantity_scope: str,
         limit: int = 365,
     ) -> list[HistoricalFiveQuantityDay]:
         rows = connection.execute(
@@ -4099,6 +4111,7 @@ class RegulatoryV2Store:
               AND s.comparison_group = ?
               AND d.observed_date < ?
               AND d.submission_id != ?
+              AND r.method_version GLOB ?
               AND r.decision = 'normal_candidate'
               AND b.eligible = 1
               AND NOT EXISTS (
@@ -4112,13 +4125,14 @@ class RegulatoryV2Store:
                 comparison_group,
                 before.isoformat(),
                 excluded_submission_id,
+                _analysis_method_scope_glob(quantity_scope),
                 limit,
             ),
         ).fetchall()
         result: list[HistoricalFiveQuantityDay] = []
         for row in reversed(rows):
             payload = _canonical_daily_payload(json.loads(row["normalized_json"]))
-            if any(payload.get(metric) is None for metric in _METRICS):
+            if any(payload.get(metric) is None for metric in LEGACY_METRICS):
                 continue
             result.append(HistoricalFiveQuantityDay.model_validate(payload))
         return result
@@ -4130,13 +4144,20 @@ class RegulatoryV2Store:
         parameters: RegulatoryFiveQuantityParameters,
     ) -> list[ReferenceBand]:
         comparison_group = submission.comparison_context.group_key
+        snapshot_group = (
+            f"{comparison_group}.ten-v3"
+            if submission.quantity_scope == "ten_quantity_v3"
+            else comparison_group
+        )
+        relationships = submission.applicable_relationships
+        method_scope_glob = _analysis_method_scope_glob(submission.quantity_scope)
         cutoff_date = submission.period_start.isoformat()
         frozen = connection.execute(
             """
             SELECT cohort_json FROM v2_peer_reference_snapshots
             WHERE comparison_group = ? AND cutoff_date = ?
             """,
-            (comparison_group, cutoff_date),
+            (snapshot_group, cutoff_date),
         ).fetchone()
         if frozen is None:
             rows = connection.execute(
@@ -4154,6 +4175,7 @@ class RegulatoryV2Store:
                       ON r.submission_id = s.submission_id
                     JOIN v2_baseline_admissions b ON b.run_id = r.run_id
                     WHERE s.comparison_group = ?
+                      AND r.method_version GLOB ?
                       -- Freeze one group-wide, lagged snapshot.  All mines in
                       -- this report period see exactly the same as-of cohort.
                       AND d.observed_date < ?
@@ -4168,22 +4190,27 @@ class RegulatoryV2Store:
                 WHERE recency_rank <= 365
                 ORDER BY mine_id, recency_rank
                 """,
-                (comparison_group, cutoff_date),
+                (comparison_group, method_scope_glob, cutoff_date),
             ).fetchall()
             ratios_by_mine: dict[RelationshipCode, dict[str, list[float]]] = {
-                relationship: {} for relationship in _RELATIONSHIP_METRIC
+                relationship: {} for relationship in relationships
             }
             for row in rows:
                 payload = _canonical_daily_payload(json.loads(row["normalized_json"]))
-                production = payload.get("production_t")
-                if production is None or production <= parameters.production_epsilon_t:
-                    continue
-                for relationship, metric in _RELATIONSHIP_METRIC.items():
-                    value = payload.get(metric)
-                    if value is not None:
+                for relationship in relationships:
+                    numerator_metric, denominator_metric = RELATIONSHIP_METRICS[
+                        relationship
+                    ]
+                    numerator = payload.get(numerator_metric)
+                    denominator = payload.get(denominator_metric)
+                    if (
+                        numerator is not None
+                        and denominator is not None
+                        and denominator > parameters.production_epsilon_t
+                    ):
                         ratios_by_mine[relationship].setdefault(
                             row["mine_id"], []
-                        ).append(float(value) / float(production))
+                        ).append(float(numerator) / float(denominator))
             mine_ids = sorted({row["mine_id"] for row in rows})
             members: list[dict[str, Any]] = []
             for mine_id in mine_ids:
@@ -4202,8 +4229,9 @@ class RegulatoryV2Store:
                     }
                 )
             cohort = {
-                "schema_version": "anonymous-peer-cohort-snapshot-v1",
+                "schema_version": "anonymous-peer-cohort-snapshot-v2",
                 "comparison_group": comparison_group,
+                "quantity_scope": submission.quantity_scope,
                 "cutoff_date": cutoff_date,
                 "members": members,
             }
@@ -4211,7 +4239,7 @@ class RegulatoryV2Store:
             snapshot_id = str(
                 uuid5(
                     NAMESPACE_URL,
-                    f"mineguard:v2:peer-snapshot:{comparison_group}:{cutoff_date}",
+                    f"mineguard:v2:peer-snapshot:{snapshot_group}:{cutoff_date}",
                 )
             )
             created_at = self._timestamp()
@@ -4224,7 +4252,7 @@ class RegulatoryV2Store:
                 """,
                 (
                     snapshot_id,
-                    comparison_group,
+                    snapshot_group,
                     cutoff_date,
                     cohort_json,
                     _hash_text(cohort_json),
@@ -4257,7 +4285,7 @@ class RegulatoryV2Store:
             if member["mine_token"] != target_token
         ]
         result: list[ReferenceBand] = []
-        for relationship in _RELATIONSHIP_METRIC:
+        for relationship in relationships:
             relationship_keys = (relationship.value,)
             if relationship is RelationshipCode.MINE_ENTRY_PERSONS_PER_PRODUCTION:
                 relationship_keys += ("labor_per_production",)
@@ -4317,11 +4345,14 @@ class RegulatoryV2Store:
         finding_type: Literal["risk", "data_insufficient"] = (
             "risk" if result.decision is DecisionStatus.RISK else "data_insufficient"
         )
+        quantity_label = (
+            "十量" if submission.quantity_scope == "ten_quantity_v3" else "五量"
+        )
         title_by_category = {
-            "data_quality": "五量数据质量风险",
-            "relationship_consistency": "五量关系协调风险",
-            "temporal_pattern": "五量时序变化风险",
-            "data_completeness": "五量数据补充要求",
+            "data_quality": f"{quantity_label}数据质量风险",
+            "relationship_consistency": f"{quantity_label}关系协调风险",
+            "temporal_pattern": f"{quantity_label}时序变化风险",
+            "data_completeness": f"{quantity_label}数据补充要求",
         }
         title = title_by_category[category]
         report = RiskFindingReport(
@@ -4587,6 +4618,10 @@ class RegulatoryV2Store:
         }
         reasons_json = _canonical_json(reasons)
         admission_id = str(uuid4())
+        baseline_rule_version = result.runtime_manifest.get(
+            "baseline_admission_rule_version",
+            BASELINE_ADMISSION_RULE_VERSION,
+        )
         connection.execute(
             """
             INSERT INTO v2_baseline_admissions(
@@ -4602,7 +4637,7 @@ class RegulatoryV2Store:
                 submission.mine_id,
                 int(eligible),
                 int(reference_candidate),
-                BASELINE_ADMISSION_RULE_VERSION,
+                baseline_rule_version,
                 reasons_json,
                 _hash_text(reasons_json),
                 recorded_at,
@@ -4624,7 +4659,7 @@ class RegulatoryV2Store:
                 "eligible": eligible,
                 "reference_candidate": reference_candidate,
                 "reasons_sha256": _hash_text(reasons_json),
-                "rule_version": BASELINE_ADMISSION_RULE_VERSION,
+                "rule_version": baseline_rule_version,
             },
             occurred_at=recorded_at,
         )
@@ -4763,23 +4798,6 @@ class RegulatoryV2Store:
 
     def _timestamp(self) -> str:
         return _as_utc(self._now()).isoformat()
-
-
-_METRICS = (
-    "ventilation_m3_min",
-    "electricity_kwh",
-    "detonators_count",
-    "explosives_kg",
-    "mine_entry_persons",
-    "production_t",
-)
-_RELATIONSHIP_METRIC = {
-    RelationshipCode.VENTILATION_PER_PRODUCTION: "ventilation_m3_min",
-    RelationshipCode.ELECTRICITY_PER_PRODUCTION: "electricity_kwh",
-    RelationshipCode.DETONATORS_PER_PRODUCTION: "detonators_count",
-    RelationshipCode.EXPLOSIVES_PER_PRODUCTION: "explosives_kg",
-    RelationshipCode.MINE_ENTRY_PERSONS_PER_PRODUCTION: "mine_entry_persons",
-}
 
 
 def _canonical_daily_payload(payload: dict[str, Any]) -> dict[str, Any]:
