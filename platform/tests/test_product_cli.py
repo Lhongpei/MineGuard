@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +25,7 @@ def test_product_cli_exposes_only_v2_runtime_and_operations() -> None:
         "demo",
         "setup",
         "start",
+        "bootstrap-admin",
         "seed-v2-demo",
         "backup",
         "verify-backup",
@@ -46,6 +48,7 @@ def test_product_cli_exposes_only_v2_runtime_and_operations() -> None:
         "enable",
         "disable",
         "reset-password",
+        "change-password",
     }
     source = inspect.getsource(product_cli)
     assert "from .api" not in source
@@ -85,7 +88,7 @@ def test_product_cli_config_check_is_read_only_and_machine_parseable(
 ) -> None:
     auth_database = tmp_path / "auth.db"
     with LocalAuthStore(auth_database) as auth:
-        auth.bootstrap_admin("admin", "admin password")
+        auth.bootstrap_admin("admin", "Ready-Admin-Password-2026!")
 
     assert (
         product_cli.main(
@@ -94,11 +97,119 @@ def test_product_cli_config_check_is_read_only_and_machine_parseable(
         == 0
     )
     result = json.loads(capsys.readouterr().out)
-    assert result == {"status": "ok", "auth_user_count": 1}
+    assert result["status"] == "ok"
+    assert result["auth_user_count"] == 1
+    assert result["auth_ready_admin_count"] == 1
+    assert result["auth_production_ready"] is True
+    assert result["auth_blocked_user_count"] == 0
+    assert result["auth_outdated_credential_policy_user_count"] == 0
+    assert result["auth_current_credential_policy_version"] == 1
 
     assert product_cli.main(["config-check"]) == 2
     error = json.loads(capsys.readouterr().out)
     assert error["error"]["code"] == "operation_failed"
+
+
+def test_short_bootstrap_uses_fixed_file_and_writes_only_password_digest(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "formal-state"
+    password = "Bootstrap-Admin-Password-2026!"
+    password_file = tmp_path / "bootstrap-admin-password.txt"
+    password_file.write_text(password, encoding="utf-8")
+    monkeypatch.setenv("MINEGUARD_ADMIN_PASSWORD", "must-not-be-used")
+    assert product_cli.main(
+        [
+            "bootstrap-admin",
+            "--state-directory",
+            str(state),
+            "--admin-username",
+            "formal-admin",
+            "--password-file",
+            str(password_file),
+            "--production",
+        ]
+    ) == 0
+    output = capsys.readouterr().out
+    result = json.loads(output)
+    assert result["status"] == "administrator_bootstrapped"
+    assert result["production_ready"] is True
+    assert result["password_stored"] is False
+    assert result["credential_policy_version"] == 1
+    assert password not in output
+    assert "MINEGUARD_ADMIN_PASSWORD" not in os.environ
+    assert not password_file.exists()
+    assert not (state / ".mineguard-start.json").exists()
+    with LocalAuthStore(state / "auth.db") as auth:
+        assert auth.login(
+            "formal-admin", password, client_id="bootstrap-test"
+        ).principal.username == "formal-admin"
+
+
+def test_short_bootstrap_is_formal_empty_store_only_and_retains_failed_input(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = tmp_path / "existing-state"
+    state.mkdir()
+    with LocalAuthStore(state / "auth.db") as auth:
+        auth.bootstrap_admin("existing-admin", "Existing-Admin-Password-2026!")
+    password_file = tmp_path / "bootstrap-admin-password.txt"
+    password_file.write_text(
+        "Second-Admin-Password-2026!", encoding="utf-8"
+    )
+    assert product_cli.main(
+        [
+            "bootstrap-admin",
+            "--state-directory",
+            str(state),
+            "--password-file",
+            str(password_file),
+            "--production",
+        ]
+    ) == 2
+    error = json.loads(capsys.readouterr().out)
+    assert "空 auth.db" in error["error"]["message"]
+    assert password_file.is_file()
+
+    assert product_cli.main(
+        [
+            "bootstrap-admin",
+            "--state-directory",
+            str(tmp_path / "unsafe"),
+            "--password-file",
+            str(password_file),
+        ]
+    ) == 2
+    error = json.loads(capsys.readouterr().out)
+    assert "--production" in error["error"]["message"]
+    assert password_file.is_file()
+
+
+def test_short_bootstrap_rejects_password_file_symlink(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    target = tmp_path / "secret-target.txt"
+    target.write_text("Symlink-Admin-Password-2026!", encoding="utf-8")
+    password_file = tmp_path / "bootstrap-admin-password.txt"
+    password_file.symlink_to(target)
+    assert product_cli.main(
+        [
+            "bootstrap-admin",
+            "--state-directory",
+            str(tmp_path / "formal-state"),
+            "--password-file",
+            str(password_file),
+            "--production",
+        ]
+    ) == 2
+    error = json.loads(capsys.readouterr().out)
+    assert "符号链接" in error["error"]["message"]
+    assert password_file.is_symlink()
+    assert target.is_file()
 
 
 def test_loopback_first_start_uses_requested_demo_password(
@@ -225,6 +336,7 @@ def test_user_cli_manages_accounts_in_the_selected_live_state(
     with LocalAuthStore(state / "auth.db") as auth:
         login = auth.login("领导甲", "initial password", client_id="test")
         assert login.principal.mine_scopes == ("MINE-QY-001",)
+    assert "MINEGUARD_NEW_USER_PASSWORD" not in os.environ
 
     assert (
         product_cli.main(
@@ -275,7 +387,6 @@ def test_user_cli_manages_accounts_in_the_selected_live_state(
     enabled = json.loads(capsys.readouterr().out)
     assert enabled["user"]["active"] is True
 
-    monkeypatch.delenv("MINEGUARD_NEW_USER_PASSWORD")
     assert (
         product_cli.main(
             [
@@ -295,6 +406,72 @@ def test_user_cli_manages_accounts_in_the_selected_live_state(
     with LocalAuthStore(state / "auth.db") as auth:
         login = auth.login("领导甲", "123123123", client_id="test-after-reset")
         assert login.principal.role.value == "reviewer"
+
+
+@pytest.mark.parametrize(
+    "formal_marker",
+    (".mineguard-start.json", ".mineguard-platform-state.json"),
+)
+def test_formal_user_add_rejects_and_clears_environment_password(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    formal_marker: str,
+) -> None:
+    state = tmp_path / "formal-state"
+    state.mkdir()
+    (state / formal_marker).write_text("{}", encoding="utf-8")
+    with LocalAuthStore(state / "auth.db") as auth:
+        auth.bootstrap_admin("admin", "Formal-Admin-2026!")
+    monkeypatch.setenv(
+        "MINEGUARD_NEW_USER_PASSWORD", "Leader-Initial-2026!"
+    )
+
+    assert product_cli.main(
+        [
+            "user",
+            "add",
+            "leader-a",
+            "--role",
+            "viewer",
+            "--mine-id",
+            "MINE-QY-001",
+            "--state-directory",
+            str(state),
+        ]
+    ) == 2
+    error = json.loads(capsys.readouterr().out)
+    assert "不接受 MINEGUARD_NEW_USER_PASSWORD" in error["error"]["message"]
+    assert "MINEGUARD_NEW_USER_PASSWORD" not in os.environ
+    with LocalAuthStore(state / "auth.db") as auth:
+        assert auth.get_user("leader-a") is None
+
+
+def test_formal_user_add_requires_an_attached_local_terminal(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = tmp_path / "formal-state"
+    state.mkdir()
+    (state / ".mineguard-start.json").write_text("{}", encoding="utf-8")
+    with LocalAuthStore(state / "auth.db") as auth:
+        auth.bootstrap_admin("admin", "Formal-Admin-2026!")
+
+    assert product_cli.main(
+        [
+            "user",
+            "add",
+            "leader-a",
+            "--role",
+            "viewer",
+            "--mine-id",
+            "MINE-QY-001",
+            "--state-directory",
+            str(state),
+        ]
+    ) == 2
+    error = json.loads(capsys.readouterr().out)
+    assert "服务器本机交互终端" in error["error"]["message"]
 
 
 def test_user_cli_rejects_wrong_state_directory_and_missing_mine_scope(
@@ -329,6 +506,89 @@ def test_user_cli_rejects_wrong_state_directory_and_missing_mine_scope(
     )
     error = json.loads(capsys.readouterr().out)
     assert "至少需要一个 --mine-id 或 --all-mines" in error["error"]["message"]
+
+
+def test_local_interactive_password_rotation_upgrades_legacy_policy_without_leak(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "legacy-state"
+    state.mkdir()
+    old_password = "admin password"
+    new_password = "Rotated-Admin-Password-2026!"
+    with LocalAuthStore(state / "auth.db") as auth:
+        legacy = auth.bootstrap_admin("admin", old_password)
+        assert legacy.credential_policy_version == 0
+
+    monkeypatch.setattr(
+        product_cli.sys,
+        "stdin",
+        SimpleNamespace(isatty=lambda: True),
+    )
+    entered = iter([old_password, new_password, new_password])
+    monkeypatch.setattr(product_cli.getpass, "getpass", lambda _label: next(entered))
+    assert product_cli.main(
+        [
+            "user",
+            "change-password",
+            "admin",
+            "--state-directory",
+            str(state),
+        ]
+    ) == 0
+    output = capsys.readouterr().out
+    result = json.loads(output)
+    assert result == {
+        "credential_policy_version": 1,
+        "password_stored": False,
+        "restart_required": False,
+        "sessions_revoked": True,
+        "state_directory": str(state.resolve()),
+        "status": "password_changed",
+        "username": "admin",
+    }
+    assert old_password not in output
+    assert new_password not in output
+    with LocalAuthStore(state / "auth.db") as auth:
+        upgraded = auth.get_user("admin")
+        assert upgraded is not None
+        assert upgraded.credential_policy_version == 1
+        assert upgraded.must_change_password is False
+        assert auth.production_credential_status()["production_ready"] is True
+
+
+def test_password_rotation_refuses_noninteractive_secret_input(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "legacy-state"
+    state.mkdir()
+    with LocalAuthStore(state / "auth.db") as auth:
+        auth.bootstrap_admin("admin", "admin password")
+    monkeypatch.setattr(
+        product_cli.sys,
+        "stdin",
+        SimpleNamespace(isatty=lambda: False),
+    )
+    monkeypatch.setattr(
+        product_cli.getpass,
+        "getpass",
+        lambda _label: pytest.fail("must not read a password without a local TTY"),
+    )
+    assert product_cli.main(
+        [
+            "user",
+            "change-password",
+            "admin",
+            "--state-directory",
+            str(state),
+        ]
+    ) == 2
+    error = json.loads(capsys.readouterr().out)
+    assert "本机交互终端" in error["error"]["message"]
+    assert "环境变量" in error["error"]["message"]
 
 
 def test_seed_v2_demo_command_creates_isolated_dashboard_data(

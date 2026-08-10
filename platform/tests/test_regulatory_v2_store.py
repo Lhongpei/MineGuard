@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+import mineguard.regulatory_v2_store as regulatory_store_module
 from mineguard.regulatory_v2 import (
     ComparisonContext,
     DecisionStatus,
@@ -22,7 +23,9 @@ from mineguard.regulatory_v2_store import (
     EnterpriseFindingResponse,
     ExchangeMessageInput,
     RegulatoryV2ConflictError,
+    RegulatoryV2IntegrityError,
     RegulatoryV2NotFoundError,
+    RegulatoryV2SchemaVersionError,
     RegulatoryV2Store,
 )
 
@@ -261,9 +264,7 @@ def test_one_mine_cannot_create_parallel_or_overlapping_monthly_roots() -> None:
             _submission(str(uuid4()), start=date(2026, 1, 1))
         )
         with pytest.raises(RegulatoryV2ConflictError, match="one root workflow"):
-            store.submit_and_analyze(
-                _submission(str(uuid4()), start=date(2026, 1, 2))
-            )
+            store.submit_and_analyze(_submission(str(uuid4()), start=date(2026, 1, 2)))
         assert len(store.list_submissions(mine_id="mine-a")) == 1
         assert store.get_submission_receipt(first.submission_id).run_id == first.run_id
 
@@ -310,6 +311,7 @@ def test_same_period_peer_arrival_order_cannot_change_analysis() -> None:
 
     def run(*, target_first: bool) -> tuple[DecisionStatus, str, list[object]]:
         with RegulatoryV2Store(":memory:", now=lambda: NOW) as store:
+
             def submit_target() -> tuple[DecisionStatus, str, list[object]]:
                 receipt = store.submit_and_analyze(
                     _submission(
@@ -357,9 +359,7 @@ def test_group_peer_snapshot_is_frozen_for_all_mines_in_reporting_period() -> No
                 )
             )
 
-        first = store.submit_and_analyze(
-            _submission(str(uuid4()), mine_id="current-a")
-        )
+        first = store.submit_and_analyze(_submission(str(uuid4()), mine_id="current-a"))
         first_bands = store.get_run(first.run_id).references.accepted_peer_bands
         assert first_bands
         assert {item.mine_count for item in first_bands} == {3}
@@ -467,9 +467,7 @@ def test_sender_idempotency_is_atomic_and_conflict_is_durably_audited() -> None:
 
         assert len(store.list_submissions(mine_id="mine-a")) == 1
         with pytest.raises(RegulatoryV2NotFoundError):
-            store.get_exchange_message(
-                second_id, mine_id="mine-a", direction="inbound"
-            )
+            store.get_exchange_message(second_id, mine_id="mine-a", direction="inbound")
         assert any(
             item.event_type == "inbox_idempotency_conflict_rejected"
             for item in store.list_audit_events(limit=100)
@@ -498,6 +496,559 @@ def test_nonce_replay_survives_store_and_core_tables_are_append_only() -> None:
                 "UPDATE v2_analysis_runs SET decision = 'risk' WHERE run_id = ?",
                 (receipt.run_id,),
             )
+
+
+def test_transport_nonce_rows_have_a_strict_per_sender_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        regulatory_store_module,
+        "_MAX_ACTIVE_TRANSPORT_NONCES_PER_SENDER",
+        2,
+    )
+    with RegulatoryV2Store(tmp_path / "bounded-nonces.sqlite3", now=lambda: NOW) as store:
+        expiry = NOW + timedelta(minutes=10)
+        assert store.claim_transport_nonce(
+            "agent-a", "bounded-nonce-1", request_time=NOW, expires_at=expiry
+        )
+        assert store.claim_transport_nonce(
+            "agent-a", "bounded-nonce-2", request_time=NOW, expires_at=expiry
+        )
+        assert not store.claim_transport_nonce(
+            "agent-a", "bounded-nonce-3", request_time=NOW, expires_at=expiry
+        )
+        assert store.claim_transport_nonce(
+            "agent-b", "bounded-nonce-1", request_time=NOW, expires_at=expiry
+        )
+        assert (
+            store._connection.execute(  # noqa: SLF001
+                "SELECT COUNT(*) FROM v2_transport_nonces WHERE sender_id='agent-a'"
+            ).fetchone()[0]
+            == 2
+        )
+
+
+def test_schema_migration_ledger_is_explicit_and_append_only(tmp_path: Path) -> None:
+    database = tmp_path / "schema-ledger.sqlite3"
+    with RegulatoryV2Store(database, now=lambda: NOW) as store:
+        status = store.schema_status()
+        assert status["current_version"] == status["supported_version"] == 1
+        assert [item["version"] for item in status["migrations"]] == [1]
+        assert len(status["migrations"][0]["checksum"]) == 64
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            store._connection.execute(
+                "UPDATE v2_schema_migrations SET checksum = ? WHERE version = 1",
+                ("0" * 64,),
+            )
+
+
+def test_pre_ledger_v2_database_requires_explicit_offline_exact_adoption(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "legacy-v2.sqlite3"
+    submission_id = str(uuid4())
+    with RegulatoryV2Store(database, now=lambda: NOW) as store:
+        store.submit_and_analyze(_submission(submission_id))
+        store._connection.execute("DROP TRIGGER v2_schema_migrations_no_update")
+        store._connection.execute("DROP TRIGGER v2_schema_migrations_no_delete")
+        store._connection.execute("DROP TABLE v2_schema_migrations")
+        store._connection.execute("PRAGMA user_version = 0")
+
+    with pytest.raises(RegulatoryV2SchemaVersionError, match="ledger is missing"):
+        RegulatoryV2Store(database, now=lambda: NOW)
+    with pytest.raises(RegulatoryV2SchemaVersionError, match="forbidden"):
+        RegulatoryV2Store(
+            database,
+            now=lambda: NOW,
+            production_mode=True,
+            allow_legacy_schema_adoption=True,
+        )
+
+    # Adoption is a deliberate offline step.  Only the exact pre-ledger V2
+    # fingerprint is accepted; production can open it only after that step.
+    with RegulatoryV2Store(
+        database,
+        now=lambda: NOW,
+        allow_legacy_schema_adoption=True,
+    ) as adopted:
+        assert adopted.get_submission(submission_id).submission_id == submission_id
+
+    with RegulatoryV2Store(database, now=lambda: NOW, production_mode=True) as upgraded:
+        assert upgraded.schema_status()["current_version"] == 1
+        assert upgraded.get_submission(submission_id).submission_id == submission_id
+        assert upgraded.verify_integrity() is True
+
+
+def test_missing_ledger_on_any_other_nonempty_database_fails_without_writes(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "unrelated-nonempty.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE unrelated(value TEXT)")
+        connection.execute("INSERT INTO unrelated VALUES ('keep-me')")
+
+    with pytest.raises(RegulatoryV2SchemaVersionError, match="ledger is missing"):
+        RegulatoryV2Store(database, now=lambda: NOW)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT value FROM unrelated").fetchone()[0] == "keep-me"
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name GLOB 'v2_*'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_managed_schema_rejects_noop_trigger_extra_or_weakened_index(
+    tmp_path: Path,
+) -> None:
+    noop_database = tmp_path / "noop-trigger.sqlite3"
+    with RegulatoryV2Store(noop_database, now=lambda: NOW) as store:
+        store._connection.execute("DROP TRIGGER v2_audit_events_no_update")
+        store._connection.execute(
+            """
+            CREATE TRIGGER v2_audit_events_no_update
+            BEFORE UPDATE ON v2_audit_events BEGIN SELECT 1; END
+            """
+        )
+    with pytest.raises(RegulatoryV2IntegrityError, match="trigger integrity"):
+        RegulatoryV2Store(noop_database, now=lambda: NOW)
+
+    extra_database = tmp_path / "extra-index.sqlite3"
+    with RegulatoryV2Store(extra_database, now=lambda: NOW) as store:
+        store._connection.execute(
+            "CREATE INDEX injected_v2_submission_index "
+            "ON v2_submissions(received_at)"
+        )
+    with pytest.raises(RegulatoryV2SchemaVersionError, match="schema contract"):
+        RegulatoryV2Store(extra_database, now=lambda: NOW)
+
+    weak_database = tmp_path / "weak-index.sqlite3"
+    with RegulatoryV2Store(weak_database, now=lambda: NOW) as store:
+        store._connection.execute("DROP INDEX idx_v2_submissions_mine_period")
+        store._connection.execute(
+            "CREATE INDEX idx_v2_submissions_mine_period "
+            "ON v2_submissions(mine_id)"
+        )
+    with pytest.raises(RegulatoryV2SchemaVersionError, match="schema contract"):
+        RegulatoryV2Store(weak_database, now=lambda: NOW)
+
+
+def test_managed_schema_rejects_weakened_check_constraint(tmp_path: Path) -> None:
+    database = tmp_path / "weak-check.sqlite3"
+    with RegulatoryV2Store(database, now=lambda: NOW):
+        pass
+    with sqlite3.connect(database) as connection:
+        original = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='v2_submissions'"
+        ).fetchone()[0]
+        weakened = original.replace(
+            "revision INTEGER NOT NULL CHECK (revision >= 1)",
+            "revision INTEGER NOT NULL",
+        )
+        assert weakened != original
+        schema_version = connection.execute("PRAGMA schema_version").fetchone()[0]
+        connection.execute("PRAGMA writable_schema=ON")
+        connection.execute(
+            "UPDATE sqlite_master SET sql=? "
+            "WHERE type='table' AND name='v2_submissions'",
+            (weakened,),
+        )
+        connection.commit()
+        connection.execute(f"PRAGMA schema_version={schema_version + 1}")
+        connection.execute("PRAGMA writable_schema=OFF")
+
+    with pytest.raises(RegulatoryV2SchemaVersionError, match="schema contract"):
+        RegulatoryV2Store(database, now=lambda: NOW)
+
+
+def test_unknown_future_schema_is_rejected_before_current_schema_changes(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "future-v2.sqlite3"
+    with RegulatoryV2Store(database, now=lambda: NOW) as store:
+        store._connection.execute(
+            """
+            INSERT INTO v2_schema_migrations(
+                version, migration_id, checksum, applied_at
+            ) VALUES (2, 'future-migration', ?, ?)
+            """,
+            ("f" * 64, NOW.isoformat()),
+        )
+        store._connection.execute("PRAGMA user_version = 2")
+
+    with pytest.raises(RegulatoryV2SchemaVersionError, match="newer"):
+        RegulatoryV2Store(database, now=lambda: NOW)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert (
+            connection.execute(
+                "SELECT migration_id FROM v2_schema_migrations WHERE version = 2"
+            ).fetchone()[0]
+            == "future-migration"
+        )
+
+
+def test_production_write_rejects_runtime_future_schema_marker(tmp_path: Path) -> None:
+    database = tmp_path / "runtime-future-v2.sqlite3"
+    with RegulatoryV2Store(database, now=lambda: NOW, production_mode=True) as store:
+        store._connection.execute(
+            """
+            INSERT INTO v2_schema_migrations(
+                version, migration_id, checksum, applied_at
+            ) VALUES (2, 'future-runtime-migration', ?, ?)
+            """,
+            ("e" * 64, NOW.isoformat()),
+        )
+        store._connection.execute("PRAGMA user_version = 2")
+        with pytest.raises(RegulatoryV2SchemaVersionError, match="newer"):
+            store.claim_transport_nonce(
+                "agent-a",
+                "nonce-after-future-upgrade",
+                request_time=NOW,
+                expires_at=NOW + timedelta(minutes=5),
+            )
+        assert (
+            store._connection.execute(
+                "SELECT COUNT(*) FROM v2_transport_nonces"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_production_start_and_subsequent_writes_fail_closed_on_broken_audit_chain(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "production-integrity.sqlite3"
+    with RegulatoryV2Store(database, now=lambda: NOW) as store:
+        store.record_security_event(
+            event_type="machine_authentication_failed",
+            request_method="POST",
+            request_path="/v2/five-quantity-submissions",
+            remote_address="127.0.0.1",
+        )
+        store._connection.execute("DROP TRIGGER v2_audit_events_no_update")
+        store._connection.execute(
+            "UPDATE v2_audit_events SET event_hash = ? WHERE sequence = 1",
+            ("f" * 64,),
+        )
+
+    with pytest.raises(RegulatoryV2IntegrityError, match="audit chain"):
+        RegulatoryV2Store(database, now=lambda: NOW, production_mode=True)
+
+    # A production process which was healthy at startup also rechecks before
+    # every transaction, so post-start tampering cannot admit even a nonce.
+    runtime_database = tmp_path / "production-runtime.sqlite3"
+    with RegulatoryV2Store(
+        runtime_database, now=lambda: NOW, production_mode=True
+    ) as store:
+        store.record_security_event(
+            event_type="machine_authentication_failed",
+            request_method="GET",
+            request_path="/v2/analysis-reports/next",
+            remote_address="127.0.0.1",
+        )
+        store._connection.execute("DROP TRIGGER v2_audit_events_no_update")
+        store._connection.execute(
+            "UPDATE v2_audit_events SET event_hash = ? WHERE sequence = 1",
+            ("e" * 64,),
+        )
+        with pytest.raises(RegulatoryV2IntegrityError, match="write refused"):
+            store.claim_transport_nonce(
+                "agent-a",
+                "nonce-after-tamper",
+                request_time=NOW,
+                expires_at=NOW + timedelta(minutes=5),
+            )
+        assert (
+            store._connection.execute(
+                "SELECT COUNT(*) FROM v2_transport_nonces"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_production_full_integrity_rejects_orphaned_foreign_keys(
+    tmp_path: Path,
+) -> None:
+    startup_database = tmp_path / "orphan-at-startup.sqlite3"
+    with RegulatoryV2Store(startup_database, now=lambda: NOW):
+        pass
+    with sqlite3.connect(startup_database) as external:
+        external.execute("PRAGMA foreign_keys = OFF")
+        external.execute(
+            """
+            INSERT INTO v2_finding_events(
+                event_id, finding_id, event_type, payload_json, occurred_at
+            ) VALUES ('orphan-startup-event', 'missing-finding', 'issued', '{}', ?)
+            """,
+            (NOW.isoformat(),),
+        )
+        assert external.execute("PRAGMA foreign_key_check").fetchone() is not None
+
+    with pytest.raises(RegulatoryV2IntegrityError, match="integrity check failed"):
+        RegulatoryV2Store(
+            startup_database,
+            now=lambda: NOW,
+            production_mode=True,
+        )
+
+    runtime_database = tmp_path / "orphan-at-runtime.sqlite3"
+    with RegulatoryV2Store(
+        runtime_database,
+        now=lambda: NOW,
+        production_mode=True,
+    ) as store:
+        trusted_checkpoint = store._integrity_checkpoint  # noqa: SLF001
+        assert trusted_checkpoint is not None
+        with sqlite3.connect(runtime_database) as external:
+            external.execute("PRAGMA foreign_keys = OFF")
+            external.execute(
+                """
+                INSERT INTO v2_finding_events(
+                    event_id, finding_id, event_type, payload_json, occurred_at
+                ) VALUES (
+                    'orphan-runtime-event', 'missing-finding', 'issued', '{}', ?
+                )
+                """,
+                (NOW.isoformat(),),
+            )
+
+        assert store.verify_integrity() is False
+        assert store._integrity_failed is True  # noqa: SLF001
+        assert store._integrity_checkpoint == trusted_checkpoint  # noqa: SLF001
+        assert store.verify_runtime_integrity() is False
+
+
+def test_production_startup_rejects_sqlite_quick_check_failure(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "sqlite-structure-damage.sqlite3"
+    with RegulatoryV2Store(database, now=lambda: NOW):
+        pass
+
+    image = bytearray(database.read_bytes())
+    assert image[:16] == b"SQLite format 3\x00"
+    freelist_count = int.from_bytes(image[36:40], "big")
+    image[36:40] = (freelist_count + 1).to_bytes(4, "big")
+    database.write_bytes(image)
+
+    with sqlite3.connect(database) as probe:
+        quick_check = [tuple(row) for row in probe.execute("PRAGMA quick_check")]
+    assert quick_check != [("ok",)]
+
+    with pytest.raises(RegulatoryV2IntegrityError, match="integrity check failed"):
+        RegulatoryV2Store(database, now=lambda: NOW, production_mode=True)
+
+
+def test_production_integrity_fast_path_does_not_rescan_large_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "large-production-history.sqlite3"
+    with RegulatoryV2Store(database, now=lambda: NOW) as seed:
+        for index in range(750):
+            seed.record_security_event(
+                event_type="machine_authentication_failed",
+                request_method="POST",
+                request_path="/v2/five-quantity-submissions",
+                remote_address=f"10.0.{index // 256}.{index % 256}",
+            )
+
+    with RegulatoryV2Store(database, now=lambda: NOW, production_mode=True) as store:
+        full_scan_count = 0
+        original = store._run_full_integrity_check_locked  # noqa: SLF001
+
+        def counted_full_scan() -> bool:
+            nonlocal full_scan_count
+            full_scan_count += 1
+            return original()
+
+        monkeypatch.setattr(
+            store,
+            "_run_full_integrity_check_locked",
+            counted_full_scan,
+        )
+        for index in range(100):
+            assert store.verify_runtime_integrity() is True
+            assert store.claim_transport_nonce(
+                "agent-a",
+                f"large-history-nonce-{index}",
+                request_time=NOW,
+                expires_at=NOW + timedelta(minutes=5),
+            )
+        for _ in range(25):
+            store.record_security_event(
+                event_type="machine_authentication_failed",
+                request_method="GET",
+                request_path="/v2/analysis-reports/next",
+                remote_address="127.0.0.1",
+            )
+
+        assert full_scan_count == 0
+        assert store.verify_audit_chain() is True
+
+
+def test_production_runtime_detects_external_tamper_even_after_trigger_recreated(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "external-tamper.sqlite3"
+    with RegulatoryV2Store(database, now=lambda: NOW, production_mode=True) as store:
+        store.record_security_event(
+            event_type="machine_authentication_failed",
+            request_method="POST",
+            request_path="/v2/five-quantity-submissions",
+            remote_address="127.0.0.1",
+        )
+        with sqlite3.connect(database) as external:
+            external.execute("DROP TRIGGER v2_audit_events_no_update")
+            external.execute(
+                "UPDATE v2_audit_events SET event_hash=? WHERE sequence=1",
+                ("d" * 64,),
+            )
+            external.execute(
+                """
+                CREATE TRIGGER v2_audit_events_no_update
+                BEFORE UPDATE ON v2_audit_events
+                BEGIN
+                    SELECT RAISE(ABORT, 'v2_audit_events is append-only');
+                END
+                """
+            )
+
+        assert store.verify_runtime_integrity() is False
+        # Integrity failure is deliberately latched; a later marker match or
+        # repair cannot make this process resume writes without a restart.
+        assert store.verify_runtime_integrity() is False
+        with pytest.raises(RegulatoryV2IntegrityError, match="write refused"):
+            store.claim_transport_nonce(
+                "agent-a",
+                "external-tamper-nonce",
+                request_time=NOW,
+                expires_at=NOW + timedelta(minutes=5),
+            )
+
+
+def test_production_runtime_rejects_every_external_append_after_checkpoint(
+    tmp_path: Path,
+) -> None:
+    binding_database = tmp_path / "external-binding-append.sqlite3"
+    with RegulatoryV2Store(
+        binding_database, now=lambda: NOW, production_mode=True
+    ) as store:
+        with sqlite3.connect(binding_database) as external:
+            external.execute(
+                """
+                INSERT INTO v2_agent_mine_bindings(agent_id, mine_id, created_at)
+                VALUES ('forged-agent', 'forged-mine', ?)
+                """,
+                (NOW.isoformat(),),
+            )
+        assert store.verify_runtime_integrity() is False
+        assert store._integrity_failed is True  # noqa: SLF001
+        assert store.verify_runtime_integrity() is False
+
+    audit_database = tmp_path / "external-audit-append.sqlite3"
+    with RegulatoryV2Store(
+        audit_database, now=lambda: NOW, production_mode=True
+    ) as store:
+        # A second, internally self-consistent store represents an out-of-band
+        # writer capable of producing a perfectly valid public SHA-256 chain.
+        with RegulatoryV2Store(audit_database, now=lambda: NOW) as external:
+            external.record_security_event(
+                event_type="machine_authentication_failed",
+                request_method="GET",
+                request_path="/v2/analysis-reports/next",
+                remote_address="127.0.0.2",
+            )
+        assert store.verify_runtime_integrity() is False
+        assert store._integrity_failed is True  # noqa: SLF001
+
+
+def test_production_runtime_latches_external_migration_ledger_deletion(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "external-ledger-delete.sqlite3"
+    with RegulatoryV2Store(database, now=lambda: NOW, production_mode=True) as store:
+        with sqlite3.connect(database) as external:
+            external.executescript(
+                """
+                DROP TRIGGER v2_schema_migrations_no_update;
+                DROP TRIGGER v2_schema_migrations_no_delete;
+                DELETE FROM v2_schema_migrations;
+                CREATE TRIGGER v2_schema_migrations_no_update
+                BEFORE UPDATE ON v2_schema_migrations
+                BEGIN
+                    SELECT RAISE(ABORT, 'v2_schema_migrations is append-only');
+                END;
+                CREATE TRIGGER v2_schema_migrations_no_delete
+                BEFORE DELETE ON v2_schema_migrations
+                BEGIN
+                    SELECT RAISE(ABORT, 'v2_schema_migrations is append-only');
+                END;
+                """
+            )
+        assert store.verify_runtime_integrity() is False
+        assert store._integrity_failed is True  # noqa: SLF001
+        with pytest.raises(RegulatoryV2IntegrityError, match="write refused"):
+            store.claim_transport_nonce(
+                "agent-a",
+                "nonce-after-ledger-delete",
+                request_time=NOW,
+                expires_at=NOW + timedelta(minutes=5),
+            )
+
+    with pytest.raises(RegulatoryV2SchemaVersionError, match="migration|ledger"):
+        RegulatoryV2Store(database, now=lambda: NOW, production_mode=True)
+
+
+def test_production_rejects_unexpected_trigger_before_it_can_run(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "unexpected-trigger.sqlite3"
+    with RegulatoryV2Store(database, now=lambda: NOW, production_mode=True) as store:
+        store._connection.execute(  # noqa: SLF001 - simulate injected schema
+            """
+            CREATE TRIGGER injected_binding_side_effect
+            AFTER INSERT ON v2_audit_events
+            BEGIN
+                INSERT OR IGNORE INTO v2_agent_mine_bindings(
+                    agent_id, mine_id, created_at
+                ) VALUES ('injected-agent', 'injected-mine',
+                          '2026-01-01T00:00:00+00:00');
+            END
+            """
+        )
+        with pytest.raises(RegulatoryV2IntegrityError, match="write refused"):
+            store.record_security_event(
+                event_type="machine_authentication_failed",
+                request_method="GET",
+                request_path="/v2/analysis-reports/next",
+                remote_address="127.0.0.1",
+            )
+        assert (
+            store._connection.execute(  # noqa: SLF001
+                "SELECT COUNT(*) FROM v2_agent_mine_bindings "
+                "WHERE agent_id = 'injected-agent'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_production_runtime_and_restart_reject_deleted_append_only_trigger(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "deleted-trigger.sqlite3"
+    with RegulatoryV2Store(database, now=lambda: NOW, production_mode=True) as store:
+        with sqlite3.connect(database) as external:
+            external.execute("DROP TRIGGER v2_submissions_no_delete")
+        assert store.verify_runtime_integrity() is False
+
+    with pytest.raises(RegulatoryV2IntegrityError, match="trigger integrity"):
+        RegulatoryV2Store(database, now=lambda: NOW, production_mode=True)
 
 
 def test_audit_page_snapshot_has_no_duplicates_or_gaps_after_concurrent_append(

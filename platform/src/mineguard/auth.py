@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import json
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import threading
@@ -96,6 +97,25 @@ _SCRYPT_N = 2**14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
 _PASSWORD_BYTES = 32
+_KNOWN_DEMO_PASSWORDS = ("123123123",)
+_MIN_STRONG_PASSWORD_LENGTH = 12
+CURRENT_CREDENTIAL_POLICY_VERSION = 1
+_COMMON_WEAK_PASSWORDS = frozenset(
+    {
+        "12345678",
+        "123456789",
+        "123123123",
+        "admin123",
+        "admin123456",
+        "password",
+        "password123",
+        "qwerty123",
+    }
+)
+_PLACEHOLDER_PASSWORD = re.compile(
+    r"(?i)(?:replace(?:[_ -]|\b)|change[_ -]?me|demo[_ -]?only|"
+    r"not[_ -]?for[_ -]?production)"
+)
 
 
 class AuthError(Exception):
@@ -160,6 +180,9 @@ class User:
     active: bool
     created_at: datetime
     updated_at: datetime
+    must_change_password: bool = False
+    temporary_demo: bool = False
+    credential_policy_version: int = 0
 
     def to_audit_dict(self) -> dict[str, Any]:
         return {
@@ -168,6 +191,9 @@ class User:
             "role": self.role.value,
             "mine_scopes": list(self.mine_scopes),
             "active": self.active,
+            "must_change_password": self.must_change_password,
+            "temporary_demo": self.temporary_demo,
+            "credential_policy_version": self.credential_policy_version,
             "created_at": _format_datetime(self.created_at),
             "updated_at": _format_datetime(self.updated_at),
         }
@@ -181,6 +207,9 @@ class Principal:
     mine_scopes: tuple[str, ...]
     session_id: str
     active: bool = True
+    must_change_password: bool = False
+    temporary_demo: bool = False
+    credential_policy_version: int = CURRENT_CREDENTIAL_POLICY_VERSION
 
 
 @dataclass(frozen=True)
@@ -270,6 +299,204 @@ def _password_digest(password: str, salt: bytes) -> bytes:
 
 def _token_digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _credential_flags(
+    password: str,
+    *,
+    must_change_password: bool,
+    temporary_demo: bool,
+) -> tuple[bool, bool]:
+    """Normalize durable credential-purpose flags.
+
+    The built-in demonstration password is always classified as temporary and
+    pending replacement, even when an older caller does not pass the newer
+    keyword arguments.  This keeps the compatibility defaults safe.
+    """
+
+    known_demo = any(
+        secrets.compare_digest(password, candidate)
+        for candidate in _KNOWN_DEMO_PASSWORDS
+    )
+    is_temporary_demo = bool(temporary_demo or known_demo)
+    return bool(must_change_password or is_temporary_demo), is_temporary_demo
+
+
+def validate_strong_password(password: str) -> None:
+    """Validate a production/self-service password without storing it."""
+
+    if not isinstance(password, str) or not password:
+        raise ValueError("password is required")
+    if len(password) < _MIN_STRONG_PASSWORD_LENGTH:
+        raise ValueError("password must contain at least 12 characters")
+    if password.casefold() in _COMMON_WEAK_PASSWORDS:
+        raise ValueError("password is a known weak or demonstration password")
+    if _PLACEHOLDER_PASSWORD.search(password):
+        raise ValueError("password must not contain example or placeholder text")
+    categories = sum(
+        (
+            any(character.islower() for character in password),
+            any(character.isupper() for character in password),
+            any(character.isdigit() for character in password),
+            any(not character.isalnum() for character in password),
+        )
+    )
+    if categories < 3:
+        raise ValueError(
+            "password must use at least three of lowercase, uppercase, digits, symbols"
+        )
+
+
+def _credential_policy_version_for_password(password: str) -> int:
+    """Classify a newly written credential without weakening legacy writers."""
+
+    try:
+        validate_strong_password(password)
+    except ValueError:
+        return 0
+    return CURRENT_CREDENTIAL_POLICY_VERSION
+
+
+def _validated_credential_policy_version(value: object) -> int:
+    """Read a durable policy marker, rejecting downgrade/future ambiguity."""
+
+    if type(value) is not int or value not in {
+        0,
+        CURRENT_CREDENTIAL_POLICY_VERSION,
+    }:
+        raise AuthError("credential policy version is invalid or unsupported")
+    return value
+
+
+def _credential_status_from_rows(
+    rows: Iterable[sqlite3.Row],
+    *,
+    forbidden_passwords: Iterable[str],
+) -> dict[str, Any]:
+    candidates = tuple(dict.fromkeys(forbidden_passwords))
+    materialized = list(rows)
+    blocked: list[dict[str, Any]] = []
+    active_admin_count = 0
+    active_ready_admin_count = 0
+    pending_password_change_user_count = 0
+    outdated_credential_policy_user_count = 0
+    for row in materialized:
+        if row["must_change_password"] not in (0, 1) or row[
+            "temporary_demo"
+        ] not in (0, 1):
+            raise AuthError("credential-purpose flags are invalid")
+        active = bool(row["active"])
+        credential_policy_version = _validated_credential_policy_version(
+            row["credential_policy_version"]
+        )
+        if active and row["role"] == Role.ADMIN.value:
+            active_admin_count += 1
+        reasons: list[str] = []
+        if bool(row["must_change_password"]):
+            reasons.append("must_change_password")
+        if bool(row["temporary_demo"]):
+            reasons.append("temporary_demo")
+        if credential_policy_version != CURRENT_CREDENTIAL_POLICY_VERSION:
+            reasons.append("credential_policy_outdated")
+        for candidate in candidates:
+            digest = _password_digest(candidate, row["password_salt"])
+            if hmac.compare_digest(digest, row["password_hash"]):
+                reasons.append("forbidden_weak_password")
+                break
+        if active and bool(row["must_change_password"]):
+            pending_password_change_user_count += 1
+        if active and credential_policy_version != CURRENT_CREDENTIAL_POLICY_VERSION:
+            outdated_credential_policy_user_count += 1
+        globally_blocking = active and any(
+            reason in {
+                "credential_policy_outdated",
+                "temporary_demo",
+                "forbidden_weak_password",
+            }
+            for reason in reasons
+        )
+        if globally_blocking:
+            blocked.append(
+                {
+                    "username": str(row["username"]),
+                    "reasons": sorted(set(reasons)),
+                }
+            )
+        if (
+            active
+            and row["role"] == Role.ADMIN.value
+            and not reasons
+        ):
+            active_ready_admin_count += 1
+    return {
+        "user_count": len(materialized),
+        "active_admin_count": active_admin_count,
+        "active_ready_admin_count": active_ready_admin_count,
+        "production_ready": not blocked and active_ready_admin_count > 0,
+        "blocked_user_count": len(blocked),
+        "blocked_users": blocked,
+        "pending_password_change_user_count": (
+            pending_password_change_user_count
+        ),
+        "outdated_credential_policy_user_count": (
+            outdated_credential_policy_user_count
+        ),
+    }
+
+
+def inspect_auth_database(
+    database: str | Path,
+    *,
+    forbidden_passwords: Iterable[str] = _COMMON_WEAK_PASSWORDS,
+) -> dict[str, Any]:
+    """Inspect a file-backed auth database without mutating or migrating it."""
+
+    path = Path(database).expanduser().resolve()
+    if not path.is_file():
+        raise AuthError(f"authentication database does not exist: {path}")
+    try:
+        with sqlite3.connect(
+            f"{path.as_uri()}?mode=ro", uri=True, timeout=5.0
+        ) as connection:
+            connection.row_factory = sqlite3.Row
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(users)")
+            }
+            required = {
+                "username",
+                "role",
+                "active",
+                "password_salt",
+                "password_hash",
+            }
+            if not required.issubset(columns):
+                raise AuthError("authentication database has an invalid users table")
+            must_change = (
+                "must_change_password"
+                if "must_change_password" in columns
+                else "0 AS must_change_password"
+            )
+            temporary_demo = (
+                "temporary_demo"
+                if "temporary_demo" in columns
+                else "0 AS temporary_demo"
+            )
+            credential_policy_version = (
+                "credential_policy_version"
+                if "credential_policy_version" in columns
+                else "0 AS credential_policy_version"
+            )
+            rows = connection.execute(
+                "SELECT username,role,active,password_salt,password_hash,"
+                f"{must_change},{temporary_demo},{credential_policy_version} "
+                "FROM users ORDER BY username"
+            ).fetchall()
+    except sqlite3.Error as error:
+        raise AuthError("authentication database could not be inspected") from error
+    return _credential_status_from_rows(
+        rows, forbidden_passwords=forbidden_passwords
+    )
 
 
 def authorize(
@@ -475,6 +702,15 @@ class LocalAuthStore:
                     active INTEGER NOT NULL CHECK (active IN (0,1)),
                     password_salt BLOB NOT NULL,
                     password_hash BLOB NOT NULL,
+                    must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (
+                        must_change_password IN (0,1)
+                    ),
+                    temporary_demo INTEGER NOT NULL DEFAULT 0 CHECK (
+                        temporary_demo IN (0,1)
+                    ),
+                    credential_policy_version INTEGER NOT NULL DEFAULT 0 CHECK (
+                        credential_policy_version IN (0,1)
+                    ),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -510,6 +746,32 @@ class LocalAuthStore:
                 );
                 """
             )
+            # Databases created by releases before credential-purpose tracking
+            # are upgraded in place.  SQLite cannot add a table CHECK during a
+            # compatible ALTER, so every read also validates these flags.
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(users)")
+            }
+            if "must_change_password" not in columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN "
+                    "must_change_password INTEGER NOT NULL DEFAULT 0"
+                )
+            if "temporary_demo" not in columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN "
+                    "temporary_demo INTEGER NOT NULL DEFAULT 0"
+                )
+            if "credential_policy_version" not in columns:
+                # Existing hashes cannot prove which historical password
+                # policy accepted them.  They deliberately remain at zero
+                # until the owner verifies the old password and rotates it.
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN "
+                    "credential_policy_version INTEGER NOT NULL DEFAULT 0"
+                )
+            connection.commit()
 
     @staticmethod
     def _row_to_user(row: sqlite3.Row) -> User:
@@ -521,6 +783,11 @@ class LocalAuthStore:
             active=bool(row["active"]),
             created_at=_parse_datetime(row["created_at"]),
             updated_at=_parse_datetime(row["updated_at"]),
+            must_change_password=bool(row["must_change_password"]),
+            temporary_demo=bool(row["temporary_demo"]),
+            credential_policy_version=_validated_credential_policy_version(
+                row["credential_policy_version"]
+            ),
         )
 
     @staticmethod
@@ -555,8 +822,23 @@ class LocalAuthStore:
             ),
         )
 
-    def bootstrap_admin(self, username: str, password: str) -> User:
+    def bootstrap_admin(
+        self,
+        username: str,
+        password: str,
+        *,
+        must_change_password: bool = False,
+        temporary_demo: bool = False,
+    ) -> User:
         display, username_key = _normalise_username(username)
+        must_change_password, temporary_demo = _credential_flags(
+            password,
+            must_change_password=must_change_password,
+            temporary_demo=temporary_demo,
+        )
+        credential_policy_version = _credential_policy_version_for_password(
+            password
+        )
         now = self._now()
         with self._write() as connection:
             rows = connection.execute("SELECT * FROM users").fetchall()
@@ -605,8 +887,9 @@ class LocalAuthStore:
                 """
                 INSERT INTO users(
                     user_id,username,username_key,role,mine_scopes_json,active,
-                    password_salt,password_hash,created_at,updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    password_salt,password_hash,must_change_password,
+                    temporary_demo,credential_policy_version,created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     user_id,
@@ -617,6 +900,9 @@ class LocalAuthStore:
                     1,
                     salt,
                     password_hash,
+                    int(must_change_password),
+                    int(temporary_demo),
+                    credential_policy_version,
                     timestamp,
                     timestamp,
                 ),
@@ -650,8 +936,18 @@ class LocalAuthStore:
         mine_scopes: Iterable[str] = (),
         *,
         active: bool = True,
+        must_change_password: bool = False,
+        temporary_demo: bool = False,
     ) -> User:
         display, username_key = _normalise_username(username)
+        must_change_password, temporary_demo = _credential_flags(
+            password,
+            must_change_password=must_change_password,
+            temporary_demo=temporary_demo,
+        )
+        credential_policy_version = _credential_policy_version_for_password(
+            password
+        )
         selected_role = role if isinstance(role, Role) else Role(role)
         scopes = _normalise_scopes(mine_scopes, role=selected_role)
         now = self._now()
@@ -665,8 +961,9 @@ class LocalAuthStore:
                     """
                     INSERT INTO users(
                         user_id,username,username_key,role,mine_scopes_json,
-                        active,password_salt,password_hash,created_at,updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                        active,password_salt,password_hash,must_change_password,
+                        temporary_demo,credential_policy_version,created_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         user_id,
@@ -677,6 +974,9 @@ class LocalAuthStore:
                         int(active),
                         salt,
                         password_hash,
+                        int(must_change_password),
+                        int(temporary_demo),
+                        credential_policy_version,
                         timestamp,
                         timestamp,
                     ),
@@ -691,6 +991,9 @@ class LocalAuthStore:
                         "role": selected_role.value,
                         "mine_scopes": list(scopes),
                         "active": active,
+                        "must_change_password": must_change_password,
+                        "temporary_demo": temporary_demo,
+                        "credential_policy_version": credential_policy_version,
                     },
                 )
                 row = connection.execute(
@@ -717,6 +1020,27 @@ class LocalAuthStore:
                 "SELECT * FROM users ORDER BY username_key"
             ).fetchall()
         return [self._row_to_user(row).to_audit_dict() for row in rows]
+
+    def production_credential_status(
+        self,
+        *,
+        forbidden_passwords: Iterable[str] = _COMMON_WEAK_PASSWORDS,
+    ) -> dict[str, Any]:
+        """Return a secret-free, fail-closed production credential audit.
+
+        Flags cover credentials deliberately issued for demonstrations or
+        pending replacement.  Digest comparison also catches legacy databases
+        that predate those flags and therefore cannot truthfully identify the
+        original credential purpose.
+        """
+
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM users ORDER BY username_key"
+            ).fetchall()
+        return _credential_status_from_rows(
+            rows, forbidden_passwords=forbidden_passwords
+        )
 
     @staticmethod
     def _ensure_active_admin_remains(
@@ -868,6 +1192,15 @@ class LocalAuthStore:
         _, username_key = _normalise_username(username)
         if not isinstance(new_password, str) or not new_password:
             raise ValueError("new password is required")
+        validate_strong_password(new_password)
+        must_change_password, temporary_demo = _credential_flags(
+            new_password,
+            must_change_password=False,
+            temporary_demo=False,
+        )
+        credential_policy_version = _credential_policy_version_for_password(
+            new_password
+        )
         now = self._now()
         timestamp = _format_datetime(now)
         with self._write() as connection:
@@ -887,8 +1220,17 @@ class LocalAuthStore:
             password_hash = _password_digest(new_password, salt)
             connection.execute(
                 "UPDATE users SET password_salt = ?, password_hash = ?, "
-                "updated_at = ? WHERE user_id = ?",
-                (salt, password_hash, timestamp, row["user_id"]),
+                "must_change_password = ?, temporary_demo = ?, "
+                "credential_policy_version = ?, updated_at = ? WHERE user_id = ?",
+                (
+                    salt,
+                    password_hash,
+                    int(must_change_password),
+                    int(temporary_demo),
+                    credential_policy_version,
+                    timestamp,
+                    row["user_id"],
+                ),
             )
             connection.execute(
                 "UPDATE sessions SET revoked_at = ? "
@@ -903,12 +1245,30 @@ class LocalAuthStore:
                 username=row["username"],
             )
 
-    def reset_password(self, username: str, new_password: str) -> None:
+    def reset_password(
+        self,
+        username: str,
+        new_password: str,
+        *,
+        must_change_password: bool = True,
+        temporary_demo: bool = False,
+        strict: bool = False,
+    ) -> None:
         """Set a new password administratively and revoke active sessions."""
 
         _, username_key = _normalise_username(username)
         if not isinstance(new_password, str) or not new_password:
             raise ValueError("new password is required")
+        if strict:
+            validate_strong_password(new_password)
+        must_change_password, temporary_demo = _credential_flags(
+            new_password,
+            must_change_password=must_change_password,
+            temporary_demo=temporary_demo,
+        )
+        credential_policy_version = _credential_policy_version_for_password(
+            new_password
+        )
         now = self._now()
         timestamp = _format_datetime(now)
         salt = secrets.token_bytes(16)
@@ -922,8 +1282,17 @@ class LocalAuthStore:
                 raise UserNotFoundError(username)
             connection.execute(
                 "UPDATE users SET password_salt = ?, password_hash = ?, "
-                "updated_at = ? WHERE user_id = ?",
-                (salt, password_hash, timestamp, row["user_id"]),
+                "must_change_password = ?, temporary_demo = ?, "
+                "credential_policy_version = ?, updated_at = ? WHERE user_id = ?",
+                (
+                    salt,
+                    password_hash,
+                    int(must_change_password),
+                    int(temporary_demo),
+                    credential_policy_version,
+                    timestamp,
+                    row["user_id"],
+                ),
             )
             connection.execute(
                 "UPDATE sessions SET revoked_at = ? "
@@ -1079,6 +1448,11 @@ class LocalAuthStore:
             role=Role(row["role"]),
             mine_scopes=tuple(json.loads(row["mine_scopes_json"])),
             session_id=session_id,
+            must_change_password=bool(row["must_change_password"]),
+            temporary_demo=bool(row["temporary_demo"]),
+            credential_policy_version=_validated_credential_policy_version(
+                row["credential_policy_version"]
+            ),
         )
         return LoginResult(
             session_token=session_token,
@@ -1099,7 +1473,9 @@ class LocalAuthStore:
         row = connection.execute(
             """
             SELECT
-                s.*, u.username, u.role, u.mine_scopes_json, u.active
+                s.*, u.username, u.role, u.mine_scopes_json, u.active,
+                u.must_change_password, u.temporary_demo,
+                u.credential_policy_version
             FROM sessions s
             JOIN users u ON u.user_id = s.user_id
             WHERE s.token_sha256 = ?
@@ -1148,6 +1524,11 @@ class LocalAuthStore:
             role=Role(row["role"]),
             mine_scopes=tuple(json.loads(row["mine_scopes_json"])),
             session_id=row["session_id"],
+            must_change_password=bool(row["must_change_password"]),
+            temporary_demo=bool(row["temporary_demo"]),
+            credential_policy_version=_validated_credential_policy_version(
+                row["credential_policy_version"]
+            ),
         )
         return principal, row
 
@@ -1375,6 +1756,7 @@ __all__ = [
     "AuthRepository",
     "BootstrapConflictError",
     "CsrfValidationError",
+    "CURRENT_CREDENTIAL_POLICY_VERSION",
     "InvalidCredentialsError",
     "InvalidSessionError",
     "LastActiveAdminError",
@@ -1394,5 +1776,7 @@ __all__ = [
     "UserNotFoundError",
     "authorize",
     "clear_session_cookie_header",
+    "inspect_auth_database",
     "session_cookie_header",
+    "validate_strong_password",
 ]

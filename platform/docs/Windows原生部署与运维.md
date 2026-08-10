@@ -22,25 +22,42 @@
 ### 正式内网首次配置
 
 切换到“正式内网配置”，选择单位批准的 `clients.json`、用途单一的本机 NTFS 状态目录和
-端口，填写管理员账号及两遍密码。图形向导要求正式密码至少 12 位、同时包含字母和数字，
-并禁止 `123123123`。单位 HTTPS 反向代理已经就绪时，再填写供领导访问的完整 HTTPS
-根地址；地址必须以 `https://` 开头，不能含账号口令、子路径、查询参数或 `#` 片段。点击“保存
-正式配置并启动”后等待健康检查通过。控制中心打开前还会核验 HTTPS 根地址的 `/healthz`；
+端口并填写管理员账号。点击配置按钮后，独立短生命周期 helper 才弹出小密码窗并要求输入
+两遍；主控制中心既不读取密码，也不接收 `SecureString`。helper 要求正式密码至少 12 位，
+并在大写字母、小写字母、数字、符号四类中至少包含三类，并禁止 `123123123`。单位 HTTPS 反向代理已经就绪时，再填写供领导访问的完整 HTTPS
+根地址；地址必须以 `https://` 开头，不能含账号口令、子路径、查询参数或 `#` 片段。点击“打开
+安全密码窗并配置”后等待 helper 退出和健康检查通过。控制中心打开前还会核验 HTTPS 根地址的 `/readyz`；
 验证成功的地址会保存在受保护配置中，但控制中心不会配置 DNS、证书或反向代理。
 
-密码以安全对象交给受保护配置事务，不进入命令行或日志。非敏感的运行记录写入 ACL 受控的
+密码仅在 helper 进程中以安全对象交给受保护配置事务，不进入主控制中心、命令行或日志；
+配置完成或取消后 helper 立即退出。非敏感的运行记录写入 ACL 受控的
 `logs\control-center-*.log`；现场报错时可以拍照窗口底部“运行状态”栏。已有正式配置或
 已有状态数据时，控制中心会禁止一键覆盖，只允许启动现有配置和打开页面。
+所有配置写入都持有机器级 `Global\MineGuardPlatform.Configuration` Mutex，直到提交或
+回滚完全结束。启动脚本会等待同一把机器级 Mutex，并从检查事务残留、读取配置开始，
+一直持有到 Platform 长运行子进程完全退出；运行期间配置脚本获取不到该锁就会闭锁拒绝修改，避免前台
+运行时切换 config/state/ACL。正常退出、控制中心停止或异常终止都会通过 `finally`/操作系统句柄回收
+释放 Mutex；30 秒内未取得锁则闭锁拒绝启动。事务开始时会写入固定阻断标记
+`config\.mineguard-configuration-blocked.json`；只有完整提交或完整回滚并清除事务目录后
+才删除。异常断电或回滚不完整时，后续配置和启动都会拒绝继续。管理员须停服，按标记中的
+唯一 `transactionDirectory` 核验并清理该精确目录，再删除固定阻断标记并重新配置。
+即使磁盘或 ACL 故障导致标记未能更新，启动和配置也会有界扫描 `config` 的直系子目录；
+任何精确匹配 `.configuration-transaction.<32位十六进制>` 的残留目录都会独立触发阻断。
 首次写入前会检查端口占用；如果演示数据准备中断，可在同一页点击【补齐数据并启动展示】继续，
 不要手工删除受保护的状态目录。
 
 控制中心运行的是前台验收进程：窗口保持打开才会继续运行，关闭窗口会先询问并停止本次
-启动。正式长期常驻仍须按第 6 节使用本单位批准、已核验 SHA-256 的 WinSW 安装 Windows
-服务。控制中心不会下载 WinSW，也不会代替服务变更审批。
+启动。正式长期常驻可切换到“正式服务安装”页，选择本单位批准的 WinSW，并手工填写介质外
+审批记录中的 WinSW SHA-256、可选 `.config` SHA-256 和 Platform 签名证书指纹；也可按
+第 6 节使用同样参数执行命令。控制中心不会下载 WinSW、不会从 build metadata 自动取信，
+也不会代替服务变更审批。
 
 ## 1. 已支持的 Windows 基线
 
 - Windows 10/11 x64（演示、运维终端）或 Windows Server 2019/2022 x64；
+- Windows 10 1809+ 仅表示技术兼容下限；2026 年正式上线的普通 Windows 10 22H2
+  必须具有组织 ESU，或使用仍在产品生命周期内的具体 LTSC 版本；优先
+  Windows Server 2019/2022 或 Windows 11；
 - 客户机不需要安装 Python；正式包自带经验证的 Nuitka standalone 运行时；
 - 只有可信构建机需要 CPython 3.12 x64 和 Visual Studio 2022 C++ Build Tools；
 - Windows PowerShell 5.1；安装、配置、启动、健康检查、备份、恢复和服务移除脚本都会
@@ -60,18 +77,21 @@ Windows 没有系统 IANA 时区库。本发布把 `tzdata` 固定为运行依�
 
 ```text
 C:\ProgramData\MineGuard\Platform\
-  runtime\       MineGuardPlatform.exe 与受控 DLL/PYD/资源（LocalService 只读）
+  runtime\       MineGuardPlatform.exe 与受控 DLL/PYD/资源（专属服务 SID 只读）
   config\        settings.json、clients.json、首启密码文件（只读 ACL）
-  state\         mineguard.db、auth.db、backup.key（LocalService 可写）
+  state\         mineguard.db、auth.db、backup.key（专属服务 SID 可写）
                  .mineguard-platform-state.json（专用状态根所有权标记）
-  backups\       在线一致性备份（LocalService 可写）
-  logs\          WinSW 滚动日志（LocalService 可写）
-  service\       PowerShell 包装和 WinSW XML（LocalService 只读）
-  release-metadata\ 版本、构建、文件摘要与签名状态（LocalService 只读）
+  backups\       在线一致性备份（专属服务 SID 可写）
+  logs\          WinSW 滚动日志（专属服务 SID 可写）
+  service\       PowerShell 包装和 WinSW XML（专属服务 SID 只读）
+  release-metadata\ 版本、构建、文件摘要与签名状态（专属服务 SID 只读）
 ```
 
-安装脚本用 SID 设置 ACL，避免中文 Windows 上内置账号名称本地化造成权限错误。默认
-服务身份是低权限 `LocalService`（SID `S-1-5-19`），不是 `LocalSystem`。
+安装脚本用固定服务 SID 设置 ACL，避免本地化账号名以及多个 LocalService 服务共享权限。
+服务身份是专属虚拟账号 `NT SERVICE\MineGuardPlatform`，其确定性 SID 为
+`S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346`；安装时还会执行并
+复核 `sc.exe sidtype MineGuardPlatform unrestricted`。它不是 `LocalSystem`，也不再与
+其他 `LocalService` 服务共享文件访问身份。
 
 状态目录必须是用途单一的状态根。位于安装根内时只允许使用 `Platform\state` 或其专用
 子目录，不能指向 `runtime/config/service` 等程序树；位于外部磁盘时必须为空或带上述
@@ -85,8 +105,11 @@ MineGuard 所有权标记。状态目录也不能等于安装根或成为安装�
 对外只交付经 Authenticode 签名的 `MineGuard-Platform-Setup-x64-<version>.exe`、
 SHA-256 和使用手册，不交付 Python 源码、测试、Git 历史或开发虚拟环境。安装器会把
 临时展开的发布目录交给同一套受保护安装逻辑；客户机不访问 PyPI，也不需要 Python。
+正式安装的唯一信任入口是 signed Setup：必须在执行它之前，先使用介质之外的审批记录核对
+Setup 的 SHA-256、有效且带时间戳的 Authenticode 状态及签名者指纹。
 
-如在受控验收机直接核验尚未封装为 Setup.exe 的二进制 staging，可在“以管理员身份
+仅在受控构建、故障注入或兼容性测试中，需要直接核验尚未封装为 Setup.exe 的二进制
+staging 时，才可在“以管理员身份
 运行”的 **Windows PowerShell 5.1** 中进入
 `MineGuardPlatform-<version>-windows-x64`：
 
@@ -102,7 +125,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 脚本逐项核验 `release-manifest.json` 和 `SHA256SUMS.txt`，拒绝未列入文件和 reparse
 point，再校验前端资源、NumPy/SciPy/HiGHS、上海时区及 Authenticode 状态。运行时、
 运维脚本和发布元数据作为同一事务切换；失败会恢复旧版本。配置、状态、备份和日志不
-参与覆盖。
+参与覆盖。这些自检只是纵深防御：它们不能认证正在执行的管理员脚本自身，因此直接
+staging/PS1 不得作为正式交付、正式安装或信任根。
 
 ## 3. 可信 Windows 构建与离线介质
 
@@ -124,8 +148,11 @@ point，再校验前端资源、NumPy/SciPy/HiGHS、上海时区及 Authenticode
 
 普通首次配置优先使用本文开头的控制中心。需要自动化或排障时，复制
 [clients.json.example](../deploy/windows/clients.json.example) 到受控临时目录，
-为每座矿配置一个独立 Agent 身份。消息 HMAC 与 HTTP 运输 HMAC 必须是两把不同的
-随机秘密，各至少 32 字节。不要使用示例占位符，不要通过聊天、命令行参数或工单正文
+为每座矿配置一个独立 Agent 身份。`sender_id`、`party_id`、`mine_id`、`mine_name`
+和五个 `comparison_context` 维度必须使用已治理的正式值。消息 HMAC 与 HTTP 运输 HMAC
+必须是两把不同的随机秘密，各至少 32 字节。正式门禁会检查当前和轮换密钥，
+拒绝演示/占位身份与 key ID、低多样性或短片段重复密钥、密钥复用和未分类/待替换的
+同类矿分组值。不要使用示例占位符，不要通过聊天、命令行参数或工单正文
 传递秘密。示例中的 `REPLACE` 被故意设计成不能通过校验；配置、服务安装和每次启动
 还会再次拒绝常见 `REPLACE`、`CHANGE_ME`、`DEMO_ONLY` 等占位秘密。
 
@@ -155,7 +182,9 @@ Remove-Variable adminPassword
 
 配置脚本先用产品本身完整校验注册表，再原样复制到受 ACL 保护的
 `config\clients.json`。密码不会进入 WinSW XML、命令行、日志或 `settings.json`；
-首启文件仅用于建立 `auth.db` 中的 scrypt 密码摘要。
+首启文件仅用于建立 `auth.db` 中的 scrypt 密码摘要。正式密码至少 12 个字符，并包含
+大小写字母、数字、符号中的至少三类；`123123123`、常见弱口令、示例和占位文本均会被
+配置、服务安装和每次启动重复拒绝。
 
 正式配置默认启用 Secure Cookie，浏览器必须通过 HTTPS 反向代理访问。只在隔离本机
 演示时显式添加 `-HttpOnlyDemo`。只看合成数据且不接 Agent 时，可以显式使用：
@@ -194,7 +223,12 @@ $demoPassword = Read-Host '演示管理员密码' -AsSecureString
   -ClearBootstrapPassword
 ```
 
-该命令会先只读确认当前 `auth.db` 至少有一个用户；没有账号时拒绝删除，避免锁死。
+该命令会先只读确认当前 `auth.db` 至少有一个已完成改密的正式管理员；演示/默认口令或
+待换密管理员不满足条件，避免删除首启秘密后锁死。
+
+正式状态目录与演示状态目录永久分离，演示数据不能原地转正式。即使人工删除演示标记，配置、前台启动和服务安装
+仍会核验数据库中的演示交换类型、演示 Agent 绑定和演示煤矿命名空间，拒绝把合成/样表
+数据原地“转正式”。应新建空的专用状态目录，再由企业 Agent 通过签名 HTTP 报送真实数据。
 
 ## 6. 安装为 Windows 服务（WinSW）
 
@@ -203,6 +237,7 @@ $demoPassword = Read-Host '演示管理员密码' -AsSecureString
 
 ```powershell
 $ApprovedWinSWSha256 = '<从独立批准清单粘贴64位SHA-256>'
+$ApprovedPlatformSigner = '<从独立审批记录粘贴40位代码签名证书指纹>'
 # 只有批准介质存在 WinSW-x64.exe.config 时才设置这一项：
 $ApprovedWinSWConfigSha256 = '<该 .config 的独立批准 SHA-256>'
 
@@ -210,16 +245,22 @@ $ApprovedWinSWConfigSha256 = '<该 .config 的独立批准 SHA-256>'
   -WinSWExecutable 'D:\Approved\WinSW-x64.exe' `
   -ExpectedSha256 $ApprovedWinSWSha256 `
   -ExpectedConfigSha256 $ApprovedWinSWConfigSha256 `
+  -Production `
+  -ExpectedSignerThumbprint $ApprovedPlatformSigner `
   -StartService
 ```
 
 `-ExpectedSha256` 必须来自独立签名/批准清单，不能从待校验文件现场计算后原样传回。
 如果 WinSW 没有 companion `.config`，应同时删掉上例变量和参数；如果存在，则
-`ExpectedConfigSha256` 同样必须来自外部批准清单。安装脚本还会核对产品 release
+`ExpectedConfigSha256` 同样必须来自外部批准清单。正式配置必须显式传 `-Production`，
+且 `ExpectedSignerThumbprint` 必须来自待安装介质之外的审批记录。安装脚本会要求发布
+分类为 `signed-production-candidate`、`codeSigned=true`，并直接验证主程序 Authenticode
+状态、时间戳和实际签名者指纹；介质内自报的证书指纹不能单独成为信任锚。脚本还会核对产品 release
 manifest、配置/状态身份、XML 服务身份、回环监听和首启密码条件；现有同名服务不会
 被隐式覆盖。文件以随机临时名完整写入和复核后才发布，注册、启动或健康检查失败会
 撤销本次服务并删除本次文件；归属无法证明时停止清理并报告回滚不完整。注册成功后
-还会从 `Win32_Service.PathName` 核对无参数精确 wrapper 和 `LocalService` 账号。
+还会从 `Win32_Service.PathName` 核对无参数精确 wrapper、专属虚拟账号和 unrestricted
+服务 SID 类型。
 WinSW 包装使用固定 `runtime\MineGuardPlatform.exe`，日志滚动写入 `logs\`。
 
 服务操作：
@@ -279,7 +320,7 @@ NTFS 专用路径，脚本会逐级拒绝 reparse point。权威密钥仍应离�
 
 恢复目标必须不存在或为空、不能与当前状态或备份目录重叠，并满足同一固定 NTFS/逐级
 无 reparse/状态边界要求。恢复成功后脚本会在新目录创建并核验同一份
-`.mineguard-platform-state.json` 所有权标记，再设置 LocalService ACL；返回结果的
+`.mineguard-platform-state.json` 所有权标记，再设置专属服务 SID ACL；返回结果的
 `nextStep` 也只会引导使用配置事务。
 
 先用另一个端口隔离验收恢复副本。确认后，在维护窗口停止服务，并通过配置脚本的
@@ -306,6 +347,6 @@ Start-Service MineGuardPlatform
   `/readyz`，必要时从已核验备份恢复；
 - Windows 服务托管不代替 HTTPS、证书、反向代理、时间同步、磁盘监控和异地备份。
 
-上线验收至少包括：服务以 LocalService 运行、8080 仅回环监听、HTTPS 登录、每矿
+上线验收至少包括：服务以 `NT SERVICE\MineGuardPlatform` 运行且 ServiceSidType=1、8080 仅回环监听、HTTPS 登录、每矿
 Agent 报送与回执、领导只读范围、服务重启、断网恢复、在线备份、空目录恢复、备份
 密钥丢失演练、日志中文无乱码，以及注册表/首启密码对普通用户不可读。

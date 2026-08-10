@@ -18,14 +18,18 @@
 
 | 场景 | 结论 | 建议 |
 |---|---|---|
-| Windows 10/11 本机演示 | 支持 | Python 3.12 x64，Edge/Chrome |
-| Windows 10/11 单矿试点 | 支持 | 使用独立账号、NTFS 权限和定时备份 |
-| Windows Server 2022 原生服务 | 支持基线 | WinSW + 反向代理 + 专用服务账号 |
+| Windows 10 1809+/11 本机演示 | 支持 | x64 安装包，Edge/Chrome |
+| Windows 10 1809+/11 单矿试点 | 支持 | 使用独立账号、NTFS 权限和定时备份 |
+| Windows Server 2019/2022 原生服务 | 支持目标 | WinSW + 反向代理 + 专属虚拟服务账号 |
 | WSL2 | 仅开发/联调 | 不作为生产 Windows 服务方案 |
-| Windows Server 2019 或 ARM64 | 未列入发布门 | 单独安装、压测和恢复验收后再用 |
+| Windows Server 2016 及更旧版本、ARM64 | 不支持 | 不得绕过安装包系统版本/架构门禁 |
 
-仓库的 Windows CI 使用 Windows Server 2022、PowerShell 5.1 解析部署脚本，
-并在 Python 3.12 x64 上验证 `Asia/Shanghai` 时区、契约、两端单元测试、
+仓库的 Windows CI 使用 Windows Server 2022，并用 PowerShell 5.1 解析部署脚本；
+安装包的最低系统门禁是 Windows 10 1809 / Windows Server 2019（build 17763）。
+这是技术兼容下限，不等于 2026 年正式生产支持：普通 Windows 10 22H2 必须具有
+组织 ESU，或使用仍在产品生命周期内的具体 LTSC 版本；优先 Windows Server 2019/2022
+或 Windows 11。
+仓库 CI 还会在 Python 3.12 x64 上验证 `Asia/Shanghai` 时区、契约、两端单元测试、
 CLI 入口以及带中文和空格状态路径的健康检查。正式上线还必须完成本文第
 13 节的现场验收；CI 不能代替现场数据映射、断网和灾备演练。
 
@@ -54,7 +58,7 @@ CLI 入口以及带中文和空格状态路径的健康检查。正式上线还�
 
 ### 3.1 必需软件
 
-- 64 位 Windows；正式服务验证基线为 Windows Server 2022 x64。
+- 64 位 Windows 10 1809+/11 或 Windows Server 2019/2022；安装包会拒绝更旧版本和 ARM64。
 - Windows 原生发布固定 64 位 CPython 3.12；两端安装脚本会拒绝其他 Python
   小版本或 32 位解释器。项目元数据中的 `>=3.11` 是源码最低要求，不是 Windows
   发布支持矩阵。
@@ -170,19 +174,21 @@ Get-Help .\deploy\windows\Install-EnterpriseAgentService.ps1 -Full
 监听目录、outbox/inbox cursor 或任何 HMAC 秘密。同一主机上的多个试点实例
 也必须一矿一服务，但正式环境更推荐一矿一主机或虚拟机。
 
-### 5.3 不激活虚拟环境也能运行
+### 5.3 二进制正式运行不依赖虚拟环境
 
-Windows Service 和运维脚本不依赖 `Activate.ps1`。Platform 直接调用
-`runtime\Scripts\python.exe -m mineguard`；Agent 直接调用
-`runtime\.venv\Scripts\enterprise-agent.exe`。如手工建立 `.venv`，入口位于：
+已签名的 Windows 安装包使用两个独立 standalone 入口：
+`runtime\MineGuardPlatform.exe` 和 `runtime\MineGuardEnterpriseAgent.exe`。Windows Service
+和运维脚本不依赖 `Activate.ps1`，正式服务安装会拒绝 `.venv` 回退。
+
+仅在源码开发/联调时，如手工建立 `.venv`，入口位于：
 
 ```powershell
 C:\path\to\platform\.venv\Scripts\mineguard.exe
 C:\path\to\agent\.venv\Scripts\enterprise-agent.exe
 ```
 
-出现 `mineguard: command not found` 或 `enterprise-agent: command not found` 时，不要复用另一端的
-虚拟环境；直接调用本产品的绝对路径，或使用：
+源码联调出现 `mineguard: command not found` 或 `enterprise-agent: command not found` 时，
+不要复用另一端的虚拟环境；直接调用本产品的绝对路径，或使用：
 
 ```powershell
 & C:\path\to\platform\.venv\Scripts\python.exe -m mineguard --help
@@ -260,11 +266,13 @@ Agent 的 `--env-file` 只解析严格 UTF-8 `KEY=VALUE` 文件，不会把它�
 - 已经在对话、终端、截图或 Git 中出现过的 API Key 必须视为已泄露：先在服务商
   后台撤销并生成新 Key，再更新受保护配置并重启 Agent。
 
-默认服务基线使用低权限 `LocalService`，不使用 `LocalSystem`。配置文件和状态
-目录只给 `SYSTEM`、`Administrators` 和对应服务身份必需权限。不要依赖 Unix
-`chmod`；Windows 的安全边界是 NTFS ACL。产品脚本的 ACL 收敛结果必须在现场通过
-`Get-Acl` 复核。因为同一主机上的多个 `LocalService` 进程共享同一 Windows 安全
-身份，同机多矿只适用于受控演示/试点，不构成不同煤矿所有者之间的强隔离。
+Platform 服务基线使用专属虚拟账号 `NT SERVICE\MineGuardPlatform` 和确定性服务 SID，
+不使用 `LocalSystem` 或共享的 `LocalService` 身份。配置文件和状态目录只给 `SYSTEM`、
+`Administrators` 和对应专属服务 SID 的必需权限。不要依赖 Unix `chmod`；Windows 的
+安全边界是 NTFS ACL。产品脚本的 ACL 收敛结果必须在现场通过 `Get-Acl` 复核。
+Agent 同样为每个实例使用
+`NT SERVICE\MineGuardEnterpriseAgent-<实例名>` 和该名称派生的唯一服务 SID；
+不同煤矿实例不得共享数据目录、监听目录或应用/运输 HMAC。
 
 ## 7. HTTPS、端口和防火墙
 
@@ -300,12 +308,15 @@ secure cookie。Agent 访问政府私有 CA 时，将 CA bundle 配在该矿受�
 
 ## 8. 时钟和时区
 
-Windows 默认没有 IANA tzdb，产品安装包必须包含 Python `tzdata`，否则
-`Asia/Shanghai` 可能报 `ZoneInfoNotFoundError`。安装后验证：
+Windows 默认没有 IANA tzdb，产品安装包必须内含已固定版本的 `tzdata`，否则
+`Asia/Shanghai` 可能报 `ZoneInfoNotFoundError`。正式二进制不包含可供运维直接调用的
+`runtime\Scripts\python.exe`；安装后用本产品入口验证：
 
 ```powershell
-& C:\path\to\runtime\Scripts\python.exe -c `
-  "from zoneinfo import ZoneInfo; print(ZoneInfo('Asia/Shanghai'))"
+& 'C:\ProgramData\MineGuard\Platform\runtime\MineGuardPlatform.exe' self-check
+& 'C:\Program Files\MineGuard\EnterpriseAgent\runtime\MineGuardEnterpriseAgent.exe' `
+  --env-file 'C:\ProgramData\MineGuard\EnterpriseAgent\instances\<实例>\config\agent.env' `
+  config-check --production
 ```
 
 Platform 和全部 Agent 必须使用可靠时间源。HMAC 重放窗口、报表日期和审计时间都
@@ -326,7 +337,7 @@ w32tm /query /status
 PowerShell 窗口或任务计划伪装常驻服务。每个服务必须：
 
 - 使用唯一服务 ID 和显示名；
-- 显式指向本产品的 `runtime\Scripts\python.exe`；
+- 显式指向已经发布清单和 Authenticode 校验的本产品 standalone EXE；
 - 只在自己的状态、日志和隔离目录可写；
 - 配置文件路径可以写入 XML，但密钥和口令本身不得写入 XML；
 - 异常退出可受控重启，手动停止不得形成无限重启；
@@ -348,7 +359,8 @@ Agent 服务安装前会执行 `--env-file <绝对路径> config-check --product
 
 Platform 服务必须从已安装目录的 `service` 子目录安装；脚本会复核产品
 `release-metadata`、配置与状态目录身份，只接受无参数指向固定 wrapper 的
-`Win32_Service.PathName` 和 `NT AUTHORITY\LocalService`。WinSW 必须提供外部批准的
+`Win32_Service.PathName`、`NT SERVICE\MineGuardPlatform` 专属虚拟账号和 unrestricted
+服务 SID 类型。WinSW 必须提供外部批准的
 SHA-256；若批准介质同时带 `WinSW.exe.config`，还必须显式传入其独立批准摘要：
 
 ```powershell
@@ -357,6 +369,8 @@ Set-Location 'C:\ProgramData\MineGuard\Platform\service'
   -WinSWExecutable 'D:\approved-media\WinSW-x64.exe' `
   -ExpectedSha256 '<批准的 WinSW EXE SHA-256>' `
   -ExpectedConfigSha256 '<仅在存在 .config 时提供其批准 SHA-256>' `
+  -Production `
+  -ExpectedSignerThumbprint '<介质外审批记录中的40位签名证书指纹>' `
   -StartService
 ```
 
@@ -394,7 +408,7 @@ Get-WinEvent -LogName Application -MaxEvents 100
 | 现象 | 检查 |
 |---|---|
 | 终端启动后不返回 | 正常常驻状态；用健康端点确认，不重复启动 |
-| `command not found` | 直接用本产品 `runtime\Scripts\python.exe -m ...` |
+| `command not found` | 正式包直接用本产品 `runtime\MineGuardPlatform.exe` 或 `runtime\MineGuardEnterpriseAgent.exe` 的绝对路径 |
 | `Address already in use` | `Get-NetTCPConnection -LocalPort 8080` 或指定 Agent 端口 |
 | `/healthz` 成功但 `/readyz` 失败 | 进程存活但逐矿客户端注册/就绪配置不完整 |
 | `ZoneInfoNotFoundError` | 核对该 runtime 是否安装 `tzdata` |

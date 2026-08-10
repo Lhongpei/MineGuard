@@ -3,6 +3,11 @@
 本目录由 MineGuard Platform Windows 安装包部署。普通使用者不需要进入这个目录，也不
 需要输入 PowerShell 命令；本页前两节先说明图形控制中心，后面的命令只供管理员高级运维。
 
+正式安装的唯一信任入口，是在执行前已按介质外审批记录核对 SHA-256 和签名者指纹的
+signed Setup。直接展开 staging 或运行其中的管理员 PowerShell 只能用于受控构建、故障注入或
+兼容性测试，不得称为正式安装。脚本对 release manifest、文件摘要和 Authenticode 的再校验只是
+建立信任后的纵深防御，不能认证正在执行的脚本自身，也不是信任根。
+
 ## 1. 一键打开本机展示
 
 1. 从 Windows 桌面或开始菜单点击 **MineGuard Platform 控制中心**；出现管理员权限确认时选择
@@ -24,18 +29,24 @@
 目录。打开控制中心并切换到“正式内网配置”，依次：
 
 1. 选择 `clients.json` 和状态数据目录，确认本机端口；
-2. 填写管理员用户名和两遍正式密码。图形向导要求至少 12 位、同时包含字母和数字，且
-   禁止使用演示密码 `123123123`；
+2. 填写管理员用户名；点击配置后，由独立短生命周期 helper 的小密码窗输入两遍正式密码。
+   helper 要求至少 12 位，并包含大小写字母、数字、符号中的至少三类；演示密码
+   `123123123` 和常见弱口令会被拒绝；
 3. 单位 HTTPS 反向代理已经就绪时，填写领导端 HTTPS 地址。必须是完整的 `https://`
    地址，不能包含账号口令、查询参数或 `#` 片段；该栏只用于本次打开浏览器，不会配置
    反向代理，也不会持久保存；
-4. 点击“保存正式配置并启动”，等待健康检查通过后再打开领导端。
+4. 点击“打开安全密码窗并配置”，等待 helper 退出及健康检查通过后再打开领导端。
 
-密码通过内存中的安全对象交给受保护配置脚本，不出现在命令行和控制中心日志中。正式模式
+密码只在独立 helper 进程中通过内存安全对象交给受保护配置脚本；主控制中心不读取密码、
+不接收 `SecureString`，密码也不出现在命令行或控制中心日志中。helper 完成后立即退出。正式模式
 始终只监听 `127.0.0.1` 并启用 Secure Cookie；领导端应通过单位批准的 HTTPS 反向代理
 访问。控制中心的非敏感运行记录写入受保护的 `logs\control-center-*.log`，现场报错时也可
 直接拍照窗口底部“运行状态”栏。已有配置或已有状态数据时，控制中心会禁止一键覆盖，只
 提供启动和打开页面入口。
+配置与启动共用机器级 `Global\MineGuardPlatform.Configuration` Mutex：启动会在同一锁内
+检查阻断标记和残留事务、读取配置，并持有到长运行子进程完全退出。因此前台或服务
+运行期间配置脚本会闭锁拒绝修改 config/state/ACL；正常退出、向导停止和异常终止都会在
+`finally` 或操作系统关闭进程句柄时释放 Mutex。30 秒超时则闭锁拒绝启动/配置。
 
 ## 3. 高级命令：配置并前台验收
 
@@ -72,10 +83,13 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ```powershell
 $ApprovedWinSWSha256 = '<从独立批准记录取得的64位SHA-256>'
+$ApprovedPlatformSigner = '<从独立审批记录取得的40位代码签名证书指纹>'
 
 .\Install-MineGuardPlatformService.ps1 `
   -WinSWExecutable 'D:\approved-tools\WinSW-x64.exe' `
   -ExpectedSha256 $ApprovedWinSWSha256 `
+  -Production `
+  -ExpectedSignerThumbprint $ApprovedPlatformSigner `
   -InstallRoot 'C:\ProgramData\MineGuard\Platform' `
   -StartService
 ```
@@ -87,8 +101,22 @@ $ApprovedWinSWSha256 = '<从独立批准记录取得的64位SHA-256>'
 -ExpectedConfigSha256 '<该 .config 的独立批准 SHA-256>'
 ```
 
-没有 companion `.config` 时不要传这个参数。安装脚本会验证 Platform 发布清单、配置和
+没有 companion `.config` 时不要传这个参数。正式配置还必须显式使用 `-Production`，
+并从待安装介质之外的审批记录传入 `-ExpectedSignerThumbprint`；脚本会核验正式发布分类、
+有效且带时间戳的 Authenticode 签名和实际签名者。安装脚本会验证 Platform 发布清单、配置和
 状态目录身份，重复核对 WinSW 散列，并在注册、启动或健康检查失败时回滚本次服务安装。
+正式配置、每次启动和服务安装都会重复核验账号库及状态用途：仍启用的演示/默认凭据、
+没有完成改密的正式管理员、或包含演示/合成记录的状态库都会被拒绝；演示数据不能原地
+转换为正式数据。
+
+配置脚本使用机器级命名 Mutex 串行化全部配置事务。若异常中断或回滚不完整，固定的
+`config\.mineguard-configuration-blocked.json` 会阻止再次配置和启动；请按标记中的精确
+`transactionDirectory` 停服核验、清理后，再删除该固定标记并重新配置。
+标记不是唯一依据：两条入口还会有界扫描 config 直系子目录，任何精确的
+`.configuration-transaction.<32位十六进制>` 残留都会独立阻断。
+
+图形控制中心的“正式服务安装”页提供相同门禁：签名者指纹和 WinSW 摘要必须由操作员从
+介质外审批记录手工填写，界面不会从 `build-metadata.json` 自动填入信任锚。
 
 ## 5. 健康检查、备份与恢复
 

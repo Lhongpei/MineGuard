@@ -5,7 +5,9 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$WinSWExpectedSha256,
     [string]$InstallRoot = (Join-Path $env:ProgramFiles "MineGuard\EnterpriseAgent"),
     [string]$StateRoot = (Join-Path $env:ProgramData "MineGuard\EnterpriseAgent\instances"),
+    [string]$ApprovedSignerThumbprint = "",
     [switch]$AllowIncompleteDemo,
+    [switch]$AllowUnsignedTestMedia,
     [switch]$Start
 )
 
@@ -23,6 +25,146 @@ if ($PSVersionTable.PSVersion -lt [Version]"5.1") {
 $Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "This script must run in an elevated Administrator PowerShell."
+}
+$FormalServiceInstall = -not $AllowIncompleteDemo -and -not $AllowUnsignedTestMedia
+if ($FormalServiceInstall -and -not $Start) {
+    throw "Formal service installation requires -Start and must pass the bound health check before it can succeed."
+}
+
+function Get-NormalizedApprovedSignerThumbprint {
+    param([string]$Value, [switch]$AllowEmpty)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        if ($AllowEmpty) { return "" }
+        throw "Formal service installation requires -ApprovedSignerThumbprint from independently approved offline material."
+    }
+    if ($Value -notmatch '^[A-Fa-f0-9\s]+$') {
+        throw "ApprovedSignerThumbprint must contain exactly 40 hexadecimal SHA-1 characters (whitespace is ignored)."
+    }
+    $Normalized = ($Value -replace '\s', '').ToUpperInvariant()
+    if ($Normalized -notmatch '^[A-F0-9]{40}$') {
+        throw "ApprovedSignerThumbprint must contain exactly 40 hexadecimal SHA-1 characters."
+    }
+    return $Normalized
+}
+
+function Assert-FormalAgentAuthenticode {
+    param([string]$ExecutablePath, [string]$ApprovedThumbprint)
+    $Signature = Get-AuthenticodeSignature -LiteralPath $ExecutablePath
+    if ($Signature.Status.ToString() -ne "Valid" -or
+        $null -eq $Signature.SignerCertificate -or
+        $null -eq $Signature.TimeStamperCertificate) {
+        throw "Formal service installation requires an Authenticode-valid, timestamped Agent executable."
+    }
+    $ActualThumbprint = (
+        $Signature.SignerCertificate.Thumbprint -replace '\s', ''
+    ).ToUpperInvariant()
+    if ($ActualThumbprint -ne $ApprovedThumbprint) {
+        throw "The installed Agent signer does not match the independently approved signer thumbprint."
+    }
+}
+
+function Get-RequiredReleaseBoolean {
+    param([object]$Object, [string]$Name, [string]$Document)
+    $Property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $Property -or $Property.Value -isnot [bool]) {
+        throw "$Document must contain a JSON boolean property named $Name."
+    }
+    return [bool]$Property.Value
+}
+
+function Get-RequiredReleaseNullableString {
+    param([object]$Object, [string]$Name, [string]$Document)
+    $Property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $Property -or
+        ($null -ne $Property.Value -and $Property.Value -isnot [string])) {
+        throw "$Document must contain a JSON string-or-null property named $Name."
+    }
+    return [string]$Property.Value
+}
+
+function Assert-InstalledAgentReleaseClassification {
+    param(
+        [string]$ApplicationRoot,
+        [string]$ApprovedThumbprint,
+        [switch]$ExpectUnsigned,
+        [switch]$AllowMissingDevelopmentMetadata
+    )
+    $MetadataRoot = Join-Path $ApplicationRoot "release-metadata"
+    $ManifestPath = Join-Path $MetadataRoot "release-manifest.json"
+    $BuildMetadataPath = Join-Path $MetadataRoot "build-metadata.json"
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $BuildMetadataPath -PathType Leaf)) {
+        if ($AllowMissingDevelopmentMetadata) {
+            Write-Warning "DEVELOPMENT ONLY: source runtime has no installed binary release classification metadata."
+            return
+        }
+        throw "Installed Agent release classification metadata is missing."
+    }
+    Assert-OrdinaryFile -Name "Installed release manifest" `
+        -PathValue $ManifestPath -MaximumBytes 8388608
+    Assert-OrdinaryFile -Name "Installed build metadata" `
+        -PathValue $BuildMetadataPath -MaximumBytes 8388608
+    try {
+        $Manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        $BuildMetadata = Get-Content -LiteralPath $BuildMetadataPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+    }
+    catch { throw "Installed Agent release classification metadata is invalid JSON." }
+    if ($Manifest.format -ne "mineguard-enterprise-agent-windows-binary-v1" -or
+        $Manifest.product -ne "MineGuard Enterprise Agent" -or
+        $Manifest.architecture -ne "x64" -or
+        $Manifest.entrypoint -ne "runtime/MineGuardEnterpriseAgent.exe" -or
+        $BuildMetadata.format -ne "mineguard-enterprise-agent-build-metadata-v1" -or
+        $BuildMetadata.product -ne "MineGuard Enterprise Agent" -or
+        $BuildMetadata.architecture -ne "x64" -or
+        [string]$Manifest.version -ne [string]$BuildMetadata.version) {
+        throw "Installed Agent release metadata has the wrong classification identity."
+    }
+    $ManifestSigned = Get-RequiredReleaseBoolean -Object $Manifest `
+        -Name "authenticode_signed" -Document "release-manifest.json"
+    $BuildSigned = Get-RequiredReleaseBoolean -Object $BuildMetadata `
+        -Name "authenticode_signed" -Document "build-metadata.json"
+    $ManifestTimestamped = Get-RequiredReleaseBoolean -Object $Manifest `
+        -Name "timestamp_verified" -Document "release-manifest.json"
+    $BuildTimestamped = Get-RequiredReleaseBoolean -Object $BuildMetadata `
+        -Name "timestamp_verified" -Document "build-metadata.json"
+    $ManifestThumbprint = (Get-RequiredReleaseNullableString -Object $Manifest `
+        -Name "signing_certificate_thumbprint" -Document "release-manifest.json")
+    $BuildThumbprint = (Get-RequiredReleaseNullableString -Object $BuildMetadata `
+        -Name "signing_certificate_thumbprint" -Document "build-metadata.json")
+    $ManifestTimestampUrl = Get-RequiredReleaseNullableString -Object $Manifest `
+        -Name "timestamp_url" -Document "release-manifest.json"
+    $BuildTimestampUrl = Get-RequiredReleaseNullableString -Object $BuildMetadata `
+        -Name "timestamp_url" -Document "build-metadata.json"
+    $ManifestThumbprint = ($ManifestThumbprint -replace '\s', '').ToUpperInvariant()
+    $BuildThumbprint = ($BuildThumbprint -replace '\s', '').ToUpperInvariant()
+    if ($ManifestSigned -ne $BuildSigned -or
+        $ManifestTimestamped -ne $BuildTimestamped -or
+        $ManifestTimestamped -ne $ManifestSigned) {
+        throw "Installed Agent signature classification booleans are inconsistent."
+    }
+    if ($ExpectUnsigned) {
+        if ($ManifestSigned -or
+            -not [string]::IsNullOrWhiteSpace($ManifestThumbprint) -or
+            -not [string]::IsNullOrWhiteSpace($BuildThumbprint) -or
+            -not [string]::IsNullOrWhiteSpace($ManifestTimestampUrl) -or
+            -not [string]::IsNullOrWhiteSpace($BuildTimestampUrl)) {
+            throw "Unsigned test service requires metadata classified as unsigned with no signer or timestamp claim."
+        }
+        return
+    }
+    $TimestampUri = $null
+    if (-not $ManifestSigned -or
+        $ManifestThumbprint -ne $ApprovedThumbprint -or
+        $BuildThumbprint -ne $ApprovedThumbprint -or
+        $ManifestTimestampUrl -ne $BuildTimestampUrl -or
+        -not [uri]::TryCreate($ManifestTimestampUrl, [UriKind]::Absolute, [ref]$TimestampUri) -or
+        $TimestampUri.Scheme -ne "https" -or
+        [string]::IsNullOrWhiteSpace($TimestampUri.DnsSafeHost) -or
+        -not [string]::IsNullOrWhiteSpace($TimestampUri.UserInfo)) {
+        throw "Installed Agent metadata does not classify the binary under the independently approved signer and HTTPS timestamp contract."
+    }
 }
 
 function Assert-InstanceName {
@@ -263,6 +405,68 @@ function Invoke-NativeChecked {
     }
 }
 
+function Test-EAConfigurationEnvironmentName {
+    param([string]$Name)
+    foreach ($Prefix in @(
+        "ENTERPRISE_", "PLATFORM_", "REGULATORY_", "AGENT_V2_",
+        "DEEPSEEK_", "COAL_NEWS_", "MINEGUARD_SERVICE_"
+    )) {
+        if ($Name.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Invoke-IsolatedAgentConfigCheck {
+    param(
+        [string]$ExecutablePath,
+        [string[]]$ArgumentList,
+        [string]$ProductionMode,
+        [string]$FourEyesRequired
+    )
+    $OriginalEnvironment = @{}
+    foreach ($Entry in @(Get-ChildItem Env:)) {
+        if (Test-EAConfigurationEnvironmentName -Name ([string]$Entry.Name)) {
+            $OriginalEnvironment[[string]$Entry.Name] = [string]$Entry.Value
+        }
+    }
+    try {
+        foreach ($Name in @($OriginalEnvironment.Keys)) {
+            [Environment]::SetEnvironmentVariable(
+                $Name, $null, [EnvironmentVariableTarget]::Process
+            )
+        }
+        [Environment]::SetEnvironmentVariable(
+            "MINEGUARD_SERVICE_PRODUCTION_MODE", $ProductionMode,
+            [EnvironmentVariableTarget]::Process
+        )
+        [Environment]::SetEnvironmentVariable(
+            "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED", $FourEyesRequired,
+            [EnvironmentVariableTarget]::Process
+        )
+        Invoke-NativeChecked -FilePath $ExecutablePath -ArgumentList $ArgumentList
+    }
+    finally {
+        # Also clear any names a child/tooling hook added after the snapshot,
+        # then restore the administrator shell exactly as it was found.
+        foreach ($Entry in @(Get-ChildItem Env:)) {
+            if (Test-EAConfigurationEnvironmentName -Name ([string]$Entry.Name)) {
+                [Environment]::SetEnvironmentVariable(
+                    ([string]$Entry.Name), $null,
+                    [EnvironmentVariableTarget]::Process
+                )
+            }
+        }
+        foreach ($Name in @($OriginalEnvironment.Keys)) {
+            [Environment]::SetEnvironmentVariable(
+                $Name, [string]$OriginalEnvironment[$Name],
+                [EnvironmentVariableTarget]::Process
+            )
+        }
+    }
+}
+
 function Get-RegisteredService {
     param([string]$ServiceId)
     $Services = @(Get-CimInstance Win32_Service -Filter "Name='$ServiceId'" -ErrorAction Stop)
@@ -271,6 +475,15 @@ function Get-RegisteredService {
     }
     if ($Services.Count -eq 0) { return $null }
     return $Services[0]
+}
+
+function Assert-ServiceUsesDedicatedAccount {
+    param([object]$Service, [string]$ServiceId, [string]$ExpectedAccount)
+    if (-not ([string]$Service.StartName).Equals(
+            $ExpectedAccount, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Windows service $ServiceId does not use its dedicated virtual service account."
+    }
 }
 
 function Get-ServiceExecutablePath {
@@ -295,10 +508,16 @@ function Assert-ServiceTargetsWrapper {
 }
 
 function Remove-ServiceRegistrationChecked {
-    param([string]$ServiceId, [string]$ExpectedWrapper)
+    param(
+        [string]$ServiceId,
+        [string]$ExpectedWrapper,
+        [string]$ExpectedAccount
+    )
     $Service = Get-RegisteredService -ServiceId $ServiceId
     if ($null -eq $Service) { return }
     Assert-ServiceTargetsWrapper -Service $Service -ServiceId $ServiceId -ExpectedWrapper $ExpectedWrapper
+    Assert-ServiceUsesDedicatedAccount -Service $Service -ServiceId $ServiceId `
+        -ExpectedAccount $ExpectedAccount
     if (-not ([string]$Service.State).Equals("Stopped", [StringComparison]::OrdinalIgnoreCase)) {
         Stop-Service -Name $ServiceId -Force -ErrorAction Stop
         $Deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -307,6 +526,8 @@ function Remove-ServiceRegistrationChecked {
             $Service = Get-RegisteredService -ServiceId $ServiceId
             if ($null -eq $Service) { return }
             Assert-ServiceTargetsWrapper -Service $Service -ServiceId $ServiceId -ExpectedWrapper $ExpectedWrapper
+            Assert-ServiceUsesDedicatedAccount -Service $Service -ServiceId $ServiceId `
+                -ExpectedAccount $ExpectedAccount
         } while (-not ([string]$Service.State).Equals("Stopped", [StringComparison]::OrdinalIgnoreCase) -and
             [DateTime]::UtcNow -lt $Deadline)
         if (-not ([string]$Service.State).Equals("Stopped", [StringComparison]::OrdinalIgnoreCase)) {
@@ -316,7 +537,10 @@ function Remove-ServiceRegistrationChecked {
     $Service = Get-RegisteredService -ServiceId $ServiceId
     if ($null -eq $Service) { return }
     Assert-ServiceTargetsWrapper -Service $Service -ServiceId $ServiceId -ExpectedWrapper $ExpectedWrapper
-    & sc.exe delete $ServiceId | Out-Host
+    Assert-ServiceUsesDedicatedAccount -Service $Service -ServiceId $ServiceId `
+        -ExpectedAccount $ExpectedAccount
+    $ScPath = Join-Path $env:SystemRoot "System32\sc.exe"
+    & $ScPath delete $ServiceId | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "sc.exe delete failed with exit code $LASTEXITCODE for $ServiceId"
     }
@@ -367,25 +591,86 @@ $ConfigPath = $Instance.ConfigPath
 $ServiceId = $Instance.ServiceId
 $TemplatePath = Assert-SafeLocalFixedNtfsPath -Name "Service XML template" `
     -PathValue (Join-Path $InstallRoot "deploy\windows\enterprise-agent-service.xml.template")
+$SafetyHelperPath = Assert-SafeLocalFixedNtfsPath -Name "Windows safety helper" `
+    -PathValue (Join-Path $InstallRoot "deploy\windows\EnterpriseAgent.WindowsSafety.ps1")
+$HealthScriptPath = Assert-SafeLocalFixedNtfsPath -Name "Agent health script" `
+    -PathValue (Join-Path $InstallRoot "deploy\windows\Test-EnterpriseAgentHealth.ps1")
 $AgentExecutable = Join-Path $InstallRoot "runtime\MineGuardEnterpriseAgent.exe"
+$UsingDevelopmentExecutable = $false
 if (-not (Test-Path -LiteralPath $AgentExecutable -PathType Leaf)) {
     $DevelopmentExecutable = Join-Path $InstallRoot "runtime\.venv\Scripts\enterprise-agent.exe"
     if (Test-Path -LiteralPath $DevelopmentExecutable -PathType Leaf) {
         Write-Warning "Using the source-development Python runtime. Production media must use MineGuardEnterpriseAgent.exe."
         $AgentExecutable = $DevelopmentExecutable
+        $UsingDevelopmentExecutable = $true
     }
 }
 $AgentExecutable = Assert-SafeLocalFixedNtfsPath -Name "Agent executable" -PathValue $AgentExecutable
 Assert-OrdinaryFile -Name "Service XML template" -PathValue $TemplatePath -MaximumBytes 1048576
+Assert-OrdinaryFile -Name "Windows safety helper" -PathValue $SafetyHelperPath -MaximumBytes 4194304
+Assert-OrdinaryFile -Name "Agent health script" -PathValue $HealthScriptPath -MaximumBytes 4194304
 Assert-OrdinaryFile -Name "Agent executable" -PathValue $AgentExecutable
 
-$CheckArguments = @("--env-file", $ConfigPath, "config-check")
+$ApprovedSignerThumbprint = Get-NormalizedApprovedSignerThumbprint `
+    -Value $ApprovedSignerThumbprint -AllowEmpty:$AllowUnsignedTestMedia
+if ($AllowUnsignedTestMedia) {
+    if (-not $AllowIncompleteDemo) {
+        throw "-AllowUnsignedTestMedia requires -AllowIncompleteDemo so an unsigned service can never enter production mode."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint)) {
+        throw "-ApprovedSignerThumbprint cannot be combined with -AllowUnsignedTestMedia; test mode must not impersonate formal approval."
+    }
+    Assert-InstalledAgentReleaseClassification -ApplicationRoot $InstallRoot `
+        -ExpectUnsigned `
+        -AllowMissingDevelopmentMetadata:$UsingDevelopmentExecutable
+    $TestSignature = Get-AuthenticodeSignature -LiteralPath $AgentExecutable
+    if ($TestSignature.Status.ToString() -ne "NotSigned" -or
+        $null -ne $TestSignature.SignerCertificate -or
+        $null -ne $TestSignature.TimeStamperCertificate) {
+        throw "-AllowUnsignedTestMedia accepts only an actually unsigned executable; signed or invalid signatures cannot bypass formal trust."
+    }
+    Write-Warning "UNSIGNED DEMO/TEST ONLY: this service is not production-ready."
+}
+else {
+    if ($UsingDevelopmentExecutable) {
+        throw "Formal service installation refuses the source-development Python runtime."
+    }
+    Assert-InstalledAgentReleaseClassification -ApplicationRoot $InstallRoot `
+        -ApprovedThumbprint $ApprovedSignerThumbprint
+    Assert-FormalAgentAuthenticode -ExecutablePath $AgentExecutable `
+        -ApprovedThumbprint $ApprovedSignerThumbprint
+}
+
+# The installed helper is part of the release file set. It is loaded only after
+# the executable trust decision above and is used to enforce the same instance
+# identity/ACL rules as start, health, backup and restore operations.
+. $SafetyHelperPath
+$SharedContext = Get-EAInstanceContext -InstanceName $InstanceName `
+    -InstallRoot $InstallRoot -StateRoot $StateRoot
+if (-not $SharedContext.InstanceRoot.Equals(
+        $InstanceRoot, [StringComparison]::OrdinalIgnoreCase
+    ) -or -not $SharedContext.ConfigPath.Equals(
+        $ConfigPath, [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw "Shared instance validation does not match the service installation boundary."
+}
+$ServiceIdentity = $SharedContext.ServiceIdentity
+Assert-EAInstanceGlobalIsolation -Context $SharedContext
+Assert-EAInstanceWatchAcls -Context $SharedContext
+
+$ServiceProductionMode = if ($AllowIncompleteDemo -or $AllowUnsignedTestMedia) { "false" } else { "true" }
+$ServiceFourEyesRequired = if ($AllowIncompleteDemo -or $AllowUnsignedTestMedia) { "false" } else { "true" }
+$CheckArguments = @(
+    "--env-file", $ConfigPath, "--authoritative-env-file", "config-check"
+)
 if (-not $AllowIncompleteDemo) {
     $CheckArguments += "--production"
 }
-Invoke-NativeChecked -FilePath $AgentExecutable -ArgumentList $CheckArguments
+Invoke-IsolatedAgentConfigCheck -ExecutablePath $AgentExecutable `
+    -ArgumentList $CheckArguments -ProductionMode $ServiceProductionMode `
+    -FourEyesRequired $ServiceFourEyesRequired
 if ($AllowIncompleteDemo) {
-    Write-Warning "Installing an incomplete loopback demo service. It is not production-ready."
+    Write-Warning "Installing an explicitly marked incomplete loopback demo service. It is not production-ready."
 }
 
 if ($null -ne (Get-RegisteredService -ServiceId $ServiceId)) {
@@ -412,6 +697,12 @@ foreach ($Target in @($WrapperExecutable, $WrapperXml)) {
     }
 }
 
+# Canonicalize the complete private instance tree before publishing executable
+# service files. This removes every legacy S-1-5-19 grant from internal state.
+Set-EAInstanceCanonicalAcl -Context $SharedContext
+Assert-EAInstanceWatchAcls -Context $SharedContext
+Assert-EAInstanceGlobalIsolation -Context $SharedContext
+
 $TransactionId = [Guid]::NewGuid().ToString("N")
 $TemporaryWrapper = Assert-SafeLocalFixedNtfsPath -Name "Temporary WinSW wrapper" `
     -PathValue (Join-Path $ServiceDirectory (".winsw-" + $TransactionId + ".exe.tmp"))
@@ -419,7 +710,6 @@ $TemporaryXml = Assert-SafeLocalFixedNtfsPath -Name "Temporary WinSW XML" `
     -PathValue (Join-Path $ServiceDirectory (".winsw-" + $TransactionId + ".xml.tmp"))
 $PublishedWrapper = $false
 $PublishedXml = $false
-
 try {
     # Revalidate the approved source immediately before the first mutation.
     Assert-OrdinaryFile -Name "WinSW executable" -PathValue $WinSWPath
@@ -443,6 +733,9 @@ try {
         "__ENV_FILE__" = (ConvertTo-XmlText $ConfigPath)
         "__WORKING_DIRECTORY__" = (ConvertTo-XmlText $InstanceRoot)
         "__LOG_DIRECTORY__" = (ConvertTo-XmlText $LogDirectory)
+        "__SERVICE_ACCOUNT__" = (ConvertTo-XmlText $ServiceIdentity.AccountName)
+        "__PRODUCTION_MODE__" = $ServiceProductionMode
+        "__FOUR_EYES_REQUIRED__" = $ServiceFourEyesRequired
     }
     foreach ($Entry in $Replacements.GetEnumerator()) {
         $Xml = $Xml.Replace([string]$Entry.Key, [string]$Entry.Value)
@@ -477,13 +770,56 @@ try {
     }
     Assert-ServiceTargetsWrapper -Service $RegisteredService -ServiceId $ServiceId `
         -ExpectedWrapper $WrapperExecutable
+    Assert-ServiceUsesDedicatedAccount -Service $RegisteredService `
+        -ServiceId $ServiceId -ExpectedAccount $ServiceIdentity.AccountName
+    $ScPath = Join-Path $env:SystemRoot "System32\sc.exe"
+    Invoke-NativeChecked -FilePath $ScPath -ArgumentList @(
+        "sidtype", $ServiceId, "unrestricted"
+    )
+    $RegisteredService = Get-RegisteredService -ServiceId $ServiceId
+    if ($null -eq $RegisteredService) {
+        throw "Windows service disappeared while applying its SID type: $ServiceId"
+    }
+    Assert-ServiceTargetsWrapper -Service $RegisteredService -ServiceId $ServiceId `
+        -ExpectedWrapper $WrapperExecutable
+    [void](Assert-EARegisteredServiceIdentity -ServiceId $ServiceId `
+        -CimService $RegisteredService)
     if ($Start) {
+        Assert-EAInstanceGlobalIsolation -Context $SharedContext
+        Assert-EAInstanceWatchAcls -Context $SharedContext
         Start-Service -Name $ServiceId -ErrorAction Stop
         $ServiceController = Get-Service -Name $ServiceId -ErrorAction Stop
         $ServiceController.WaitForStatus(
             [System.ServiceProcess.ServiceControllerStatus]::Running,
             [TimeSpan]::FromSeconds(30)
         )
+        $RegisteredService = Get-RegisteredService -ServiceId $ServiceId
+        if ($null -eq $RegisteredService) {
+            throw "Windows service disappeared before its health check: $ServiceId"
+        }
+        Assert-ServiceTargetsWrapper -Service $RegisteredService `
+            -ServiceId $ServiceId -ExpectedWrapper $WrapperExecutable
+        [void](Assert-EARegisteredServiceIdentity -ServiceId $ServiceId `
+            -CimService $RegisteredService)
+        $HealthDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        $HealthVerified = $false
+        $LastHealthError = "health probe did not run"
+        do {
+            try {
+                & $HealthScriptPath -InstanceName $InstanceName `
+                    -InstallRoot $InstallRoot -StateRoot $StateRoot `
+                    -TimeoutSeconds 5
+                $HealthVerified = $true
+                break
+            }
+            catch {
+                $LastHealthError = $_.Exception.Message
+                Start-Sleep -Milliseconds 500
+            }
+        } while ([DateTime]::UtcNow -lt $HealthDeadline)
+        if (-not $HealthVerified) {
+            throw "Windows service did not pass its bound health check within 30 seconds: $LastHealthError"
+        }
     }
 }
 catch {
@@ -494,7 +830,11 @@ catch {
         if ($null -ne $RollbackService) {
             Assert-ServiceTargetsWrapper -Service $RollbackService -ServiceId $ServiceId `
                 -ExpectedWrapper $WrapperExecutable
-            Remove-ServiceRegistrationChecked -ServiceId $ServiceId -ExpectedWrapper $WrapperExecutable
+            Assert-ServiceUsesDedicatedAccount -Service $RollbackService `
+                -ServiceId $ServiceId -ExpectedAccount $ServiceIdentity.AccountName
+            Remove-ServiceRegistrationChecked -ServiceId $ServiceId `
+                -ExpectedWrapper $WrapperExecutable `
+                -ExpectedAccount $ServiceIdentity.AccountName
         }
     }
     catch {
@@ -561,5 +901,12 @@ finally {
 }
 
 Write-Host "Windows service installed: $ServiceId"
+Write-Host "Dedicated service identity: $($ServiceIdentity.AccountName) ($($ServiceIdentity.Sid))"
 Write-Host "WinSW was supplied locally and was not downloaded by this script."
 Write-Host "No user password or application secret was written to service XML or arguments."
+if ($AllowIncompleteDemo -or $AllowUnsignedTestMedia) {
+    Write-Warning "DEMO/TEST ONLY service installed; remove it before formal deployment."
+}
+else {
+    Write-Host "Formal Agent signer matched independently approved thumbprint: $ApprovedSignerThumbprint"
+}

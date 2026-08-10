@@ -1,4 +1,4 @@
-# MineGuard 0.5.1 verified runtime constraints.
+# MineGuard Platform 0.6.0 production-candidate runtime constraints.
 #
 # Captured from the cross-platform release verification environment on 2026-08-02
 # (Python 3.12.0, including the Windows IANA timezone package).  Change these

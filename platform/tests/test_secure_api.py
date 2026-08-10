@@ -670,7 +670,7 @@ def test_authentication_csrf_and_mine_scope_are_enforced(
             "/v1/auth/change-password",
             {
                 "current_password": "viewer password",
-                "new_password": "viewer replacement password",
+                "new_password": "Viewer-Replacement-2026!",
             },
             headers=auth_headers(viewer_cookie, viewer_csrf),
         )
@@ -689,7 +689,7 @@ def test_authentication_csrf_and_mine_scope_are_enforced(
             host,
             port,
             "viewer-m002",
-            "viewer replacement password",
+            "Viewer-Replacement-2026!",
         )
 
 

@@ -2038,6 +2038,53 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/v1/health" and method == "GET":
             llm_configured = self.server.service.llm_provider is not None
+            production_mode = bool(
+                getattr(self.server.service, "production_mode", False)
+            )
+            try:
+                audit_integrity = (
+                    self.server.service.integrity_status()
+                    if production_mode
+                    else {"valid": True, "mode": "not_enforced"}
+                )
+            except Exception as error:  # readiness must fail closed
+                audit_integrity = {
+                    "valid": False,
+                    "failure": type(error).__name__,
+                }
+            if production_mode and "generic_drafts" in audit_integrity:
+                generic_integrity = audit_integrity["generic_drafts"]
+                five_quantity_integrity = audit_integrity["five_quantity_v2"]
+                full_scan = audit_integrity.get("full_scan_snapshot")
+                safe_full_scan = (
+                    {
+                        "kind": full_scan.get("kind"),
+                        "completed_at": full_scan.get("completed_at"),
+                        "counts_are_snapshot": bool(
+                            full_scan.get("counts_are_snapshot")
+                        ),
+                    }
+                    if isinstance(full_scan, dict)
+                    else None
+                )
+                audit_integrity = {
+                    "valid": audit_integrity["valid"],
+                    "integrity_mode": audit_integrity.get("integrity_mode"),
+                    "full_scan_snapshot": safe_full_scan,
+                    "generic_drafts": {
+                        "valid": generic_integrity["valid"],
+                        "draft_count": generic_integrity["draft_count"],
+                        "event_count": generic_integrity["event_count"],
+                        "failure_count": len(generic_integrity["failures"]),
+                        "count_source": generic_integrity.get("count_source"),
+                    },
+                    "five_quantity_v2": {
+                        "valid": five_quantity_integrity["valid"],
+                        "event_count": five_quantity_integrity.get("event_count", 0),
+                        "failure": five_quantity_integrity.get("failure"),
+                        "count_source": five_quantity_integrity.get("count_source"),
+                    },
+                }
             agent_v2_runtime = getattr(
                 self.server.service,
                 "_agent_v2",
@@ -2056,9 +2103,15 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 news_skill.public_definition() if news_skill is not None else {}
             )
             self._json(
-                HTTPStatus.OK,
+                (
+                    HTTPStatus.OK
+                    if audit_integrity["valid"]
+                    else HTTPStatus.SERVICE_UNAVAILABLE
+                ),
                 {
-                    "status": "ok",
+                    "status": "ok" if audit_integrity["valid"] else "not_ready",
+                    "production_mode": production_mode,
+                    "audit_integrity": audit_integrity,
                     "service": "enterprise-reporting-agent",
                     "version": __version__,
                     "contract_version": "enterprise-submission-v1",

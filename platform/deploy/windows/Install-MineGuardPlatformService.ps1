@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[A-Fa-f0-9]{64}$')] [string] $ExpectedSha256,
     [string] $ExpectedConfigSha256,
+    [switch] $Production,
+    [string] $ExpectedSignerThumbprint = '',
     [string] $InstallRoot = (Join-Path ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonApplicationData)) 'MineGuard\Platform'),
     [switch] $StartService
 )
@@ -15,6 +17,8 @@ $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 $OutputEncoding = $utf8NoBom
 try { [Console]::OutputEncoding = $utf8NoBom } catch { }
 $script:ServiceInstallScriptPath = [IO.Path]::GetFullPath($PSCommandPath)
+$ServiceAccount = 'NT SERVICE\MineGuardPlatform'
+$ServiceSid = 'S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346'
 
 if ($env:OS -ne 'Windows_NT') {
     throw 'MineGuard Platform Windows 服务只能在 Windows 上安装。'
@@ -211,6 +215,22 @@ function Assert-PlatformReleaseIdentity {
         [string]$build.operatingSystem -ne 'Windows') {
         throw 'Platform build-metadata 与 release manifest 身份不一致。'
     }
+    if ($manifest.codeSigned -isnot [bool] -or
+        $manifest.authenticodeVerified -isnot [bool] -or
+        [bool]$manifest.authenticodeVerified -ne [bool]$manifest.codeSigned -or
+        $build.codeSigned -isnot [bool] -or
+        [bool]$build.codeSigned -ne [bool]$manifest.codeSigned) {
+        throw 'Platform 发布的代码签名声明无效或彼此不一致。'
+    }
+    $expectedClassification = if ([bool]$manifest.codeSigned) {
+        'signed-production-candidate'
+    } else {
+        'unsigned-test-artifacts'
+    }
+    if ([string]$manifest.releaseClassification -ne $expectedClassification -or
+        [string]$build.releaseClassification -ne $expectedClassification) {
+        throw 'Platform 发布分类与代码签名状态不一致。'
+    }
     $checksumMap = @{}
     foreach ($line in Get-Content -LiteralPath $checksumsPath -Encoding UTF8) {
         if ($line -notmatch '^(?<hash>[A-Fa-f0-9]{64})  (?<path>[^\r\n]+)$') {
@@ -264,6 +284,7 @@ function Assert-PlatformReleaseIdentity {
             'deploy/windows/Resolve-MineGuardPlatformExecutable.ps1',
             'deploy/windows/MineGuard.Platform.xml',
             'deploy/windows/Start-MineGuardPlatform.ps1',
+            'deploy/windows/Configure-MineGuardPlatformFormal.ps1',
             'deploy/windows/Test-MineGuardPlatform.ps1'
         )) {
         if (-not $seen.ContainsKey($required.ToLowerInvariant())) {
@@ -275,7 +296,50 @@ function Assert-PlatformReleaseIdentity {
             $expectedScript, [StringComparison]::OrdinalIgnoreCase)) {
         throw '必须从已安装且经 release manifest 校验的 service 目录运行服务安装脚本。'
     }
-    return [pscustomobject]@{ Version = $version; ManifestSha256 = $manifestHash }
+    return [pscustomobject]@{
+        Version = $version
+        ManifestSha256 = $manifestHash
+        CodeSigned = [bool]$manifest.codeSigned
+        ReleaseClassification = $expectedClassification
+        RecordedSignerThumbprint = [string]$build.signingCertificateThumbprint
+    }
+}
+
+function Assert-ProductionRuntimeSignature {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [object] $ReleaseIdentity,
+        [Parameter(Mandatory = $true)] [string] $ApprovedThumbprint
+    )
+    $approved = ($ApprovedThumbprint -replace '\s', '').ToUpperInvariant()
+    if ($approved -notmatch '^[A-F0-9]{40}$') {
+        throw '-ExpectedSignerThumbprint 必须是从独立审批渠道取得的 40 位证书 SHA-1 指纹。'
+    }
+    if (-not [bool]$ReleaseIdentity.CodeSigned -or
+        [string]$ReleaseIdentity.ReleaseClassification -ne
+            'signed-production-candidate') {
+        throw '正式服务只接受标记为 signed-production-candidate 的已签名 Platform 发布。'
+    }
+    $recorded = (([string]$ReleaseIdentity.RecordedSignerThumbprint) `
+        -replace '\s', '').ToUpperInvariant()
+    if ($recorded -notmatch '^[A-F0-9]{40}$') {
+        throw '已安装构建元数据没有有效的签名证书指纹。'
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne 'Valid' -or
+        $null -eq $signature.SignerCertificate) {
+        throw "Platform 主程序 Authenticode 签名无效：$($signature.Status)"
+    }
+    if ($null -eq $signature.TimeStamperCertificate) {
+        throw 'Platform 主程序缺少可验证的 Authenticode 时间戳。'
+    }
+    $actual = ($signature.SignerCertificate.Thumbprint -replace '\s', '').ToUpperInvariant()
+    if ($actual -ne $approved) {
+        throw 'Platform 主程序签名者与外部批准的证书指纹不一致。'
+    }
+    if ($actual -ne $recorded) {
+        throw 'Platform 主程序签名者与构建元数据不一致。'
+    }
 }
 
 function Get-RegisteredService {
@@ -283,6 +347,49 @@ function Get-RegisteredService {
     if ($services.Count -gt 1) { throw '同一名称出现多个 Win32_Service 记录。' }
     if ($services.Count -eq 0) { return $null }
     return $services[0]
+}
+
+function Assert-ServiceSidTypeUnrestricted {
+    $serviceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\MineGuardPlatform'
+    try {
+        $properties = Get-ItemProperty -LiteralPath $serviceKey -ErrorAction Stop
+    } catch {
+        throw '无法读取 MineGuardPlatform 的 ServiceSidType；拒绝继续。'
+    }
+    $property = $properties.PSObject.Properties['ServiceSidType']
+    if ($null -eq $property -or [int]$property.Value -ne 1) {
+        throw 'MineGuardPlatform 未启用 unrestricted 专属服务 SID；拒绝继续。'
+    }
+    $sidOutput = (& "$env:SystemRoot\System32\sc.exe" `
+        'showsid' 'MineGuardPlatform' 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "sc.exe showsid 无法计算 MineGuardPlatform 服务 SID，退出码 $LASTEXITCODE。"
+    }
+    $sidMatches = @([regex]::Matches(
+        $sidOutput,
+        '(?<![0-9])S-1-5-80(?:-[0-9]+){5}(?![0-9])',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    ) | ForEach-Object { $_.Value.ToUpperInvariant() } | Select-Object -Unique)
+    if ($sidMatches.Count -ne 1 -or
+        -not $sidMatches[0].Equals(
+            $ServiceSid, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'Windows 计算的 MineGuardPlatform 服务 SID 与固定 ACL SID 不一致。'
+    }
+    try {
+        $account = New-Object -TypeName Security.Principal.NTAccount `
+            -ArgumentList $ServiceAccount
+        $translated = $account.Translate(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+    } catch {
+        throw "无法把专属虚拟账号 $ServiceAccount 解析为 Windows SID。"
+    }
+    if (-not $translated.Equals(
+            $ServiceSid, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw '专属虚拟账号解析所得 SID 与固定 ACL SID 不一致。'
+    }
 }
 
 function Get-ServiceExecutablePath {
@@ -302,8 +409,8 @@ function Assert-ServiceIdentity {
     }
     if (-not $PathOnly -and
         -not ([string]$Service.StartName).Equals(
-            'NT AUTHORITY\LocalService', [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'MineGuardPlatform 服务账号不是批准的 NT AUTHORITY\LocalService。'
+            $ServiceAccount, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "MineGuardPlatform 服务账号不是批准的专属虚拟账号 $ServiceAccount。"
     }
 }
 
@@ -367,6 +474,20 @@ $serviceDirectory = Get-SafeLocalPath -Path (Join-Path $InstallRoot 'service') `
     -Label '服务目录' -RequireFixedNtfs
 $configDirectory = Get-SafeLocalPath -Path (Join-Path $InstallRoot 'config') `
     -Label '配置目录' -RequireFixedNtfs
+$configurationMutex = New-Object -TypeName System.Threading.Mutex `
+    -ArgumentList @($false, 'Global\MineGuardPlatform.Configuration')
+$configurationMutexHeld = $false
+try {
+    try {
+        $configurationMutexHeld = $configurationMutex.WaitOne(
+            [TimeSpan]::FromSeconds(30)
+        )
+    } catch [System.Threading.AbandonedMutexException] {
+        $configurationMutexHeld = $true
+    }
+    if (-not $configurationMutexHeld) {
+        throw '前台/服务运行或配置事务仍占用机器级配置锁；30 秒内未取得，已拒绝安装服务。'
+    }
 Assert-NoReparseTree -Path $serviceDirectory -Label '服务目录'
 Assert-NoReparseTree -Path $configDirectory -Label '配置目录'
 $releaseIdentity = Assert-PlatformReleaseIdentity -Root $InstallRoot
@@ -402,12 +523,12 @@ try { [xml]$xml = Get-Content -LiteralPath $template -Raw -Encoding UTF8 } catch
     throw "WinSW XML 无效：$($_.Exception.Message)"
 }
 if ($xml.service.id -ne 'MineGuardPlatform' -or
-    $xml.service.serviceaccount.username -ne 'NT AUTHORITY\LocalService' -or
+    $xml.service.serviceaccount.username -ne $ServiceAccount -or
     $xml.service.executable -ne '%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe' -or
     $xml.service.workingdirectory -ne '%BASE%' -or
     $xml.service.startmode -ne 'Automatic' -or
     $null -ne $xml.service.serviceaccount.password) {
-    throw 'WinSW XML 的服务 ID、可执行入口、工作目录或低权限 LocalService 账号不符合固定契约。'
+    throw 'WinSW XML 的服务 ID、可执行入口、工作目录或专属虚拟服务账号不符合固定契约。'
 }
 $xmlText = Get-Content -LiteralPath $template -Raw -Encoding UTF8
 if ($xmlText -match '(?i)REPLACE[_-]|CHANGE[_-]ME|<password>|MINEGUARD_ADMIN_PASSWORD') {
@@ -441,6 +562,31 @@ if ([string]::IsNullOrWhiteSpace([string]$configuration.adminUsername) -or
     throw 'settings.json 的管理员身份无效。'
 }
 $configuredClientsFile = [string]$configuration.clientsFile
+$isFormalConfiguration = -not [string]::IsNullOrWhiteSpace(
+    $configuredClientsFile
+)
+$isDemoConfiguration = -not $isFormalConfiguration
+if ($isFormalConfiguration) {
+    if ([bool]$configuration.allowDemoDefaultPassword) {
+        throw '正式配置绝不允许 allowDemoDefaultPassword=true；拒绝安装降级服务。'
+    }
+    if (-not [bool]$configuration.secureCookie) {
+        throw '正式 Windows 服务必须启用 Secure Cookie 并通过 HTTPS 反向代理访问。'
+    }
+    if (-not $Production) {
+        throw '正式配置安装服务必须显式使用 -Production。'
+    }
+    Assert-ProductionRuntimeSignature -Path $runtimePath `
+        -ReleaseIdentity $releaseIdentity `
+        -ApprovedThumbprint $ExpectedSignerThumbprint
+} elseif (-not [bool]$configuration.allowDemoDefaultPassword -or
+    [bool]$configuration.secureCookie) {
+    throw '无客户端注册表时只允许明确的本机 HTTP 演示配置；安全开关组合不一致。'
+}
+if ($isDemoConfiguration -and
+    ($Production -or -not [string]::IsNullOrWhiteSpace($ExpectedSignerThumbprint))) {
+    throw '演示配置不得声明 -Production 或正式签名者指纹。'
+}
 if (-not [string]::IsNullOrWhiteSpace($configuredClientsFile)) {
     $configuredClientsFile = Get-SafeLocalPath -Path $configuredClientsFile `
         -Label 'settings.json 客户端注册表'
@@ -454,21 +600,15 @@ if (-not [string]::IsNullOrWhiteSpace($configuredClientsFile)) {
     }
     $null = Assert-OrdinaryFile -Path $configuredClientsFile `
         -Label 'settings.json 客户端注册表' -MaximumBytes 4194304
-    $configuredClientsText = Get-Content -LiteralPath $configuredClientsFile -Raw -Encoding UTF8
-    if ($configuredClientsText -match '(?i)REPLACE(?:[_-]|\b)|CHANGE[_-]?ME|DEMO[_-]?ONLY|NOT[_-]?FOR[_-]?PRODUCTION') {
-        throw '客户端注册表仍含示例/占位秘密；拒绝安装服务。'
-    }
-    $configuredClientsText = $null
     $checkArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
-        -Arguments @('config-check', '--clients-file', $configuredClientsFile)
+        -Arguments @(
+            'config-check', '--clients-file', $configuredClientsFile, '--production',
+            '--platform-system-id', ([string]$configuration.platformSystemId),
+            '--platform-party-id', ([string]$configuration.platformPartyId),
+            '--platform-key-id', ([string]$configuration.platformKeyId)
+        )
     & $runtime.filePath @checkArguments | Out-Null
     if ($LASTEXITCODE -ne 0) { throw '客户端注册表未通过 MineGuard 完整校验。' }
-} elseif (-not [bool]$configuration.allowDemoDefaultPassword) {
-    throw '正式服务至少需要一座煤矿客户端注册；拒绝安装空注册表服务。'
-}
-if (-not [bool]$configuration.secureCookie -and
-    -not [bool]$configuration.allowDemoDefaultPassword) {
-    throw '正式 Windows 服务必须启用 Secure Cookie 并通过 HTTPS 反向代理访问。'
 }
 $configuredStateDirectory = Get-SafeLocalPath `
     -Path ([string]$configuration.stateDirectory) `
@@ -505,6 +645,17 @@ $markerInstallRoot = Get-SafeLocalPath -Path ([string]$stateMarker.initializedFo
 if (-not $markerInstallRoot.Equals($InstallRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw '状态目录所有权标记不属于当前 Platform 安装目录。'
 }
+if ($isFormalConfiguration) {
+    $stateCheckArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
+        -Arguments @(
+            'config-check', '--state-directory', $configuredStateDirectory,
+            '--production'
+        )
+    & $runtime.filePath @stateCheckArguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw '状态目录包含演示/合成数据或无法通过正式用途核验；拒绝安装服务。'
+    }
+}
 $authDatabase = Join-Path $configuredStateDirectory 'auth.db'
 $hasAuthUser = $false
 if (Test-Path -LiteralPath $authDatabase -PathType Leaf) {
@@ -516,23 +667,67 @@ if (Test-Path -LiteralPath $authDatabase -PathType Leaf) {
     }
     $check = $checkText | Out-String | ConvertFrom-Json
     $hasAuthUser = ([int]$check.auth_user_count -ge 1)
+    if ($isFormalConfiguration -and $hasAuthUser) {
+        $productionAuthArguments = Join-MineGuardPlatformArguments `
+            -Runtime $runtime -Arguments @(
+                'config-check', '--auth-database', $authDatabase, '--production'
+            )
+        & $runtime.filePath @productionAuthArguments | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'auth.db 没有正式可用管理员，或仍有启用的演示凭据账号；拒绝安装服务。'
+        }
+    }
 }
 if (-not $hasAuthUser -and
     -not (Test-Path -LiteralPath $bootstrapSecret -PathType Leaf) -and
-    -not [bool]$configuration.allowDemoDefaultPassword) {
+    $isFormalConfiguration) {
     throw '首次启动缺少受保护的管理员密码文件；拒绝安装会回退演示口令的服务。'
 }
 if (-not $hasAuthUser -and
-    (Test-Path -LiteralPath $bootstrapSecret -PathType Leaf)) {
-    $bootstrapText = Get-Content -LiteralPath $bootstrapSecret -Raw -Encoding UTF8
-    if ($bootstrapText.Length -lt 8 -or
-        $bootstrapText.IndexOfAny([char[]]"`r`n`0") -ge 0 -or
-        $bootstrapText -match '(?i)REPLACE(?:[_-]|\b)|CHANGE[_-]?ME|DEMO[_-]?ONLY|NOT[_-]?FOR[_-]?PRODUCTION') {
-        throw '首次管理员密码文件无效或仍含占位文本；拒绝安装服务。'
+    (Test-Path -LiteralPath $bootstrapSecret -PathType Leaf) -and
+    $isFormalConfiguration) {
+    $null = Assert-OrdinaryFile -Path $bootstrapSecret `
+        -Label '首次管理员密码文件' -MaximumBytes 4096
+    $bootstrapArguments = Join-MineGuardPlatformArguments `
+        -Runtime $runtime -Arguments @(
+            'bootstrap-admin', '--state-directory', $configuredStateDirectory,
+            '--admin-username', ([string]$configuration.adminUsername),
+            '--password-file', $bootstrapSecret, '--production'
+        )
+    & $runtime.filePath @bootstrapArguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw '短生命周期 bootstrap-admin 未能建立正式管理员摘要；拒绝安装服务。'
     }
-    $bootstrapText = $null
+    if (Test-Path -LiteralPath $bootstrapSecret) {
+        throw 'bootstrap-admin 成功返回但未删除首启密码文件；拒绝安装长运行服务。'
+    }
+    $productionAuthArguments = Join-MineGuardPlatformArguments `
+        -Runtime $runtime -Arguments @(
+            'config-check', '--auth-database', $authDatabase, '--production'
+        )
+    & $runtime.filePath @productionAuthArguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw '短首启 helper 建立的管理员摘要未通过正式凭据核验。'
+    }
+    $hasAuthUser = $true
 }
-if ([bool]$configuration.allowDemoDefaultPassword) {
+if ($hasAuthUser -and $isFormalConfiguration -and
+    (Test-Path -LiteralPath $bootstrapSecret)) {
+    throw 'auth.db 已有账号但首启密码文件仍在；请先按受控清理流程处理，拒绝安装服务。'
+}
+if ($isDemoConfiguration -and
+    (Test-Path -LiteralPath $bootstrapSecret)) {
+    throw '演示服务不使用首启密码文件；请先按受控流程清理异常残留。'
+}
+if ($isDemoConfiguration) {
+    $demoStateArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
+        -Arguments @('config-check', '--state-directory', $configuredStateDirectory)
+    $demoStateText = & $runtime.filePath @demoStateArguments
+    if ($LASTEXITCODE -ne 0) { throw '演示状态目录无法核验；拒绝安装服务。' }
+    $demoStateCheck = $demoStateText | Out-String | ConvertFrom-Json
+    if ([int]$demoStateCheck.state_demo_evidence_count -lt 1) {
+        throw '演示配置缺少受控合成数据标记；拒绝用演示开关安装正式状态目录。'
+    }
     Write-Warning '配置允许演示默认密码；不得把该服务接入正式内网。'
 }
 
@@ -575,7 +770,9 @@ $integrity = [ordered]@{
     schemaVersion = 1
     product = 'MineGuard Platform WinSW Service'
     serviceId = 'MineGuardPlatform'
-    serviceAccount = 'NT AUTHORITY\LocalService'
+    serviceAccount = $ServiceAccount
+    serviceSid = $ServiceSid
+    serviceSidType = 'unrestricted'
     canonicalWrapperPath = $destination
     wrapperSha256 = $actualHash
     wrapperConfigSha256 = $configHash
@@ -589,7 +786,12 @@ $publishedConfig = $false
 $publishedIntegrity = $false
 try {
     # 最后一次复核全部外部信任锚和产品身份，然后才开始写入服务目录。
-    $null = Assert-PlatformReleaseIdentity -Root $InstallRoot
+    $lateReleaseIdentity = Assert-PlatformReleaseIdentity -Root $InstallRoot
+    if ($isFormalConfiguration) {
+        Assert-ProductionRuntimeSignature -Path $runtimePath `
+            -ReleaseIdentity $lateReleaseIdentity `
+            -ApprovedThumbprint $ExpectedSignerThumbprint
+    }
     $null = Assert-OrdinaryFile -Path $WinSWExecutable -Label 'WinSW 输入文件' `
         -MaximumBytes 134217728
     $actualHash = (Get-FileHash -LiteralPath $WinSWExecutable -Algorithm SHA256).Hash
@@ -638,7 +840,7 @@ try {
             $ExpectedConfigSha256.ToUpperInvariant()) {
         throw '已发布 WinSW .config 未通过批准 SHA-256。'
     }
-    $serviceRead = '*S-1-5-19:R'
+    $serviceRead = ('*{0}:R' -f $ServiceSid)
     & "$env:SystemRoot\System32\icacls.exe" $integrityPath '/inheritance:r' `
         '/grant:r' '*S-1-5-18:F' '*S-1-5-32-544:F' $serviceRead | Out-Null
     if ($LASTEXITCODE -ne 0) { throw '保护 WinSW 完整性记录失败；拒绝安装服务。' }
@@ -657,10 +859,22 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "WinSW 安装服务失败，退出码 $LASTEXITCODE。" }
     $registeredService = Get-RegisteredService
     if ($null -eq $registeredService) { throw 'WinSW 返回成功但未注册 MineGuardPlatform 服务。' }
+    & "$env:SystemRoot\System32\sc.exe" 'sidtype' 'MineGuardPlatform' `
+        'unrestricted' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "设置 MineGuardPlatform 专属服务 SID 失败，sc.exe 退出码 $LASTEXITCODE。"
+    }
+    Assert-ServiceSidTypeUnrestricted
     Assert-ServiceIdentity -Service $registeredService -ExpectedWrapper $destination
     if ($StartService) {
         $registeredService = Get-RegisteredService
+        Assert-ServiceSidTypeUnrestricted
         Assert-ServiceIdentity -Service $registeredService -ExpectedWrapper $destination
+        # Start-MineGuardPlatform.ps1 必须持有同一把锁贯穿运行期。
+        # 此时配置、bootstrap 和服务注册已完整提交，先释放再启动，
+        # 避免新服务等待本安装进程而死锁。
+        $configurationMutex.ReleaseMutex()
+        $configurationMutexHeld = $false
         Start-Service -Name 'MineGuardPlatform' -ErrorAction Stop
         $serviceController = Get-Service -Name 'MineGuardPlatform' -ErrorAction Stop
         $serviceController.WaitForStatus(
@@ -672,7 +886,7 @@ try {
             BaseUri = ('http://127.0.0.1:{0}' -f $configuredPort)
             TimeoutSeconds = 2
         }
-        if ([bool]$configuration.allowDemoDefaultPassword) {
+        if ($isDemoConfiguration) {
             $healthArguments['HealthOnly'] = $true
         }
         $ready = $false
@@ -689,6 +903,7 @@ try {
             throw '服务已启动，但 30 秒内未通过健康检查。'
         }
         $registeredService = Get-RegisteredService
+        Assert-ServiceSidTypeUnrestricted
         Assert-ServiceIdentity -Service $registeredService -ExpectedWrapper $destination
     }
 } catch {
@@ -725,6 +940,13 @@ try {
             Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
         }
     }
+}
+} finally {
+    if ($configurationMutexHeld) {
+        try { $configurationMutex.ReleaseMutex() }
+        catch { }
+    }
+    if ($null -ne $configurationMutex) { $configurationMutex.Dispose() }
 }
 
 Write-Host 'MineGuardPlatform Windows 服务安装完成。'

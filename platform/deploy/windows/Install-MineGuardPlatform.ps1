@@ -11,7 +11,8 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$ServiceSid = 'S-1-5-19'
+$ServiceSid = 'S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346'
+$ServiceAccount = 'NT SERVICE\MineGuardPlatform'
 $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 $OutputEncoding = $utf8NoBom
 try { [Console]::OutputEncoding = $utf8NoBom } catch { }
@@ -27,6 +28,33 @@ function Assert-Administrator {
         [Security.Principal.WindowsBuiltInRole]::Administrator
     )) {
         throw '安装和设置 NTFS ACL 必须在【以管理员身份运行】的 Windows PowerShell 5.1 中执行。'
+    }
+}
+
+function Assert-InstalledServiceSecurityBoundary {
+    $records = @(Get-CimInstance Win32_Service `
+        -Filter "Name='MineGuardPlatform'" -ErrorAction Stop)
+    if ($records.Count -ne 1 -or
+        -not ([string]$records[0].StartName).Equals(
+            $ServiceAccount, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw '现有 MineGuardPlatform 服务不是专属虚拟账号；请先用当前版本安全移除服务，再重新安装。'
+    }
+    $properties = Get-ItemProperty -LiteralPath `
+        'HKLM:\SYSTEM\CurrentControlSet\Services\MineGuardPlatform' `
+        -ErrorAction Stop
+    $sidType = $properties.PSObject.Properties['ServiceSidType']
+    if ($null -eq $sidType -or [int]$sidType.Value -ne 1) {
+        throw '现有 MineGuardPlatform 服务未启用 unrestricted 专属服务 SID；拒绝继承。'
+    }
+    $sidOutput = (& "$env:SystemRoot\System32\sc.exe" `
+        'showsid' 'MineGuardPlatform' 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or
+        $sidOutput -notmatch '(?<![0-9])S-1-5-80(?:-[0-9]+){5}(?![0-9])' -or
+        -not $Matches[0].Equals(
+            $ServiceSid, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'Windows 计算的 MineGuardPlatform 服务 SID 与固定 ACL SID 不一致；拒绝继承。'
     }
 }
 
@@ -448,6 +476,14 @@ if ($binaryMode) {
         [bool]$manifest.authenticodeVerified -ne [bool]$manifest.codeSigned) {
         throw 'release-manifest.json 的 Authenticode 验证状态无效。'
     }
+    $expectedClassification = if ([bool]$manifest.codeSigned) {
+        'signed-production-candidate'
+    } else {
+        'unsigned-test-artifacts'
+    }
+    if ([string]$manifest.releaseClassification -ne $expectedClassification) {
+        throw 'release-manifest.json 的发布分类与代码签名状态不一致。'
+    }
     $manifestFiles = @{}
     foreach ($entry in @($manifest.files)) {
         $relative = [string]$entry.path
@@ -496,6 +532,9 @@ if ($binaryMode) {
     if ($buildMetadata.codeSigned -isnot [bool] -or
         [bool]$buildMetadata.codeSigned -ne [bool]$manifest.codeSigned) {
         throw '发布清单与构建元数据的代码签名状态不一致。'
+    }
+    if ([string]$buildMetadata.releaseClassification -ne $expectedClassification) {
+        throw '构建元数据的发布分类与发布清单不一致。'
     }
     if ([string]$buildMetadata.version -ne $candidateVersionText) {
         throw '构建元数据与候选发布版本不一致。'
@@ -656,6 +695,9 @@ if ($binaryMode) {
     $metadataTarget = Join-Path $InstallRoot 'release-metadata'
     $serviceSource = $PSScriptRoot
     $service = Get-Service -Name 'MineGuardPlatform' -ErrorAction SilentlyContinue
+    if ($null -ne $service) {
+        Assert-InstalledServiceSecurityBoundary
+    }
     if ($null -ne $service -and $service.Status -ne 'Stopped') {
         throw '切换 Platform 二进制运行时前必须停止 MineGuardPlatform 服务。'
     }
@@ -738,6 +780,9 @@ if ($binaryMode) {
             $actualWrapperHash = (Get-FileHash -LiteralPath $existingWrapper `
                 -Algorithm SHA256).Hash
             if ([int]$wrapperIntegrity.schemaVersion -ne 1 -or
+                [string]$wrapperIntegrity.serviceAccount -ne $ServiceAccount -or
+                [string]$wrapperIntegrity.serviceSid -ne $ServiceSid -or
+                [string]$wrapperIntegrity.serviceSidType -ne 'unrestricted' -or
                 $expectedWrapperHash -notmatch '^[A-Fa-f0-9]{64}$' -or
                 $actualWrapperHash -ne $expectedWrapperHash.ToUpperInvariant()) {
                 throw '已有 WinSW 服务包装器与批准的 SHA-256 记录不一致；拒绝继承。'
@@ -773,6 +818,7 @@ if ($binaryMode) {
         foreach ($requiredScript in @(
             'Start-MineGuardPlatform.ps1',
             'Start-MineGuardPlatformWizard.ps1',
+            'Configure-MineGuardPlatformFormal.ps1',
             'Resolve-MineGuardPlatformExecutable.ps1',
             'Install-MineGuardPlatformService.ps1'
         )) {
@@ -810,8 +856,8 @@ if ($binaryMode) {
                 adminUsername = 'admin'
                 secureCookie = $true
                 allowDemoDefaultPassword = $false
-                platformSystemId = 'mineguard-government'
-                platformPartyId = 'regulator-government'
+                platformSystemId = 'mineguard-qinyuan'
+                platformPartyId = 'regulator-qinyuan'
                 platformKeyId = 'regulator-key-v2'
             }
             [System.IO.File]::WriteAllText(
@@ -883,6 +929,7 @@ if ($binaryMode) {
         foreach ($requiredScript in @(
             'Start-MineGuardPlatform.ps1',
             'Start-MineGuardPlatformWizard.ps1',
+            'Configure-MineGuardPlatformFormal.ps1',
             'Resolve-MineGuardPlatformExecutable.ps1',
             'Install-MineGuardPlatformService.ps1'
         )) {
@@ -1125,8 +1172,8 @@ if (-not $binaryMode) {
             adminUsername = 'admin'
             secureCookie = $true
             allowDemoDefaultPassword = $false
-            platformSystemId = 'mineguard-government'
-            platformPartyId = 'regulator-government'
+            platformSystemId = 'mineguard-qinyuan'
+            platformPartyId = 'regulator-qinyuan'
             platformKeyId = 'regulator-key-v2'
         }
         [System.IO.File]::WriteAllText(

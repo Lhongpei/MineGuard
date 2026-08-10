@@ -11,7 +11,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$ServiceSid = 'S-1-5-19'
+$ServiceSid = 'S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346'
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false

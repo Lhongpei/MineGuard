@@ -33,7 +33,7 @@ def test_runtime_manifest_matches_release_environment_and_constraints() -> None:
 
     assert manifest["schema_version"] == "mineguard.runtime.v1"
     assert manifest["application"] == {
-        "name": "mineguard-mvp",
+        "name": "mineguard-platform",
         "version": __version__,
     }
     assert manifest["python"] == {

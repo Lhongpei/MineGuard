@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import http.client
 import json
+import sqlite3
 import threading
+from pathlib import Path
 from typing import Any
 
+import pytest
 from conftest import complete_values
 
 from enterprise_agent import __version__
@@ -239,6 +242,81 @@ def test_head_health_is_probe_friendly_and_has_no_body() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+
+
+def test_production_health_uses_cached_full_scan_counts_and_safe_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "production-health.db"
+    repository = Repository(database)
+    service = EnterpriseAgentService(repository, production_mode=True)
+    service.create_draft(actor="operator-1")
+    with repository._transaction() as db:
+        db.execute("CREATE TABLE health_external_probe(value TEXT NOT NULL)")
+    original_full_scan = repository.verify_all_draft_audits
+    full_scan_calls = 0
+
+    def counted_full_scan() -> dict[str, Any]:
+        nonlocal full_scan_calls
+        full_scan_calls += 1
+        return original_full_scan()
+
+    monkeypatch.setattr(repository, "verify_all_draft_audits", counted_full_scan)
+    service.assert_production_integrity()
+    assert full_scan_calls == 1
+
+    server = EnterpriseAgentHTTPServer(("127.0.0.1", 0), service)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", server.server_address[1], timeout=3
+    )
+    try:
+        first_status, first = _request(connection, "GET", "/api/v1/health")
+        second_status, second = _request(connection, "GET", "/api/v1/health")
+        assert first_status == second_status == 200
+        assert full_scan_calls == 1
+        integrity = first["audit_integrity"]
+        assert integrity["integrity_mode"] == "runtime_constant_boundary"
+        assert integrity["full_scan_snapshot"]["kind"] == (
+            "trusted_startup_full_scan"
+        )
+        assert integrity["full_scan_snapshot"]["counts_are_snapshot"] is True
+        assert integrity["generic_drafts"]["event_count"] == 1
+        assert integrity["generic_drafts"]["count_source"] == (
+            "trusted_full_scan_snapshot"
+        )
+        assert integrity["five_quantity_v2"]["count_source"] == (
+            "trusted_full_scan_snapshot"
+        )
+        assert second["audit_integrity"]["full_scan_snapshot"] == (
+            integrity["full_scan_snapshot"]
+        )
+        # The readiness projection deliberately omits audit bodies, hashes and
+        # the cached failure detail list.
+        encoded = json.dumps(integrity, ensure_ascii=False)
+        assert "head_hash" not in encoded
+        assert "failures" not in encoded
+
+        with sqlite3.connect(database) as external:
+            external.execute(
+                "INSERT INTO health_external_probe(value) VALUES ('tampered')"
+            )
+        failed_status, failed = _request(connection, "GET", "/api/v1/health")
+        assert failed_status == 503
+        assert failed["status"] == "not_ready"
+        assert failed["audit_integrity"] == {
+            "valid": False,
+            "failure": "ConflictError",
+        }
+        assert full_scan_calls == 1
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+        repository.close()
 
 
 def test_draft_list_is_bounded_paginated_summary() -> None:

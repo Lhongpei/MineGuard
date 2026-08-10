@@ -651,6 +651,9 @@ try {
         builtUtc = [DateTime]::UtcNow.ToString('o')
         codeSigned = $codeSigned
         authenticodeVerified = $codeSigned
+        releaseClassification = $(
+            if ($codeSigned) { 'signed-production-candidate' } else { 'unsigned-test-artifacts' }
+        )
         signingCertificateThumbprint = $(
             if ($codeSigned) { $SigningCertificateThumbprint } else { $null }
         )
@@ -688,6 +691,9 @@ try {
         operations = 'deploy/windows'
         codeSigned = $codeSigned
         authenticodeVerified = $codeSigned
+        releaseClassification = $(
+            if ($codeSigned) { 'signed-production-candidate' } else { 'unsigned-test-artifacts' }
+        )
         files = $manifestFiles
         selfCheck = $selfCheck
     }

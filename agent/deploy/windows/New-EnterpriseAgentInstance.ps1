@@ -11,7 +11,8 @@ param(
     [string]$StateRoot = (Join-Path $env:ProgramData "MineGuard\EnterpriseAgent\instances"),
     [string[]]$WatchDirectories = @(),
     [switch]$GrantWatchReadAcl,
-    [switch]$SkipAcl
+    [switch]$SkipAcl,
+    [switch]$DevelopmentOnly
 )
 
 Set-StrictMode -Version 2.0
@@ -26,6 +27,16 @@ if (-not (Test-Path -LiteralPath $SafetyHelper -PathType Leaf)) {
 }
 . $SafetyHelper
 Assert-EAPowerShell51
+
+if ($SkipAcl -and -not $DevelopmentOnly) {
+    throw "-SkipAcl requires the explicit -DevelopmentOnly acknowledgement and can never be used for a production instance."
+}
+if ($DevelopmentOnly -and -not $SkipAcl) {
+    throw "-DevelopmentOnly is only valid together with -SkipAcl."
+}
+if ($SkipAcl -and $GrantWatchReadAcl) {
+    throw "-GrantWatchReadAcl cannot be combined with -SkipAcl."
+}
 
 if (-not $SkipAcl) {
     $Principal = New-Object Security.Principal.WindowsPrincipal(
@@ -86,6 +97,8 @@ function Assert-SafeWatchAclTarget {
 }
 
 Assert-EAInstanceName -Value $InstanceName
+$ServiceId = "MineGuardEnterpriseAgent-$InstanceName"
+$ServiceIdentity = Get-EAServiceIdentity -ServiceId $ServiceId
 Assert-ContractIdentifier -Name "MineId" -Value $MineId
 Assert-DisplayName -Name "MineName" -Value $MineName
 Assert-ContractIdentifier -Name "OperatorId" -Value $OperatorId
@@ -97,17 +110,36 @@ $InstallRoot = Resolve-EASafeLocalPath -Name "InstallRoot" -PathValue $InstallRo
     -MustExist -RequiredType Container
 $StateRoot = Resolve-EASafeLocalPath -Name "StateRoot" -PathValue $StateRoot `
     -MustExist -RequiredType Container
-[void](Assert-EAStateRootMarker -StateRoot $StateRoot)
+$StateMarker = Assert-EAStateRootMarker -StateRoot $StateRoot
 $AgentExecutable = Get-EAAgentExecutable -InstallRoot $InstallRoot
 $Template = Resolve-EASafeLocalPath -Name "Instance template" `
     -PathValue (Join-Path $InstallRoot "deploy\windows\agent.env.template") `
     -MustExist -RequiredType Leaf
 Assert-EAOrdinaryLeaf -Path $Template -Name "Instance template" -MaximumBytes 1MB
 
+$CreationMutexName = "Global\MineGuardEnterpriseAgent-StateRoot-$($StateMarker.root_id)"
+$CreationMutex = New-Object Threading.Mutex($false, $CreationMutexName)
+$CreationMutexAcquired = $false
+try {
+    try {
+        $CreationMutexAcquired = $CreationMutex.WaitOne(
+            [TimeSpan]::FromSeconds(60)
+        )
+    }
+    catch [Threading.AbandonedMutexException] {
+        # The prior creator died while holding the boundary. We own the mutex
+        # now, and the staging-directory validation below remains fail-closed.
+        $CreationMutexAcquired = $true
+    }
+    if (-not $CreationMutexAcquired) {
+        throw "Timed out waiting for the StateRoot-wide instance creation mutex."
+    }
+
 $InstanceRoot = Join-Path $StateRoot $InstanceName
 if (Test-Path -LiteralPath $InstanceRoot) {
     throw "Instance already exists: $InstanceRoot"
 }
+$ExistingContexts = @()
 foreach ($ExistingDirectory in Get-ChildItem -LiteralPath $StateRoot -Directory -Force) {
     if ($ExistingDirectory.Name.StartsWith(".instance-staging-")) { continue }
     if ($ExistingDirectory.Name -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$') {
@@ -115,8 +147,20 @@ foreach ($ExistingDirectory in Get-ChildItem -LiteralPath $StateRoot -Directory 
     }
     $ExistingContext = Get-EAInstanceContext -InstanceName $ExistingDirectory.Name `
         -InstallRoot $InstallRoot -StateRoot $StateRoot
+    Assert-EAInstanceGlobalIsolation -Context $ExistingContext
+    $ExistingContexts += $ExistingContext
     if ($ExistingContext.Port -eq $Port) {
         throw "Port $Port is already assigned by $($ExistingContext.InstanceName)."
+    }
+    if ($ExistingContext.MineId.Equals(
+            $MineId, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "MineId $MineId is already assigned by $($ExistingContext.InstanceName)."
+    }
+    if ($ExistingContext.SystemId.Equals(
+            $SystemId, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "SystemId $SystemId is already assigned by $($ExistingContext.InstanceName)."
     }
 }
 
@@ -141,6 +185,23 @@ if (-not $UsingDefaultInbox) {
         $ResolvedWatchDirectories += $ResolvedWatch
     }
 }
+else {
+    $ResolvedWatchDirectories = @(Join-Path $InstanceRoot "inbox")
+}
+foreach ($ExistingContext in $ExistingContexts) {
+    foreach ($NewWatch in $ResolvedWatchDirectories) {
+        foreach ($ExistingWatch in @($ExistingContext.WatchDirectories)) {
+            if ((Test-EAPathWithin -Candidate $NewWatch -Parent $ExistingWatch) -or
+                (Test-EAPathWithin -Candidate $ExistingWatch -Parent $NewWatch)) {
+                throw (
+                    "Watch directory isolation violation: new instance $InstanceName " +
+                    "overlaps existing instance $($ExistingContext.InstanceName): " +
+                    "$NewWatch <-> $ExistingWatch"
+                )
+            }
+        }
+    }
+}
 
 $StageRoot = Join-Path $StateRoot (".instance-staging-" + [Guid]::NewGuid().ToString("N"))
 $Published = $false
@@ -162,9 +223,6 @@ try {
 
     $FinalConfigPath = Join-Path $InstanceRoot "config\agent.env"
     $FinalDatabasePath = Join-Path $InstanceRoot "data\enterprise-agent.db"
-    if ($UsingDefaultInbox) {
-        $ResolvedWatchDirectories = @(Join-Path $InstanceRoot "inbox")
-    }
     $Content = [IO.File]::ReadAllText($Template)
     $Replacements = @{
         "__DATABASE_PATH__" = $FinalDatabasePath
@@ -187,7 +245,6 @@ try {
     [IO.File]::WriteAllText($StageConfigPath, $Content, $Utf8NoBom)
     [void](Read-EAEnvironmentFile -Path $StageConfigPath)
 
-    $ServiceId = "MineGuardEnterpriseAgent-$InstanceName"
     $Metadata = [ordered]@{
         format = "mineguard-enterprise-agent-windows-instance-v1"
         instance_name = $InstanceName
@@ -210,14 +267,14 @@ try {
             -Name "Staged Agent instance" -RootGrants @(
                 "*S-1-5-18:(OI)(CI)F",
                 "*S-1-5-32-544:(OI)(CI)F",
-                "*S-1-5-19:(OI)(CI)RX"
+                "*$($ServiceIdentity.Sid):(OI)(CI)RX"
             )
         foreach ($Writable in @($StageDataDirectory, $StageLogDirectory)) {
             Set-EACanonicalInheritedTreeAcl -Root $Writable `
                 -Name "Writable Agent instance directory" -RootGrants @(
                     "*S-1-5-18:(OI)(CI)F",
                     "*S-1-5-32-544:(OI)(CI)F",
-                    "*S-1-5-19:(OI)(CI)M"
+                    "*$($ServiceIdentity.Sid):(OI)(CI)M"
                 )
         }
         Set-EACanonicalInheritedTreeAcl -Root $StageBackupDirectory `
@@ -230,23 +287,34 @@ try {
                 $ExternalAclBackups[$WatchDirectory] = Get-Acl -LiteralPath $WatchDirectory
                 # Set one inheritable read ACE on the dedicated root. Do not recursively
                 # rewrite vendor files or protected child ACLs.
-                Invoke-EAIcaclsChecked -ArgumentList @(
-                    $WatchDirectory, "/grant", "*S-1-5-19:(OI)(CI)RX"
-                )
+                Grant-EAServiceWatchReadAcl -WatchRoot $WatchDirectory `
+                    -ServiceSid $ServiceIdentity.Sid
+                Assert-EAServiceWatchReadAcl -WatchRoot $WatchDirectory `
+                    -ServiceSid $ServiceIdentity.Sid
             }
         }
         elseif (-not $UsingDefaultInbox) {
-            Write-Warning "Custom watch directories were not modified. Grant LocalService read access through the directory owner."
+            Write-Warning (
+                "Custom watch directories were not modified. Their owner must grant " +
+                "inheritable read access to $($ServiceIdentity.AccountName) " +
+                "(SID $($ServiceIdentity.Sid)) and narrow any Everyone, Authenticated " +
+                "Users, BUILTIN Users, LocalService, NetworkService, ALL SERVICES or " +
+                "different service-SID allow ACE before formal service installation."
+            )
         }
     }
     else {
-        Write-Warning "ACL hardening was skipped. Do not use this instance in production."
+        Write-Warning "DEVELOPMENT ONLY: ACL hardening was skipped. This instance cannot be installed as a production service."
     }
 
     Assert-EAOrdinaryTree -Root $StageRoot -Name "Staged instance"
     Move-Item -LiteralPath $StageRoot -Destination $InstanceRoot
     $CreatedContext = Get-EAInstanceContext -InstanceName $InstanceName `
         -InstallRoot $InstallRoot -StateRoot $StateRoot
+    Assert-EAInstanceGlobalIsolation -Context $CreatedContext
+    if (-not $SkipAcl -and ($UsingDefaultInbox -or $GrantWatchReadAcl)) {
+        Assert-EAInstanceWatchAcls -Context $CreatedContext
+    }
     $Published = $true
     Write-Host "Enterprise Agent instance created: $InstanceName"
     Write-Host "Config: $($CreatedContext.ConfigPath)"
@@ -275,4 +343,11 @@ catch {
         }
     }
     throw $OriginalError
+}
+}
+finally {
+    if ($CreationMutexAcquired) {
+        $CreationMutex.ReleaseMutex()
+    }
+    $CreationMutex.Dispose()
 }

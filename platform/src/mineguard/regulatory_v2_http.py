@@ -8,6 +8,7 @@ sent by one mine's independently deployed enterprise agent.
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager, suppress
 import csv
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,9 +22,11 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import sys
 from threading import BoundedSemaphore, Condition, Lock, Thread
-from typing import Any, Callable, Mapping
+from time import monotonic
+from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import parse_qsl, quote, urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from zoneinfo import ZoneInfo
@@ -31,6 +34,8 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from .auth import (
+    AuthError,
+    CURRENT_CREDENTIAL_POLICY_VERSION,
     CsrfValidationError,
     InvalidCredentialsError,
     InvalidSessionError,
@@ -54,6 +59,8 @@ from .exchange_v2 import (
     load_exchange_clients,
     sign_exchange_message,
     validate_exchange_lineage,
+    validate_production_exchange_clients,
+    validate_production_platform_identity,
     verify_exchange_message_signature,
 )
 from .external_submission import jcs_canonical_json
@@ -65,7 +72,9 @@ from .regulatory_v2_store import (
     FindingProjection,
     OutboxItem,
     RegulatoryV2ConflictError,
+    RegulatoryV2IntegrityError,
     RegulatoryV2NotFoundError,
+    RegulatoryV2SchemaVersionError,
     RegulatoryV2Store,
     ResponseBatchReceipt,
 )
@@ -93,6 +102,11 @@ _TRACE_EXPORT_LIMIT = 10_000
 _LOCAL_CONTROL_PATH = "/_mineguard/local-control/shutdown"
 _LOCAL_CONTROL_HEADER = "X-MineGuard-Local-Control-Token"
 _TRACE_MINE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_AUTH_FAILURE_WINDOW_SECONDS = 60
+_AUTH_FAILURE_EARLY_SUMMARY_THRESHOLD = 10
+_REQUEST_IO_TIMEOUT_SECONDS = 30.0
+_DRAIN_TIMEOUT_SECONDS = 10.0
+_FORCED_DRAIN_GRACE_SECONDS = 2.0
 _TRACE_EVENT_GROUPS: dict[str, frozenset[str]] = {
     "submission": frozenset({"submission_received"}),
     "analysis": frozenset({"analysis_completed"}),
@@ -117,10 +131,42 @@ _TRACE_EVENT_GROUPS: dict[str, frozenset[str]] = {
         }
     ),
     "security": frozenset(
-        {"agent_mine_bound", "inbox_idempotency_conflict_rejected"}
+        {
+            "agent_mine_bound",
+            "inbox_idempotency_conflict_rejected",
+            "machine_authentication_failed",
+            "machine_authentication_failure_summary",
+        }
     ),
 }
 _TRACE_BUSINESS_EVENT_TYPES = frozenset().union(*_TRACE_EVENT_GROUPS.values())
+
+
+class PasswordChangeRequiredError(Exception):
+    """A pending credential may only use auth recovery/change endpoints."""
+
+
+class _TraceExportTooLargeError(ValueError):
+    def __init__(self, matched_count: int) -> None:
+        super().__init__("trace export exceeds the governed row limit")
+        self.matched_count = matched_count
+
+
+@dataclass
+class _AuthenticationFailureBucket:
+    window_started_at: datetime
+    last_attempt_at: datetime
+    attempt_count: int = 1
+    next_summary_attempt_count: int = _AUTH_FAILURE_EARLY_SUMMARY_THRESHOLD
+
+
+@dataclass(frozen=True)
+class _MachineTransportAuthentication:
+    client: ExchangeClient
+    request_time: datetime
+    nonce: str
+
+
 _TRACE_EVENT_GROUP_LABELS = {
     "submission": "企业报送",
     "analysis": "政府研判",
@@ -165,9 +211,7 @@ class _TraceQuery:
             "view": self.view,
             "event_group": self.event_group,
             "mine_id": self.mine_id,
-            "from": (
-                None if self.occurred_from is None else _iso(self.occurred_from)
-            ),
+            "from": (None if self.occurred_from is None else _iso(self.occurred_from)),
             "to": (
                 None if self.occurred_before is None else _iso(self.occurred_before)
             ),
@@ -187,6 +231,8 @@ def _trace_event_group(event_type: str) -> str:
     }:
         return "technical"
     return "system"
+
+
 _BUSINESS_TEXT_LABELS = {
     "ventilation_m3_min": "风量",
     "wind_m3_min": "风量",
@@ -230,9 +276,7 @@ def _humanize_business_text(value: Any) -> str:
     """Render algorithm/storage tokens as controlled government-facing text."""
 
     rendered = _LOWER_SNAKE_CASE_TOKEN.sub(
-        lambda matched: _BUSINESS_TEXT_LABELS.get(
-            matched.group(1), "其他业务项"
-        ),
+        lambda matched: _BUSINESS_TEXT_LABELS.get(matched.group(1), "其他业务项"),
         str(value or ""),
     )
     # Prefer whole-phrase translations where a literal acronym replacement
@@ -321,13 +365,27 @@ def _semantic_engine_version(method_version: str) -> str:
     return matched.group(1)
 
 
-def _principal_json(principal: Principal) -> dict[str, Any]:
+def _principal_json(
+    principal: Principal, *, enforce_password_change: bool = False
+) -> dict[str, Any]:
     return {
         "user_id": principal.user_id,
         "username": principal.username,
         "role": principal.role.value,
         "mine_scopes": list(principal.mine_scopes),
         "business_access": "read_only",
+        "must_change_password": principal.must_change_password,
+        "temporary_demo": principal.temporary_demo,
+        "credential_policy_version": principal.credential_policy_version,
+        "password_change_required": bool(
+            enforce_password_change
+            and (
+                principal.must_change_password
+                or principal.temporary_demo
+                or principal.credential_policy_version
+                != CURRENT_CREDENTIAL_POLICY_VERSION
+            )
+        ),
     }
 
 
@@ -349,7 +407,28 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
         platform_key_id: str,
         local_control_token: str | None,
         clock: Callable[[], datetime],
+        production_mode: bool,
+        request_io_timeout_seconds: float = _REQUEST_IO_TIMEOUT_SECONDS,
+        drain_timeout_seconds: float = _DRAIN_TIMEOUT_SECONDS,
     ) -> None:
+        if production_mode:
+            if auth_required is not True:
+                raise ValueError("production server requires government authentication")
+            if secure_cookie is not True:
+                raise ValueError("production server requires Secure session cookies")
+            validate_production_exchange_clients(clients)
+            validate_production_platform_identity(
+                platform_system_id,
+                platform_party_id,
+                platform_key_id,
+                clients=clients,
+            )
+            credential_status = auth_store.production_credential_status()
+            if not bool(credential_status["production_ready"]):
+                raise AuthError(
+                    "production server requires credentials confirmed under "
+                    "the current password policy"
+                )
         self.store = store
         self.auth_store = auth_store
         self.clients = dict(clients)
@@ -360,12 +439,33 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
         self.platform_key_id = platform_key_id
         self.local_control_token = local_control_token
         self.local_control_lock = Lock()
+        self.authentication_failure_lock = Lock()
+        # The key is either one configured sender ID or a single shared unknown
+        # bucket. Its cardinality is therefore bounded by client_count + 1 and
+        # cannot be expanded with attacker-controlled header values.
+        self.authentication_failure_buckets: dict[
+            str, _AuthenticationFailureBucket
+        ] = {}
         self.request_condition = Condition()
         self.active_requests = 0
+        self.active_request_sockets: set[Any] = set()
         self.draining = False
+        self.request_io_timeout_seconds = float(request_io_timeout_seconds)
+        self.drain_timeout_seconds = float(drain_timeout_seconds)
+        if not 0.1 <= self.request_io_timeout_seconds <= 300:
+            raise ValueError("request I/O timeout must be between 0.1 and 300 seconds")
+        if not 0.1 <= self.drain_timeout_seconds <= 300:
+            raise ValueError("drain timeout must be between 0.1 and 300 seconds")
         self.clock = clock
-        self.integrity_valid = store.verify_integrity()
+        self.production_mode = bool(production_mode)
+        # RegulatoryV2Store performs the authoritative full scan at production
+        # startup. The server consumes its trusted constant-size checkpoint.
+        self.integrity_valid = store.verify_runtime_integrity()
         self.integrity_checked_at = clock()
+        if self.production_mode and not self.integrity_valid:
+            raise RegulatoryV2IntegrityError(
+                "regulatory immutable-store integrity check failed"
+            )
         self.analysis_slots = {
             sender_id: BoundedSemaphore(1) for sender_id in self.clients
         }
@@ -377,30 +477,71 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
         # socket cannot hold shutdown forever. Business requests are counted
         # separately: stop admitting work, let admitted handlers leave their
         # store transactions, and only then close SQLite.
+        deadline = monotonic() + self.drain_timeout_seconds
+        lingering_sockets: tuple[Any, ...] = ()
         with self.request_condition:
             self.draining = True
             while self.active_requests > 0:
-                self.request_condition.wait(timeout=0.5)
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    lingering_sockets = tuple(self.active_request_sockets)
+                    break
+                self.request_condition.wait(timeout=min(0.5, remaining))
+        if lingering_sockets:
+            for request_socket in lingering_sockets:
+                with suppress(OSError):
+                    request_socket.shutdown(socket.SHUT_RDWR)
+            self.store.interrupt()
+            forced_deadline = monotonic() + _FORCED_DRAIN_GRACE_SECONDS
+            with self.request_condition:
+                while self.active_requests > 0:
+                    remaining = forced_deadline - monotonic()
+                    if remaining <= 0:
+                        break
+                    self.request_condition.wait(timeout=min(0.1, remaining))
+        with self.request_condition:
+            abandoned_requests = self.active_requests
         try:
             super().server_close()
         finally:
-            if not self._resources_closed:
+            if abandoned_requests:
+                # Closing SQLite under a still-running business transaction is
+                # less safe than leaving process teardown to release it. A
+                # later server_close call can finish cleanup once the handler
+                # has observed the interrupted socket/database operation.
+                print(
+                    "bounded shutdown left "
+                    f"{abandoned_requests} interrupted request(s) to unwind",
+                    file=sys.stderr,
+                )
+            elif not self._resources_closed:
                 self._resources_closed = True
+                try:
+                    self.flush_authentication_failure_summaries()
+                except Exception as error:  # pragma: no cover - shutdown outage
+                    print(
+                        f"security audit summary flush failed: {error!r}",
+                        file=sys.stderr,
+                    )
                 self.store.close()
                 self.auth_store.close()
 
-    def begin_request(self) -> bool:
+    def begin_request(self, request_socket: Any | None = None) -> bool:
         with self.request_condition:
             if self.draining:
                 return False
             self.active_requests += 1
+            if request_socket is not None:
+                self.active_request_sockets.add(request_socket)
             return True
 
-    def end_request(self) -> None:
+    def end_request(self, request_socket: Any | None = None) -> None:
         with self.request_condition:
             if self.active_requests <= 0:  # pragma: no cover - invariant guard
                 raise RuntimeError("request accounting underflow")
             self.active_requests -= 1
+            if request_socket is not None:
+                self.active_request_sockets.discard(request_socket)
             if self.active_requests == 0:
                 self.request_condition.notify_all()
 
@@ -409,9 +550,126 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
             self.draining = True
             self.request_condition.notify_all()
 
-    def handle_error(
-        self, request: Any, client_address: tuple[str, int]
+    def refresh_integrity(self) -> bool:
+        self.integrity_valid = self.store.verify_runtime_integrity()
+        self.integrity_checked_at = self.clock()
+        return self.integrity_valid
+
+    @contextmanager
+    def regulatory_read_snapshot(self) -> Iterator[None]:
+        """Build one leadership projection from a verified SQLite snapshot."""
+
+        try:
+            with self.store.verified_read_snapshot():
+                self.integrity_valid = True
+                self.integrity_checked_at = self.clock()
+                yield
+        except (RegulatoryV2IntegrityError, RegulatoryV2SchemaVersionError):
+            self.integrity_valid = False
+            self.integrity_checked_at = self.clock()
+            raise
+
+    def require_machine_write_integrity(self) -> None:
+        if self.production_mode and not self.refresh_integrity():
+            raise RegulatoryV2IntegrityError(
+                "regulatory audit integrity check failed; machine write refused"
+            )
+
+    def record_authentication_failure(
+        self,
+        *,
+        request_method: str,
+        request_path: str,
+        remote_address: str,
+        client: ExchangeClient | None,
     ) -> None:
+        """Persist bounded first/summary evidence for invalid machine HMACs."""
+
+        now = self.clock().astimezone(UTC)
+        bucket_key = client.sender_id if client is not None else "<unknown-sender>"
+        sender_id = client.sender_id if client is not None else None
+        mine_id = client.mine_id if client is not None else None
+        with self.authentication_failure_lock:
+            bucket = self.authentication_failure_buckets.get(bucket_key)
+            if bucket is None:
+                self.store.record_authentication_failure_evidence(
+                    request_method=request_method,
+                    request_path=request_path,
+                    remote_address=remote_address,
+                    known_sender_id=sender_id,
+                    mine_id=mine_id,
+                )
+                self.authentication_failure_buckets[bucket_key] = (
+                    _AuthenticationFailureBucket(
+                        window_started_at=now,
+                        last_attempt_at=now,
+                    )
+                )
+                return
+
+            observed_at = max(now, bucket.window_started_at)
+            window_age = observed_at - bucket.window_started_at
+            if window_age >= timedelta(seconds=_AUTH_FAILURE_WINDOW_SECONDS):
+                self.store.record_authentication_failure_evidence(
+                    request_method=request_method,
+                    request_path=request_path,
+                    remote_address=remote_address,
+                    known_sender_id=sender_id,
+                    mine_id=mine_id,
+                    summary_attempt_count=(
+                        bucket.attempt_count if bucket.attempt_count > 1 else None
+                    ),
+                    summary_window_started_at=(
+                        bucket.window_started_at if bucket.attempt_count > 1 else None
+                    ),
+                    summary_window_ended_at=(
+                        bucket.last_attempt_at if bucket.attempt_count > 1 else None
+                    ),
+                    summary_final=True if bucket.attempt_count > 1 else None,
+                )
+                self.authentication_failure_buckets[bucket_key] = (
+                    _AuthenticationFailureBucket(
+                        window_started_at=observed_at,
+                        last_attempt_at=observed_at,
+                    )
+                )
+                return
+
+            bucket.attempt_count += 1
+            bucket.last_attempt_at = max(bucket.last_attempt_at, observed_at)
+            if bucket.attempt_count >= bucket.next_summary_attempt_count:
+                self.store.record_authentication_failure_evidence(
+                    known_sender_id=sender_id,
+                    mine_id=mine_id,
+                    summary_attempt_count=bucket.attempt_count,
+                    summary_window_started_at=bucket.window_started_at,
+                    summary_window_ended_at=bucket.last_attempt_at,
+                    summary_final=False,
+                )
+                while bucket.next_summary_attempt_count <= bucket.attempt_count:
+                    bucket.next_summary_attempt_count *= 2
+
+    def flush_authentication_failure_summaries(self) -> None:
+        """Preserve an exact final count on graceful shutdown."""
+
+        with self.authentication_failure_lock:
+            for bucket_key, bucket in tuple(
+                self.authentication_failure_buckets.items()
+            ):
+                if bucket.attempt_count <= 1:
+                    continue
+                client = self.clients.get(bucket_key)
+                self.store.record_authentication_failure_evidence(
+                    known_sender_id=(client.sender_id if client is not None else None),
+                    mine_id=(client.mine_id if client is not None else None),
+                    summary_attempt_count=bucket.attempt_count,
+                    summary_window_started_at=bucket.window_started_at,
+                    summary_window_ended_at=bucket.last_attempt_at,
+                    summary_final=True,
+                )
+            self.authentication_failure_buckets.clear()
+
+    def handle_error(self, request: Any, client_address: tuple[str, int]) -> None:
         error = sys.exc_info()[1]
         if isinstance(
             error,
@@ -425,6 +683,10 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
     server: RegulatoryV2HTTPServer
     protocol_version = "HTTP/1.1"
 
+    def setup(self) -> None:
+        self.request.settimeout(self.server.request_io_timeout_seconds)
+        super().setup()
+
     def log_message(self, format: str, *args: object) -> None:
         super().log_message(format, *args)
 
@@ -436,11 +698,12 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
 
     def _do_head(self) -> None:
         path = urlsplit(self.path).path
-        if path == "/v2/regulatory/exchanges/export.csv" or path.startswith(
-            "/v2/analysis-reports"
-        ) or path.startswith(
-            "/v2/five-quantity-submissions"
-        ) or path.startswith("/v2/risk-responses"):
+        if (
+            path == "/v2/regulatory/exchanges/export.csv"
+            or path.startswith("/v2/analysis-reports")
+            or path.startswith("/v2/five-quantity-submissions")
+            or path.startswith("/v2/risk-responses")
+        ):
             self._send_empty(405, {"Allow": "GET, POST, OPTIONS"})
             return
         self._guard(lambda: self._dispatch_get(head_only=True))
@@ -450,25 +713,58 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self._tracked_request(
-            lambda: self._send_empty(
-                204, {"Allow": "GET, HEAD, POST, OPTIONS"}
-            )
+            lambda: self._send_empty(204, {"Allow": "GET, HEAD, POST, OPTIONS"})
         )
 
     def _tracked_request(self, operation: Callable[[], None]) -> None:
-        if not self.server.begin_request():
+        if not self.server.begin_request(self.connection):
             self.close_connection = True
             self._send_error(503, "service_draining", "服务正在安全停止")
             return
         try:
             operation()
         finally:
-            self.server.end_request()
+            self.server.end_request(self.connection)
 
     def _guard(self, operation: Callable[[], None]) -> None:
         try:
             operation()
+        except RegulatoryV2SchemaVersionError:
+            self.server.integrity_valid = False
+            self.server.integrity_checked_at = self.server.clock()
+            self._send_error(
+                503,
+                "schema_version_unsupported",
+                "监管数据库版本与当前程序不兼容，服务已安全拒绝写入",
+            )
+        except RegulatoryV2IntegrityError:
+            self.server.integrity_valid = False
+            self.server.integrity_checked_at = self.server.clock()
+            self._send_error(
+                503,
+                "audit_integrity_failed",
+                "监管留痕完整性校验失败，服务已停止监管数据访问和机器写入",
+            )
         except ExchangeAuthenticationError:
+            try:
+                self._record_machine_authentication_failure()
+            except RegulatoryV2IntegrityError:
+                self.server.integrity_valid = False
+                self.server.integrity_checked_at = self.server.clock()
+                self._send_error(
+                    503,
+                    "audit_integrity_failed",
+                    "监管留痕完整性校验失败，服务已停止监管数据访问和机器写入",
+                )
+                return
+            except Exception as audit_error:  # pragma: no cover - storage outage
+                self.log_error("security audit persistence failed: %r", audit_error)
+                self._send_error(
+                    503,
+                    "security_audit_unavailable",
+                    "安全认证失败留痕暂不可用，请稍后重试",
+                )
+                return
             self._send_error(401, "exchange_authentication_failed", "交换认证失败")
         except LoginRateLimitedError as error:
             self._send_error(
@@ -479,6 +775,12 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             )
         except (InvalidCredentialsError, InvalidSessionError):
             self._send_error(401, "authentication_required", "请先登录")
+        except PasswordChangeRequiredError:
+            self._send_error(
+                403,
+                "password_change_required",
+                "当前账号必须先修改初始密码，完成后才能查看监管业务",
+            )
         except CsrfValidationError:
             self._send_error(403, "csrf_failed", "请求校验失败")
         except RegulatoryV2ConflictError as error:
@@ -496,6 +798,10 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             )
         except (ValueError, json.JSONDecodeError) as error:
             self._send_error(400, "invalid_request", str(error))
+        except TimeoutError:
+            self.close_connection = True
+            with suppress(BrokenPipeError, ConnectionResetError, OSError):
+                self._send_error(408, "request_timeout", "请求读取超时")
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as error:  # pragma: no cover - defensive HTTP boundary
@@ -514,21 +820,26 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/readyz":
-            if not self.server.clients:
-                self._send_error(
-                    503,
-                    "not_ready",
-                    "尚未配置任何一矿一智能体交换身份",
-                )
-                return
-            self.server.store.list_mine_overviews()
-            self._send_json(
-                200,
-                {
+            with self.server.regulatory_read_snapshot():
+                if not self.server.clients:
+                    self._send_error(
+                        503,
+                        "not_ready",
+                        "尚未配置任何一矿一智能体交换身份",
+                    )
+                    return
+                self.server.store.list_mine_overviews()
+                schema = self.server.store.schema_status()
+                payload = {
                     "status": "ready",
                     "service": "mineguard-v2",
                     "configured_mines": len(self.server.clients),
-                },
+                    "integrity": "valid",
+                    "schema_version": schema["current_version"],
+                }
+            self._send_json(
+                200,
+                payload,
                 head_only=head_only,
             )
             return
@@ -542,9 +853,16 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             self._serve_static(path, head_only=head_only)
             return
         if path == "/v2/auth/me":
-            principal = self._government_principal()
+            principal = self._session_principal()
             self._send_json(
-                200, {"principal": _principal_json(principal)}, head_only=head_only
+                200,
+                {
+                    "principal": _principal_json(
+                        principal,
+                        enforce_password_change=self.server.production_mode,
+                    )
+                },
+                head_only=head_only,
             )
             return
         if path == "/v2/auth/csrf":
@@ -557,26 +875,38 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             principal, csrf_token = self.server.auth_store.issue_csrf(token)
             self._send_json(
                 200,
-                {"principal": _principal_json(principal), "csrf_token": csrf_token},
+                {
+                    "principal": _principal_json(
+                        principal,
+                        enforce_password_change=self.server.production_mode,
+                    ),
+                    "csrf_token": csrf_token,
+                },
                 head_only=head_only,
             )
             return
         if path == "/v2/regulatory/overview":
             principal = self._government_principal()
-            self._send_json(200, self._overview(principal), head_only=head_only)
+            with self.server.regulatory_read_snapshot():
+                payload = self._overview(principal)
+            self._send_json(200, payload, head_only=head_only)
             return
         if path == "/v2/regulatory/mines":
             principal = self._government_principal()
+            with self.server.regulatory_read_snapshot():
+                payload = {"items": self._mine_rows(principal)}
             self._send_json(
-                200, {"items": self._mine_rows(principal)}, head_only=head_only
+                200, payload, head_only=head_only
             )
             return
         mine_match = _MINE_DETAIL.fullmatch(path)
         if mine_match:
             principal = self._government_principal()
+            with self.server.regulatory_read_snapshot():
+                payload = self._mine_detail(principal, mine_match.group("id"))
             self._send_json(
                 200,
-                self._mine_detail(principal, mine_match.group("id")),
+                payload,
                 head_only=head_only,
             )
             return
@@ -585,82 +915,135 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             limit = self._single_int_query(
                 parsed.query, "limit", default=100, maximum=1000
             )
+            with self.server.regulatory_read_snapshot():
+                payload = {"items": self._finding_rows(principal, limit=limit)}
             self._send_json(
                 200,
-                {"items": self._finding_rows(principal, limit=limit)},
+                payload,
                 head_only=head_only,
             )
             return
         if path == "/v2/regulatory/exchanges/export.csv":
             principal = self._government_principal()
-            self._export_trace_csv(principal, parsed.query)
+            try:
+                with self.server.regulatory_read_snapshot():
+                    prepared = self._export_trace_csv(principal, parsed.query)
+            except _TraceExportTooLargeError as error:
+                self._send_error(
+                    422,
+                    "export_too_large",
+                    "当前筛选结果超过 10000 条，请缩小煤矿或时间范围后再导出",
+                    detail={
+                        "matched_count": error.matched_count,
+                        "maximum": _TRACE_EXPORT_LIMIT,
+                    },
+                )
+                return
+            if prepared is not None:
+                body, headers = prepared
+                self._send_bytes(
+                    200,
+                    body,
+                    content_type="text/csv; charset=utf-8",
+                    headers=headers,
+                )
             return
         if path == "/v2/regulatory/exchanges":
             principal = self._government_principal()
-            self._send_json(200, self._trace_page(principal, parsed.query), head_only=head_only)
+            with self.server.regulatory_read_snapshot():
+                payload = self._trace_page(principal, parsed.query)
+            self._send_json(
+                200, payload, head_only=head_only
+            )
             return
 
         if path == "/v2/analysis-reports/next":
-            client = self._machine_auth(
+            transport = self._authenticate_machine_transport(
                 body=b"", expected_contract="five-quantity-exchange-v2"
             )
-            after_cursor = self._single_query(parsed.query, "after_cursor")
-            after_sequence = self._cursor_sequence(client.mine_id, after_cursor)
-            item = self._next_response_required_report(client.mine_id, after_sequence)
+            client = transport.client
+            with self.server.store.controlled_write_scope():
+                self._claim_machine_transport(transport)
+                after_cursor = self._single_query(parsed.query, "after_cursor")
+                after_sequence = self._cursor_sequence(client.mine_id, after_cursor)
+                item = self._next_response_required_report(
+                    client.mine_id, after_sequence
+                )
+                message = (
+                    None
+                    if item is None
+                    else self._analysis_report_message(client, item.aggregate_id, item)
+                )
             if item is None:
                 self._send_empty(204)
                 return
-            message = self._analysis_report_message(client, item.aggregate_id, item)
+            assert message is not None
             self._send_json(200, message, head_only=head_only)
             return
         receipt_match = _SUBMISSION_RECEIPT.fullmatch(path)
         if receipt_match:
             self._reject_query(parsed.query)
-            client = self._machine_auth(
+            transport = self._authenticate_machine_transport(
                 body=b"", expected_contract="five-quantity-exchange-v2"
             )
-            submission_receipt = self.server.store.get_submission_receipt(
-                receipt_match.group("id"), mine_id=client.mine_id
-            )
-            inbound = self._exchange_message(
-                direction="inbound",
-                message_type="five_quantity_submission",
-                predicate=lambda item: (
-                    item.get("message_id") == submission_receipt.submission_id
-                ),
-                mine_id=client.mine_id,
-            )
-            assert inbound is not None
+            client = transport.client
+            with self.server.store.controlled_write_scope():
+                self._claim_machine_transport(transport)
+                submission_receipt = self.server.store.get_submission_receipt(
+                    receipt_match.group("id"), mine_id=client.mine_id
+                )
+                inbound = self._exchange_message(
+                    direction="inbound",
+                    message_type="five_quantity_submission",
+                    predicate=lambda item: (
+                        item.get("message_id") == submission_receipt.submission_id
+                    ),
+                    mine_id=client.mine_id,
+                )
+                assert inbound is not None
+                message = self._intake_receipt_message(
+                    client, inbound, submission_receipt
+                )
             self._send_json(
                 200,
-                self._intake_receipt_message(client, inbound, submission_receipt),
+                message,
                 head_only=head_only,
             )
             return
         report_match = _REPORT.fullmatch(path)
         if report_match:
             self._reject_query(parsed.query)
-            client = self._machine_auth(
+            transport = self._authenticate_machine_transport(
                 body=b"", expected_contract="five-quantity-exchange-v2"
             )
+            client = transport.client
+            with self.server.store.controlled_write_scope():
+                self._claim_machine_transport(transport)
+                message = self._analysis_report_message(
+                    client, report_match.group("id")
+                )
             self._send_json(
                 200,
-                self._analysis_report_message(client, report_match.group("id")),
+                message,
                 head_only=head_only,
             )
             return
         response_match = _RESPONSE_RECEIPT.fullmatch(path)
         if response_match:
             self._reject_query(parsed.query)
-            client = self._machine_auth(
+            transport = self._authenticate_machine_transport(
                 body=b"", expected_contract="five-quantity-exchange-v2"
             )
-            response_receipt = self.server.store.get_response_batch_receipt(
-                response_match.group("id"), mine_id=client.mine_id
-            )
+            client = transport.client
+            with self.server.store.controlled_write_scope():
+                self._claim_machine_transport(transport)
+                response_receipt = self.server.store.get_response_batch_receipt(
+                    response_match.group("id"), mine_id=client.mine_id
+                )
+                message = self._response_receipt_message(client, response_receipt)
             self._send_json(
                 200,
-                self._response_receipt_message(client, response_receipt),
+                message,
                 head_only=head_only,
             )
             return
@@ -697,7 +1080,10 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             self._send_json(
                 200,
                 {
-                    "principal": _principal_json(result.principal),
+                    "principal": _principal_json(
+                        result.principal,
+                        enforce_password_change=self.server.production_mode,
+                    ),
                     "csrf_token": result.csrf_token,
                 },
                 headers={
@@ -729,11 +1115,52 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path == "/v2/auth/change-password":
+            self._reject_query(parsed.query)
+            payload = self._read_json(limit=64 * 1024)
+            if not self.server.auth_required:
+                raise ValueError("本机免认证演示不支持修改账号密码")
+            token = self._session_token()
+            principal = self.server.auth_store.validate_csrf(
+                token, self.headers.get("X-CSRF-Token"), method="POST"
+            )
+            try:
+                self.server.auth_store.change_password(
+                    principal.username,
+                    str(payload.get("current_password", "")),
+                    str(payload.get("new_password", "")),
+                )
+            except InvalidCredentialsError:
+                self._send_error(
+                    422,
+                    "current_password_invalid",
+                    "当前密码不正确，请重新输入",
+                )
+                return
+            except ValueError:
+                self._send_error(
+                    422,
+                    "new_password_invalid",
+                    "新密码不符合安全要求：至少 12 位，并包含大小写字母、数字、符号中的至少三类",
+                )
+                return
+            self._send_json(
+                200,
+                {"status": "password_changed", "login_required": True},
+                headers={
+                    "Set-Cookie": clear_session_cookie_header(
+                        secure=self.server.secure_cookie,
+                        cookie_name=_SESSION_COOKIE,
+                    )
+                },
+            )
+            return
 
         body = self._read_body()
         if path == "/v2/five-quantity-submissions":
             self._reject_query(parsed.query)
-            client = self._machine_auth(body=body)
+            transport = self._authenticate_machine_transport(body=body)
+            client = transport.client
             decoded = decode_inbound_message(body)
             message = decoded.message
             if not isinstance(message, FiveQuantitySubmissionMessage):
@@ -743,8 +1170,6 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             payload_hash = verify_exchange_message_signature(
                 message, client, decoded.document
             )
-            self._validate_submission_time(message)
-            self._validate_submission_lineage(message, client)
             document = decoded.document
             slot = self.server.analysis_slots[client.sender_id]
             if not slot.acquire(blocking=False):
@@ -756,28 +1181,32 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
-                submission_receipt = self.server.store.submit_and_analyze(
-                    message.to_regulatory_submission(),
-                    agent_id=client.sender_id,
-                    idempotency_key=message.idempotency_key,
-                    exchange_message=ExchangeMessageInput(
-                        message_id=message.message_id,
-                        direction="inbound",
-                        message_type=message.message_type,
-                        mine_id=message.mine_id,
+                with self.server.store.controlled_write_scope():
+                    self._validate_submission_time(message)
+                    self._validate_submission_lineage(message, client)
+                    self._claim_machine_transport(transport)
+                    submission_receipt = self.server.store.submit_and_analyze(
+                        message.to_regulatory_submission(),
                         agent_id=client.sender_id,
-                        body=document,
-                        exchanged_at=message.created_at,
-                    ),
-                )
+                        idempotency_key=message.idempotency_key,
+                        exchange_message=ExchangeMessageInput(
+                            message_id=message.message_id,
+                            direction="inbound",
+                            message_type=message.message_type,
+                            mine_id=message.mine_id,
+                            agent_id=client.sender_id,
+                            body=document,
+                            exchanged_at=message.created_at,
+                        ),
+                    )
+                    outbound = self._intake_receipt_message(
+                        client,
+                        document,
+                        submission_receipt,
+                        received_payload_sha256=payload_hash,
+                    )
             finally:
                 slot.release()
-            outbound = self._intake_receipt_message(
-                client,
-                document,
-                submission_receipt,
-                received_payload_sha256=payload_hash,
-            )
             self._send_json(
                 200 if submission_receipt.idempotent_replay else 202, outbound
             )
@@ -786,81 +1215,91 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         ack_match = _REPORT_ACK.fullmatch(path)
         if ack_match:
             self._reject_query(parsed.query)
-            client = self._machine_auth(body=body)
+            transport = self._authenticate_machine_transport(body=body)
+            client = transport.client
             decoded = decode_inbound_message(body)
             message = decoded.message
             if not isinstance(message, RiskDeliveryAckMessage):
                 raise ValueError("this path requires risk_delivery_ack")
             self._assert_message_binding(message, client)
             verify_exchange_message_signature(message, client, decoded.document)
-            if message.payload.report_id != ack_match.group("id"):
-                raise ValueError("path report_id differs from acknowledgement")
-            item = self._report_outbox_item(client.mine_id, message.payload.report_id)
-            if item.message_id != message.payload.analysis_report_message_id:
-                raise ValueError(
-                    "acknowledgement does not reference the issued report message"
+            with self.server.store.controlled_write_scope():
+                if message.payload.report_id != ack_match.group("id"):
+                    raise ValueError("path report_id differs from acknowledgement")
+                item = self._report_outbox_item(
+                    client.mine_id, message.payload.report_id
                 )
-            issued = self.server.store.get_exchange_message(
-                item.message_id, mine_id=client.mine_id, direction="outbound"
-            ).body
-            validate_exchange_lineage(message, allowed_causes=(issued,))
-            self.server.store.record_delivery_ack(
-                message.to_store_ack(),
-                sender_id=client.sender_id,
-                idempotency_key=message.idempotency_key,
-                exchange_message=ExchangeMessageInput(
-                    message_id=message.message_id,
-                    direction="inbound",
-                    message_type=message.message_type,
-                    mine_id=message.mine_id,
-                    agent_id=client.sender_id,
-                    body=decoded.document,
-                    exchanged_at=message.created_at,
-                ),
-            )
+                if item.message_id != message.payload.analysis_report_message_id:
+                    raise ValueError(
+                        "acknowledgement does not reference the issued report message"
+                    )
+                issued = self.server.store.get_exchange_message(
+                    item.message_id, mine_id=client.mine_id, direction="outbound"
+                ).body
+                validate_exchange_lineage(message, allowed_causes=(issued,))
+                self._claim_machine_transport(transport)
+                self.server.store.record_delivery_ack(
+                    message.to_store_ack(),
+                    sender_id=client.sender_id,
+                    idempotency_key=message.idempotency_key,
+                    exchange_message=ExchangeMessageInput(
+                        message_id=message.message_id,
+                        direction="inbound",
+                        message_type=message.message_type,
+                        mine_id=message.mine_id,
+                        agent_id=client.sender_id,
+                        body=decoded.document,
+                        exchanged_at=message.created_at,
+                    ),
+                )
             self._send_empty(204)
             return
 
         response_match = _REPORT_RESPONSE.fullmatch(path)
         if response_match:
             self._reject_query(parsed.query)
-            client = self._machine_auth(body=body)
+            transport = self._authenticate_machine_transport(body=body)
+            client = transport.client
             decoded = decode_inbound_message(body)
             message = decoded.message
             if not isinstance(message, EnterpriseRiskResponseMessage):
                 raise ValueError("this path requires enterprise_risk_response")
             self._assert_message_binding(message, client)
             verify_exchange_message_signature(message, client, decoded.document)
-            if message.payload.report_id != response_match.group("id"):
-                raise ValueError("path report_id differs from enterprise response")
-            item = self._report_outbox_item(client.mine_id, message.payload.report_id)
-            if item.message_id != message.payload.analysis_report_message_id:
-                raise ValueError(
-                    "response does not reference the issued report message"
+            with self.server.store.controlled_write_scope():
+                if message.payload.report_id != response_match.group("id"):
+                    raise ValueError("path report_id differs from enterprise response")
+                item = self._report_outbox_item(
+                    client.mine_id, message.payload.report_id
                 )
-            issued = self.server.store.get_exchange_message(
-                item.message_id, mine_id=client.mine_id, direction="outbound"
-            ).body
-            self._validate_response_lineage(message, issued, client)
-            self._validate_corrected_submission_references(message, client)
-            response_receipt = self.server.store.record_enterprise_response_batch(
-                message.payload.response_id,
-                message.payload.report_id,
-                message.mine_id,
-                message.to_store_responses(),
-                sender_id=client.sender_id,
-                idempotency_key=message.idempotency_key,
-                exchange_message=ExchangeMessageInput(
-                    message_id=message.message_id,
-                    direction="inbound",
-                    message_type=message.message_type,
-                    mine_id=message.mine_id,
-                    agent_id=client.sender_id,
-                    body=decoded.document,
-                    exchanged_at=message.created_at,
-                ),
-            )
-            outbound = self._response_receipt_message(client, response_receipt)
+                if item.message_id != message.payload.analysis_report_message_id:
+                    raise ValueError(
+                        "response does not reference the issued report message"
+                    )
+                issued = self.server.store.get_exchange_message(
+                    item.message_id, mine_id=client.mine_id, direction="outbound"
+                ).body
+                self._validate_response_lineage(message, issued, client)
+                self._validate_corrected_submission_references(message, client)
+                self._claim_machine_transport(transport)
+                response_receipt = self.server.store.record_enterprise_response_batch(
+                    message.payload.response_id,
+                    message.payload.report_id,
+                    message.mine_id,
+                    message.to_store_responses(),
+                    sender_id=client.sender_id,
+                    idempotency_key=message.idempotency_key,
+                    exchange_message=ExchangeMessageInput(
+                        message_id=message.message_id,
+                        direction="inbound",
+                        message_type=message.message_type,
+                        mine_id=message.mine_id,
+                        agent_id=client.sender_id,
+                        body=decoded.document,
+                        exchanged_at=message.created_at,
+                    ),
+                )
+                outbound = self._response_receipt_message(client, response_receipt)
             self._send_json(
                 200 if response_receipt.idempotent_replay else 202, outbound
             )
@@ -870,12 +1309,13 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
     # Authentication and contract binding
 
-    def _machine_auth(
+    def _authenticate_machine_transport(
         self,
         *,
         body: bytes,
         expected_contract: str | None = None,
-    ) -> ExchangeClient:
+    ) -> _MachineTransportAuthentication:
+        self.server.require_machine_write_integrity()
         client, request_time, nonce, contract_version = authenticate_transport(
             self.server.clients,
             dict(self.headers.items()),
@@ -894,17 +1334,40 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("POST body lacks contract_version") from error
             if contract_version != body_contract:
                 raise ExchangeAuthenticationError("exchange authentication failed")
+        return _MachineTransportAuthentication(
+            client=client,
+            request_time=request_time,
+            nonce=nonce,
+        )
+
+    def _claim_machine_transport(
+        self,
+        authentication: _MachineTransportAuthentication,
+    ) -> None:
         expiry = self.server.clock().astimezone(UTC) + timedelta(
             seconds=EXCHANGE_NONCE_RETENTION_SECONDS
         )
         if not self.server.store.claim_transport_nonce(
-            client.sender_id,
-            nonce,
-            request_time=request_time,
+            authentication.client.sender_id,
+            authentication.nonce,
+            request_time=authentication.request_time,
             expires_at=expiry,
         ):
             raise ExchangeAuthenticationError("exchange authentication failed")
-        return client
+
+    def _record_machine_authentication_failure(self) -> None:
+        supplied_sender = self.headers.get("X-Exchange-Sender-Id")
+        client = (
+            self.server.clients.get(supplied_sender)
+            if supplied_sender is not None
+            else None
+        )
+        self.server.record_authentication_failure(
+            request_method=self.command,
+            request_path=urlsplit(self.path).path,
+            remote_address=str(self.client_address[0]),
+            client=client,
+        )
 
     def _assert_message_binding(self, message: Any, client: ExchangeClient) -> None:
         if (
@@ -1055,6 +1518,17 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             raise ValueError("report cannot close before its final shift ends")
 
     def _government_principal(self) -> Principal:
+        principal = self._session_principal()
+        if self.server.production_mode and (
+            principal.must_change_password
+            or principal.temporary_demo
+            or principal.credential_policy_version
+            != CURRENT_CREDENTIAL_POLICY_VERSION
+        ):
+            raise PasswordChangeRequiredError
+        return principal
+
+    def _session_principal(self) -> Principal:
         if not self.server.auth_required:
             return self._no_auth_principal()
         return self.server.auth_store.authenticate(self._session_token())
@@ -1232,9 +1706,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                     _hash_json(history_bands) if history_bands else None
                 ),
                 "peer_snapshot_sha256": _hash_json(peer_bands) if peer_bands else None,
-                "started_at": _iso(
-                    datetime.fromisoformat(run_metadata["started_at"])
-                ),
+                "started_at": _iso(datetime.fromisoformat(run_metadata["started_at"])),
                 "completed_at": _iso(
                     datetime.fromisoformat(run_metadata["completed_at"])
                 ),
@@ -2336,9 +2808,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         ).hexdigest()
 
     @staticmethod
-    def _encode_trace_cursor(
-        *, snapshot: int, before: int, fingerprint: str
-    ) -> str:
+    def _encode_trace_cursor(*, snapshot: int, before: int, fingerprint: str) -> str:
         payload = _canonical_bytes(
             {"v": 1, "snapshot": snapshot, "before": before, "fp": fingerprint}
         )
@@ -2354,17 +2824,23 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             snapshot = int(payload["snapshot"])
             before = int(payload["before"])
             fingerprint = str(payload["fp"])
-        except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as error:
             raise ValueError("cursor is invalid") from error
-        if snapshot < 0 or before <= 0 or not re.fullmatch(
-            r"[0-9a-f]{64}", fingerprint
+        if (
+            snapshot < 0
+            or before <= 0
+            or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
         ):
             raise ValueError("cursor is invalid")
         return snapshot, before, fingerprint
 
-    def _trace_page(
-        self, principal: Principal, raw_query: str
-    ) -> dict[str, Any]:
+    def _trace_page(self, principal: Principal, raw_query: str) -> dict[str, Any]:
         query = self._parse_trace_query(raw_query, for_export=False)
         mine_ids = self._trace_scope(principal, query.mine_id)
         event_types = self._trace_event_types(query)
@@ -2397,12 +2873,6 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             for item in page.items
         ]
         now = self.server.clock()
-        if (
-            now < self.server.integrity_checked_at
-            or now - self.server.integrity_checked_at >= timedelta(seconds=60)
-        ):
-            self.server.integrity_valid = self.server.store.verify_integrity()
-            self.server.integrity_checked_at = now
         next_cursor = None
         if page.has_more and page.next_before_sequence is not None:
             next_cursor = self._encode_trace_cursor(
@@ -2447,16 +2917,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             limit=1000,
         )
         if first.matched_count > _TRACE_EXPORT_LIMIT:
-            self._send_error(
-                422,
-                "export_too_large",
-                "当前筛选结果超过 10000 条，请缩小煤矿或时间范围后再导出",
-                detail={
-                    "matched_count": first.matched_count,
-                    "maximum": _TRACE_EXPORT_LIMIT,
-                },
-            )
-            return None
+            raise _TraceExportTooLargeError(first.matched_count)
         rows = list(first.items)
         page = first
         while page.has_more:
@@ -2476,20 +2937,23 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             raise RuntimeError("audit export snapshot count changed unexpectedly")
         return rows, first.snapshot_sequence, first.matched_count
 
-    def _export_trace_csv(self, principal: Principal, raw_query: str) -> None:
+    def _export_trace_csv(
+        self,
+        principal: Principal,
+        raw_query: str,
+    ) -> tuple[bytes, dict[str, str]] | None:
         query = self._parse_trace_query(raw_query, for_export=True)
         mine_ids = self._trace_scope(principal, query.mine_id)
-        integrity_valid = self.server.store.verify_integrity()
-        checked_at = self.server.clock()
-        self.server.integrity_valid = integrity_valid
-        self.server.integrity_checked_at = checked_at
-        if not integrity_valid:
+        # Development/test servers do not maintain the production controlled-
+        # write checkpoint after every mutation. Preserve their explicit full
+        # export check without putting production exports back on O(history).
+        if not self.server.production_mode and not self.server.store.verify_integrity():
             self._send_error(
                 409,
                 "audit_integrity_failed",
                 "完整留痕链校验未通过，已停止导出，请联系系统管理员核验",
             )
-            return
+            return None
         collected = self._trace_export_items(query, mine_ids)
         if collected is None:
             return
@@ -2545,8 +3009,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         encoded = b"\xef\xbb\xbf" + stream.getvalue().encode("utf-8")
         exported_at = self.server.clock().astimezone(UTC)
         ascii_filename = (
-            "mineguard-exchange-trace-"
-            f"{exported_at.strftime('%Y%m%d-%H%M%S')}.csv"
+            f"mineguard-exchange-trace-{exported_at.strftime('%Y%m%d-%H%M%S')}.csv"
         )
         chinese_filename = (
             "MineGuard_双系统交换留痕_"
@@ -2568,21 +3031,16 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 "filename": ascii_filename,
             },
         )
-        self._send_bytes(
-            200,
-            encoded,
-            content_type="text/csv; charset=utf-8",
-            headers={
-                "Cache-Control": "no-store",
-                "Content-Disposition": (
-                    f'attachment; filename="{ascii_filename}"; '
-                    f"filename*=UTF-8''{quote(chinese_filename, safe='')}"
-                ),
-                "X-Download-Options": "noopen",
-                "X-MineGuard-Snapshot-Sequence": str(snapshot_sequence),
-                "X-MineGuard-Row-Count": str(matched_count),
-            },
-        )
+        return encoded, {
+            "Cache-Control": "no-store",
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_filename}"; '
+                f"filename*=UTF-8''{quote(chinese_filename, safe='')}"
+            ),
+            "X-Download-Options": "noopen",
+            "X-MineGuard-Snapshot-Sequence": str(snapshot_sequence),
+            "X-MineGuard-Row-Count": str(matched_count),
+        }
 
     @staticmethod
     def _audit_row(item: AuditProjection) -> dict[str, Any]:
@@ -2863,9 +3321,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             body,
             content_type=f"{content_type}; charset=utf-8",
             head_only=head_only,
-            headers={
-                "Cache-Control": "no-cache"
-            },
+            headers={"Cache-Control": "no-cache"},
         )
 
     def _send_json(
@@ -2968,14 +3424,15 @@ def create_server(
     platform_party_id: str | None = None,
     platform_key_id: str | None = None,
     local_control_token: str | None = None,
+    production_mode: bool = False,
     clock: Callable[[], datetime] = _utc_now,
+    request_io_timeout_seconds: float = _REQUEST_IO_TIMEOUT_SECONDS,
+    drain_timeout_seconds: float = _DRAIN_TIMEOUT_SECONDS,
     **_: Any,
 ) -> RegulatoryV2HTTPServer:
     if local_control_token is not None:
         if not re.fullmatch(r"[0-9a-f]{64}", local_control_token):
-            raise ValueError(
-                "local control token must be 64 lowercase hex characters"
-            )
+            raise ValueError("local control token must be 64 lowercase hex characters")
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("local process control requires a loopback listener")
     registry = (
@@ -2986,7 +3443,32 @@ def create_server(
             os.environ.get("MINEGUARD_V2_CLIENTS_FILE"),
         )
     )
-    store = RegulatoryV2Store(database_path, now=clock)
+    resolved_platform_system_id = platform_system_id or os.environ.get(
+        "MINEGUARD_V2_PLATFORM_SYSTEM_ID", "mineguard-qinyuan"
+    )
+    resolved_platform_party_id = platform_party_id or os.environ.get(
+        "MINEGUARD_V2_PLATFORM_PARTY_ID", "regulator-qinyuan"
+    )
+    resolved_platform_key_id = platform_key_id or os.environ.get(
+        "MINEGUARD_V2_PLATFORM_KEY_ID", "regulator-key-v2"
+    )
+    if production_mode:
+        if auth_required is not True:
+            raise ValueError("production server requires government authentication")
+        if secure_cookie is not True:
+            raise ValueError("production server requires Secure session cookies")
+        validate_production_exchange_clients(registry)
+        validate_production_platform_identity(
+            resolved_platform_system_id,
+            resolved_platform_party_id,
+            resolved_platform_key_id,
+            clients=registry,
+        )
+    store = RegulatoryV2Store(
+        database_path,
+        now=clock,
+        production_mode=production_mode,
+    )
     auth_store = LocalAuthStore(auth_database_path, clock=clock)
     try:
         for client in registry.values():
@@ -2998,14 +3480,14 @@ def create_server(
             clients=registry,
             auth_required=auth_required,
             secure_cookie=secure_cookie,
-            platform_system_id=platform_system_id
-            or os.environ.get("MINEGUARD_V2_PLATFORM_SYSTEM_ID", "mineguard-qinyuan"),
-            platform_party_id=platform_party_id
-            or os.environ.get("MINEGUARD_V2_PLATFORM_PARTY_ID", "regulator-qinyuan"),
-            platform_key_id=platform_key_id
-            or os.environ.get("MINEGUARD_V2_PLATFORM_KEY_ID", "regulator-key-v2"),
+            platform_system_id=resolved_platform_system_id,
+            platform_party_id=resolved_platform_party_id,
+            platform_key_id=resolved_platform_key_id,
             local_control_token=local_control_token,
             clock=clock,
+            production_mode=production_mode,
+            request_io_timeout_seconds=request_io_timeout_seconds,
+            drain_timeout_seconds=drain_timeout_seconds,
         )
     except BaseException:
         store.close()

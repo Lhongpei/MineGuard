@@ -8,6 +8,7 @@ param(
     [Parameter(ParameterSetName = "Release")][switch]$ExpectLegacyServer2012R2CompatibilityTest,
     [Parameter(ParameterSetName = "Release")][switch]$SkipRuntimeSmoke,
     [Parameter(ParameterSetName = "Release")][switch]$TestInstallerLifecycle,
+    [Parameter(ParameterSetName = "Release")][string]$ApprovedAgentSignerThumbprint = "",
     [Parameter(Mandatory = $true, ParameterSetName = "SecretAudit")]
     [ValidateNotNullOrEmpty()][string[]]$SecretAuditRoots
 )
@@ -29,6 +30,22 @@ if ($ExpectLegacyServer2012R2CompatibilityTest -and
 }
 if ($TestInstallerLifecycle -and -not $ArtifactDirectory) {
     throw "TestInstallerLifecycle requires ArtifactDirectory."
+}
+if (-not [string]::IsNullOrWhiteSpace($ApprovedAgentSignerThumbprint)) {
+    $ApprovedAgentSignerThumbprint = (
+        $ApprovedAgentSignerThumbprint -replace '\s', ''
+    ).ToUpperInvariant()
+    if ($ApprovedAgentSignerThumbprint -notmatch '^[A-F0-9]{40}$') {
+        throw "ApprovedAgentSignerThumbprint must contain exactly 40 hexadecimal SHA-1 characters."
+    }
+}
+if ($TestInstallerLifecycle -and $RequireSigned -and
+    [string]::IsNullOrWhiteSpace($ApprovedAgentSignerThumbprint)) {
+    throw "Signed Agent installer lifecycle requires independently supplied ApprovedAgentSignerThumbprint."
+}
+if ($ExpectUnsignedTestOnly -and
+    -not [string]::IsNullOrWhiteSpace($ApprovedAgentSignerThumbprint)) {
+    throw "Unsigned test lifecycle cannot claim an approved Agent signer thumbprint."
 }
 
 function Get-FullExistingDirectory {
@@ -624,10 +641,10 @@ function Invoke-RuntimeSmoke {
             $IndexResponse = Invoke-WebRequest `
                 -Uri "$BaseUrl/" -UseBasicParsing -TimeoutSec 5
             $ScriptResponse = Invoke-WebRequest `
-                -Uri "$BaseUrl/assets/app.js?v=2.8.1" `
+                -Uri "$BaseUrl/assets/app.js?v=2.9.0" `
                 -UseBasicParsing -TimeoutSec 5
             $StyleResponse = Invoke-WebRequest `
-                -Uri "$BaseUrl/assets/styles.css?v=2.8.1" `
+                -Uri "$BaseUrl/assets/styles.css?v=2.9.0" `
                 -UseBasicParsing -TimeoutSec 5
             if ([int]$IndexResponse.StatusCode -ne 200 -or
                 [string]$IndexResponse.Headers["Content-Type"] -ne
@@ -1005,7 +1022,13 @@ function Remove-VerificationRootWithRetry {
 }
 
 function Invoke-InstallerLifecycleTest {
-    param([string]$Product, [string]$Installer)
+    param(
+        [string]$Product,
+        [string]$Installer,
+        [string]$ApprovedAgentSignerThumbprint,
+        [switch]$UnsignedPlatformTestMedia,
+        [switch]$UnsignedAgentTestMedia
+    )
     $Identity = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     if (-not $Identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw "Installer lifecycle verification requires an elevated Administrator runner."
@@ -1025,8 +1048,23 @@ function Invoke-InstallerLifecycleTest {
     try {
         $ProbeService = New-ServiceStateProbe -ServiceName $ServiceName -ProbeRoot $VerificationRoot
         $InstallArguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$InstallRoot", "/LOG=$(Join-Path $VerificationRoot 'install.log')")
+        if ($Product -eq "platform" -and $UnsignedPlatformTestMedia) {
+            $InstallArguments += "/ALLOW_UNSIGNED_TEST_MEDIA=1"
+        }
         if ($Product -eq "agent") {
             $InstallArguments += "/STATE_ROOT=$AgentStateRoot"
+            if ($UnsignedAgentTestMedia) {
+                $InstallArguments += "/ALLOW_UNSIGNED_TEST_MEDIA=1"
+            }
+            else {
+                if ($ApprovedAgentSignerThumbprint -notmatch '^[A-F0-9]{40}$') {
+                    throw "Agent lifecycle is missing the independently supplied approved signer thumbprint."
+                }
+                $InstallArguments += (
+                    "/APPROVED_SIGNER_THUMBPRINT=" +
+                    $ApprovedAgentSignerThumbprint
+                )
+            }
         }
         $InstallExitCode = Invoke-WindowsGuiProcessAndWait `
             -FilePath $Installer -ArgumentList $InstallArguments
@@ -1395,8 +1433,13 @@ if ($ArtifactDirectory) {
     $ArtifactDirectory = Get-FullExistingDirectory -PathValue $ArtifactDirectory -Label "ArtifactDirectory"
     $RootRelease = Test-RootArtifactManifest -ArtifactsRoot $ArtifactDirectory
     if ($TestInstallerLifecycle) {
-        Invoke-InstallerLifecycleTest -Product platform -Installer $RootRelease.installers["platform"]
-        Invoke-InstallerLifecycleTest -Product agent -Installer $RootRelease.installers["enterprise-agent"]
+        Invoke-InstallerLifecycleTest -Product platform `
+            -Installer $RootRelease.installers["platform"] `
+            -UnsignedPlatformTestMedia:$ExpectUnsignedTestOnly
+        Invoke-InstallerLifecycleTest -Product agent `
+            -Installer $RootRelease.installers["enterprise-agent"] `
+            -ApprovedAgentSignerThumbprint $ApprovedAgentSignerThumbprint `
+            -UnsignedAgentTestMedia:$ExpectUnsignedTestOnly
     }
 }
 

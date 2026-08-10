@@ -26,6 +26,7 @@ POWERSHELL_SCRIPTS = {
     "Remove-MineGuardPlatformService.ps1",
     "Uninstall-MineGuardPlatformRuntime.ps1",
     "Resolve-MineGuardPlatformExecutable.ps1",
+    "Configure-MineGuardPlatformFormal.ps1",
 }
 
 
@@ -36,8 +37,23 @@ def _client_registry() -> dict[str, object]:
                 "sender_id": "agent-mine-windows-001",
                 "party_id": "operator-mine-windows-001",
                 "mine_id": "MINE-WINDOWS-001",
-                "message_secret": "windows-message-secret-material-0000000001",
-                "transport_secret": "windows-transport-secret-material-0000001",
+                "mine_name": "沁源 Windows 一号煤矿",
+                "active_message_key_id": "minewin001-msg-2026q3-a7f4",
+                "message_keys": {
+                    "minewin001-msg-2026q3-a7f4": (
+                        "windows-message-secret-material-0000000001"
+                    )
+                },
+                "transport_secrets": [
+                    "windows-transport-secret-material-0000001"
+                ],
+                "comparison_context": {
+                    "capacity_band": "0.9-1.2Mtpa",
+                    "mining_method": "underground-longwall",
+                    "shift_system": "three-shift-eight-hour",
+                    "coal_type": "thermal-coal",
+                    "operating_regime": "normal-production",
+                },
             }
         ]
     }
@@ -107,6 +123,7 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         "Backup-MineGuardPlatform.ps1",
         "Restore-MineGuardPlatform.ps1",
         "Remove-MineGuardPlatformService.ps1",
+        "Configure-MineGuardPlatformFormal.ps1",
     ):
         source = (WINDOWS / name).read_text(encoding="utf-8-sig")
         assert "$PSVersionTable.PSVersion.Major -lt 5" in source, name
@@ -139,16 +156,132 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
     assert "Start-BitsTransfer" not in install
     assert "version[1] -ne 12" in install
     assert "icacls.exe" in install and "@('/T', '/C')" in install
+    assert install.count("'Configure-MineGuardPlatformFormal.ps1'") >= 2
+    assert "Assert-InstalledServiceSecurityBoundary" in install
+    assert "platformSystemId = 'mineguard-qinyuan'" in install
+    assert "platformPartyId = 'regulator-qinyuan'" in install
+    assert "mineguard-government" not in install
+    assert "regulator-government" not in install
 
     start = (WINDOWS / "Start-MineGuardPlatform.ps1").read_text(encoding="utf-8-sig")
     assert "Resolve-MineGuardPlatformExecutable" in start
     assert "'serve'" in start
     assert "$env:PYTHONUTF8 = '1'" in start
     assert "MINEGUARD_V2_CLIENTS_FILE" in start
-    assert "Remove-Item Env:MINEGUARD_V2_CLIENTS_JSON" in start
     assert "全新状态库缺少首次管理员密码" in start
-    assert "仍含示例/占位秘密" in start
+    assert (
+        "'config-check', '--clients-file', $clientsFile, '--production'" in start
+    )
+    assert "$clientsText" not in start
+    assert "Get-Content -LiteralPath $clientsFile" not in start
+    assert "'--production'" in start
+    assert "'--state-directory', $stateDirectory, '--production'" in start
+    assert "'--auth-database', $authDatabase, '--production'" in start
     assert "-isnot [bool]" in start
+    bootstrap_command = start.index("'bootstrap-admin'")
+    password_file_argument = start.index("'--password-file', $bootstrapSecret")
+    bootstrap_file_absent = start.index(
+        "if (Test-Path -LiteralPath $bootstrapSecret)", bootstrap_command
+    )
+    post_bootstrap_check = start.index(
+        "'--auth-database', $authDatabase, '--production'",
+        bootstrap_command,
+    )
+    long_serve_arguments = start.index("'serve'", post_bootstrap_check)
+    long_serve_invocation = start.index(
+        "$serverProcess = [Diagnostics.Process]::Start($startInfo)",
+        long_serve_arguments,
+    )
+    assert (
+        bootstrap_command
+        < password_file_argument
+        < bootstrap_file_absent
+        < post_bootstrap_check
+        < long_serve_arguments
+        < long_serve_invocation
+    )
+    assert "$env:MINEGUARD_ADMIN_PASSWORD =" not in start
+    assert "ReadToEnd" not in start
+    assert "$password" not in start
+    assert "Remove-Item -LiteralPath $bootstrapSecret -Force" not in start
+    assert ".mineguard-configuration-blocked.json" in start
+    assert "Assert-NoResidualConfigurationTransaction" in start
+    assert "^\\.configuration-transaction\\.[A-Fa-f0-9]{32}$" in start
+    assert "$inspected -gt 256" in start
+    mutex_name = start.index("Global\\MineGuardPlatform.Configuration")
+    mutex_wait = start.index("$configurationMutex.WaitOne", mutex_name)
+    residual_check = start.index(
+        "Assert-NoResidualConfigurationTransaction", mutex_wait
+    )
+    marker_check = start.index(
+        "if (Test-Path -LiteralPath $configurationBlockMarker)", residual_check
+    )
+    settings_read = start.index(
+        "Get-Content -LiteralPath $settingsPath", marker_check
+    )
+    process_start = start.index(
+        "$serverProcess = [Diagnostics.Process]::Start($startInfo)", settings_read
+    )
+    process_wait = start.index("$serverProcess.WaitForExit()", process_start)
+    mutex_release = start.index(
+        "$configurationMutex.ReleaseMutex()", process_wait
+    )
+    assert (
+        mutex_name
+        < mutex_wait
+        < residual_check
+        < marker_check
+        < settings_read
+        < process_start
+        < process_wait
+        < mutex_release
+    )
+    assert "[TimeSpan]::FromSeconds(30)" in start
+    assert "$configurationMutexHeld = $false" in start
+    assert "Join-WindowsCommandLineArguments -Arguments $arguments" in start
+    control_capture = start.index(
+        "'Env:MINEGUARD_LOCAL_CONTROL_TOKEN'", settings_read
+    )
+    environment_clear = start.index("Get-ChildItem Env:", control_capture)
+    platform_identity = start.index(
+        "$env:MINEGUARD_V2_PLATFORM_SYSTEM_ID", environment_clear
+    )
+    token_child_injection = start.index(
+        "$startInfo.EnvironmentVariables['MINEGUARD_LOCAL_CONTROL_TOKEN']",
+        platform_identity,
+    )
+    token_process_clear = start.index(
+        "$startInfo.EnvironmentVariables.Remove(", token_child_injection
+    )
+    assert (
+        control_capture
+        < environment_clear
+        < platform_identity
+        < token_child_injection
+        < process_start
+        < token_process_clear
+    )
+    assert "$localControlToken -cnotmatch '^[0-9a-f]{64}$'" in start
+    assert "'MINEGUARD_', [StringComparison]::OrdinalIgnoreCase" in start
+    for inherited_only_name in (
+        "MINEGUARD_EXTERNAL_CLIENTS_JSON",
+        "MINEGUARD_EDGE_CLIENTS_JSON",
+        "MINEGUARD_SAFETY_WEBHOOKS_JSON",
+        "MINEGUARD_MAP_GEOJSON_PATH",
+    ):
+        assert inherited_only_name not in start
+
+    configure = (
+        WINDOWS / "Set-MineGuardPlatformConfiguration.ps1"
+    ).read_text(encoding="utf-8-sig")
+    assert "Grant-BootstrapPasswordDeleteToService" in configure
+    assert "('*{0}:(R,D)' -f $ServiceSid)" in configure
+    assert "Global\\MineGuardPlatform.Configuration" in configure
+    assert ".mineguard-configuration-blocked.json" in configure
+    assert "rollback_incomplete" in configure
+    assert "Assert-NoResidualConfigurationTransaction" in configure
+    assert "^\\.configuration-transaction\\.[A-Fa-f0-9]{32}$" in configure
+    assert "$inspected -gt 256" in configure
     for required in (
         "Get-SafeFixedNtfsPath",
         "^[A-Za-z]:\\\\",
@@ -171,8 +304,8 @@ def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
         "MineGuard Platform 首次配置与启动",
         "本机展示（推荐先看）",
         "正式内网配置",
+        "正式服务安装",
         "一键准备并启动展示",
-        "[Security.SecureString] $AdminPassword",
         "DemoWithoutClientRegistry = $true",
         "AllowDemoDefaultPassword = $true",
         "HttpOnlyDemo = $true",
@@ -206,6 +339,11 @@ def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
         'Lines.Enqueue("[STDOUT] "',
         'Lines.Enqueue("[STDERR] "',
         "Write-ServerCaptureLine",
+        "Install-MineGuardPlatformService.ps1",
+        "Configure-MineGuardPlatformFormal.ps1",
+        "ExpectedSignerThumbprint = $ExpectedSignerThumbprint",
+        "Production = $true",
+        "签名者指纹必须是从介质外审批记录取得",
     ):
         assert required in wizard
     assert wizard.index("Test-MineGuardHealth -Port") < wizard.index(
@@ -217,13 +355,46 @@ def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
     assert "foreach ($force in @($false, $true))" not in wizard
     assert "正常停止命令未成功" not in wizard
     assert 'Lines.Enqueue("[错误] "' not in wizard
-    demo_worker = wizard.index("if ($Mode -eq 'demo')")
+    demo_worker = wizard.index("function Start-DemoConfigurationOperation")
     assert wizard.index("& $ConfigScript @parameters", demo_worker) < wizard.index(
         "'seed-v2-demo'", demo_worker
     )
     assert "formalAccessUrl = $Uri.AbsoluteUri" in wizard
     assert "Test-MineGuardHealthUrl -Url $formalHealthUrl.AbsoluteUri" in wizard
     assert "Test-Path -LiteralPath $path -PathType Leaf" in wizard
+    assert "build-metadata.json" not in wizard
+    assert "$AdminPassword" not in wizard
+    assert "-AdminPassword" not in wizard
+    assert "$passwordInput" not in wizard
+    assert "$confirmInput" not in wizard
+    assert "FormalConfigProcess.HasExited" in wizard
+    assert "FormalConfigCapture.Lines.TryDequeue" in wizard
+    assert "Stop-FormalConfigurationProcess" in wizard
+    assert "疑似敏感字段标签" in wizard
+    assert "$text.Length -gt 2048" in wizard
+    assert "Clear-BootstrapPasswordIfPresent" not in wizard
+    assert "ClearBootstrapAttempted" not in wizard
+    assert "$platformSystemInput.Text = 'mineguard-qinyuan'" in wizard
+    assert "$platformPartyInput.Text = 'regulator-qinyuan'" in wizard
+    assert "$platformKeyInput.Text = 'regulator-key-v2'" in wizard
+    assert "'-PlatformSystemId', $PlatformSystemId" in wizard
+    assert "'-PlatformPartyId', $PlatformPartyId" in wizard
+    assert "'-PlatformKeyId', $PlatformKeyId" in wizard
+
+    helper = (WINDOWS / "Configure-MineGuardPlatformFormal.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    assert "[Security.SecureString]" not in wizard
+    assert "New-Object Security.SecureString" in helper
+    assert "-AdminPassword $script:formalPassword" in helper
+    assert "passwordBox.Text" in helper
+    assert "exit 3" in helper
+    assert "[string] $PlatformSystemId" in helper
+    assert "[string] $PlatformPartyId" in helper
+    assert "[string] $PlatformKeyId" in helper
+    assert "-PlatformSystemId $PlatformSystemId" in helper
+    assert "-PlatformPartyId $PlatformPartyId" in helper
+    assert "-PlatformKeyId $PlatformKeyId" in helper
 
 
 def test_windows_runtime_uninstall_is_transactional_and_data_preserving() -> None:
@@ -256,7 +427,9 @@ def test_windows_configuration_and_service_templates_fail_closed() -> None:
     xml_path = WINDOWS / "MineGuard.Platform.xml"
     xml = ElementTree.parse(xml_path).getroot()
     assert xml.findtext("id") == "MineGuardPlatform"
-    assert xml.findtext("serviceaccount/username") == "NT AUTHORITY\\LocalService"
+    assert xml.findtext("serviceaccount/username") == (
+        "NT SERVICE\\MineGuardPlatform"
+    )
     assert "Start-MineGuardPlatform.ps1" in (xml.findtext("arguments") or "")
     assert xml.find("serviceaccount/password") is None
     xml_text = xml_path.read_text(encoding="utf-8")
@@ -271,6 +444,19 @@ def test_windows_configuration_and_service_templates_fail_closed() -> None:
     assert "MINEGUARD_V2_CLIENTS_JSON" not in configure
     assert "'config-check', '--auth-database'" in configure
     assert "'config-check', '--clients-file'" in configure
+    assert (
+        "'config-check', '--clients-file', $sourceClientsPath, '--production'"
+        in configure
+    )
+    assert (
+        "'config-check', '--clients-file', $stagedClients, '--production'"
+        in configure
+    )
+    assert "'config-check', '--state-directory'" in configure
+    assert "'--auth-database', $authDatabase, '--production'" in configure
+    assert "正式配置禁止使用演示默认密码 123123123" in configure
+    assert "正式管理员密码至少 12 个字符" in configure
+    assert "-HttpOnlyDemo 仅允许" in configure
     assert "-ClearBootstrapPassword" in configure
     assert "REPLACE(?:[_-]|\\b)" in configure
     assert "Assert-StateBoundary" in configure
@@ -281,18 +467,90 @@ def test_windows_configuration_and_service_templates_fail_closed() -> None:
     assert "Set-ConfigAcl -Path $configDirectory" in configure
     assert "AuditFailAfterFirstMutation" in configure
     assert "configuration-rollback-test" in configure
+    assert "[string] $PlatformSystemId = 'mineguard-qinyuan'" in configure
+    assert "[string] $PlatformPartyId = 'regulator-qinyuan'" in configure
+    assert "'--platform-system-id', $PlatformSystemId" in configure
+    assert "'--platform-party-id', $PlatformPartyId" in configure
+    assert "'--platform-key-id', $PlatformKeyId" in configure
 
     service_install = (WINDOWS / "Install-MineGuardPlatformService.ps1").read_text(
         encoding="utf-8-sig"
     )
     assert "[ValidatePattern('^[A-Fa-f0-9]{64}$')]" in service_install
-    assert "LocalService" in service_install
+    assert "NT SERVICE\\MineGuardPlatform" in service_install
+    assert "S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346" in (
+        service_install
+    )
+    assert "'sidtype' 'MineGuardPlatform'" in service_install
+    assert "'showsid' 'MineGuardPlatform'" in service_install
+    assert "ServiceSidType" in service_install
     assert "'config-check', '--clients-file'" in service_install
+    assert (
+        "'config-check', '--clients-file', $configuredClientsFile, '--production'"
+        in service_install
+    )
+    assert "'--platform-system-id', ([string]$configuration.platformSystemId)" in (
+        service_install
+    )
+    assert "'--platform-party-id', ([string]$configuration.platformPartyId)" in (
+        service_install
+    )
+    assert "'--platform-key-id', ([string]$configuration.platformKeyId)" in (
+        service_install
+    )
+    assert "'config-check', '--state-directory'" in service_install
+    assert "'--auth-database', $authDatabase, '--production'" in service_install
+    assert "'bootstrap-admin'" in service_install
+    assert "'--password-file', $bootstrapSecret" in service_install
+    assert "$bootstrapText" not in service_install
+    assert "$configuredClientsText" not in service_install
+    assert "Get-Content -LiteralPath $configuredClientsFile" not in service_install
     assert "secureCookie" in service_install
     assert "-isnot [bool]" in service_install
     assert "winsw-integrity.json" in service_install
     assert "wrapperSha256" in service_install
     assert "wrapperConfigSha256" in service_install
+    assert "[switch] $Production" in service_install
+    assert "ExpectedSignerThumbprint" in service_install
+    assert "signed-production-candidate" in service_install
+    assert "Get-AuthenticodeSignature" in service_install
+    assert "TimeStamperCertificate" in service_install
+    assert "deploy/windows/Configure-MineGuardPlatformFormal.ps1" in service_install
+    service_mutex = service_install.index(
+        "Global\\MineGuardPlatform.Configuration"
+    )
+    service_mutex_wait = service_install.index(
+        "$configurationMutex.WaitOne", service_mutex
+    )
+    service_settings_read = service_install.index(
+        "Read-JsonObject -Path $settings", service_mutex_wait
+    )
+    service_bootstrap = service_install.index("'bootstrap-admin'", service_settings_read)
+    service_registration = service_install.index(
+        "& $destination 'install'", service_bootstrap
+    )
+    service_mutex_release = service_install.index(
+        "$configurationMutex.ReleaseMutex()", service_registration
+    )
+    service_start = service_install.index(
+        "Start-Service -Name 'MineGuardPlatform'", service_mutex_release
+    )
+    assert (
+        service_mutex
+        < service_mutex_wait
+        < service_settings_read
+        < service_bootstrap
+        < service_registration
+        < service_mutex_release
+        < service_start
+    )
+    assert "[TimeSpan]::FromSeconds(30)" in service_install[
+        service_mutex:service_settings_read
+    ]
+    assert service_install.count("$configurationMutex.ReleaseMutex()") >= 2
+    service_outer_finally = service_install.rindex("} finally {")
+    assert service_outer_finally > service_start
+    assert "$configurationMutex.Dispose()" in service_install[service_outer_finally:]
 
     remove_service = (WINDOWS / "Remove-MineGuardPlatformService.ps1").read_text(
         encoding="utf-8-sig"
@@ -347,7 +605,7 @@ def test_platform_service_lifecycle_is_path_bound_and_transactional() -> None:
             "Get-ServiceExecutablePath",
             "^[^\"\\r\\n]+$",
             "StringComparison]::OrdinalIgnoreCase",
-            "NT AUTHORITY\\LocalService",
+            "NT SERVICE\\MineGuardPlatform",
         ):
             assert required in script
 
@@ -366,6 +624,11 @@ def test_platform_service_lifecycle_is_path_bound_and_transactional() -> None:
         "Start-Service -Name 'MineGuardPlatform'",
         "WaitForStatus(",
         "Assert-ServiceIdentity -Service $registeredService",
+        "'sidtype' 'MineGuardPlatform'",
+        "'showsid' 'MineGuardPlatform'",
+        "Security.Principal.NTAccount",
+        "ExpectedSignerThumbprint",
+        "Assert-ProductionRuntimeSignature",
     ):
         assert required in install
     assert install.count("Get-FileHash -LiteralPath $WinSWExecutable") >= 2
@@ -447,7 +710,10 @@ def test_windows_operations_document_covers_the_complete_lifecycle() -> None:
         "Install-MineGuardPlatformService.ps1",
         "Remove-MineGuardPlatformService.ps1",
         "MINEGUARD_V2_CLIENTS_FILE",
-        "LocalService",
+        "NT SERVICE\\MineGuardPlatform",
+        "ExpectedSignerThumbprint",
+        "Global\\MineGuardPlatform.Configuration",
+        ".mineguard-configuration-blocked.json",
         "127.0.0.1",
         "Secure Cookie",
         "-Wheelhouse",
@@ -460,5 +726,36 @@ def test_windows_operations_document_covers_the_complete_lifecycle() -> None:
         "Win32_Service.PathName",
         "RemoveWrapperFiles",
         "回滚不完整",
+        "演示数据不能原地",
     ):
         assert required in document
+
+
+def test_linux_service_template_enables_explicit_production_gate() -> None:
+    service = (ROOT / "deploy" / "mineguard.service.example").read_text(
+        encoding="utf-8"
+    )
+    assert "mineguard serve --production" in service
+    assert "--secure-cookie" in service
+    assert "--backup-key-file" not in service
+
+    environment = (ROOT / "deploy" / "mineguard.env.example").read_text(
+        encoding="utf-8"
+    )
+    assert "MINEGUARD_ADMIN_PASSWORD=" not in environment
+    assert "bootstrap-admin" in environment
+
+    handbook = (ROOT / "docs" / "内网部署与运维手册.md").read_text(
+        encoding="utf-8"
+    )
+    assert "serve --production --host 127.0.0.1" in handbook
+    assert "bootstrap-admin" in handbook
+    assert "至少 12 个字符" in handbook
+    assert "四类中至少包含三类" in handbook
+    assert "`serve` 没有\n`--backup-key-file`" in handbook
+
+    v2_operations = (ROOT.parent / "docs" / "V2部署与运行.md").read_text(
+        encoding="utf-8"
+    )
+    assert "至少 8 字符的 `MINEGUARD_ADMIN_PASSWORD`" not in v2_operations
+    assert "bootstrap-admin --production" in v2_operations

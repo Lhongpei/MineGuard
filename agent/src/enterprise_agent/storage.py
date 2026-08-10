@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import timedelta
 from pathlib import Path
@@ -23,7 +23,7 @@ from .errors import (
 from .security import observation_review_fingerprint
 from .util import canonical_json, parse_aware_datetime, sha256_json, utc_now, utc_text
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 _CONNECTOR_EVENTS_PER_TEN_MINUTES = 240
 _CONNECTOR_EVENTS_PER_DAY = 5_000
 _CONNECTOR_MAX_MONTH_BINDINGS = 240
@@ -968,6 +968,53 @@ def _install_schema_guards(db: sqlite3.Connection) -> None:
         )
 
 
+def _normalise_managed_schema_sql(value: str) -> str:
+    """Return a stable representation of SQL authored by this application.
+
+    SQLite stores the trigger body supplied at creation time.  Collapsing
+    whitespace is deliberately the *only* normalisation: accepting a trigger
+    merely because its header looks right would also accept a same-name no-op
+    body and defeat the append-only boundary.
+    """
+
+    return " ".join(value.split())
+
+
+def _expected_draft_audit_triggers() -> dict[str, str]:
+    return {
+        f"guard_draft_audit_{operation.casefold()}_v4": (
+            _normalise_managed_schema_sql(
+                f"""
+                CREATE TRIGGER guard_draft_audit_{operation.casefold()}_v4
+                BEFORE {operation} ON draft_audit
+                BEGIN
+                    SELECT RAISE(ABORT, 'draft_audit is append-only');
+                END
+                """
+            )
+        )
+        for operation in ("UPDATE", "DELETE")
+    }
+
+
+def _draft_audit_triggers_intact(db: sqlite3.Connection) -> bool:
+    """Require the exact two governed triggers and reject side-effect extras."""
+
+    expected = _expected_draft_audit_triggers()
+    rows = db.execute(
+        "SELECT name,sql FROM sqlite_master "
+        "WHERE type='trigger' AND tbl_name='draft_audit'"
+    ).fetchall()
+    actual: dict[str, str] = {}
+    for row in rows:
+        name = str(row["name"])
+        sql = row["sql"]
+        if name not in expected or not isinstance(sql, str):
+            return False
+        actual[name] = _normalise_managed_schema_sql(sql)
+    return actual == expected
+
+
 class Repository:
     def __init__(self, path: str | Path):
         raw_path = str(path)
@@ -980,11 +1027,29 @@ class Repository:
             Path(self.path).parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         self._lock = threading.RLock()
         self._memory_connection: sqlite3.Connection | None = None
+        self._runtime_connection: sqlite3.Connection | None = None
+        self._runtime_data_version: int | None = None
+        self._runtime_schema_version: int | None = None
+        self._runtime_integrity_failed = False
+        # Development and migration utilities may legitimately open a second
+        # Repository for the same file.  Production startup enables the latch
+        # only after the complete audit verification succeeds; from that point
+        # on any commit through another SQLite connection is terminal for this
+        # process.
+        self._runtime_integrity_latching_enabled = False
         if self.path == ":memory:":
             self._memory_connection = self._connect()
         try:
             self._initialize()
             self._ensure_wal()
+            # All post-initialisation reads and writes share one connection.
+            # PRAGMA data_version changes on this connection only when another
+            # SQLite connection commits, which gives the running Agent a
+            # constant-size, process-local external-write latch.  The RLock
+            # already serialised the former short-lived connections, so this
+            # does not reduce application concurrency.
+            self._runtime_connection = self._memory_connection or self._connect()
+            self._refresh_runtime_integrity_checkpoint_locked()
         except sqlite3.Error as error:
             raise ValueError(
                 f"无法打开企业端数据库 {self.path}；请检查路径、权限或数据库完整性"
@@ -1058,35 +1123,224 @@ class Repository:
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
-            connection = self._memory_connection or self._connect()
+            connection = self._runtime_connection or self._memory_connection
+            if connection is None:  # pragma: no cover - construction invariant
+                raise RuntimeError("企业端数据库运行连接尚未初始化")
+            if connection.in_transaction:
+                yield connection
+                return
+            self._assert_runtime_database_unchanged_locked(connection)
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 yield connection
+                # Capture the schema marker while the reserved write lock still
+                # excludes an external writer.  Our own commit does not change
+                # this connection's data_version.
+                expected_schema_version = int(
+                    connection.execute("PRAGMA schema_version").fetchone()[0]
+                )
                 connection.execute("COMMIT")
+                self._accept_controlled_commit_locked(
+                    connection,
+                    expected_schema_version=expected_schema_version,
+                )
             except BaseException:
                 # KeyboardInterrupt, cancellation and SystemExit must not leave
                 # the shared in-memory connection inside an open transaction.
                 with suppress(sqlite3.Error):
                     connection.execute("ROLLBACK")
                 raise
-            finally:
-                if self._memory_connection is None:
-                    connection.close()
 
     @contextmanager
     def _read(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
-            connection = self._memory_connection or self._connect()
+            connection = self._runtime_connection or self._memory_connection
+            if connection is None:  # pragma: no cover - construction invariant
+                raise RuntimeError("企业端数据库运行连接尚未初始化")
+            if connection.in_transaction:
+                yield connection
+                return
+            self._assert_runtime_database_unchanged_locked(connection)
             try:
                 yield connection
-            finally:
-                if self._memory_connection is None:
-                    connection.close()
+                self._assert_runtime_database_unchanged_locked(connection)
+            except BaseException:
+                # A few governance projections deliberately open their own
+                # snapshot on the yielded connection. Never leave that manual
+                # read transaction active after an exception.
+                if connection.in_transaction:
+                    with suppress(sqlite3.Error):
+                        connection.execute("ROLLBACK")
+                raise
+
+    def _refresh_runtime_integrity_checkpoint_locked(self) -> None:
+        connection = self._runtime_connection or self._memory_connection
+        if connection is None:  # pragma: no cover - construction invariant
+            raise RuntimeError("企业端数据库运行连接尚未初始化")
+        self._runtime_data_version = int(
+            connection.execute("PRAGMA data_version").fetchone()[0]
+        )
+        self._runtime_schema_version = int(
+            connection.execute("PRAGMA schema_version").fetchone()[0]
+        )
+
+    def _latch_runtime_integrity_failure(self) -> None:
+        self._runtime_integrity_failed = True
+
+    def _assert_runtime_database_unchanged_locked(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        if self._runtime_integrity_failed:
+            raise ConflictError(
+                "运行期数据库完整性已锁死；拒绝继续读写，请保全现场并重启核验"
+            )
+        data_version = int(connection.execute("PRAGMA data_version").fetchone()[0])
+        schema_version = int(
+            connection.execute("PRAGMA schema_version").fetchone()[0]
+        )
+        if (
+            self._runtime_data_version is None
+            or self._runtime_schema_version is None
+        ):
+            self._runtime_data_version = data_version
+            self._runtime_schema_version = schema_version
+            return
+        if (
+            data_version != self._runtime_data_version
+            or schema_version != self._runtime_schema_version
+        ):
+            if not self._runtime_integrity_latching_enabled:
+                self._runtime_data_version = data_version
+                self._runtime_schema_version = schema_version
+                return
+            self._latch_runtime_integrity_failure()
+            raise ConflictError(
+                "检测到运行期外部数据库写入或 schema 变化；"
+                "当前进程已锁死，请保全数据库并重启核验"
+            )
+
+    def _accept_controlled_commit_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        expected_schema_version: int,
+    ) -> None:
+        data_version = int(connection.execute("PRAGMA data_version").fetchone()[0])
+        schema_version = int(
+            connection.execute("PRAGMA schema_version").fetchone()[0]
+        )
+        if (
+            self._runtime_data_version is None
+            or data_version != self._runtime_data_version
+            or schema_version != expected_schema_version
+        ):
+            if not self._runtime_integrity_latching_enabled:
+                self._runtime_data_version = data_version
+                self._runtime_schema_version = schema_version
+                return
+            self._latch_runtime_integrity_failure()
+            raise ConflictError(
+                "受控提交完成时检测到并发外部数据库变化；"
+                "当前进程已锁死，请重启核验"
+            )
+        self._runtime_schema_version = schema_version
+
+    def verify_runtime_integrity_boundary(
+        self,
+        *,
+        additional_check: Callable[[sqlite3.Connection], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Run the constant-size production readiness boundary.
+
+        A complete audit scan must have armed the latch first.  Thereafter the
+        persistent connection's data/schema markers make every external commit
+        terminal.  The fixed trigger/version checks below protect the trusted
+        schema boundary without walking historical audit rows.  A caller may
+        add another constant-size check (the five-quantity singleton anchor and
+        its two exact triggers) while the same lock and marker window are held.
+
+        This method never attempts a full rescan or refreshes a mismatched
+        checkpoint: a runtime mismatch is recoverable only by process restart
+        followed by the normal startup full verification.
+        """
+
+        with self._lock:
+            connection = self._runtime_connection or self._memory_connection
+            if connection is None:  # pragma: no cover - construction invariant
+                raise RuntimeError("企业端数据库运行连接尚未初始化")
+            if self._runtime_integrity_failed:
+                raise ConflictError(
+                    "运行期数据库完整性已锁死；拒绝继续服务，请保全现场并重启核验"
+                )
+            if not self._runtime_integrity_latching_enabled:
+                raise ConflictError(
+                    "正式模式尚未完成启动全链核验；运行期就绪检查拒绝放行"
+                )
+            self._assert_runtime_database_unchanged_locked(connection)
+            try:
+                version = connection.execute(
+                    "SELECT version FROM app_schema_versions "
+                    "WHERE component='enterprise_agent'"
+                ).fetchone()
+                anchor_table = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='draft_audit_anchors'"
+                ).fetchone()
+                generic_valid = bool(
+                    version is not None
+                    and int(version["version"]) == _SCHEMA_VERSION
+                    and anchor_table is not None
+                    and _draft_audit_triggers_intact(connection)
+                )
+                additional_valid = (
+                    True
+                    if additional_check is None
+                    else bool(additional_check(connection))
+                )
+            except (
+                sqlite3.Error,
+                IndexError,
+                KeyError,
+                TypeError,
+                ValueError,
+            ) as error:
+                self._latch_runtime_integrity_failure()
+                raise ConflictError(
+                    "运行期固定完整性边界无法核验；当前进程已锁死，请重启核验"
+                ) from error
+            if not generic_valid or not additional_valid:
+                self._latch_runtime_integrity_failure()
+                raise ConflictError(
+                    "运行期审计触发器、版本或必要锚点异常；"
+                    "当前进程已锁死，请保全现场并重启核验"
+                )
+            # Detect an external commit that raced any of the constant queries.
+            self._assert_runtime_database_unchanged_locked(connection)
+            return {
+                "valid": True,
+                "mode": "runtime_constant_boundary",
+                "generic_triggers_exact": True,
+                "generic_anchor_table_present": True,
+                "additional_boundary_valid": additional_valid,
+            }
+
+    def close(self) -> None:
+        """Close the shared file connection when an embedding runtime can."""
+
+        with self._lock:
+            connection = self._runtime_connection
+            self._runtime_connection = None
+            if connection is not None and connection is not self._memory_connection:
+                connection.close()
+            if self._memory_connection is not None:
+                self._memory_connection.close()
+                self._memory_connection = None
 
     def _initialize(self) -> None:
         with self._lock:
             db = self._memory_connection or self._connect()
             try:
+                opening_schema_version = 0
                 version_table = db.execute(
                     """
                     SELECT 1 FROM sqlite_master
@@ -1100,6 +1354,8 @@ class Repository:
                         WHERE component = 'enterprise_agent'
                         """
                     ).fetchone()
+                    if current_version is not None:
+                        opening_schema_version = int(current_version["version"])
                     if (
                         current_version is not None
                         and int(current_version["version"]) > _SCHEMA_VERSION
@@ -1143,6 +1399,14 @@ class Repository:
                         previous_hash TEXT NOT NULL,
                         event_hash TEXT NOT NULL,
                         PRIMARY KEY (draft_id, sequence),
+                        FOREIGN KEY (draft_id) REFERENCES drafts(draft_id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS draft_audit_anchors (
+                        draft_id TEXT PRIMARY KEY,
+                        event_count INTEGER NOT NULL CHECK (event_count >= 1),
+                        head_hash TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
                         FOREIGN KEY (draft_id) REFERENCES drafts(draft_id)
                     );
 
@@ -1973,7 +2237,47 @@ class Repository:
                                 f"ALTER TABLE {table} "
                                 f"ADD COLUMN {column} {definition}"
                             )
+                if (
+                    opening_schema_version >= 4
+                    and not _draft_audit_triggers_intact(db)
+                ):
+                    raise ValueError(
+                        "草稿审计防篡改触发器缺失或被替换，拒绝启动"
+                    )
                 _install_schema_guards(db)
+                if not _draft_audit_triggers_intact(db):
+                    # CREATE TRIGGER IF NOT EXISTS must never turn a same-name
+                    # no-op/replacement trigger into an accepted migration.
+                    raise ValueError(
+                        "草稿审计防篡改触发器缺失、被替换或存在额外副作用，拒绝启动"
+                    )
+                if opening_schema_version < 9:
+                    # Anchor each already validated complete chain exactly once
+                    # so deleting a valid tail can no longer look valid.
+                    draft_ids = db.execute(
+                        "SELECT draft_id FROM drafts ORDER BY draft_id"
+                    ).fetchall()
+                    for draft_row in draft_ids:
+                        integrity = self._draft_audit_integrity_in_transaction(
+                            db,
+                            str(draft_row["draft_id"]),
+                            require_anchor=False,
+                        )
+                        if not integrity["valid"]:
+                            raise ValueError(
+                                "历史草稿审计链不完整，拒绝建立正式审计锚点"
+                            )
+                        db.execute(
+                            "INSERT OR REPLACE INTO draft_audit_anchors("
+                            "draft_id,event_count,head_hash,updated_at) "
+                            "VALUES (?,?,?,?)",
+                            (
+                                draft_row["draft_id"],
+                                integrity["event_count"],
+                                integrity["head_hash"],
+                                utc_text(),
+                            ),
+                        )
                 # These indexes reference columns introduced by the migration,
                 # so they must be created only after the ALTER statements.
                 db.execute(
@@ -2093,6 +2397,15 @@ class Repository:
             """,
             (draft_id,),
         ).fetchone()
+        anchor = db.execute(
+            "SELECT 1 FROM draft_audit_anchors WHERE draft_id=?", (draft_id,)
+        ).fetchone()
+        if last is not None or anchor is not None:
+            integrity = Repository._draft_audit_integrity_in_transaction(db, draft_id)
+            if not integrity["valid"]:
+                raise ConflictError(
+                    "草稿审计链或防篡改锚点异常，已拒绝追加事件"
+                )
         sequence = int(last["sequence"]) + 1 if last else 1
         previous_hash = str(last["event_hash"]) if last else "0" * 64
         timestamp = occurred_at or utc_text()
@@ -2123,6 +2436,18 @@ class Repository:
                 previous_hash,
                 event_hash,
             ),
+        )
+        db.execute(
+            """
+            INSERT INTO draft_audit_anchors(
+                draft_id,event_count,head_hash,updated_at
+            ) VALUES (?,?,?,?)
+            ON CONFLICT(draft_id) DO UPDATE SET
+                event_count=excluded.event_count,
+                head_hash=excluded.head_hash,
+                updated_at=excluded.updated_at
+            """,
+            (draft_id, sequence, event_hash, timestamp),
         )
         return {**event, "event_hash": event_hash}
 
@@ -3059,8 +3384,19 @@ class Repository:
     def _draft_audit_integrity_in_transaction(
         db: sqlite3.Connection,
         draft_id: str,
+        *,
+        require_anchor: bool = True,
     ) -> dict[str, Any]:
         """Verify the complete draft audit chain in the current transaction."""
+
+        if not _draft_audit_triggers_intact(db):
+            return {
+                "valid": False,
+                "event_count": 0,
+                "failed_sequence": None,
+                "failure": "audit_trigger_missing",
+                "creator": None,
+            }
 
         rows = db.execute(
             """
@@ -3120,12 +3456,30 @@ class Repository:
                     "creator": creator,
                 }
             expected_previous = str(row["event_hash"])
-        return {
+        result = {
             "valid": bool(rows) and creator is not None,
             "event_count": len(rows),
             "head_hash": expected_previous,
             "creator": creator,
         }
+        if not result["valid"] or not require_anchor:
+            return result
+        anchor = db.execute(
+            "SELECT event_count,head_hash FROM draft_audit_anchors "
+            "WHERE draft_id=?",
+            (draft_id,),
+        ).fetchone()
+        if (
+            anchor is None
+            or int(anchor["event_count"]) != len(rows)
+            or str(anchor["head_hash"]) != expected_previous
+        ):
+            return {
+                **result,
+                "valid": False,
+                "failure": "audit_tail_or_anchor_mismatch",
+            }
+        return result
 
     def replace_draft(
         self,
@@ -3144,6 +3498,11 @@ class Repository:
             ).fetchone()
             if row is None or row["deleted_at"] is not None:
                 raise NotFoundError("草稿不存在")
+            audit_integrity = self._draft_audit_integrity_in_transaction(
+                db, draft_id
+            )
+            if not audit_integrity["valid"]:
+                raise ConflictError("草稿审计链或防篡改锚点异常，拒绝修改")
             succeeded = db.execute(
                 """
                 SELECT 1 FROM submissions
@@ -3228,6 +3587,11 @@ class Repository:
             ).fetchone()
             if row is None or row["deleted_at"] is not None:
                 raise NotFoundError("草稿不存在")
+            audit_integrity = self._draft_audit_integrity_in_transaction(
+                db, draft_id
+            )
+            if not audit_integrity["valid"]:
+                raise ConflictError("草稿审计链或防篡改锚点异常，拒绝确认")
             succeeded = db.execute(
                 """
                 SELECT 1 FROM submissions
@@ -3465,28 +3829,185 @@ class Repository:
             for row in rows
         ]
 
+    def last_content_actor(self, draft_id: str) -> str:
+        """Return the principal responsible for the current draft revision.
+
+        This is derived from the append-only audit chain so databases created
+        by older releases require no destructive migration or guessed owner.
+        """
+
+        self.get_draft(draft_id)
+        with self._read() as db:
+            row = db.execute(
+                """
+                SELECT actor FROM draft_audit
+                WHERE draft_id = ? AND event_type IN (
+                    'draft_created',
+                    'draft_updated',
+                    'source_imported',
+                    'regulator_event_snapshot_imported',
+                    'llm_assistance_recorded'
+                )
+                ORDER BY sequence DESC LIMIT 1
+                """,
+                (draft_id,),
+            ).fetchone()
+        if row is None:
+            raise ConflictError(
+                "草稿缺少可核验的创建/编辑人审计记录，不能执行四眼复核"
+            )
+        return str(row["actor"])
+
     def verify_audit(self, draft_id: str) -> dict[str, Any]:
-        events = self.audit_events(draft_id)
-        expected_previous = "0" * 64
-        for expected_sequence, event in enumerate(events, start=1):
-            material = {
-                key: value for key, value in event.items() if key != "event_hash"
-            }
+        self.get_draft(draft_id, include_deleted=True)
+        with self._read() as db:
+            return self._draft_audit_integrity_in_transaction(db, draft_id)
+
+    def verify_all_draft_audits(self) -> dict[str, Any]:
+        """Verify every complete chain, trigger and tail anchor.
+
+        The first successful production check also arms the process-local
+        external-write latch.  That transition must be based on one explicit
+        SQLite read snapshot.  Otherwise an external connection could commit
+        halfway through the scan and have its new ``data_version`` accepted as
+        the checkpoint immediately before the latch becomes active.
+        """
+
+        with self._lock:
+            db = self._runtime_connection or self._memory_connection
+            if db is None:  # pragma: no cover - construction invariant
+                raise RuntimeError("企业端数据库运行连接尚未初始化")
+            if db.in_transaction:
+                raise RuntimeError("完整审计扫描不能在业务事务中启用")
+            # Before the first successful full scan there is no trusted marker
+            # to refresh.  Sample the candidate snapshot below and publish its
+            # markers only if every database/audit check succeeds.  Once armed
+            # (or failed), the existing latch must be enforced before any rescan.
             if (
-                event["sequence"] != expected_sequence
-                or event["previous_hash"] != expected_previous
-                or sha256_json(material) != event["event_hash"]
+                self._runtime_integrity_latching_enabled
+                or self._runtime_integrity_failed
             ):
-                return {
-                    "valid": False,
-                    "event_count": len(events),
-                    "failed_sequence": event["sequence"],
+                self._assert_runtime_database_unchanged_locked(db)
+            starting_data_version = int(
+                db.execute("PRAGMA data_version").fetchone()[0]
+            )
+            starting_schema_version = int(
+                db.execute("PRAGMA schema_version").fetchone()[0]
+            )
+            db.execute("BEGIN")
+            try:
+                result = self._verify_all_draft_audits_in_snapshot(db)
+                db.execute("COMMIT")
+            except BaseException:
+                if db.in_transaction:
+                    with suppress(sqlite3.Error):
+                        db.execute("ROLLBACK")
+                raise
+
+            ending_data_version = int(
+                db.execute("PRAGMA data_version").fetchone()[0]
+            )
+            ending_schema_version = int(
+                db.execute("PRAGMA schema_version").fetchone()[0]
+            )
+            if (
+                ending_data_version != starting_data_version
+                or ending_schema_version != starting_schema_version
+            ):
+                self._latch_runtime_integrity_failure()
+                raise ConflictError(
+                    "完整审计扫描期间检测到外部数据库提交；"
+                    "当前进程已锁死，请保全现场并重启核验"
+                )
+            if result["valid"]:
+                # Store the values already compared above.  Do not issue a
+                # fresh checkpoint query here: a commit racing after the
+                # comparison must remain visible to the next guarded access.
+                self._runtime_data_version = ending_data_version
+                self._runtime_schema_version = ending_schema_version
+                self._runtime_integrity_latching_enabled = True
+            return result
+
+    def _verify_all_draft_audits_in_snapshot(
+        self, db: sqlite3.Connection
+    ) -> dict[str, Any]:
+        """Scan SQLite and the audit boundary in one caller-owned snapshot."""
+
+        # quick_check deliberately runs only during the authoritative startup
+        # scan, never on the high-frequency health path.  SQLite's quick_check
+        # does not report foreign-key violations, so both results are required
+        # before this snapshot may arm the runtime marker latch.
+        quick_check_rows = db.execute("PRAGMA quick_check").fetchall()
+        quick_check_ok = bool(
+            len(quick_check_rows) == 1
+            and str(quick_check_rows[0][0]) == "ok"
+        )
+        foreign_key_violation = db.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchone()
+        foreign_keys_ok = foreign_key_violation is None
+
+        rows = db.execute(
+            "SELECT draft_id FROM drafts ORDER BY draft_id"
+        ).fetchall()
+        failures = []
+        if not quick_check_ok:
+            failures.append(
+                {
+                    "draft_id": None,
+                    "integrity": {
+                        "valid": False,
+                        "event_count": 0,
+                        "failed_sequence": None,
+                        "failure": "sqlite_quick_check_failed",
+                        "creator": None,
+                    },
                 }
-            expected_previous = event["event_hash"]
+            )
+        if not foreign_keys_ok:
+            failures.append(
+                {
+                    "draft_id": None,
+                    "integrity": {
+                        "valid": False,
+                        "event_count": 0,
+                        "failed_sequence": None,
+                        "failure": "sqlite_foreign_key_violation",
+                        "creator": None,
+                    },
+                }
+            )
+        if not _draft_audit_triggers_intact(db):
+            failures.append(
+                {
+                    "draft_id": None,
+                    "integrity": {
+                        "valid": False,
+                        "event_count": 0,
+                        "failed_sequence": None,
+                        "failure": "audit_trigger_missing",
+                        "creator": None,
+                    },
+                }
+            )
+        total_events = 0
+        for row in rows:
+            draft_id = str(row["draft_id"])
+            integrity = self._draft_audit_integrity_in_transaction(db, draft_id)
+            total_events += int(integrity.get("event_count") or 0)
+            if not integrity["valid"]:
+                failures.append(
+                    {"draft_id": draft_id, "integrity": integrity}
+                )
         return {
-            "valid": True,
-            "event_count": len(events),
-            "head_hash": expected_previous,
+            "valid": not failures,
+            "draft_count": len(rows),
+            "event_count": total_events,
+            "failures": failures[:20],
+            "database_checks": {
+                "quick_check": "ok" if quick_check_ok else "failed",
+                "foreign_keys": "ok" if foreign_keys_ok else "failed",
+            },
         }
 
     def begin_submission(
@@ -3507,6 +4028,11 @@ class Repository:
             ).fetchone()
             if draft is None or draft["deleted_at"] is not None:
                 raise NotFoundError("草稿不存在")
+            audit_integrity = self._draft_audit_integrity_in_transaction(
+                db, draft_id
+            )
+            if not audit_integrity["valid"]:
+                raise ConflictError("草稿审计链或防篡改锚点异常，拒绝提交")
             if (
                 int(draft["revision"]) != confirmed_revision
                 or draft["confirmed_revision"] != confirmed_revision

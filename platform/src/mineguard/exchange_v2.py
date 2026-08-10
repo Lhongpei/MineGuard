@@ -84,6 +84,76 @@ _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _PLACEHOLDER_SECRET = re.compile(
     r"(?i)(?:replace(?:[_-]|\b)|change[_-]?me|demo[_-]?only)"
 )
+_PRODUCTION_PLACEHOLDER_MARKERS = (
+    "demo",
+    "example",
+    "sample",
+    "placeholder",
+    "not-configured",
+    "not_configured",
+    "not-for-production",
+    "not_for_production",
+    "replace-me",
+    "replace_me",
+    "change-before",
+    "change_before",
+    "default-secret",
+    "test-only",
+    "test_only",
+)
+_PRODUCTION_PLACEHOLDER_KEY_IDS = frozenset(
+    {
+        "key",
+        "key-v1",
+        "key-v2",
+        "current-key",
+        "demo-exchange-key",
+        "enterprise-key-2026-01",
+        "regulator-key-v2",
+    }
+)
+_PRODUCTION_CONTEXT_FIELDS = frozenset(
+    {
+        "capacity_band",
+        "mining_method",
+        "shift_system",
+        "coal_type",
+        "operating_regime",
+    }
+)
+_PRODUCTION_CONTEXT_PLACEHOLDERS = frozenset(
+    {
+        "-",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "tbd",
+        "unknown",
+        "unclassified",
+        "占位",
+        "待填写",
+        "待分类",
+        "待配置",
+        "待补充",
+        "未分类",
+        "未配置",
+        "未知",
+        "测试",
+        "示例",
+    }
+)
+_PRODUCTION_PUBLIC_IDENTITY_TOKENS = frozenset(
+    {
+        "demo",
+        "example",
+        "placeholder",
+        "replace",
+        "sample",
+        "synthetic",
+        "test",
+    }
+)
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{22,86}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MONTH = re.compile(r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")
@@ -1472,6 +1542,265 @@ def load_exchange_clients(
     except UnicodeDecodeError as error:
         raise ValueError("MINEGUARD_V2_CLIENTS_FILE must contain UTF-8 JSON") from error
     return parse_exchange_clients(value)
+
+
+def _production_secret_defect(value: bytes) -> str | None:
+    """Return a secret-free reason when HMAC material is obviously unsafe."""
+
+    if not isinstance(value, bytes) or len(value) < 32:
+        return "must contain at least 32 bytes"
+    rendered = value.decode("utf-8", errors="ignore").strip().casefold()
+    if any(marker in rendered for marker in _PRODUCTION_PLACEHOLDER_MARKERS):
+        return "is example, placeholder, or test material"
+    if len(set(value)) < 10:
+        return "has insufficient byte diversity"
+    maximum_unit = min(16, len(value) // 2)
+    for unit_length in range(1, maximum_unit + 1):
+        if len(value) % unit_length:
+            continue
+        unit = value[:unit_length]
+        if unit * (len(value) // unit_length) == value:
+            return "is composed of a repeated short fragment"
+    return None
+
+
+def _production_placeholder_key_id(value: str) -> bool:
+    folded = value.strip().casefold()
+    if folded in _PRODUCTION_PLACEHOLDER_KEY_IDS:
+        return True
+    if any(marker in folded for marker in _PRODUCTION_PLACEHOLDER_MARKERS):
+        return True
+    if re.search(r"(?:^|[._:-])test(?:$|[._:-])", folded):
+        return True
+    compact = re.sub(r"[^a-z0-9]", "", folded)
+    return len(set(compact)) < 5
+
+
+def _production_placeholder_public_identity(value: str) -> bool:
+    folded = value.strip().casefold()
+    if any(
+        marker in folded
+        for marker in (
+            "not-configured",
+            "not_configured",
+            "not-for-production",
+            "not_for_production",
+            "change-before",
+            "change_before",
+            "change-me",
+            "change_me",
+        )
+    ):
+        return True
+    tokens = {
+        token for token in re.split(r"[^a-z0-9]+", folded) if token
+    }
+    if tokens & _PRODUCTION_PUBLIC_IDENTITY_TOKENS:
+        return True
+    return any(
+        marker in folded
+        for marker in (
+            "占位",
+            "待配置",
+            "未配置",
+            "演示",
+            "测试",
+            "示例",
+            "虚拟",
+            "合成",
+        )
+    )
+
+
+def _production_context_placeholder(value: str) -> bool:
+    folded = " ".join(value.strip().casefold().split())
+    if folded in _PRODUCTION_CONTEXT_PLACEHOLDERS:
+        return True
+    markers = (
+        "change me",
+        "change-me",
+        "change_me",
+        "demo",
+        "example",
+        "placeholder",
+        "replace",
+        "sample",
+        "test-only",
+        "test_only",
+        "占位",
+        "填写",
+        "部署时",
+        "待填",
+        "待配置",
+        "待补充",
+        "未分类",
+        "未知",
+        "测试值",
+        "示例值",
+    )
+    return any(marker in folded for marker in markers)
+
+
+def validate_production_exchange_clients(
+    clients: Mapping[str, ExchangeClient],
+) -> None:
+    """Apply the fail-closed quality gate used by every production boundary.
+
+    Generic parsing deliberately stays compatible with isolated demonstrations.
+    Production additionally requires independently issued, non-placeholder HMAC
+    material and a complete governed peer-comparison context for every mine.
+    Error messages identify only public registry labels and never key material.
+    """
+
+    if not clients:
+        raise ValueError(
+            "production exchange client registry requires at least one exchange client"
+        )
+
+    seen_mines: dict[str, str] = {}
+    seen_secret_digests: dict[bytes, str] = {}
+    for registry_sender_id, client in clients.items():
+        if not isinstance(registry_sender_id, str) or not isinstance(
+            client, ExchangeClient
+        ):
+            raise ValueError("production exchange client registry is malformed")
+        if registry_sender_id != client.sender_id:
+            raise ValueError(
+                "production exchange client registry key does not match sender_id"
+            )
+        for label, identifier in (
+            ("sender_id", client.sender_id),
+            ("party_id", client.party_id),
+            ("mine_id", client.mine_id),
+        ):
+            if (
+                not isinstance(identifier, str)
+                or _IDENTIFIER.fullmatch(identifier) is None
+                or (label == "mine_id" and identifier == "*")
+            ):
+                raise ValueError(
+                    f"production exchange client {registry_sender_id} has invalid {label}"
+                )
+            if _production_placeholder_public_identity(identifier):
+                raise ValueError(
+                    "production exchange client "
+                    f"{registry_sender_id} has placeholder {label}"
+                )
+        if (
+            not isinstance(client.mine_name, str)
+            or not client.mine_name.strip()
+            or len(client.mine_name.strip()) > 128
+            or _production_placeholder_public_identity(client.mine_name)
+        ):
+            raise ValueError(
+                "production exchange client "
+                f"{registry_sender_id} requires a non-placeholder mine_name"
+            )
+        other_sender = seen_mines.get(client.mine_id)
+        if other_sender is not None:
+            raise ValueError(
+                "production exchange client registry binds mine "
+                f"{client.mine_id} to more than one sender"
+            )
+        seen_mines[client.mine_id] = registry_sender_id
+
+        context = client.comparison_context
+        if not isinstance(context, Mapping) or set(context) != set(
+            _PRODUCTION_CONTEXT_FIELDS
+        ):
+            raise ValueError(
+                "production exchange client "
+                f"{registry_sender_id} requires all five comparison_context fields"
+            )
+        for field_name in sorted(_PRODUCTION_CONTEXT_FIELDS):
+            context_value = context[field_name]
+            if (
+                not isinstance(context_value, str)
+                or not context_value.strip()
+                or len(context_value.strip()) > 64
+                or _production_context_placeholder(context_value)
+            ):
+                raise ValueError(
+                    "production exchange client "
+                    f"{registry_sender_id} has placeholder comparison_context "
+                    f"field {field_name}"
+                )
+
+        message_keys = client.message_verification_keys
+        secret_entries: list[tuple[str, bytes]] = []
+        for key_id, secret_value in message_keys.items():
+            if _production_placeholder_key_id(key_id):
+                raise ValueError(
+                    "production exchange client "
+                    f"{registry_sender_id} has placeholder message key ID {key_id}"
+                )
+            secret_entries.append((f"message key {key_id}", secret_value))
+        secret_entries.extend(
+            (f"transport key {index}", secret_value)
+            for index, secret_value in enumerate(
+                client.transport_verification_secrets, start=1
+            )
+        )
+        for secret_label, secret_value in secret_entries:
+            defect = _production_secret_defect(secret_value)
+            if defect is not None:
+                raise ValueError(
+                    "production exchange client "
+                    f"{registry_sender_id} {secret_label} {defect}"
+                )
+            digest = hashlib.sha256(secret_value).digest()
+            previous_label = seen_secret_digests.get(digest)
+            current_label = f"{registry_sender_id} {secret_label}"
+            if previous_label is not None:
+                raise ValueError(
+                    "production exchange HMAC material must not be reused between "
+                    f"{previous_label} and {current_label}"
+                )
+            seen_secret_digests[digest] = current_label
+
+
+def validate_production_platform_identity(
+    system_id: str,
+    party_id: str,
+    key_id: str,
+    *,
+    clients: Mapping[str, ExchangeClient] | None = None,
+) -> None:
+    """Validate public government signing identity at a production boundary."""
+
+    for label, value in (
+        ("platform_system_id", system_id),
+        ("platform_party_id", party_id),
+        ("platform_key_id", key_id),
+    ):
+        if (
+            not isinstance(value, str)
+            or _IDENTIFIER.fullmatch(value) is None
+            or value == "*"
+        ):
+            raise ValueError(f"production {label} is invalid")
+        if label == "platform_key_id":
+            # This is the shipped, documented government key namespace.  It is
+            # intentionally valid; generic or demonstrative IDs are not.
+            placeholder = (
+                value.casefold() != "regulator-key-v2"
+                and _production_placeholder_key_id(value)
+            )
+        else:
+            placeholder = _production_placeholder_public_identity(value)
+        if placeholder:
+            raise ValueError(f"production {label} is a placeholder identifier")
+    if secrets.compare_digest(system_id.encode(), party_id.encode()):
+        raise ValueError(
+            "production platform_system_id and platform_party_id must be distinct"
+        )
+    for client in (clients or {}).values():
+        for client_key_id in client.message_verification_keys:
+            if secrets.compare_digest(key_id.encode(), client_key_id.encode()):
+                raise ValueError(
+                    "production platform_key_id must not reuse an enterprise "
+                    "message key ID"
+                )
 
 
 def sha256_bytes(value: bytes) -> str:

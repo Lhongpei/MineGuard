@@ -25,6 +25,80 @@ function Assert-EAInstanceName {
     }
 }
 
+function Get-EAScExecutable {
+    $ScPath = Join-Path $env:SystemRoot "System32\sc.exe"
+    if (-not (Test-Path -LiteralPath $ScPath -PathType Leaf)) {
+        throw "Windows Service Controller is missing: $ScPath"
+    }
+    return $ScPath
+}
+
+function Get-EAServiceIdentity {
+    param([Parameter(Mandatory = $true)][string]$ServiceId)
+    if ($ServiceId -notmatch '^MineGuardEnterpriseAgent-[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$') {
+        throw "Invalid Enterprise Agent service identity."
+    }
+    $ScPath = Get-EAScExecutable
+    $Output = @(& $ScPath showsid $ServiceId 2>&1)
+    $ExitCode = $LASTEXITCODE
+    if ($ExitCode -ne 0) {
+        throw "sc.exe showsid failed with exit code $ExitCode for $ServiceId"
+    }
+    $SidMatches = [regex]::Matches(
+        ($Output -join "`n"),
+        '(?<![0-9])S-1-5-80-(?:[0-9]+-){4}[0-9]+(?![0-9])',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if ($SidMatches.Count -ne 1) {
+        throw "Windows did not return exactly one service SID for $ServiceId."
+    }
+    $Sid = $SidMatches[0].Value
+    try {
+        $ParsedSid = New-Object Security.Principal.SecurityIdentifier($Sid)
+    }
+    catch {
+        throw "Windows returned an invalid service SID for $ServiceId."
+    }
+    return [pscustomobject]@{
+        ServiceId = $ServiceId
+        AccountName = "NT SERVICE\$ServiceId"
+        Sid = $ParsedSid.Value
+    }
+}
+
+function Assert-EARegisteredServiceIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServiceId,
+        [Parameter(Mandatory = $true)][object]$CimService
+    )
+    $Identity = Get-EAServiceIdentity -ServiceId $ServiceId
+    if (-not ([string]$CimService.StartName).Equals(
+            $Identity.AccountName, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Windows service $ServiceId does not use its dedicated virtual service account."
+    }
+    $ServiceRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceId"
+    $Registry = Get-ItemProperty -LiteralPath $ServiceRegistryPath `
+        -Name "ServiceSidType" -ErrorAction Stop
+    if ([int]$Registry.ServiceSidType -ne 1) {
+        throw "Windows service $ServiceId is not configured with unrestricted service SID type."
+    }
+    try {
+        $TranslatedSid = (New-Object Security.Principal.NTAccount(
+            $Identity.AccountName
+        )).Translate([Security.Principal.SecurityIdentifier]).Value
+    }
+    catch {
+        throw "The dedicated virtual service account cannot be resolved: $($Identity.AccountName)"
+    }
+    if (-not $TranslatedSid.Equals(
+            $Identity.Sid, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Virtual service account SID does not match the derived service SID."
+    }
+    return $Identity
+}
+
 function Assert-EAOrdinaryTree {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
@@ -293,6 +367,67 @@ function Get-EAAgentExecutable {
     return $Executable
 }
 
+function Get-EARestoreRecoveryBlockPath {
+    param([Parameter(Mandatory = $true)][object]$Context)
+    # Keep the sentinel at the instance boundary: the dedicated service SID can
+    # see/read it and fail before opening SQLite, but cannot modify it.
+    return Join-Path $Context.InstanceRoot "restore-recovery-block.json"
+}
+
+function Assert-EANoRestoreRecoveryBlock {
+    param([Parameter(Mandatory = $true)][object]$Context)
+    $MarkerPath = Get-EARestoreRecoveryBlockPath -Context $Context
+    if (Test-Path -LiteralPath $MarkerPath) {
+        throw (
+            "This Agent instance is blocked by an incomplete restore: " +
+            "$MarkerPath. Keep the service stopped and follow the exact " +
+            "manual database/quarantine recovery paths recorded in that " +
+            "protected marker; remove it only after administrator verification."
+        )
+    }
+}
+
+function Assert-EARestoreRecoveryBlockAcl {
+    param(
+        [Parameter(Mandatory = $true)][object]$Context,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    Assert-EAOrdinaryLeaf -Path $Path -Name "Restore recovery block" `
+        -MaximumBytes 1MB
+    $ServiceSid = [string]$Context.ServiceIdentity.Sid
+    $AllowedSids = @("S-1-5-18", "S-1-5-32-544", $ServiceSid)
+    $RequiredRights = @{}
+    $RequiredRights["S-1-5-18"] = `
+        [Security.AccessControl.FileSystemRights]::FullControl
+    $RequiredRights["S-1-5-32-544"] = `
+        [Security.AccessControl.FileSystemRights]::FullControl
+    $RequiredRights[$ServiceSid] = `
+        [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    $Satisfied = @{}
+    foreach ($Rule in (Get-Acl -LiteralPath $Path).Access) {
+        $Sid = try {
+            $Rule.IdentityReference.Translate(
+                [Security.Principal.SecurityIdentifier]
+            ).Value
+        } catch { [string]$Rule.IdentityReference }
+        if ($Rule.AccessControlType -eq
+                [Security.AccessControl.AccessControlType]::Allow) {
+            if ($AllowedSids -notcontains $Sid) {
+                throw "Restore recovery block ACL grants an unexpected identity: $Sid"
+            }
+            $Needed = $RequiredRights[$Sid]
+            if (($Rule.FileSystemRights -band $Needed) -eq $Needed) {
+                $Satisfied[$Sid] = $true
+            }
+        }
+    }
+    foreach ($Sid in $AllowedSids) {
+        if (-not $Satisfied.ContainsKey($Sid)) {
+            throw "Restore recovery block ACL is missing required access for $Sid."
+        }
+    }
+}
+
 function Get-EAInstanceContext {
     param(
         [Parameter(Mandatory = $true)][string]$InstanceName,
@@ -388,7 +523,7 @@ function Get-EAInstanceContext {
         $ResolvedWatches += $ResolvedWatch
     }
     $Executable = Get-EAAgentExecutable -InstallRoot $InstallRoot
-    return [pscustomobject]@{
+    $Context = [pscustomobject]@{
         InstallRoot = $InstallRoot
         StateRoot = $StateRoot
         RootId = [string]$RootMarker.root_id
@@ -399,19 +534,26 @@ function Get-EAInstanceContext {
         ConfigPath = $ConfigPath
         DatabasePath = $DatabasePath
         DataDirectory = (Join-Path $InstanceRoot "data")
+        LogDirectory = (Join-Path $InstanceRoot "logs")
+        InboxDirectory = $ExpectedInbox
         BackupDirectory = (Join-Path $InstanceRoot "backups")
         ServiceDirectory = (Join-Path $InstanceRoot "service")
         ServiceId = $ServiceId
+        ServiceIdentity = (Get-EAServiceIdentity -ServiceId $ServiceId)
+        WatchDirectories = @($ResolvedWatches)
         WrapperPath = (Join-Path (Join-Path $InstanceRoot "service") "$ServiceId.exe")
         Executable = $Executable
         Port = $Port
         MineId = [string]$Metadata.mine_id
         SystemId = [string]$Metadata.system_id
     }
+    Assert-EANoRestoreRecoveryBlock -Context $Context
+    return $Context
 }
 
 function Get-EAServiceContext {
     param([Parameter(Mandatory = $true)][object]$Context)
+    Assert-EAInstanceGlobalIsolation -Context $Context
     $Service = Get-Service -Name $Context.ServiceId -ErrorAction SilentlyContinue
     if ($null -eq $Service) { return $null }
     $CimService = Get-CimInstance Win32_Service -Filter (
@@ -436,6 +578,8 @@ function Get-EAServiceContext {
     }
     Assert-EAOrdinaryLeaf -Path $Context.WrapperPath -Name "Service wrapper" `
         -MaximumBytes 512MB
+    [void](Assert-EARegisteredServiceIdentity -ServiceId $Context.ServiceId `
+        -CimService $CimService)
     $Service.Refresh()
     return [pscustomobject]@{ Service = $Service; CimService = $CimService }
 }
@@ -535,6 +679,155 @@ function Set-EACanonicalInheritedTreeAcl {
     Invoke-EAIcaclsChecked -ArgumentList @(
         (Join-Path $Root "*"), "/reset", "/T", "/C"
     )
+}
+
+function Set-EAInstanceCanonicalAcl {
+    param([Parameter(Mandatory = $true)][object]$Context)
+    if (-not [bool]$Context.Metadata.acl_hardened) {
+        throw "Canonical ACL repair refuses an instance created with -SkipAcl."
+    }
+    $ServiceSid = [string]$Context.ServiceIdentity.Sid
+    if ($ServiceSid -notmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$') {
+        throw "Instance service SID is invalid."
+    }
+    Set-EACanonicalInheritedTreeAcl -Root $Context.InstanceRoot `
+        -Name "Agent instance boundary" -RootGrants @(
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
+            "*${ServiceSid}:(OI)(CI)RX"
+        )
+    foreach ($Writable in @($Context.DataDirectory, $Context.LogDirectory)) {
+        Set-EACanonicalInheritedTreeAcl -Root $Writable `
+            -Name "Writable Agent instance directory" -RootGrants @(
+                "*S-1-5-18:(OI)(CI)F",
+                "*S-1-5-32-544:(OI)(CI)F",
+                "*${ServiceSid}:(OI)(CI)M"
+            )
+    }
+    Set-EACanonicalInheritedTreeAcl -Root $Context.BackupDirectory `
+        -Name "Agent backup directory" -RootGrants @(
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F"
+        )
+}
+
+function Grant-EAServiceWatchReadAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$WatchRoot,
+        [Parameter(Mandatory = $true)][string]$ServiceSid
+    )
+    if ($ServiceSid -notmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$') {
+        throw "Watch ACL service SID is invalid."
+    }
+    # Add only the selected instance identity. Broad or legacy business ACLs
+    # are never rewritten here: formal verification below fails closed and
+    # tells the directory owner to remediate them at their owning boundary.
+    Invoke-EAIcaclsChecked -ArgumentList @(
+        $WatchRoot, "/grant:r", "*${ServiceSid}:(OI)(CI)RX"
+    )
+}
+
+function Assert-EAServiceWatchReadAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$WatchRoot,
+        [Parameter(Mandatory = $true)][string]$ServiceSid
+    )
+    $Acl = Get-Acl -LiteralPath $WatchRoot
+    $HasDedicatedRead = $false
+    foreach ($Rule in $Acl.Access) {
+        $RuleSid = try {
+            $Rule.IdentityReference.Translate(
+                [Security.Principal.SecurityIdentifier]
+            ).Value
+        }
+        catch { [string]$Rule.IdentityReference }
+        if ($Rule.AccessControlType -ne
+                [Security.AccessControl.AccessControlType]::Allow) {
+            continue
+        }
+        if ($RuleSid -in @(
+                "S-1-1-0",       # Everyone
+                "S-1-5-11",      # Authenticated Users
+                "S-1-5-19",      # LocalService
+                "S-1-5-20",      # NetworkService
+                "S-1-5-32-545",  # BUILTIN\Users
+                "S-1-5-80-0"     # ALL SERVICES
+            ) -or
+            ($RuleSid -match '^S-1-5-80-' -and $RuleSid -ne $ServiceSid)) {
+            throw (
+                "Watch directory ACL grants a broad/shared or different " +
+                "Windows service identity: $WatchRoot ($RuleSid). The Agent " +
+                "does not remove business ACLs automatically; the directory " +
+                "owner must narrow the allow rule at its owning ACL boundary."
+            )
+        }
+        if ($RuleSid -eq $ServiceSid) {
+            $RequiredRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            $RequiredInheritance = (
+                [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ObjectInherit
+            )
+            if (($Rule.FileSystemRights -band $RequiredRights) -eq $RequiredRights -and
+                ($Rule.InheritanceFlags -band $RequiredInheritance) -eq
+                    $RequiredInheritance) {
+                $HasDedicatedRead = $true
+            }
+        }
+    }
+    if (-not $HasDedicatedRead) {
+        throw "Watch directory does not grant inheritable read access to the dedicated instance service SID: $WatchRoot"
+    }
+}
+
+function Assert-EAInstanceWatchAcls {
+    param([Parameter(Mandatory = $true)][object]$Context)
+    foreach ($WatchRoot in @($Context.WatchDirectories)) {
+        Assert-EAServiceWatchReadAcl -WatchRoot $WatchRoot `
+            -ServiceSid ([string]$Context.ServiceIdentity.Sid)
+    }
+}
+
+function Assert-EAInstanceGlobalIsolation {
+    param([Parameter(Mandatory = $true)][object]$Context)
+    foreach ($Directory in Get-ChildItem -LiteralPath $Context.StateRoot `
+        -Directory -Force) {
+        if ($Directory.Name.Equals(
+                $Context.InstanceName, [StringComparison]::Ordinal
+            )) {
+            continue
+        }
+        if ($Directory.Name -notmatch
+                '^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$') {
+            throw "StateRoot contains an unrecognized instance directory: $($Directory.FullName)"
+        }
+        $OtherContext = Get-EAInstanceContext -InstanceName $Directory.Name `
+            -InstallRoot $Context.InstallRoot -StateRoot $Context.StateRoot
+        if ($Context.Port -eq $OtherContext.Port) {
+            throw "Instance port isolation violation: $($Context.InstanceName) and $($OtherContext.InstanceName) both use $($Context.Port)."
+        }
+        if ($Context.MineId.Equals(
+                $OtherContext.MineId, [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "MineId isolation violation: $($Context.InstanceName) and $($OtherContext.InstanceName) both use $($Context.MineId)."
+        }
+        if ($Context.SystemId.Equals(
+                $OtherContext.SystemId, [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "SystemId isolation violation: $($Context.InstanceName) and $($OtherContext.InstanceName) both use $($Context.SystemId)."
+        }
+        foreach ($SelectedWatch in @($Context.WatchDirectories)) {
+            foreach ($OtherWatch in @($OtherContext.WatchDirectories)) {
+                if ((Test-EAPathWithin -Candidate $SelectedWatch -Parent $OtherWatch) -or
+                    (Test-EAPathWithin -Candidate $OtherWatch -Parent $SelectedWatch)) {
+                    throw (
+                        "Watch directory isolation violation: instance " +
+                        "$($Context.InstanceName) overlaps instance " +
+                        "$($OtherContext.InstanceName): $SelectedWatch <-> $OtherWatch"
+                    )
+                }
+            }
+        }
+    }
 }
 
 function Remove-EAOwnedTemporaryTree {

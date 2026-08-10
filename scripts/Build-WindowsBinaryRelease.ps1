@@ -1003,8 +1003,18 @@ try {
         "-ArtifactDirectory", $ArtifactStage,
         "-SkipRuntimeSmoke"
     )
-    if ($SigningEnabled) { $FinalAuditArguments += "-RequireSigned" }
-    else { $FinalAuditArguments += "-ExpectUnsignedTestOnly" }
+    if ($SigningEnabled) {
+        # This value comes from the build invocation/approved certificate
+        # configuration, never from the Agent stage or its self-described
+        # metadata. The lifecycle test forwards it into the formal GUI.
+        $FinalAuditArguments += @(
+            "-RequireSigned",
+            "-ApprovedAgentSignerThumbprint", $NormalizedThumbprint
+        )
+    }
+    else {
+        $FinalAuditArguments += "-ExpectUnsignedTestOnly"
+    }
     if ($LegacyWindowsServer2012R2CompatibilityTest) {
         $FinalAuditArguments += "-ExpectLegacyServer2012R2CompatibilityTest"
     }

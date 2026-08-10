@@ -102,6 +102,8 @@ def test_regulatory_frontend_is_a_read_only_business_surface() -> None:
     # Login/logout are session management, not a regulator business mutation.
     assert 'api("/v2/auth/login", {method:"POST"' in script
     assert 'api("/v2/auth/logout", {method:"POST"' in script
+    assert 'api("/v2/auth/change-password"' in script
+    assert 'id="passwordChangeDialog"' in index
     for forbidden in (
         "/v1/ingest/",
         "/v1/analyze/",
@@ -111,6 +113,154 @@ def test_regulatory_frontend_is_a_read_only_business_surface() -> None:
         "deleteFinding",
     ):
         assert forbidden not in script
+
+
+def test_required_password_change_dialog_is_non_dismissible_and_field_aware(
+) -> None:
+    index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="passwordChangeLogout"' in index
+    assert '$("passwordChangeDialog").addEventListener("cancel"' in script
+    assert "if (passwordChangeGateActive()) event.preventDefault()" in script
+    assert '$("passwordChangeDialog").addEventListener("close"' in script
+    assert "window.setTimeout(showPasswordChange, 0)" in script
+    assert '$("passwordChangeLogout").addEventListener("click", logout)' in script
+
+    # RFC 7807 uses application/problem+json, so field errors must still be
+    # decoded instead of falling back to a generic request failure.
+    assert 'contentType.includes("json")' in script
+    assert 'error.code === "CURRENT_PASSWORD_INVALID"' in script
+    assert "当前密码不正确，请重新输入。" in script
+
+    change_handler = script.split(
+        "async function changeInitialPassword", maxsplit=1
+    )[1].split("async function logout", maxsplit=1)[0]
+    assert 'hardAuthenticationBoundary("密码已修改' in change_handler
+
+
+def test_authentication_boundaries_clear_dom_and_do_not_loop_on_initial_401(
+) -> None:
+    script_path = WEB_ROOT / "app.js"
+    probe = r"""
+const fs = require("fs");
+const {JSDOM, VirtualConsole} = require("jsdom");
+const source = fs.readFileSync(__SCRIPT_PATH__, "utf8") + `
+window.__authSurface = {
+  api, login, logout, changeInitialPassword, state,
+  boundaryStarted: () => authenticationBoundaryStarted,
+};`;
+
+function response(status, payload) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: {get() { return "application/json"; }},
+    async json() { return payload; },
+  };
+}
+
+function scenario(fetcher) {
+  const virtualConsole = new VirtualConsole();
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <section id="businessSecret">上一账号煤矿数据</section>
+    <button id="logoutButton"></button>
+    <dialog id="loginDialog"></dialog>
+    <dialog id="passwordChangeDialog"></dialog>
+    <input id="username" value="new-user">
+    <input id="password" value="current-password">
+    <div id="loginError"></div>
+    <input id="currentPassword" value="Old-Password-2025!">
+    <input id="newPassword" value="New-Password-2026!">
+    <input id="confirmPassword" value="New-Password-2026!">
+    <div id="passwordChangeError"></div>
+  </body></html>`, {
+    url: "http://127.0.0.1:8080/",
+    runScripts: "outside-only",
+    virtualConsole,
+  });
+  const {window} = dom;
+  const originalAddEventListener = window.document.addEventListener.bind(
+    window.document
+  );
+  window.document.addEventListener = (type, listener, options) => {
+    if (type !== "DOMContentLoaded") {
+      originalAddEventListener(type, listener, options);
+    }
+  };
+  for (const dialog of window.document.querySelectorAll("dialog")) {
+    dialog.showModal = function () { this.open = true; };
+    dialog.close = function () { this.open = false; };
+  }
+  window.fetch = fetcher;
+  window.eval(source);
+  return dom;
+}
+
+function assertCleared(dom, label) {
+  const surface = dom.window.__authSurface;
+  if (!surface.boundaryStarted()) throw new Error(`${label}: boundary not started`);
+  if (dom.window.document.getElementById("businessSecret")) {
+    throw new Error(`${label}: prior business DOM remains`);
+  }
+  if (dom.window.document.body.textContent.includes("上一账号煤矿数据")) {
+    throw new Error(`${label}: prior rendered data remains`);
+  }
+  if (surface.state.principal !== null || surface.state.csrf !== null) {
+    throw new Error(`${label}: credential state remains`);
+  }
+  if (surface.state.overview !== null || surface.state.selectedMine !== null ||
+      surface.state.mines.length || surface.state.findings.length ||
+      surface.state.trace.length) {
+    throw new Error(`${label}: cached business state remains`);
+  }
+}
+
+(async () => {
+  let dom = scenario(async () => response(401, {code:"AUTHENTICATION_REQUIRED"}));
+  try { await dom.window.__authSurface.api("/v2/auth/me"); } catch (_) {}
+  if (dom.window.__authSurface.boundaryStarted()) {
+    throw new Error("initial unauthenticated 401 caused reload loop");
+  }
+  if (!dom.window.document.getElementById("businessSecret")) {
+    throw new Error("initial unauthenticated 401 unexpectedly replaced page");
+  }
+
+  dom = scenario(async () => response(401, {code:"AUTHENTICATION_REQUIRED"}));
+  dom.window.__authSurface.state.principal = {user_id:"old-user"};
+  dom.window.__authSurface.state.overview = {secret:true};
+  dom.window.__authSurface.state.mines = [{mine_id:"SECRET"}];
+  try { await dom.window.__authSurface.api("/v2/regulatory/overview"); } catch (_) {}
+  assertCleared(dom, "authenticated 401");
+
+  dom = scenario(async () => response(200, {}));
+  dom.window.__authSurface.state.principal = {user_id:"old-user"};
+  await dom.window.__authSurface.logout();
+  assertCleared(dom, "logout");
+
+  dom = scenario(async () => response(200, {
+    principal:{user_id:"new-user", password_change_required:false},
+    csrf_token:"csrf-new",
+  }));
+  dom.window.__authSurface.state.principal = {user_id:"old-user"};
+  await dom.window.__authSurface.login({preventDefault() {}});
+  assertCleared(dom, "account login switch");
+
+  dom = scenario(async () => response(200, {status:"password_changed"}));
+  dom.window.__authSurface.state.principal = {
+    user_id:"old-user", password_change_required:true,
+  };
+  dom.window.__authSurface.state.csrf = "csrf-old";
+  await dom.window.__authSurface.changeInitialPassword({preventDefault() {}});
+  assertCleared(dom, "password change");
+})().catch((error) => { console.error(error); process.exit(2); });
+""".replace("__SCRIPT_PATH__", json.dumps(str(script_path)))
+    subprocess.run(
+        ["node", "-e", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_regulatory_frontend_uses_the_official_mineguard_brand_name() -> None:
@@ -968,8 +1118,8 @@ def test_five_quantity_chart_explains_tracks_and_busts_static_cache() -> None:
     assert 'aria-label="五量分轨时序图；火工品包含雷管和炸药子项"' in index
     assert "SIX TRACKS" not in index
     assert "六条原子序列" not in index
-    assert "/assets/styles.css?v=2.8.1" in index
-    assert "/assets/app.js?v=2.8.1" in index
+    assert "/assets/styles.css?v=2.9.0" in index
+    assert "/assets/app.js?v=2.9.0" in index
 
 
 def test_frontend_boot_failure_is_visible_without_running_application_js() -> None:

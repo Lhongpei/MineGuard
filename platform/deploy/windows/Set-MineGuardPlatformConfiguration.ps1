@@ -6,9 +6,9 @@ param(
     [string] $StateDirectory,
     [ValidateRange(1, 65535)] [int] $Port = 8080,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')]
-    [string] $PlatformSystemId = 'mineguard-government',
+    [string] $PlatformSystemId = 'mineguard-qinyuan',
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')]
-    [string] $PlatformPartyId = 'regulator-government',
+    [string] $PlatformPartyId = 'regulator-qinyuan',
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')]
     [string] $PlatformKeyId = 'regulator-key-v2',
     [string] $AdminUsername = 'admin',
@@ -23,7 +23,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$ServiceSid = 'S-1-5-19'
+$ServiceSid = 'S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346'
 $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 $OutputEncoding = $utf8NoBom
 try { [Console]::OutputEncoding = $utf8NoBom } catch { }
@@ -35,6 +35,41 @@ function Assert-Administrator {
     if (-not $principal.IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator
     )) { throw '配置和保护秘密文件必须以管理员身份运行 Windows PowerShell。' }
+}
+
+function Write-ConfigurationBlockMarker {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $TransactionDirectory,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('in_progress', 'rollback_incomplete')]
+        [string] $Phase
+    )
+    $document = [ordered]@{
+        schemaVersion = 1
+        product = 'MineGuard Platform Configuration Guard'
+        phase = $Phase
+        transactionDirectory = $TransactionDirectory
+        createdUtc = [DateTime]::UtcNow.ToString('o')
+        recovery = '停止 MineGuardPlatform；管理员核验并清理上述精确事务目录；最后删除本阻断标记并重新配置。'
+    }
+    $temporary = $Path + ('.{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText(
+            $temporary,
+            ($document | ConvertTo-Json -Depth 4),
+            $utf8NoBom
+        )
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [IO.File]::Replace($temporary, $Path, $null)
+        } else {
+            [IO.File]::Move($temporary, $Path)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Set-ConfigAcl {
@@ -52,6 +87,22 @@ function Set-ConfigAcl {
     & "$env:SystemRoot\System32\icacls.exe" @resetArguments | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "重置配置目录子项 NTFS ACL 继承失败：$Path"
+    }
+}
+
+function Grant-BootstrapPasswordDeleteToService {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw '首次管理员密码必须是配置目录中的普通文件。'
+    }
+    $serviceGrant = ('*{0}:(R,D)' -f $ServiceSid)
+    & "$env:SystemRoot\System32\icacls.exe" $Path '/grant:r' `
+        $serviceGrant | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw '无法授权低权限 Platform 服务在建立密码摘要后删除首启密码文件。'
     }
 }
 
@@ -145,6 +196,24 @@ function Assert-NoReparseTree {
     }
 }
 
+function Assert-NoResidualConfigurationTransaction {
+    param([Parameter(Mandatory = $true)] [string] $ConfigurationDirectory)
+    $inspected = 0
+    foreach ($child in Get-ChildItem -LiteralPath $ConfigurationDirectory -Force) {
+        $inspected++
+        if ($inspected -gt 256) {
+            throw '配置目录直系子项超过 256 个安全上限；无法证明不存在残留配置事务。'
+        }
+        if ($child.PSIsContainer -and
+            $child.Name -match '^\.configuration-transaction\.[A-Fa-f0-9]{32}$') {
+            throw (
+                '检测到残留配置事务目录，已拒绝继续：' + $child.FullName +
+                '。请保持服务停止，由管理员核验并清理该精确目录后重新配置。'
+            )
+        }
+    }
+}
+
 function Assert-StateBoundary {
     param([string] $Candidate, [string] $Root)
     $defaultState = Join-Path $Root 'state'
@@ -215,12 +284,29 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
         $PSVersionTable.PSVersion.Minor -lt 1)) {
     throw '需要 Windows PowerShell 5.1 或更高版本。'
 }
+$configurationMutex = New-Object -TypeName System.Threading.Mutex `
+    -ArgumentList @($false, 'Global\MineGuardPlatform.Configuration')
+$configurationMutexHeld = $false
+try {
+    try {
+        $configurationMutexHeld = $configurationMutex.WaitOne(
+            [TimeSpan]::FromSeconds(30)
+        )
+    } catch [System.Threading.AbandonedMutexException] {
+        $configurationMutexHeld = $true
+    }
+    if (-not $configurationMutexHeld) {
+        throw '另一项 MineGuard Platform 配置事务仍在运行；30 秒内未获得机器级配置锁。'
+    }
+
 $InstallRoot = Get-SafeLocalPath -Path $InstallRoot -Label '安装目录' `
     -RequireFixedNtfs
 $configDirectory = Join-Path $InstallRoot 'config'
 $settingsPath = Join-Path $configDirectory 'settings.json'
 $bootstrapPath = Join-Path $configDirectory 'bootstrap-admin-password.txt'
 $targetClientsPath = Join-Path $configDirectory 'clients.json'
+$configurationBlockMarker = Join-Path $configDirectory `
+    '.mineguard-configuration-blocked.json'
 $resolverPath = Join-Path $PSScriptRoot 'Resolve-MineGuardPlatformExecutable.ps1'
 if (-not (Test-Path -LiteralPath $resolverPath -PathType Leaf)) {
     throw "找不到运行时解析器：$resolverPath。请重新安装 MineGuard Platform。"
@@ -229,6 +315,15 @@ if (-not (Test-Path -LiteralPath $configDirectory -PathType Container)) {
     throw "找不到配置目录：$configDirectory。请先运行安装脚本。"
 }
 Assert-NoReparseTree -Path $configDirectory -Label '配置目录'
+Assert-NoResidualConfigurationTransaction `
+    -ConfigurationDirectory $configDirectory
+if (Test-Path -LiteralPath $configurationBlockMarker) {
+    throw (
+        '检测到上次配置事务未安全收尾，已拒绝继续。请停止 MineGuardPlatform，' +
+        '由管理员查看 config\.mineguard-configuration-blocked.json 中的精确 transactionDirectory，' +
+        '核验并清理该目录后，再删除该精确阻断标记并重新运行配置。'
+    )
+}
 . $resolverPath
 $runtime = Resolve-MineGuardPlatformExecutable -InstallRoot $InstallRoot
 
@@ -252,15 +347,42 @@ if ($ClearBootstrapPassword) {
     if (-not (Test-Path -LiteralPath $authDatabase -PathType Leaf)) {
         throw 'auth.db 尚不存在；拒绝删除首次管理员密码，以免服务无法完成首启。'
     }
+    $authCheck = @('config-check', '--auth-database', $authDatabase)
+    $currentDemoProperty = $currentSettings.PSObject.Properties[
+        'allowDemoDefaultPassword'
+    ]
+    if ($null -eq $currentDemoProperty -or
+        $currentDemoProperty.Value -isnot [bool]) {
+        throw 'settings.json 的 allowDemoDefaultPassword 必须是 JSON 布尔值。'
+    }
+    $currentClientsFile = [string]$currentSettings.clientsFile
+    $currentSecureCookie = $currentSettings.secureCookie
+    if ($currentSecureCookie -isnot [bool]) {
+        throw 'settings.json 的 secureCookie 必须是 JSON 布尔值。'
+    }
+    $currentIsFormal = -not [string]::IsNullOrWhiteSpace($currentClientsFile)
+    if ($currentIsFormal -and
+        ([bool]$currentDemoProperty.Value -or -not [bool]$currentSecureCookie)) {
+        throw '正式配置安全开关不一致；拒绝清除首启密码。'
+    }
+    if (-not $currentIsFormal -and
+        (-not [bool]$currentDemoProperty.Value -or [bool]$currentSecureCookie)) {
+        throw '演示配置安全开关不一致；拒绝清除首启密码。'
+    }
+    if ($currentIsFormal) { $authCheck += '--production' }
     $checkArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
-        -Arguments @('config-check', '--auth-database', $authDatabase)
+        -Arguments $authCheck
     $checkText = & $runtime.filePath @checkArguments
     if ($LASTEXITCODE -ne 0) {
         throw 'auth.db 无法只读核验；拒绝删除首次管理员密码。'
     }
     $check = $checkText | Out-String | ConvertFrom-Json
+    if ([int]$check.auth_ready_admin_count -lt 1 -and
+        $currentIsFormal) {
+        throw 'auth.db 中尚无已完成改密的正式管理员；拒绝删除首次管理员密码。'
+    }
     if ([int]$check.auth_user_count -lt 1) {
-        throw 'auth.db 中尚无管理员账号；拒绝删除首次管理员密码。'
+        throw 'auth.db 中尚无账号；拒绝删除首次管理员密码。'
     }
     Set-ConfigAcl -Path $configDirectory
     if (Test-Path -LiteralPath $bootstrapPath -PathType Leaf) {
@@ -269,7 +391,7 @@ if ($ClearBootstrapPassword) {
     } else {
         Write-Host '首次管理员明文密码文件已经不存在。'
     }
-    exit 0
+    return
 }
 
 $service = Get-Service -Name 'MineGuardPlatform' -ErrorAction SilentlyContinue
@@ -288,6 +410,13 @@ if (-not $DemoWithoutClientRegistry -and [string]::IsNullOrWhiteSpace($ClientsFi
 }
 if ($AllowDemoDefaultPassword -and -not $DemoWithoutClientRegistry) {
     throw '-AllowDemoDefaultPassword 只允许与 -DemoWithoutClientRegistry 一起使用。'
+}
+if ($HttpOnlyDemo -and -not $DemoWithoutClientRegistry) {
+    throw '-HttpOnlyDemo 仅允许与 -DemoWithoutClientRegistry 一起使用；正式配置必须通过 HTTPS。'
+}
+if ($DemoWithoutClientRegistry -and
+    (-not $AllowDemoDefaultPassword -or -not $HttpOnlyDemo)) {
+    throw '演示配置必须同时显式启用 -AllowDemoDefaultPassword 和 -HttpOnlyDemo。'
 }
 if ([string]::IsNullOrWhiteSpace($AdminUsername) -or $AdminUsername.Length -gt 128) {
     throw '管理员用户名必须包含 1-128 个字符。'
@@ -314,7 +443,12 @@ if (-not $DemoWithoutClientRegistry) {
     }
     $sourceText = $null
     $checkArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
-        -Arguments @('config-check', '--clients-file', $sourceClientsPath)
+        -Arguments @(
+            'config-check', '--clients-file', $sourceClientsPath, '--production',
+            '--platform-system-id', $PlatformSystemId,
+            '--platform-party-id', $PlatformPartyId,
+            '--platform-key-id', $PlatformKeyId
+        )
     $checkText = & $runtime.filePath @checkArguments
     if ($LASTEXITCODE -ne 0) { throw '客户端注册表未通过 MineGuard 完整校验。' }
     $validated = $checkText | Out-String | ConvertFrom-Json
@@ -332,6 +466,17 @@ $stateDirectory = Get-SafeLocalPath -Path $stateDirectory -Label '状态目录' 
 Assert-StateBoundary -Candidate $stateDirectory -Root $InstallRoot
 Assert-NoReparseTree -Path $stateDirectory -Label '状态目录'
 
+if (-not $DemoWithoutClientRegistry) {
+    $stateCheckArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
+        -Arguments @(
+            'config-check', '--state-directory', $stateDirectory, '--production'
+        )
+    & $runtime.filePath @stateCheckArguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw '状态目录包含演示/合成数据或无法通过正式用途核验；请改用独立空目录。'
+    }
+}
+
 $authDatabase = Join-Path $stateDirectory 'auth.db'
 $hasAuthUser = $false
 if (Test-Path -LiteralPath $authDatabase -PathType Leaf) {
@@ -343,14 +488,25 @@ if (Test-Path -LiteralPath $authDatabase -PathType Leaf) {
     }
     $check = $checkText | Out-String | ConvertFrom-Json
     $hasAuthUser = ([int]$check.auth_user_count -ge 1)
+    if (-not $DemoWithoutClientRegistry -and $hasAuthUser) {
+        $productionCheckArguments = Join-MineGuardPlatformArguments `
+            -Runtime $runtime -Arguments @(
+                'config-check', '--auth-database', $authDatabase, '--production'
+            )
+        & $runtime.filePath @productionCheckArguments | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw '现有 auth.db 没有已完成改密的正式管理员，或仍有启用的演示凭据账号。'
+        }
+    }
 }
 if ($null -eq $AdminPassword -and -not $hasAuthUser -and
     -not $AllowDemoDefaultPassword) {
     if ($NonInteractive) {
         throw '全新状态库需要 -AdminPassword；非交互模式不会回退到演示默认密码。'
     }
-    $AdminPassword = Read-Host '请输入首次管理员密码（至少 8 个字符）' `
-        -AsSecureString
+    $AdminPassword = Read-Host (
+        '请输入正式管理员密码（至少 12 位，大小写字母、数字、符号至少三类）'
+    ) -AsSecureString
 }
 
 $plainPassword = $null
@@ -371,6 +527,27 @@ if ($null -ne $AdminPassword) {
     if ($plainPassword -match '(?i)REPLACE(?:[_-]|\b)|CHANGE[_-]?ME|DEMO[_-]?ONLY|NOT[_-]?FOR[_-]?PRODUCTION') {
         $plainPassword = $null
         throw '首次管理员密码不能使用示例或占位文本。'
+    }
+    if (-not $DemoWithoutClientRegistry) {
+        if ($plainPassword -ceq '123123123') {
+            $plainPassword = $null
+            throw '正式配置禁止使用演示默认密码 123123123。'
+        }
+        $categoryCount = 0
+        if ($plainPassword -cmatch '[a-z]') { $categoryCount++ }
+        if ($plainPassword -cmatch '[A-Z]') { $categoryCount++ }
+        if ($plainPassword -match '[0-9]') { $categoryCount++ }
+        if ($plainPassword -match '[^A-Za-z0-9]') { $categoryCount++ }
+        if ($plainPassword.Length -lt 12 -or $categoryCount -lt 3) {
+            $plainPassword = $null
+            throw '正式管理员密码至少 12 个字符，并包含大小写字母、数字、符号中的至少三类。'
+        }
+        if ($plainPassword.ToLowerInvariant() -in @(
+                'password123', 'admin123456', 'qwerty123'
+            )) {
+            $plainPassword = $null
+            throw '正式管理员密码不能使用常见弱口令。'
+        }
     }
 }
 
@@ -412,6 +589,8 @@ $operations = @()
 $transactionComplete = $false
 $rollbackComplete = $false
 $mutationCount = 0
+Write-ConfigurationBlockMarker -Path $configurationBlockMarker `
+    -TransactionDirectory $transactionRoot -Phase 'in_progress'
 try {
     New-Item -ItemType Directory -Path $stagedRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $rollbackRoot -Force | Out-Null
@@ -429,7 +608,12 @@ try {
             [System.IO.File]::ReadAllBytes($sourceClientsPath)
         )
         $checkArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
-            -Arguments @('config-check', '--clients-file', $stagedClients)
+            -Arguments @(
+                'config-check', '--clients-file', $stagedClients, '--production',
+                '--platform-system-id', $PlatformSystemId,
+                '--platform-party-id', $PlatformPartyId,
+                '--platform-key-id', $PlatformKeyId
+            )
         & $runtime.filePath @checkArguments | Out-Null
         if ($LASTEXITCODE -ne 0) {
             throw '事务暂存的客户端注册表未通过 MineGuard 完整校验。'
@@ -480,6 +664,7 @@ try {
         }
     }
     Set-ConfigAcl -Path $configDirectory
+    Grant-BootstrapPasswordDeleteToService -Path $bootstrapPath
     $transactionComplete = $true
 } catch {
     $configurationError = $_
@@ -501,6 +686,13 @@ try {
         }
     }
     if ($rollbackErrors.Count -gt 0) {
+        try {
+            Write-ConfigurationBlockMarker -Path $configurationBlockMarker `
+                -TransactionDirectory $transactionRoot `
+                -Phase 'rollback_incomplete'
+        } catch {
+            $rollbackErrors += ('blocking-marker: {0}' -f $_.Exception.Message)
+        }
         throw ((
             'Platform 配置失败且自动回滚不完整；为避免丢失旧配置，已保留事务目录 {0}。' +
             '请停止操作并由管理员恢复 rollback 子目录。原始错误：{1}；回滚错误：{2}'
@@ -517,6 +709,10 @@ try {
         (Test-Path -LiteralPath $transactionRoot)) {
         Remove-Item -LiteralPath $transactionRoot -Recurse -Force
     }
+    if (($transactionComplete -or $rollbackComplete) -and
+        (Test-Path -LiteralPath $configurationBlockMarker -PathType Leaf)) {
+        Remove-Item -LiteralPath $configurationBlockMarker -Force -ErrorAction Stop
+    }
 }
 if (-not $transactionComplete) { throw 'Platform 配置事务未完成。' }
 
@@ -530,9 +726,14 @@ if (-not $HttpOnlyDemo) {
     Write-Warning '当前为 HTTP 本机演示模式，不能用于正式内网。'
 }
 if ($null -ne $AdminPassword) {
-    Write-Host '首次启动并通过健康检查后，请运行：'
-    Write-Host ("  & '{0}' -InstallRoot '{1}' -ClearBootstrapPassword" -f `
-        (Join-Path (Join-Path $InstallRoot 'service') 'Set-MineGuardPlatformConfiguration.ps1'), `
-        $InstallRoot)
+    Write-Host '首次正式启动会由短生命周期 helper 建立密码摘要，并在成功后自动删除首启明文文件。'
+    Write-Host '若摘要建立或删除失败，长运行服务会拒绝启动；请按错误核验 auth.db 后再使用受控清理选项。'
 }
 Write-Host '配置修改需重启 MineGuardPlatform 服务后生效。'
+} finally {
+    if ($configurationMutexHeld) {
+        try { $configurationMutex.ReleaseMutex() }
+        catch { }
+    }
+    if ($null -ne $configurationMutex) { $configurationMutex.Dispose() }
+}

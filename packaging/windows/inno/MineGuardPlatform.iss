@@ -116,6 +116,44 @@ const
 var
   RuntimeRemovalCompleted: Boolean;
   ProductInstallFailed: Boolean;
+#ifndef EnableSigning
+  UnsignedTestPage: TInputOptionWizardPage;
+#endif
+
+#ifndef EnableSigning
+function IsUnsignedTestMediaAuthorized(): Boolean;
+var
+  CommandLineValue: String;
+begin
+  CommandLineValue := Trim(ExpandConstant('{param:ALLOW_UNSIGNED_TEST_MEDIA|}'));
+  Result := (CommandLineValue = '1') or UnsignedTestPage.Values[0];
+end;
+#endif
+
+procedure InitializeWizard();
+begin
+#ifndef EnableSigning
+  UnsignedTestPage := CreateInputOptionPage(wpSelectDir,
+    'Unsigned internal test media',
+    'This Platform build cannot be used as a formal installation',
+    'Continue only on an isolated test machine. This unsigned build is not a production trust root and cannot be treated as formally delivered software.',
+    False, False);
+  UnsignedTestPage.Add('I explicitly authorize this unsigned internal-test Platform installation.');
+#endif
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+#ifndef EnableSigning
+  if (CurPageID = UnsignedTestPage.ID) and
+      (not IsUnsignedTestMediaAuthorized()) then
+  begin
+    MsgBox('Unsigned Platform test media requires explicit test authorization.', mbError, MB_OK);
+    Result := False;
+  end;
+#endif
+end;
 
 function HasMineGuardPlatformService(): Boolean;
 begin
@@ -166,6 +204,12 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
+#ifndef EnableSigning
+  if not IsUnsignedTestMediaAuthorized() then
+    Result := 'Unsigned Platform internal-test media was not explicitly authorized. Formal installation is unavailable for this build.';
+  if Result <> '' then
+    Exit;
+#endif
   if HasRunningMineGuardPlatformService() then
     Result := 'The MineGuardPlatform service is running. Stop it before installing or upgrading the runtime. A registered but stopped service is preserved.'
   else if HasActiveMineGuardPlatformRuntime() then
@@ -180,6 +224,10 @@ var
 begin
   PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
   Parameters := ExpandConstant('-NoProfile -ExecutionPolicy Bypass -File "{tmp}\MineGuardPlatformRelease\deploy\windows\Install-MineGuardPlatform.ps1" -SourceDirectory "{tmp}\MineGuardPlatformRelease" -InstallRoot "{app}"');
+#ifndef EnableSigning
+  if not IsUnsignedTestMediaAuthorized() then
+    RaiseException('Unsigned Platform test media was not explicitly authorized.');
+#endif
   if not ExecAndLogOutput(PowerShellPath, Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode, nil) then
   begin
     ProductInstallFailed := True;

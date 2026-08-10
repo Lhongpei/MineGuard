@@ -35,6 +35,7 @@ const state = {
     lastError: null,
   },
 };
+let authenticationBoundaryStarted = false;
 
 const $ = (id) => {
   const element = document.getElementById(id);
@@ -357,15 +358,58 @@ async function api(path, options = {}) {
   if (state.csrf && !["GET", "HEAD"].includes((options.method || "GET").toUpperCase())) headers["X-CSRF-Token"] = state.csrf;
   const response = await fetch(path, {...options, headers, credentials: "same-origin"});
   const contentType = response.headers.get("content-type") || "";
-  const payload = contentType.includes("application/json") ? await response.json() : null;
+  const payload = contentType.includes("json") ? await response.json() : null;
   if (response.status === 401) {
-    state.principal = null;
-    resetTraceSessionState();
-    showLogin();
-    throw new Error("请重新登录");
+    const hadAuthenticatedSession = Boolean(state.principal);
+    if (hadAuthenticatedSession) hardAuthenticationBoundary("会话已失效，正在安全返回登录页…");
+    else showLogin();
+    const error = new Error("会话已失效，请重新登录");
+    error.code = (payload && payload.code) || "AUTHENTICATION_REQUIRED";
+    error.status = response.status;
+    throw error;
   }
-  if (!response.ok) throw new Error((payload && payload.error && payload.error.message) || (payload && payload.message) || `请求失败（${response.status}）`);
+  if (!response.ok) {
+    const message = (payload && payload.error && payload.error.message)
+      || (payload && payload.detail)
+      || (payload && payload.message)
+      || (payload && payload.title)
+      || `请求失败（${response.status}）`;
+    const error = new Error(message);
+    error.code = (payload && payload.code) || "REQUEST_FAILED";
+    error.status = response.status;
+    throw error;
+  }
   return payload;
+}
+
+function clearAuthenticatedClientState() {
+  if (state.refreshTimer) window.clearInterval(state.refreshTimer);
+  stopWallboardTimers();
+  state.csrf = null;
+  state.principal = null;
+  state.overview = null;
+  state.mines = [];
+  state.findings = [];
+  state.selectedMine = null;
+  state.activeView = "overview";
+  state.refreshTimer = null;
+  state.refreshing = false;
+  state.wallboard.active = false;
+  state.wallboard.rotationIndex = 0;
+  state.wallboard.updateFailed = false;
+  state.wallboard.lastError = null;
+  resetTraceSessionState();
+}
+
+function hardAuthenticationBoundary(message) {
+  if (authenticationBoundaryStarted) return;
+  authenticationBoundaryStarted = true;
+  clearAuthenticatedClientState();
+  const guard = document.createElement("main");
+  guard.setAttribute("role", "status");
+  guard.textContent = message || "正在安全切换账号…";
+  document.body.replaceChildren(guard);
+  window.location.replace("/");
 }
 
 function resetTraceSessionState() {
@@ -396,6 +440,8 @@ function showNotice(message, kind = "warning") {
 }
 
 function showLogin() {
+  const passwordDialog = $("passwordChangeDialog");
+  if (passwordDialog.open && !state.principal) passwordDialog.close();
   $("logoutButton").classList.add("hidden");
   const dialog = $("loginDialog");
   if (!dialog.open) dialog.showModal();
@@ -408,12 +454,36 @@ function hideLogin() {
   $("logoutButton").classList.remove("hidden");
 }
 
+function showPasswordChange() {
+  const loginDialog = $("loginDialog");
+  if (loginDialog.open) loginDialog.close();
+  $("logoutButton").classList.add("hidden");
+  const dialog = $("passwordChangeDialog");
+  if (!dialog.open) dialog.showModal();
+  $("currentPassword").focus();
+}
+
+function passwordChangeGateActive() {
+  return Boolean(state.principal && state.principal.password_change_required);
+}
+
+function clearPasswordChangeForm() {
+  $("currentPassword").value = "";
+  $("newPassword").value = "";
+  $("confirmPassword").value = "";
+  $("passwordChangeError").textContent = "";
+}
+
 async function recoverSession() {
   try {
     const me = await api("/v2/auth/me");
     state.principal = me.principal || me;
     const csrf = await api("/v2/auth/csrf");
     state.csrf = csrf.csrf_token;
+    if (state.principal.password_change_required) {
+      showPasswordChange();
+      return false;
+    }
     hideLogin();
     return true;
   } catch (_) {
@@ -430,19 +500,41 @@ async function login(event) {
     state.principal = payload.principal;
     state.csrf = payload.csrf_token;
     $("password").value = "";
-    hideLogin();
-    await refreshAll();
+    hardAuthenticationBoundary("登录成功，正在安全进入账号…");
   } catch (error) {
     $("loginError").textContent = error.message;
   }
 }
 
+async function changeInitialPassword(event) {
+  event.preventDefault();
+  $("passwordChangeError").textContent = "";
+  const currentPassword = $("currentPassword").value;
+  const newPassword = $("newPassword").value;
+  if (newPassword !== $("confirmPassword").value) {
+    $("passwordChangeError").textContent = "两次输入的新密码不一致";
+    return;
+  }
+  try {
+    await api("/v2/auth/change-password", {
+      method:"POST",
+      body:JSON.stringify({current_password:currentPassword, new_password:newPassword}),
+    });
+    hardAuthenticationBoundary("密码已修改，正在安全返回登录页…");
+  } catch (error) {
+    if (error.code === "CURRENT_PASSWORD_INVALID") {
+      $("passwordChangeError").textContent = "当前密码不正确，请重新输入。";
+      $("currentPassword").focus();
+      $("currentPassword").select();
+    } else {
+      $("passwordChangeError").textContent = error.message;
+    }
+  }
+}
+
 async function logout() {
   try { await api("/v2/auth/logout", {method:"POST", body:"{}"}); } catch (_) {}
-  state.csrf = null;
-  state.principal = null;
-  resetTraceSessionState();
-  showLogin();
+  hardAuthenticationBoundary("已安全退出，正在返回登录页…");
 }
 
 function pickCounts(payload) {
@@ -1312,6 +1404,16 @@ async function refreshAll({automatic = false} = {}) {
 
 function bindEvents() {
   $("loginForm").addEventListener("submit", login);
+  $("passwordChangeForm").addEventListener("submit", changeInitialPassword);
+  $("passwordChangeLogout").addEventListener("click", logout);
+  $("passwordChangeDialog").addEventListener("cancel", (event) => {
+    if (passwordChangeGateActive()) event.preventDefault();
+  });
+  $("passwordChangeDialog").addEventListener("close", () => {
+    if (passwordChangeGateActive()) {
+      window.setTimeout(showPasswordChange, 0);
+    }
+  });
   $("logoutButton").addEventListener("click", logout);
   $("refreshButton").addEventListener("click", () => refreshAll());
   $("fullscreenButton").addEventListener("click", () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());

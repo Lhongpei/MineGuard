@@ -109,7 +109,9 @@ if ($SelfTest) {
     $requiredNames = @(
         'Set-MineGuardPlatformConfiguration.ps1',
         'Start-MineGuardPlatform.ps1',
-        'Resolve-MineGuardPlatformExecutable.ps1'
+        'Resolve-MineGuardPlatformExecutable.ps1',
+        'Install-MineGuardPlatformService.ps1',
+        'Configure-MineGuardPlatformFormal.ps1'
     )
     $missingNames = @($requiredNames | Where-Object {
             -not (Test-Path -LiteralPath (Join-Path $scriptDirectory $_) `
@@ -160,7 +162,14 @@ $configScript = Join-Path $scriptDirectory `
 $startScript = Join-Path $scriptDirectory 'Start-MineGuardPlatform.ps1'
 $resolverScript = Join-Path $scriptDirectory `
     'Resolve-MineGuardPlatformExecutable.ps1'
-foreach ($requiredPath in @($configScript, $startScript, $resolverScript)) {
+$serviceInstallScript = Join-Path $scriptDirectory `
+    'Install-MineGuardPlatformService.ps1'
+$formalConfigHelper = Join-Path $scriptDirectory `
+    'Configure-MineGuardPlatformFormal.ps1'
+foreach ($requiredPath in @(
+        $configScript, $startScript, $resolverScript, $serviceInstallScript,
+        $formalConfigHelper
+    )) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         Show-FatalMessage "安装不完整，缺少文件：$requiredPath"
         exit 1
@@ -231,9 +240,9 @@ $muted = [System.Drawing.Color]::FromArgb(90, 98, 108)
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'MineGuard Platform 首次配置与启动'
-$form.ClientSize = New-Object System.Drawing.Size(870, 690)
+$form.ClientSize = New-Object System.Drawing.Size(870, 710)
 $form.StartPosition = 'CenterScreen'
-$form.MinimumSize = New-Object System.Drawing.Size(886, 728)
+$form.MinimumSize = New-Object System.Drawing.Size(886, 748)
 $form.Font = $normalFont
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 
@@ -261,7 +270,7 @@ $form.Controls.Add($configurationBanner)
 
 $tabs = New-Object System.Windows.Forms.TabControl
 $tabs.Location = New-Object System.Drawing.Point(22, 130)
-$tabs.Size = New-Object System.Drawing.Size(826, 310)
+$tabs.Size = New-Object System.Drawing.Size(826, 330)
 $form.Controls.Add($tabs)
 
 $demoTab = New-Object System.Windows.Forms.TabPage
@@ -416,35 +425,51 @@ $adminInput.Location = New-Object System.Drawing.Point(382, 96)
 $adminInput.Size = New-Object System.Drawing.Size(210, 25)
 $formalTab.Controls.Add($adminInput)
 
-Add-FormalLabel -Text '管理员密码' -Y 135
-$passwordInput = New-Object System.Windows.Forms.TextBox
-$passwordInput.UseSystemPasswordChar = $true
-$passwordInput.Location = New-Object System.Drawing.Point(132, 135)
-$passwordInput.Size = New-Object System.Drawing.Size(230, 25)
-$formalTab.Controls.Add($passwordInput)
+Add-FormalLabel -Text 'Platform 系统 ID' -Y 135
+$platformSystemInput = New-Object System.Windows.Forms.TextBox
+$platformSystemInput.Text = 'mineguard-qinyuan'
+$platformSystemInput.Location = New-Object System.Drawing.Point(132, 135)
+$platformSystemInput.Size = New-Object System.Drawing.Size(250, 25)
+$platformSystemInput.Font = $monoFont
+$formalTab.Controls.Add($platformSystemInput)
 
-$confirmLabel = New-Object System.Windows.Forms.Label
-$confirmLabel.Text = '再次输入'
-$confirmLabel.Location = New-Object System.Drawing.Point(382, 135)
-$confirmLabel.Size = New-Object System.Drawing.Size(75, 25)
-$confirmLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-$formalTab.Controls.Add($confirmLabel)
-$confirmInput = New-Object System.Windows.Forms.TextBox
-$confirmInput.UseSystemPasswordChar = $true
-$confirmInput.Location = New-Object System.Drawing.Point(460, 135)
-$confirmInput.Size = New-Object System.Drawing.Size(230, 25)
-$formalTab.Controls.Add($confirmInput)
+$platformPartyLabel = New-Object System.Windows.Forms.Label
+$platformPartyLabel.Text = '监管主体 ID'
+$platformPartyLabel.Location = New-Object System.Drawing.Point(400, 135)
+$platformPartyLabel.Size = New-Object System.Drawing.Size(105, 25)
+$platformPartyLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$formalTab.Controls.Add($platformPartyLabel)
+$platformPartyInput = New-Object System.Windows.Forms.TextBox
+$platformPartyInput.Text = 'regulator-qinyuan'
+$platformPartyInput.Location = New-Object System.Drawing.Point(510, 135)
+$platformPartyInput.Size = New-Object System.Drawing.Size(278, 25)
+$platformPartyInput.Font = $monoFont
+$formalTab.Controls.Add($platformPartyInput)
 
+Add-FormalLabel -Text '政府签名 key ID' -Y 174
+$platformKeyInput = New-Object System.Windows.Forms.TextBox
+$platformKeyInput.Text = 'regulator-key-v2'
+$platformKeyInput.Location = New-Object System.Drawing.Point(132, 174)
+$platformKeyInput.Size = New-Object System.Drawing.Size(250, 25)
+$platformKeyInput.Font = $monoFont
+$formalTab.Controls.Add($platformKeyInput)
+
+$passwordLabel = New-Object System.Windows.Forms.Label
+$passwordLabel.Text = '管理员密码'
+$passwordLabel.Location = New-Object System.Drawing.Point(400, 174)
+$passwordLabel.Size = New-Object System.Drawing.Size(105, 25)
+$passwordLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$formalTab.Controls.Add($passwordLabel)
 $passwordHint = New-Object System.Windows.Forms.Label
-$passwordHint.Text = '至少 12 位，并同时包含字母和数字；正式模式禁止使用 123123123。'
+$passwordHint.Text = '安全窗输入；请同时核对左侧政府签名 key ID。'
 $passwordHint.ForeColor = $muted
-$passwordHint.Location = New-Object System.Drawing.Point(132, 166)
-$passwordHint.Size = New-Object System.Drawing.Size(560, 23)
+$passwordHint.Location = New-Object System.Drawing.Point(510, 174)
+$passwordHint.Size = New-Object System.Drawing.Size(278, 38)
 $formalTab.Controls.Add($passwordHint)
 
-Add-FormalLabel -Text '单位 HTTPS 地址' -Y 190
+Add-FormalLabel -Text '单位 HTTPS 地址' -Y 213
 $formalAccessUrl = New-Object System.Windows.Forms.TextBox
-$formalAccessUrl.Location = New-Object System.Drawing.Point(132, 190)
+$formalAccessUrl.Location = New-Object System.Drawing.Point(132, 213)
 $formalAccessUrl.Size = New-Object System.Drawing.Size(558, 25)
 $formalAccessUrl.Text = ''
 $formalTab.Controls.Add($formalAccessUrl)
@@ -452,13 +477,13 @@ $formalTab.Controls.Add($formalAccessUrl)
 $formalAccessHint = New-Object System.Windows.Forms.Label
 $formalAccessHint.Text = '可暂不填写；配置好 HTTPS 反向代理后再粘贴领导端地址。'
 $formalAccessHint.ForeColor = $muted
-$formalAccessHint.Location = New-Object System.Drawing.Point(700, 187)
+$formalAccessHint.Location = New-Object System.Drawing.Point(700, 210)
 $formalAccessHint.Size = New-Object System.Drawing.Size(90, 44)
 $formalTab.Controls.Add($formalAccessHint)
 
 $formalButton = New-Object System.Windows.Forms.Button
-$formalButton.Text = '保存正式配置并启动'
-$formalButton.Location = New-Object System.Drawing.Point(20, 232)
+$formalButton.Text = '打开安全密码窗并配置'
+$formalButton.Location = New-Object System.Drawing.Point(20, 252)
 $formalButton.Size = New-Object System.Drawing.Size(205, 42)
 $formalButton.BackColor = [System.Drawing.Color]::FromArgb(34, 91, 158)
 $formalButton.ForeColor = [System.Drawing.Color]::White
@@ -470,12 +495,78 @@ $formalHint.Text = (
     '正式配置启用 Secure Cookie，只监听 127.0.0.1；请通过单位批准的 HTTPS 反向代理访问。'
 )
 $formalHint.ForeColor = $amber
-$formalHint.Location = New-Object System.Drawing.Point(242, 229)
+$formalHint.Location = New-Object System.Drawing.Point(242, 249)
 $formalHint.Size = New-Object System.Drawing.Size(545, 48)
 $formalTab.Controls.Add($formalHint)
 
+$serviceTab = New-Object System.Windows.Forms.TabPage
+$serviceTab.Text = '正式服务安装'
+$serviceTab.BackColor = [System.Drawing.Color]::White
+$tabs.TabPages.Add($serviceTab)
+
+function Add-ServiceInstallLabel {
+    param([string] $Text, [int] $Y)
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = $Text
+    $label.Location = New-Object System.Drawing.Point(18, $Y)
+    $label.Size = New-Object System.Drawing.Size(112, 25)
+    $label.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+    $serviceTab.Controls.Add($label)
+}
+
+Add-ServiceInstallLabel -Text '批准的 WinSW' -Y 18
+$winSWText = New-Object System.Windows.Forms.TextBox
+$winSWText.Location = New-Object System.Drawing.Point(132, 18)
+$winSWText.Size = New-Object System.Drawing.Size(558, 25)
+$serviceTab.Controls.Add($winSWText)
+$winSWBrowse = New-Object System.Windows.Forms.Button
+$winSWBrowse.Text = '选择...'
+$winSWBrowse.Location = New-Object System.Drawing.Point(700, 16)
+$winSWBrowse.Size = New-Object System.Drawing.Size(88, 29)
+$serviceTab.Controls.Add($winSWBrowse)
+
+Add-ServiceInstallLabel -Text 'WinSW SHA-256' -Y 57
+$winSWSha256Text = New-Object System.Windows.Forms.TextBox
+$winSWSha256Text.Location = New-Object System.Drawing.Point(132, 57)
+$winSWSha256Text.Size = New-Object System.Drawing.Size(656, 25)
+$winSWSha256Text.Font = $monoFont
+$serviceTab.Controls.Add($winSWSha256Text)
+
+Add-ServiceInstallLabel -Text '.config SHA-256' -Y 96
+$winSWConfigSha256Text = New-Object System.Windows.Forms.TextBox
+$winSWConfigSha256Text.Location = New-Object System.Drawing.Point(132, 96)
+$winSWConfigSha256Text.Size = New-Object System.Drawing.Size(656, 25)
+$winSWConfigSha256Text.Font = $monoFont
+$serviceTab.Controls.Add($winSWConfigSha256Text)
+
+Add-ServiceInstallLabel -Text '签名者指纹' -Y 135
+$signerThumbprintText = New-Object System.Windows.Forms.TextBox
+$signerThumbprintText.Location = New-Object System.Drawing.Point(132, 135)
+$signerThumbprintText.Size = New-Object System.Drawing.Size(656, 25)
+$signerThumbprintText.Font = $monoFont
+$serviceTab.Controls.Add($signerThumbprintText)
+
+$serviceInstallButton = New-Object System.Windows.Forms.Button
+$serviceInstallButton.Text = '核验并安装正式服务'
+$serviceInstallButton.Location = New-Object System.Drawing.Point(20, 182)
+$serviceInstallButton.Size = New-Object System.Drawing.Size(205, 42)
+$serviceInstallButton.BackColor = [System.Drawing.Color]::FromArgb(34, 91, 158)
+$serviceInstallButton.ForeColor = [System.Drawing.Color]::White
+$serviceInstallButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$serviceTab.Controls.Add($serviceInstallButton)
+
+$serviceInstallHint = New-Object System.Windows.Forms.Label
+$serviceInstallHint.Text = (
+    '先完成正式配置和前台验收。三个摘要/指纹必须从介质之外的单位审批记录手工填写；' +
+    '.config 不存在时对应 SHA-256 留空。安装完成后自动启动服务。'
+)
+$serviceInstallHint.ForeColor = $amber
+$serviceInstallHint.Location = New-Object System.Drawing.Point(242, 178)
+$serviceInstallHint.Size = New-Object System.Drawing.Size(545, 62)
+$serviceTab.Controls.Add($serviceInstallHint)
+
 $buttonPanel = New-Object System.Windows.Forms.Panel
-$buttonPanel.Location = New-Object System.Drawing.Point(22, 450)
+$buttonPanel.Location = New-Object System.Drawing.Point(22, 470)
 $buttonPanel.Size = New-Object System.Drawing.Size(826, 42)
 $form.Controls.Add($buttonPanel)
 
@@ -514,12 +605,12 @@ $buttonPanel.Controls.Add($statusLabel)
 $logLabel = New-Object System.Windows.Forms.Label
 $logLabel.Text = '运行状态（出错时可拍照这一栏）'
 $logLabel.Font = $sectionFont
-$logLabel.Location = New-Object System.Drawing.Point(22, 496)
+$logLabel.Location = New-Object System.Drawing.Point(22, 516)
 $logLabel.Size = New-Object System.Drawing.Size(400, 24)
 $form.Controls.Add($logLabel)
 
 $logBox = New-Object System.Windows.Forms.RichTextBox
-$logBox.Location = New-Object System.Drawing.Point(22, 523)
+$logBox.Location = New-Object System.Drawing.Point(22, 543)
 $logBox.Size = New-Object System.Drawing.Size(826, 140)
 $logBox.ReadOnly = $true
 $logBox.BackColor = [System.Drawing.Color]::FromArgb(248, 249, 251)
@@ -532,7 +623,8 @@ $script:OperationPowerShell = $null
 $script:OperationAsync = $null
 $script:OperationPurpose = ''
 $script:OperationStreamOffsets = @{}
-$script:OperationSecureString = $null
+$script:FormalConfigCapture = $null
+$script:FormalConfigProcess = $null
 $script:ServerCapture = $null
 $script:ServerProcess = $null
 $script:ServerPort = 8080
@@ -540,7 +632,6 @@ $script:ServerMode = ''
 $script:BrowserOpened = $false
 $script:BrowserAutoAttempted = $false
 $script:HealthConfirmed = $false
-$script:ClearBootstrapAttempted = $false
 $script:LastHealthCheck = [DateTime]::MinValue
 $script:ServerStartedAt = [DateTime]::MinValue
 $script:HealthDelayReported = $false
@@ -612,9 +703,18 @@ function Set-BusyState {
     $formalState.Enabled = $formalInputsEnabled
     $portInput.Enabled = $formalInputsEnabled
     $adminInput.Enabled = $formalInputsEnabled
-    $passwordInput.Enabled = $formalInputsEnabled
-    $confirmInput.Enabled = $formalInputsEnabled
+    $platformSystemInput.Enabled = $formalInputsEnabled
+    $platformPartyInput.Enabled = $formalInputsEnabled
+    $platformKeyInput.Enabled = $formalInputsEnabled
     $formalAccessUrl.Enabled = -not $Busy
+    $serviceInstallEnabled = (-not $Busy) -and
+        ($script:ConfigurationState.kind -eq 'formal')
+    $winSWBrowse.Enabled = $serviceInstallEnabled
+    $winSWText.Enabled = $serviceInstallEnabled
+    $winSWSha256Text.Enabled = $serviceInstallEnabled
+    $winSWConfigSha256Text.Enabled = $serviceInstallEnabled
+    $signerThumbprintText.Enabled = $serviceInstallEnabled
+    $serviceInstallButton.Enabled = $serviceInstallEnabled
     $refreshButton.Enabled = -not $Busy
 }
 
@@ -728,8 +828,19 @@ function Get-ConfigurationState {
         }
     }
     $hasState = Test-StateDirectoryHasContent -StateDirectory $stateDirectory
-    if (-not [string]::IsNullOrWhiteSpace($clientsFile) -or
-        (Test-Path -LiteralPath $clientsPath -PathType Leaf)) {
+    $hasFormalRegistry = (
+        -not [string]::IsNullOrWhiteSpace($clientsFile) -or
+        (Test-Path -LiteralPath $clientsPath -PathType Leaf)
+    )
+    if ($hasFormalRegistry -and ($allowDemo -or -not $secureCookie)) {
+        return [pscustomobject]@{
+            kind = 'blocked'
+            message = '正式配置的演示口令或 Secure Cookie 开关被改动；已拒绝降级启动。'
+            port = $port
+            stateDirectory = $stateDirectory
+        }
+    }
+    if ($hasFormalRegistry) {
         return [pscustomobject]@{
             kind = 'formal'
             message = '已检测到正式配置。为防止误覆盖，只允许启动或打开页面。'
@@ -737,10 +848,18 @@ function Get-ConfigurationState {
             stateDirectory = $stateDirectory
         }
     }
-    if ($allowDemo -or -not $secureCookie) {
+    if ($allowDemo -and -not $secureCookie) {
         return [pscustomobject]@{
             kind = 'demo'
             message = '已检测到本机演示配置。可直接启动，不会重复改写配置。'
+            port = $port
+            stateDirectory = $stateDirectory
+        }
+    }
+    if ($allowDemo -or -not $secureCookie) {
+        return [pscustomobject]@{
+            kind = 'blocked'
+            message = '演示配置安全开关组合不一致；已禁止启动或覆盖。'
             port = $port
             stateDirectory = $stateDirectory
         }
@@ -760,8 +879,8 @@ function Get-ConfigurationState {
             $defaultStateDirectory,
             [StringComparison]::OrdinalIgnoreCase
         ) -and
-        [string]$settings.platformSystemId -eq 'mineguard-government' -and
-        [string]$settings.platformPartyId -eq 'regulator-government' -and
+        [string]$settings.platformSystemId -eq 'mineguard-qinyuan' -and
+        [string]$settings.platformPartyId -eq 'regulator-qinyuan' -and
         [string]$settings.platformKeyId -eq 'regulator-key-v2'
     )
     if (-not $isInstallerPlaceholder) {
@@ -815,7 +934,10 @@ function Refresh-ConfigurationState {
             $configurationBanner.ForeColor = $red
         }
     }
-    Set-BusyState -Busy ($null -ne $script:OperationPowerShell)
+    Set-BusyState -Busy (
+        $null -ne $script:OperationPowerShell -or
+        $null -ne $script:FormalConfigProcess
+    )
 }
 
 function Get-ModernBrowserPath {
@@ -997,7 +1119,9 @@ function Open-LeaderPage {
         }
         $url = $parsed.AbsoluteUri
     }
-    if (-not (Test-MineGuardHealth -Port $script:ServerPort)) {
+    $requireReady = ($script:ConfigurationState.kind -eq 'formal')
+    if (-not (Test-MineGuardHealth -Port $script:ServerPort `
+            -RequireReady:$requireReady)) {
         Add-Log "Platform 尚未通过健康检查，暂不打开页面：$localUrl" 'warning'
         [void][System.Windows.Forms.MessageBox]::Show(
             'Platform 还没有正常启动。请先点击【启动当前配置】，并等待右下角显示【服务正常】。',
@@ -1010,12 +1134,12 @@ function Open-LeaderPage {
     if ($script:ConfigurationState.kind -eq 'formal') {
         $formalHealthUrl = New-Object System.Uri -ArgumentList @(
             $parsed,
-            'healthz'
+            'readyz'
         )
         if (-not (Test-MineGuardHealthUrl -Url $formalHealthUrl.AbsoluteUri `
-                -TimeoutMilliseconds 5000)) {
+                -TimeoutMilliseconds 5000 -ExpectedStatus 'ready')) {
             Add-Log (
-                '本机服务正常，但单位 HTTPS 地址未能访问 /healthz。' +
+                '本机服务正常，但单位 HTTPS 地址未能访问 /readyz。' +
                 '请检查 DNS、证书和反向代理根路径。'
             ) 'error'
             [void][System.Windows.Forms.MessageBox]::Show(
@@ -1061,7 +1185,8 @@ function Open-LeaderPage {
 function Test-MineGuardHealthUrl {
     param(
         [Parameter(Mandatory = $true)] [string] $Url,
-        [ValidateRange(100, 30000)] [int] $TimeoutMilliseconds = 900
+        [ValidateRange(100, 30000)] [int] $TimeoutMilliseconds = 900,
+        [ValidateSet('ok', 'ready')] [string] $ExpectedStatus = 'ok'
     )
     $response = $null
     $reader = $null
@@ -1085,9 +1210,12 @@ function Test-MineGuardHealthUrl {
         $response = $request.GetResponse()
         $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
         $body = $reader.ReadToEnd()
+        $statusPattern = '"status"\s*:\s*"{0}"' -f [regex]::Escape(
+            $ExpectedStatus
+        )
         return ([int]$response.StatusCode -eq 200 -and
             $body -match '"service"\s*:\s*"mineguard-v2"' -and
-            $body -match '"status"\s*:\s*"ok"')
+            $body -match $statusPattern)
     } catch {
         return $false
     } finally {
@@ -1100,10 +1228,12 @@ function Test-MineGuardHealthUrl {
 }
 
 function Test-MineGuardHealth {
-    param([int] $Port)
+    param([int] $Port, [switch] $RequireReady)
+    $endpoint = if ($RequireReady) { 'readyz' } else { 'healthz' }
+    $expectedStatus = if ($RequireReady) { 'ready' } else { 'ok' }
     return Test-MineGuardHealthUrl -Url (
-        'http://127.0.0.1:{0}/healthz' -f $Port
-    )
+        'http://127.0.0.1:{0}/{1}' -f $Port, $endpoint
+    ) -ExpectedStatus $expectedStatus
 }
 
 function Request-MineGuardGracefulShutdown {
@@ -1135,16 +1265,6 @@ function Request-MineGuardGracefulShutdown {
     }
 }
 
-function New-SecureStringFromTextBox {
-    param([System.Windows.Forms.TextBox] $TextBox)
-    $secure = New-Object Security.SecureString
-    foreach ($character in $TextBox.Text.ToCharArray()) {
-        $secure.AppendChar($character)
-    }
-    $secure.MakeReadOnly()
-    return $secure
-}
-
 function New-MineGuardLocalControlToken {
     $bytes = New-Object byte[] 32
     $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -1156,44 +1276,32 @@ function New-MineGuardLocalControlToken {
     return ([BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
 }
 
-function Start-ConfigurationOperation {
+function Start-DemoConfigurationOperation {
     param(
-        [ValidateSet('demo', 'formal')] [string] $Mode,
         [string] $StateDirectory,
         [int] $Port,
-        [string] $ClientsFile,
-        [string] $AdminUsername,
-        [Security.SecureString] $AdminPassword,
         [string] $ThroughMonth
     )
-    if ($null -ne $script:OperationPowerShell) {
+    if ($null -ne $script:OperationPowerShell -or
+        $null -ne $script:FormalConfigProcess) {
         Add-Log '另一项配置操作仍在进行，请稍候。' 'warning'
-        if ($null -ne $AdminPassword) { $AdminPassword.Dispose() }
         return
     }
     Refresh-ConfigurationState
     $configureFirst = ($script:ConfigurationState.kind -eq 'pristine')
-    $canResumeDemo = (
-        $Mode -eq 'demo' -and
-        $script:ConfigurationState.kind -eq 'demo'
-    )
+    $canResumeDemo = ($script:ConfigurationState.kind -eq 'demo')
     if (-not $configureFirst -and -not $canResumeDemo) {
         Add-Log '检测到已有配置或状态数据；为防止覆盖，已取消首次配置。' 'error'
-        if ($null -ne $AdminPassword) { $AdminPassword.Dispose() }
         return
     }
 
     $worker = @'
 param(
-    [string] $Mode,
     [string] $InstallRoot,
     [string] $ResolverScript,
     [string] $ConfigScript,
     [string] $StateDirectory,
     [int] $Port,
-    [string] $ClientsFile,
-    [string] $AdminUsername,
-    [Security.SecureString] $AdminPassword,
     [string] $ThroughMonth,
     [bool] $ConfigureFirst
 )
@@ -1201,79 +1309,63 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 . $ResolverScript
 $runtime = Resolve-MineGuardPlatformExecutable -InstallRoot $InstallRoot
-if ($Mode -eq 'demo') {
-    if ($ConfigureFirst) {
-        Write-Information '正在应用受保护的本机配置...' -InformationAction Continue
-        $parameters = @{
-            InstallRoot = $InstallRoot
-            StateDirectory = $StateDirectory
-            Port = $Port
-            AdminUsername = 'admin'
-            DemoWithoutClientRegistry = $true
-            AllowDemoDefaultPassword = $true
-            HttpOnlyDemo = $true
-            NonInteractive = $true
-        }
-        & $ConfigScript @parameters
-        Write-Information '受保护的本机配置已完成。' -InformationAction Continue
-    } else {
-        Write-Information '已有演示配置；本次只补齐或核验演示数据，不改写配置。' -InformationAction Continue
-    }
-    Write-Information '正在生成或核验演示数据，请稍候...' -InformationAction Continue
-    $seedArguments = Join-MineGuardPlatformArguments -Runtime $runtime -Arguments @(
-        'seed-v2-demo', '--state-directory', $StateDirectory,
-        '--through-month', $ThroughMonth
-    )
-    $seedOutput = & $runtime.filePath @seedArguments
-    $seedExitCode = $LASTEXITCODE
-    if ($seedExitCode -ne 0) {
-        throw "演示数据生成失败，运行时退出码：$seedExitCode"
-    }
-    try {
-        $seedResult = $seedOutput | Out-String | ConvertFrom-Json
-        $mineCount = [int]$seedResult.mine_count
-        $submissionCount = [int]$seedResult.submission_count
-    } catch {
-        throw "演示数据生成结果无法核验：$($_.Exception.Message)"
-    }
-    if ([string]$seedResult.schema_version -ne
-            'mineguard-regulatory-v2-demo-v3' -or
-        $mineCount -ne 10 -or $submissionCount -ne 26 -or
-        $seedResult.demo_dataset -ne $true -or
-        $seedResult.contains_workbook_examples -ne $true) {
-        throw '演示数据未达到受控样例的 10 座煤矿、26 期报送，已拒绝启动不完整页面。'
-    }
-    Write-Information (
-        '演示数据已准备完成：{0} 座煤矿、{1} 期报送。' -f
-        $mineCount, $submissionCount
-    ) -InformationAction Continue
-} else {
-    Write-Information '正在校验 clients.json 并原子保存正式配置...' -InformationAction Continue
+if ($ConfigureFirst) {
+    Write-Information '正在应用受保护的本机配置...' -InformationAction Continue
     $parameters = @{
         InstallRoot = $InstallRoot
         StateDirectory = $StateDirectory
         Port = $Port
-        ClientsFile = $ClientsFile
-        AdminUsername = $AdminUsername
-        AdminPassword = $AdminPassword
+        AdminUsername = 'admin'
+        DemoWithoutClientRegistry = $true
+        AllowDemoDefaultPassword = $true
+        HttpOnlyDemo = $true
         NonInteractive = $true
     }
     & $ConfigScript @parameters
+    Write-Information '受保护的本机配置已完成。' -InformationAction Continue
+} else {
+    Write-Information '已有演示配置；本次只补齐或核验演示数据，不改写配置。' -InformationAction Continue
 }
+Write-Information '正在生成或核验演示数据，请稍候...' -InformationAction Continue
+$seedArguments = Join-MineGuardPlatformArguments -Runtime $runtime -Arguments @(
+    'seed-v2-demo', '--state-directory', $StateDirectory,
+    '--through-month', $ThroughMonth
+)
+$seedOutput = & $runtime.filePath @seedArguments
+$seedExitCode = $LASTEXITCODE
+if ($seedExitCode -ne 0) {
+    throw "演示数据生成失败，运行时退出码：$seedExitCode"
+}
+try {
+    $seedResult = $seedOutput | Out-String | ConvertFrom-Json
+    $mineCount = [int]$seedResult.mine_count
+    $submissionCount = [int]$seedResult.submission_count
+} catch {
+    throw "演示数据生成结果无法核验：$($_.Exception.Message)"
+}
+if ([string]$seedResult.schema_version -ne
+        'mineguard-regulatory-v2-demo-v3' -or
+    $mineCount -ne 10 -or $submissionCount -ne 26 -or
+    $seedResult.demo_dataset -ne $true -or
+    $seedResult.contains_workbook_examples -ne $true) {
+    throw '演示数据未达到受控样例的 10 座煤矿、26 期报送，已拒绝启动不完整页面。'
+}
+Write-Information (
+    '演示数据已准备完成：{0} 座煤矿、{1} 期报送。' -f
+    $mineCount, $submissionCount
+) -InformationAction Continue
 Write-Information '一键准备操作已完成。' -InformationAction Continue
 '@
 
     $script:OperationPowerShell = [System.Management.Automation.PowerShell]::Create()
     [void]$script:OperationPowerShell.AddScript($worker)
     foreach ($argument in @(
-        $Mode, $InstallRoot, $resolverScript, $configScript, $StateDirectory,
-        $Port, $ClientsFile, $AdminUsername, $AdminPassword, $ThroughMonth,
-        $configureFirst
+        $InstallRoot, $resolverScript, $configScript, $StateDirectory,
+        $Port, $ThroughMonth, $configureFirst
     )) {
         [void]$script:OperationPowerShell.AddArgument($argument)
     }
-    $script:OperationPurpose = $Mode
-    $script:OperationSecureString = $AdminPassword
+    $script:OperationPurpose = 'demo'
     $script:OperationStreamOffsets = @{
         Error = 0; Warning = 0; Information = 0; Verbose = 0
     }
@@ -1281,22 +1373,141 @@ Write-Information '一键准备操作已完成。' -InformationAction Continue
         $script:OperationAsync = $script:OperationPowerShell.BeginInvoke()
         Set-BusyState -Busy $true
         $statusLabel.Text = '正在配置...'
-        $operationMessage = if ($Mode -eq 'demo') {
-            '开始一键准备本机展示。'
-        } else {
-            '开始正式首次配置；密码不会显示在日志或命令行。'
-        }
-        Add-Log $operationMessage
+        Add-Log '开始一键准备本机展示。'
     } catch {
         $script:OperationPowerShell.Dispose()
         $script:OperationPowerShell = $null
         $script:OperationAsync = $null
-        if ($null -ne $script:OperationSecureString) {
-            $script:OperationSecureString.Dispose()
-            $script:OperationSecureString = $null
-        }
         Set-BusyState -Busy $false
         Add-Log "无法启动配置操作：$($_.Exception.Message)" 'error'
+    }
+}
+
+function Start-FormalConfigurationProcess {
+    param(
+        [string] $StateDirectory,
+        [int] $Port,
+        [string] $ClientsFile,
+        [string] $AdminUsername,
+        [string] $PlatformSystemId,
+        [string] $PlatformPartyId,
+        [string] $PlatformKeyId
+    )
+    if ($null -ne $script:OperationPowerShell -or
+        $null -ne $script:FormalConfigProcess) {
+        Add-Log '另一项配置或服务操作仍在进行，请稍候。' 'warning'
+        return
+    }
+    Refresh-ConfigurationState
+    if ($script:ConfigurationState.kind -ne 'pristine') {
+        Add-Log '检测到已有配置或状态数据；为防止覆盖，已取消正式首次配置。' 'error'
+        return
+    }
+    try {
+        $arguments = Join-NativeArguments -Arguments @(
+            '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+            '-File', $formalConfigHelper,
+            '-InstallRoot', $InstallRoot,
+            '-ClientsFile', $ClientsFile,
+            '-StateDirectory', $StateDirectory,
+            '-Port', [string]$Port,
+            '-AdminUsername', $AdminUsername,
+            '-PlatformSystemId', $PlatformSystemId,
+            '-PlatformPartyId', $PlatformPartyId,
+            '-PlatformKeyId', $PlatformKeyId
+        )
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $windowsPowerShell
+        $startInfo.Arguments = $arguments
+        $startInfo.WorkingDirectory = $InstallRoot
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.EnvironmentVariables.Remove('MINEGUARD_ADMIN_PASSWORD')
+        try {
+            $encoding = New-Object System.Text.UTF8Encoding($false)
+            $startInfo.StandardOutputEncoding = $encoding
+            $startInfo.StandardErrorEncoding = $encoding
+        } catch { }
+        $capture = New-Object MineGuardGuiProcessCapture
+        $capture.Start($startInfo)
+        $script:FormalConfigCapture = $capture
+        $script:FormalConfigProcess = $capture.Process
+        Set-BusyState -Busy $true
+        $statusLabel.Text = '等待独立安全密码窗口...'
+        Add-Log '已启动独立短生命周期正式配置 helper；主控制中心未接收密码。'
+    } catch {
+        if ($null -ne $script:FormalConfigCapture) {
+            $script:FormalConfigCapture.Dispose()
+        }
+        $script:FormalConfigCapture = $null
+        $script:FormalConfigProcess = $null
+        Set-BusyState -Busy $false
+        Add-Log "无法启动正式配置 helper：$($_.Exception.Message)" 'error'
+    }
+}
+
+function Start-ServiceInstallOperation {
+    param(
+        [string] $WinSWExecutable,
+        [string] $ExpectedSha256,
+        [string] $ExpectedConfigSha256,
+        [string] $ExpectedSignerThumbprint
+    )
+    if ($null -ne $script:OperationPowerShell -or
+        $null -ne $script:FormalConfigProcess) {
+        Add-Log '另一项配置或服务操作仍在进行，请稍候。' 'warning'
+        return
+    }
+    $worker = @'
+param(
+    [string] $ServiceInstallScript,
+    [string] $InstallRoot,
+    [string] $WinSWExecutable,
+    [string] $ExpectedSha256,
+    [string] $ExpectedConfigSha256,
+    [string] $ExpectedSignerThumbprint
+)
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$parameters = @{
+    WinSWExecutable = $WinSWExecutable
+    ExpectedSha256 = $ExpectedSha256
+    InstallRoot = $InstallRoot
+    Production = $true
+    ExpectedSignerThumbprint = $ExpectedSignerThumbprint
+    StartService = $true
+}
+if (-not [string]::IsNullOrWhiteSpace($ExpectedConfigSha256)) {
+    $parameters['ExpectedConfigSha256'] = $ExpectedConfigSha256
+}
+& $ServiceInstallScript @parameters
+'@
+    $script:OperationPowerShell = [System.Management.Automation.PowerShell]::Create()
+    [void]$script:OperationPowerShell.AddScript($worker)
+    foreach ($argument in @(
+        $serviceInstallScript, $InstallRoot, $WinSWExecutable,
+        $ExpectedSha256, $ExpectedConfigSha256, $ExpectedSignerThumbprint
+    )) {
+        [void]$script:OperationPowerShell.AddArgument($argument)
+    }
+    $script:OperationPurpose = 'service-install'
+    $script:OperationStreamOffsets = @{
+        Error = 0; Warning = 0; Information = 0; Verbose = 0
+    }
+    try {
+        $script:OperationAsync = $script:OperationPowerShell.BeginInvoke()
+        Set-BusyState -Busy $true
+        $statusLabel.Text = '正在核验并安装服务...'
+        Add-Log '开始正式服务安装；签名者指纹来自用户填写的线下审批记录。'
+    } catch {
+        $script:OperationPowerShell.Dispose()
+        $script:OperationPowerShell = $null
+        $script:OperationAsync = $null
+        $script:OperationPurpose = ''
+        Set-BusyState -Busy $false
+        Add-Log "无法启动服务安装操作：$($_.Exception.Message)" 'error'
     }
 }
 
@@ -1395,7 +1606,6 @@ function Start-ConfiguredServer {
         $script:BrowserOpened = $false
         $script:BrowserAutoAttempted = $false
         $script:HealthConfirmed = $false
-        $script:ClearBootstrapAttempted = $false
         $script:LastHealthCheck = [DateTime]::MinValue
         $script:ServerStartedAt = Get-Date
         $script:HealthDelayReported = $false
@@ -1412,33 +1622,6 @@ function Start-ConfiguredServer {
         Add-Log "启动失败：$($_.Exception.Message)" 'error'
         $statusLabel.Text = '启动失败'
         $statusLabel.ForeColor = $red
-    }
-}
-
-function Clear-BootstrapPasswordIfPresent {
-    if ($script:ClearBootstrapAttempted) { return }
-    $script:ClearBootstrapAttempted = $true
-    $bootstrapPath = Join-Path (Join-Path $InstallRoot 'config') `
-        'bootstrap-admin-password.txt'
-    if (-not (Test-Path -LiteralPath $bootstrapPath -PathType Leaf)) { return }
-    $clearPowerShell = $null
-    try {
-        $clearPowerShell = [System.Management.Automation.PowerShell]::Create()
-        [void]$clearPowerShell.AddCommand($configScript)
-        [void]$clearPowerShell.AddParameter('InstallRoot', $InstallRoot)
-        [void]$clearPowerShell.AddParameter('ClearBootstrapPassword')
-        $result = $clearPowerShell.Invoke()
-        if ($clearPowerShell.HadErrors) {
-            throw [string]$clearPowerShell.Streams.Error[0]
-        }
-        Add-Log '首次管理员明文密码文件已由受保护脚本清除。' 'success'
-    } catch {
-        Add-Log (
-            '服务已启动，但首次密码文件自动清除失败。请不要关闭本窗口，并联系管理员处理：' +
-            $_.Exception.Message
-        ) 'error'
-    } finally {
-        if ($null -ne $clearPowerShell) { $clearPowerShell.Dispose() }
     }
 }
 
@@ -1524,6 +1707,49 @@ function Stop-StartedServer {
     }
 }
 
+function Stop-FormalConfigurationProcess {
+    if ($null -eq $script:FormalConfigProcess) { return $true }
+    try {
+        $processId = [string]$script:FormalConfigProcess.Id
+        if (-not $script:FormalConfigProcess.HasExited) {
+            try { [void]$script:FormalConfigProcess.CloseMainWindow() }
+            catch { }
+            [void]$script:FormalConfigProcess.WaitForExit(3000)
+        }
+        if (-not $script:FormalConfigProcess.HasExited) {
+            $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+            $stopInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $stopInfo.FileName = $taskKill
+            $stopInfo.Arguments = Join-NativeArguments -Arguments @(
+                '/PID', $processId, '/T', '/F'
+            )
+            $stopInfo.UseShellExecute = $false
+            $stopInfo.CreateNoWindow = $true
+            $stopProcess = [Diagnostics.Process]::Start($stopInfo)
+            if ($null -eq $stopProcess -or
+                -not $stopProcess.WaitForExit(10000)) {
+                if ($null -ne $stopProcess) { $stopProcess.Dispose() }
+                throw '独立正式配置 helper 未能在限定时间内停止。'
+            }
+            $taskKillExitCode = $stopProcess.ExitCode
+            $stopProcess.Dispose()
+            [void]$script:FormalConfigProcess.WaitForExit(5000)
+            if (-not $script:FormalConfigProcess.HasExited) {
+                throw "精确终止正式配置 helper 后进程仍在运行，taskkill 退出码 $taskKillExitCode。"
+            }
+        }
+        if ($null -ne $script:FormalConfigCapture) {
+            $script:FormalConfigCapture.Dispose()
+        }
+        $script:FormalConfigCapture = $null
+        $script:FormalConfigProcess = $null
+        return $true
+    } catch {
+        Add-Log "停止正式配置 helper 失败：$($_.Exception.Message)" 'error'
+        return $false
+    }
+}
+
 $clientsBrowse.Add_Click({
         $dialog = New-Object System.Windows.Forms.OpenFileDialog
         $dialog.Title = '选择单位批准的 clients.json'
@@ -1532,6 +1758,18 @@ $clientsBrowse.Add_Click({
         $dialog.Multiselect = $false
         if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
             $clientsText.Text = $dialog.FileName
+        }
+        $dialog.Dispose()
+    })
+
+$winSWBrowse.Add_Click({
+        $dialog = New-Object System.Windows.Forms.OpenFileDialog
+        $dialog.Title = '选择单位批准的 WinSW x64 可执行文件'
+        $dialog.Filter = '可执行文件 (*.exe)|*.exe|所有文件|*.*'
+        $dialog.CheckFileExists = $true
+        $dialog.Multiselect = $false
+        if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $winSWText.Text = $dialog.FileName
         }
         $dialog.Dispose()
     })
@@ -1575,14 +1813,10 @@ $demoButton.Add_Click({
             ) 'error'
             return
         }
-        $emptyPassword = New-Object Security.SecureString
-        $emptyPassword.MakeReadOnly()
         $throughMonth = '{0:yyyy-MM-dd}' -f
             $monthPicker.Value.Date.AddMonths(1).AddDays(-1)
-        Start-ConfigurationOperation -Mode demo `
+        Start-DemoConfigurationOperation `
             -StateDirectory $demoPath.Text -Port $requestedDemoPort `
-            -ClientsFile '' `
-            -AdminUsername 'admin' -AdminPassword $emptyPassword `
             -ThroughMonth $throughMonth
     })
 
@@ -1602,6 +1836,31 @@ $formalButton.Add_Click({
             Add-Log '管理员用户名必须包含 1-128 个字符。' 'error'
             return
         }
+        $identityPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        $selectedPlatformSystemId = $platformSystemInput.Text.Trim()
+        $selectedPlatformPartyId = $platformPartyInput.Text.Trim()
+        $selectedPlatformKeyId = $platformKeyInput.Text.Trim()
+        $identityValues = @(
+            [pscustomobject]@{
+                Label = 'Platform 系统 ID'; Value = $selectedPlatformSystemId
+            },
+            [pscustomobject]@{
+                Label = '监管主体 ID'; Value = $selectedPlatformPartyId
+            },
+            [pscustomobject]@{
+                Label = '政府签名 key ID'; Value = $selectedPlatformKeyId
+            }
+        )
+        foreach ($identityValue in $identityValues) {
+            if ($identityValue.Value -cnotmatch $identityPattern) {
+                Add-Log ($identityValue.Label + '格式无效；请核对后重试。') 'error'
+                return
+            }
+        }
+        if ($selectedPlatformSystemId -ceq $selectedPlatformPartyId) {
+            Add-Log 'Platform 系统 ID 与监管主体 ID 不能相同。' 'error'
+            return
+        }
         $requestedFormalPort = [int]$portInput.Value
         if (-not (Test-LocalPortAvailable -Port $requestedFormalPort)) {
             Add-Log (
@@ -1619,32 +1878,69 @@ $formalButton.Add_Click({
                 return
             }
         }
-        $passwordText = $passwordInput.Text
-        $confirmText = $confirmInput.Text
-        if ($passwordText -ne $confirmText) {
-            Add-Log '两次输入的管理员密码不一致。' 'error'
-            $passwordText = $null
-            $confirmText = $null
-            return
-        }
-        if ($passwordText.Length -lt 12 -or
-            $passwordText -notmatch '[A-Za-z]' -or
-            $passwordText -notmatch '[0-9]' -or
-            $passwordText -eq '123123123') {
-            Add-Log '正式管理员密码至少 12 位，并同时包含字母和数字，且不能使用演示默认密码。' 'error'
-            $passwordText = $null
-            $confirmText = $null
-            return
-        }
-        $securePassword = New-SecureStringFromTextBox -TextBox $passwordInput
-        $passwordInput.Clear()
-        $confirmInput.Clear()
-        $passwordText = $null
-        $confirmText = $null
-        Start-ConfigurationOperation -Mode formal `
+        Start-FormalConfigurationProcess `
             -StateDirectory $formalState.Text -Port $requestedFormalPort `
             -ClientsFile $clientsText.Text -AdminUsername $adminInput.Text `
-            -AdminPassword $securePassword -ThroughMonth '2026-07-31'
+            -PlatformSystemId $selectedPlatformSystemId `
+            -PlatformPartyId $selectedPlatformPartyId `
+            -PlatformKeyId $selectedPlatformKeyId
+    })
+
+$serviceInstallButton.Add_Click({
+        Refresh-ConfigurationState
+        if ($script:ConfigurationState.kind -ne 'formal') {
+            Add-Log '请先完成正式内网配置和前台验收，再安装正式服务。' 'error'
+            return
+        }
+        if ($null -ne $script:ServerProcess -and
+            -not $script:ServerProcess.HasExited) {
+            Add-Log '请先点击【停止本次启动】，释放端口后再安装 Windows 服务。' 'error'
+            return
+        }
+        if ($null -ne (Get-Service -Name 'MineGuardPlatform' `
+                -ErrorAction SilentlyContinue)) {
+            Add-Log 'MineGuardPlatform 服务已经存在；向导不会隐式覆盖或重装。' 'error'
+            return
+        }
+        $winSWPathValue = $winSWText.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($winSWPathValue) -or
+            $winSWPathValue -notmatch '^[A-Za-z]:\\' -or
+            -not (Test-Path -LiteralPath $winSWPathValue -PathType Leaf)) {
+            Add-Log '请选择本机磁盘上实际存在、经单位批准的 WinSW x64 文件。' 'error'
+            return
+        }
+        $approvedWinSW = $winSWSha256Text.Text.Trim()
+        if ($approvedWinSW -notmatch '^[A-Fa-f0-9]{64}$') {
+            Add-Log 'WinSW SHA-256 必须是线下审批记录中的 64 位十六进制值。' 'error'
+            return
+        }
+        $approvedConfig = $winSWConfigSha256Text.Text.Trim()
+        $companionConfig = $winSWPathValue + '.config'
+        if (Test-Path -LiteralPath $companionConfig -PathType Leaf) {
+            if ($approvedConfig -notmatch '^[A-Fa-f0-9]{64}$') {
+                Add-Log '所选 WinSW 带 .config；必须填写其线下批准的 64 位 SHA-256。' 'error'
+                return
+            }
+        } elseif (-not [string]::IsNullOrWhiteSpace($approvedConfig)) {
+            Add-Log '所选 WinSW 不带 companion .config；对应 SHA-256 必须留空。' 'error'
+            return
+        }
+        $approvedSigner = ($signerThumbprintText.Text -replace '\s', '').ToUpperInvariant()
+        if ($approvedSigner -notmatch '^[A-F0-9]{40}$') {
+            Add-Log '签名者指纹必须是从介质外审批记录取得的 40 位证书 SHA-1 指纹。' 'error'
+            return
+        }
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            '请确认 WinSW 摘要和 Platform 签名者指纹均来自待安装介质之外的单位审批记录。继续后将安装并启动正式 Windows 服务。',
+            '确认外部信任锚',
+            [System.Windows.Forms.MessageBoxButtons]::OKCancel,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        if ($answer -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        Start-ServiceInstallOperation -WinSWExecutable $winSWPathValue `
+            -ExpectedSha256 $approvedWinSW.ToUpperInvariant() `
+            -ExpectedConfigSha256 $approvedConfig.ToUpperInvariant() `
+            -ExpectedSignerThumbprint $approvedSigner
     })
 
 $startCurrentButton.Add_Click({ Start-ConfiguredServer -Mode existing })
@@ -1668,11 +1964,11 @@ function Write-ServerCaptureLine {
     # The GUI itself probes health every two seconds.  These successful access
     # lines are not useful to an operator and previously filled the pane with
     # misleading red "errors" because BaseHTTPRequestHandler logs to stderr.
-    if ($text -match '"GET /healthz HTTP/1\.1" 200 (?:-|[0-9]+)$') { return }
+    if ($text -match '"GET /(?:healthz|readyz) HTTP/1\.1" 200 (?:-|[0-9]+)$') { return }
     $level = 'info'
     if ($isStandardError) {
         if ($text -match '" [23][0-9]{2} (?:-|[0-9]+)$' -or
-            $text -match '^(首次管理员账号|本机演示默认密码|管理员密码来自环境变量|MineGuard ·|状态目录：|业务前端只读)') {
+            $text -match '^(首次管理员账号|本机演示默认密码|MineGuard ·|状态目录：|业务前端只读)') {
             $level = 'info'
         } elseif ($text -match '" 4[0-9]{2} (?:-|[0-9]+)$') {
             $level = 'warning'
@@ -1685,9 +1981,67 @@ function Write-ServerCaptureLine {
     Add-Log $text $level
 }
 
+function Write-ShortProcessCaptureLine {
+    param([string] $Line)
+    if ([string]::IsNullOrWhiteSpace($Line)) { return }
+    $isStandardError = $Line.StartsWith('[STDERR] ')
+    $text = if ($isStandardError -or $Line.StartsWith('[STDOUT] ')) {
+        $Line.Substring(9)
+    } else { $Line }
+    if ([string]::IsNullOrWhiteSpace($text)) { return }
+    if ($text -match '(?i)(MINEGUARD_ADMIN_PASSWORD|AdminPassword\s*[:=])') {
+        Add-Log '独立 helper 返回了疑似敏感字段标签；该行已隐藏，请查看受控事件记录。' 'warning'
+        return
+    }
+    if ($text.Length -gt 2048) {
+        $text = $text.Substring(0, 2048) + '…[已截断]'
+    }
+    Add-Log $text $(if ($isStandardError) { 'error' } else { 'info' })
+}
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 250
 $timer.Add_Tick({
+        if ($null -ne $script:FormalConfigCapture) {
+            $formalLine = $null
+            while ($script:FormalConfigCapture.Lines.TryDequeue(
+                    [ref]$formalLine
+                )) {
+                Write-ShortProcessCaptureLine -Line $formalLine
+                $formalLine = $null
+            }
+            if ($script:FormalConfigProcess.HasExited) {
+                [void]$script:FormalConfigProcess.WaitForExit()
+                while ($script:FormalConfigCapture.Lines.TryDequeue(
+                        [ref]$formalLine
+                    )) {
+                    Write-ShortProcessCaptureLine -Line $formalLine
+                    $formalLine = $null
+                }
+                $formalExitCode = $script:FormalConfigProcess.ExitCode
+                $script:FormalConfigCapture.Dispose()
+                $script:FormalConfigCapture = $null
+                $script:FormalConfigProcess = $null
+                Refresh-ConfigurationState
+                if ($formalExitCode -eq 0 -and
+                    $script:ConfigurationState.kind -eq 'formal') {
+                    $statusLabel.Text = '正式配置完成，正在启动'
+                    $statusLabel.ForeColor = $green
+                    Add-Log '独立短生命周期 helper 已退出；主控制中心从未接收管理员密码。' 'success'
+                    Start-ConfiguredServer -Mode formal
+                } elseif ($formalExitCode -eq 3) {
+                    $statusLabel.Text = '已取消正式配置'
+                    $statusLabel.ForeColor = $muted
+                    Add-Log '正式配置已取消，未写入密码或配置。' 'warning'
+                    Set-BusyState -Busy $false
+                } else {
+                    $statusLabel.Text = '正式配置失败'
+                    $statusLabel.ForeColor = $red
+                    Add-Log "独立正式配置 helper 失败，退出码：$formalExitCode。" 'error'
+                    Set-BusyState -Busy $false
+                }
+            }
+        }
         if ($null -ne $script:OperationPowerShell) {
             Copy-OperationStreams
             if ($script:OperationAsync.IsCompleted) {
@@ -1712,21 +2066,26 @@ $timer.Add_Tick({
                 $script:OperationPowerShell.Dispose()
                 $script:OperationPowerShell = $null
                 $script:OperationAsync = $null
-                if ($null -ne $script:OperationSecureString) {
-                    $script:OperationSecureString.Dispose()
-                    $script:OperationSecureString = $null
-                }
                 $script:OperationPurpose = ''
                 Refresh-ConfigurationState
                 if ($operationFailed) {
-                    $statusLabel.Text = '配置失败'
+                    $statusLabel.Text = if ($purpose -eq 'service-install') {
+                        '服务安装失败'
+                    } else { '配置失败' }
                     $statusLabel.ForeColor = $red
-                    if ($purpose -eq 'demo' -and
+                    if ($purpose -eq 'service-install') {
+                        Add-Log '正式服务未安装或已安全回滚；请按上方错误核对审批值后重试。' 'error'
+                    } elseif ($purpose -eq 'demo' -and
                         $script:ConfigurationState.kind -eq 'demo') {
                         Add-Log '安全配置已保存，但演示数据未准备完成。修正上方问题后，再点击【补齐数据并启动展示】。' 'error'
                     } else {
                         Add-Log '准备未完成。配置文件事务已自动回滚；请按上方错误检查后重试。' 'error'
                     }
+                } elseif ($purpose -eq 'service-install') {
+                    $statusLabel.Text = '正式服务已安装并启动'
+                    $statusLabel.ForeColor = $green
+                    Add-Log 'MineGuardPlatform 正式 Windows 服务已安装并通过健康检查。' 'success'
+                    Set-BusyState -Busy $false
                 } else {
                     $statusLabel.Text = '配置完成，正在启动'
                     $statusLabel.ForeColor = $green
@@ -1768,16 +2127,18 @@ $timer.Add_Tick({
                 Set-BusyState -Busy $false
             } elseif (((Get-Date) - $script:LastHealthCheck).TotalSeconds -ge 2) {
                 $script:LastHealthCheck = Get-Date
-                if (Test-MineGuardHealth -Port $script:ServerPort) {
+                $requireReady = ($script:ServerMode -eq 'formal')
+                if (Test-MineGuardHealth -Port $script:ServerPort `
+                        -RequireReady:$requireReady) {
                     if (-not $script:HealthConfirmed) {
                         $script:HealthConfirmed = $true
                         $statusLabel.Text = '服务正常'
                         $statusLabel.ForeColor = $green
                         Add-Log (
-                            '健康检查通过：http://127.0.0.1:{0}/' -f
+                            '{0}检查通过：http://127.0.0.1:{1}/' -f
+                            $(if ($requireReady) { '正式就绪' } else { '健康' }),
                             $script:ServerPort
                         ) 'success'
-                        Clear-BootstrapPasswordIfPresent
                     }
                     $shouldOpenDemo = ($script:ServerMode -eq 'demo')
                     $shouldOpenFormal = (
@@ -1805,13 +2166,26 @@ $form.Add_FormClosing({
         if ($script:ClosingApproved) { return }
         if ($null -ne $script:OperationPowerShell) {
             [void][System.Windows.Forms.MessageBox]::Show(
-                '配置事务正在执行，请等待完成后再关闭。',
+                '配置或服务事务正在执行，请等待操作退出后再关闭。',
                 '请稍候',
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Information
             )
             $eventArgs.Cancel = $true
             return
+        }
+        if ($null -ne $script:FormalConfigProcess) {
+            $answer = [System.Windows.Forms.MessageBox]::Show(
+                '关闭会精确终止独立正式配置 helper。若配置事务已开始，下次启动将按阻断标记拒绝并要求管理员恢复。是否继续？',
+                '确认终止安全配置窗口',
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            )
+            if ($answer -ne [System.Windows.Forms.DialogResult]::Yes -or
+                -not (Stop-FormalConfigurationProcess)) {
+                $eventArgs.Cancel = $true
+                return
+            }
         }
         if ($null -ne $script:ServerProcess -and
             -not $script:ServerProcess.HasExited) {
@@ -1839,8 +2213,9 @@ $form.Add_FormClosed({
             try { $script:OperationPowerShell.Stop() } catch { }
             $script:OperationPowerShell.Dispose()
         }
-        if ($null -ne $script:OperationSecureString) {
-            $script:OperationSecureString.Dispose()
+        if ($null -ne $script:FormalConfigCapture -or
+            $null -ne $script:FormalConfigProcess) {
+            [void](Stop-FormalConfigurationProcess)
         }
         if ($null -ne $script:ServerCapture) {
             $script:ServerCapture.Dispose()

@@ -23,6 +23,19 @@ from typing import Any
 PASSWORD_SCHEME = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 600_000
 SESSION_COOKIE_NAME = "enterprise_agent_session"
+PRODUCTION_CREDENTIAL_PROVENANCES = frozenset(
+    {
+        "production_hash_command",
+        "secret_manager_generated",
+        "verified_migration",
+    }
+)
+_KNOWN_INSECURE_PASSWORDS = (
+    "123123123",
+    "12345678",
+    "password",
+    "admin123",
+)
 KNOWN_PERMISSIONS = frozenset(
     {
         "read",
@@ -84,6 +97,11 @@ class UserAccount:
     permissions: frozenset[str]
     must_change_password: bool = False
     temporary_demo: bool = False
+    # Password hashes cannot prove how the original password was selected.
+    # Production therefore requires an explicit, auditable provenance claim.
+    # ``unspecified`` preserves compatibility with existing development JSON,
+    # while the production config gate rejects it.
+    credential_provenance: str = "unspecified"
 
     def principal(self) -> Principal:
         return Principal(
@@ -196,6 +214,54 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
+def validate_production_password(password: str) -> None:
+    """Reject passwords unsuitable for a newly provisioned formal account."""
+
+    if isinstance(password, str) and password.casefold() in {
+        value.casefold() for value in _KNOWN_INSECURE_PASSWORDS
+    }:
+        raise ValueError("正式账号密码不得使用演示或常见默认密码")
+    if not isinstance(password, str) or not 12 <= len(password) <= 1_024:
+        raise ValueError("正式账号密码长度必须为 12-1024 个字符")
+    categories = sum(
+        (
+            any(character.islower() for character in password),
+            any(character.isupper() for character in password),
+            any(character.isdigit() for character in password),
+            any(not character.isalnum() for character in password),
+        )
+    )
+    if categories < 3:
+        raise ValueError("正式账号密码至少应包含大小写字母、数字、符号中的三类")
+
+
+def production_credential_errors(account: UserAccount) -> tuple[str, ...]:
+    """Return account-local credential defects detectable from configuration."""
+
+    errors: list[str] = []
+    if account.must_change_password:
+        errors.append("仍标记为必须换密")
+    if account.temporary_demo:
+        errors.append("仍标记为演示账号")
+    if account.credential_provenance not in PRODUCTION_CREDENTIAL_PROVENANCES:
+        errors.append(
+            "未声明可信 credential_provenance（应使用 production_hash_command、"
+            "secret_manager_generated 或 verified_migration）"
+        )
+    try:
+        iterations = int(account.password_hash.split("$", 3)[1])
+    except (IndexError, ValueError):
+        iterations = 0
+    if iterations < PASSWORD_ITERATIONS:
+        errors.append(f"PBKDF2 迭代次数低于正式基线 {PASSWORD_ITERATIONS}")
+    if any(
+        verify_password(candidate, account.password_hash)
+        for candidate in _KNOWN_INSECURE_PASSWORDS
+    ):
+        errors.append("使用了演示或已知常见默认密码")
+    return tuple(errors)
+
+
 def _text(record: dict[str, Any], field: str) -> str:
     value = record.get(field)
     if not isinstance(value, str) or not value.strip() or len(value.strip()) > 128:
@@ -277,6 +343,20 @@ def parse_users_json(raw: str | None) -> tuple[UserAccount, ...]:
         must_change = record.get("must_change_password", False)
         if not isinstance(must_change, bool):
             raise ValueError("must_change_password 必须是布尔值")
+        credential_provenance = record.get(
+            "credential_provenance",
+            "unspecified",
+        )
+        if (
+            not isinstance(credential_provenance, str)
+            or credential_provenance
+            not in PRODUCTION_CREDENTIAL_PROVENANCES | {"unspecified"}
+        ):
+            raise ValueError(
+                "credential_provenance 必须是 unspecified、"
+                "production_hash_command、secret_manager_generated 或 "
+                "verified_migration"
+            )
         accounts.append(
             UserAccount(
                 actor_id=actor_id,
@@ -285,6 +365,7 @@ def parse_users_json(raw: str | None) -> tuple[UserAccount, ...]:
                 password_hash=password_hash,
                 permissions=permission_set,
                 must_change_password=must_change,
+                credential_provenance=credential_provenance,
             )
         )
         seen.add(actor_id)
@@ -316,6 +397,7 @@ def demo_account() -> UserAccount:
         permissions=frozenset({"read", "write"}),
         must_change_password=True,
         temporary_demo=True,
+        credential_provenance="unspecified",
     )
 
 

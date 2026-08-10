@@ -38,7 +38,7 @@ def build_runtime_manifest() -> dict[str, object]:
     return {
         "schema_version": "mineguard.runtime.v1",
         "application": {
-            "name": "mineguard-mvp",
+            "name": "mineguard-platform",
             "version": __version__,
         },
         "python": {

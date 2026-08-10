@@ -157,7 +157,7 @@ def test_governance_schema_migrates_and_legacy_rows_fail_closed(
                 "PRAGMA table_info(agent_skill_versions)"
             ).fetchall()
         }
-    assert version["version"] == 8
+    assert version["version"] == 9
     assert {
         "runtime_activation",
         "revision",
@@ -302,7 +302,7 @@ def test_schema_migration_is_serialized_between_repository_instances(
 
     with ThreadPoolExecutor(max_workers=12) as pool:
         versions = list(pool.map(open_repository, range(24)))
-    assert versions == [8] * 24
+    assert versions == [9] * 24
 
 
 def test_future_schema_version_refuses_downgrade(tmp_path: Path) -> None:

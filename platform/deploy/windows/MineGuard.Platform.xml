@@ -7,7 +7,7 @@
   <arguments>-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BASE%\Start-MineGuardPlatform.ps1" -InstallRoot "%BASE%\.."</arguments>
   <workingdirectory>%BASE%</workingdirectory>
   <serviceaccount>
-    <username>NT AUTHORITY\LocalService</username>
+    <username>NT SERVICE\MineGuardPlatform</username>
   </serviceaccount>
   <startmode>Automatic</startmode>
   <delayedAutoStart>true</delayedAutoStart>

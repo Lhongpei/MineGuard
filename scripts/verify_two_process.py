@@ -4,7 +4,8 @@
 The script deliberately uses only Python's standard library.  It starts each
 application in its own subprocess with an application-specific ``PYTHONPATH``
 and exercises the public HTTP/JSON contracts.  It does not import either
-application package.
+application package.  The default workflow covers the current V2 exchange;
+the retired V1 workflow is available only through an explicit legacy flag.
 """
 
 from __future__ import annotations
@@ -276,7 +277,7 @@ def _transport_headers(
 def _password_hash(password: str) -> str:
     """Generate the documented enterprise account PBKDF2 representation."""
 
-    iterations = 100_000
+    iterations = 600_000
     salt = secrets.token_bytes(18)
     digest = hashlib.pbkdf2_hmac(
         "sha256",
@@ -521,6 +522,29 @@ def _login_platform(
     csrf = payload.get("csrf_token") if isinstance(payload, dict) else None
     if not cookie or not isinstance(csrf, str) or not csrf:
         raise VerificationError("监管平台登录响应缺少会话或 CSRF")
+    return cookie, csrf
+
+
+def _login_platform_v2(
+    port: int,
+    *,
+    username: str,
+    password: str,
+) -> tuple[str, str]:
+    payload, headers = _expect(
+        _request(
+            port,
+            "POST",
+            "/v2/auth/login",
+            payload={"username": username, "password": password},
+        ),
+        200,
+        "登录 V2 监管平台",
+    )
+    cookie = headers.get("set-cookie", "").split(";", 1)[0]
+    csrf = payload.get("csrf_token") if isinstance(payload, dict) else None
+    if not cookie or not isinstance(csrf, str) or not csrf:
+        raise VerificationError("V2 监管平台登录响应缺少会话或 CSRF")
     return cookie, csrf
 
 
@@ -1776,8 +1800,11 @@ def _application_environment(source_root: Path) -> dict[str, str]:
             name.startswith("DEEPSEEK_")
             or name.startswith("OPENAI_")
             or name.startswith("MINEGUARD_")
-            or name.startswith("ENTERPRISE_AGENT_")
+            or name.startswith("ENTERPRISE_")
+            or name.startswith("REGULATORY_")
             or name.startswith("PLATFORM_")
+            or name.startswith("AGENT_V2_")
+            or name.startswith("COAL_NEWS_")
             or name == "PYTHONPATH"
         ):
             environment.pop(name, None)
@@ -2120,7 +2147,7 @@ def _verify_public_origin_proxy_boundary(
         raise VerificationError("反向代理边界测试退出后仍残留监听进程")
 
 
-def verify(
+def verify_legacy(
     *,
     timeout: float,
     platform_python: str | None,
@@ -2831,6 +2858,724 @@ def verify(
     return result
 
 
+def _previous_complete_month_csv() -> tuple[str, str, str, int, bytes]:
+    """Build a deterministic, complete prior-month CSV without model input."""
+
+    current_month_start = datetime.now(UTC).date().replace(day=1)
+    month_end = current_month_start - timedelta(days=1)
+    month_start = month_end.replace(day=1)
+    lines = [
+        "date,ventilation_m3_min,mine_entry_persons,electricity_kwh,"
+        "detonators_count,explosives_kg,production_t"
+    ]
+    current = month_start
+    while current <= month_end:
+        offset = current.day - 1
+        # Keep the document contract-valid while introducing a deterministic
+        # within-month electricity/production change point.  This ensures the
+        # platform emits a response-required report, so delivery acknowledgement
+        # is exercised instead of stopping at a normal-candidate analysis.
+        electricity_kwh = 52_000 if current.day <= 10 else 83_200
+        lines.append(
+            ",".join(
+                (
+                    current.isoformat(),
+                    str(4_800 + (offset % 5) * 20),
+                    str(320 + (offset % 4)),
+                    str(electricity_kwh),
+                    str(120 + (offset % 3)),
+                    str(240 + (offset % 3) * 2),
+                    "2600",
+                )
+            )
+        )
+        current += timedelta(days=1)
+    content = ("\n".join(lines) + "\n").encode("utf-8")
+    return (
+        month_start.strftime("%Y-%m"),
+        month_start.isoformat(),
+        month_end.isoformat(),
+        month_end.day,
+        content,
+    )
+
+
+def _object_payload(value: Any, operation: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise VerificationError(f"{operation} 未返回 JSON 对象")
+    return value
+
+
+def _assert_agent_principal(
+    principal: dict[str, Any],
+    *,
+    actor_id: str,
+    permissions: set[str],
+    label: str,
+) -> None:
+    actual_permissions = principal.get("permissions")
+    if (
+        principal.get("actor_id") != actor_id
+        or not isinstance(actual_permissions, list)
+        or set(actual_permissions) != permissions
+        or principal.get("must_change_password") is not False
+        or principal.get("temporary_demo") is not False
+    ):
+        raise VerificationError(f"{label} 的具名身份或最小权限不符合 V2 验收配置")
+
+
+def _matching_analysis_report(
+    risks: dict[str, Any],
+    submission_message_id: str,
+) -> dict[str, Any] | None:
+    items = risks.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        report = item.get("report")
+        payload = report.get("payload") if isinstance(report, dict) else None
+        if (
+            isinstance(payload, dict)
+            and payload.get("submission_message_id") == submission_message_id
+        ):
+            return item
+    return None
+
+
+def verify_v2(
+    *,
+    timeout: float,
+    platform_python: str | None,
+    agent_python: str | None,
+) -> dict[str, Any]:
+    """Exercise the current one-mine V2 exchange as two black-box processes."""
+
+    platform_port = _unused_port()
+    agent_port = _unused_port()
+    while agent_port == platform_port:
+        agent_port = _unused_port()
+
+    token = secrets.token_hex(8)
+    mine_id = f"e2e-mine-{token}"
+    mine_name = "V2 双进程验收煤矿"
+    operator_id = f"e2e-operator-{token}"
+    operator_name = "V2 双进程验收煤业有限公司"
+    enterprise_system_id = f"agent-e2e-{token}"
+    regulatory_system_id = "mineguard-qinyuan"
+    regulatory_party_id = "regulator-qinyuan"
+    enterprise_key_id = f"enterprise-key-{token}"
+    regulatory_key_id = f"regulatory-key-{token}"
+    message_secret = secrets.token_hex(48)
+    transport_secret = secrets.token_hex(48)
+    while hmac.compare_digest(message_secret, transport_secret):
+        transport_secret = secrets.token_hex(48)
+    platform_admin_password = "A7!" + secrets.token_hex(24)
+    preparer_password = "B8!" + secrets.token_hex(24)
+    reviewer_password = "C9!" + secrets.token_hex(24)
+    preparer_id = f"preparer-{token}"
+    reviewer_id = f"reviewer-{token}"
+    reporting_month, period_start, period_end, day_count, csv_content = (
+        _previous_complete_month_csv()
+    )
+
+    comparison_context = {
+        "capacity_band": "medium",
+        "mining_method": "underground",
+        "shift_system": "three-shift-eight-hour",
+        "coal_type": "bituminous",
+        "operating_regime": "normal-production",
+    }
+    platform_clients = {
+        "clients": [
+            {
+                "sender_id": enterprise_system_id,
+                "party_id": operator_id,
+                "mine_id": mine_id,
+                "mine_name": mine_name,
+                "active_message_key_id": enterprise_key_id,
+                "message_keys": {enterprise_key_id: message_secret},
+                "transport_secrets": [transport_secret],
+                "comparison_context": comparison_context,
+            }
+        ]
+    }
+    agent_users = [
+        {
+            "actor_id": preparer_id,
+            "name": "验收经办员",
+            "role": "企业数据经办",
+            "password_hash": _password_hash(preparer_password),
+            "permissions": ["read", "write"],
+            "must_change_password": False,
+            "credential_provenance": "production_hash_command",
+        },
+        {
+            "actor_id": reviewer_id,
+            "name": "验收复核员",
+            "role": "企业复核负责人",
+            "password_hash": _password_hash(reviewer_password),
+            "permissions": ["read", "confirm", "submit"],
+            "must_change_password": False,
+            "credential_provenance": "production_hash_command",
+        },
+    ]
+    platform_executable = _python_for(PLATFORM_ROOT, platform_python)
+    agent_executable = _python_for(AGENT_ROOT, agent_python)
+    managed_processes: list[ManagedProcess] = []
+    redactions = (
+        platform_admin_password,
+        preparer_password,
+        reviewer_password,
+        message_secret,
+        transport_secret,
+    )
+    result: dict[str, Any] | None = None
+
+    with tempfile.TemporaryDirectory(
+        prefix="MineGuard V2 Two Process 验收 "
+    ) as temporary:
+        temporary_root = Path(temporary)
+        platform_state = temporary_root / "Platform V2 状态"
+        agent_database = temporary_root / "Agent V2 状态" / "enterprise-agent.db"
+        agent_database.parent.mkdir(parents=True, exist_ok=True)
+
+        platform_environment = _application_environment(PLATFORM_ROOT / "src")
+        platform_environment.update(
+            {
+                "MINEGUARD_ADMIN_PASSWORD": platform_admin_password,
+                "MINEGUARD_V2_CLIENTS_JSON": json.dumps(
+                    platform_clients,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                "MINEGUARD_V2_PLATFORM_SYSTEM_ID": regulatory_system_id,
+                "MINEGUARD_V2_PLATFORM_PARTY_ID": regulatory_party_id,
+                "MINEGUARD_V2_PLATFORM_KEY_ID": regulatory_key_id,
+            }
+        )
+        agent_environment = _application_environment(AGENT_ROOT / "src")
+        agent_environment.update(
+            {
+                "ENTERPRISE_AGENT_DB": str(agent_database),
+                "ENTERPRISE_AGENT_USERS_JSON": json.dumps(
+                    agent_users,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                "ENTERPRISE_AGENT_ALLOW_ANONYMOUS_LOCAL": "false",
+                "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED": "true",
+                "ENTERPRISE_AGENT_SECURE_COOKIE": "false",
+                "ENTERPRISE_MINE_ID": mine_id,
+                "ENTERPRISE_MINE_NAME": mine_name,
+                "ENTERPRISE_OPERATOR_ID": operator_id,
+                "ENTERPRISE_OPERATOR_NAME": operator_name,
+                "ENTERPRISE_SYSTEM_ID": enterprise_system_id,
+                "ENTERPRISE_EXCHANGE_KEY_ID": enterprise_key_id,
+                "ENTERPRISE_EXCHANGE_HMAC_SECRET": message_secret,
+                "ENTERPRISE_REPORTING_TIMEZONE": "Asia/Shanghai",
+                "ENTERPRISE_CAPACITY_BAND": comparison_context["capacity_band"],
+                "ENTERPRISE_MINING_METHOD": comparison_context["mining_method"],
+                "ENTERPRISE_SHIFT_SYSTEM": comparison_context["shift_system"],
+                "ENTERPRISE_COAL_TYPE": comparison_context["coal_type"],
+                "ENTERPRISE_OPERATING_REGIME": comparison_context[
+                    "operating_regime"
+                ],
+                "REGULATORY_SYSTEM_ID": regulatory_system_id,
+                "REGULATORY_PARTY_ID": regulatory_party_id,
+                "REGULATORY_EXCHANGE_KEY_ID": regulatory_key_id,
+                "PLATFORM_V2_BASE_URL": f"http://127.0.0.1:{platform_port}",
+                "PLATFORM_V2_SENDER_ID": enterprise_system_id,
+                "PLATFORM_V2_TRANSPORT_HMAC_SECRET": transport_secret,
+                "PLATFORM_V2_TIMEOUT_SECONDS": str(max(1.0, min(timeout, 120.0))),
+                "ENTERPRISE_FIVE_QUANTITY_POLL_SECONDS": "0.5",
+                "COAL_NEWS_SEARCH_ENABLED": "false",
+                "AGENT_V2_ENABLED": "false",
+                "AGENT_V2_SCHEDULER_ENABLED": "false",
+            }
+        )
+
+        try:
+            platform = _start_process(
+                name="V2 监管平台",
+                command=[
+                    platform_executable,
+                    "-m",
+                    "mineguard",
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(platform_port),
+                    "--state-directory",
+                    str(platform_state),
+                ],
+                cwd=PLATFORM_ROOT,
+                environment=platform_environment,
+                log_path=temporary_root / "platform-v2.log",
+            )
+            managed_processes.append(platform)
+            _wait_until_ready(
+                platform,
+                port=platform_port,
+                path="/readyz",
+                timeout=timeout,
+            )
+            platform_cookie, _ = _login_platform_v2(
+                platform_port,
+                username="admin",
+                password=platform_admin_password,
+            )
+
+            agent = _start_process(
+                name="V2 企业智能体",
+                command=[
+                    agent_executable,
+                    "-m",
+                    "enterprise_agent",
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(agent_port),
+                ],
+                cwd=AGENT_ROOT,
+                environment=agent_environment,
+                log_path=temporary_root / "agent-v2.log",
+            )
+            managed_processes.append(agent)
+            _wait_until_ready(
+                agent,
+                port=agent_port,
+                path="/api/v1/health",
+                timeout=timeout,
+            )
+
+            preparer_cookie, preparer_csrf, preparer_principal = _login_agent(
+                agent_port,
+                actor_id=preparer_id,
+                password=preparer_password,
+            )
+            reviewer_cookie, reviewer_csrf, reviewer_principal = _login_agent(
+                agent_port,
+                actor_id=reviewer_id,
+                password=reviewer_password,
+            )
+            _assert_agent_principal(
+                preparer_principal,
+                actor_id=preparer_id,
+                permissions={"read", "write"},
+                label="经办账号",
+            )
+            _assert_agent_principal(
+                reviewer_principal,
+                actor_id=reviewer_id,
+                permissions={"read", "confirm", "submit"},
+                label="复核账号",
+            )
+
+            imported_value, _ = _expect(
+                _request(
+                    agent_port,
+                    "POST",
+                    "/api/v2/imports",
+                    payload={
+                        "filename": f"five-quantity-{reporting_month}.csv",
+                        "content_base64": base64.b64encode(csv_content).decode(
+                            "ascii"
+                        ),
+                    },
+                    headers=_agent_headers(preparer_cookie, preparer_csrf),
+                ),
+                201,
+                "经办账号导入完整月报 CSV",
+            )
+            imported = _object_payload(imported_value, "导入完整月报 CSV")
+            draft = _object_payload(imported.get("draft"), "导入后的草稿")
+            draft_id = draft.get("draft_id")
+            revision = draft.get("revision")
+            payload = draft.get("payload")
+            if (
+                not isinstance(draft_id, str)
+                or not draft_id
+                or isinstance(revision, bool)
+                or not isinstance(revision, int)
+                or not isinstance(payload, dict)
+                or payload.get("reporting_month") != reporting_month
+                or payload.get("period_start") != period_start
+                or payload.get("period_end") != period_end
+                or not isinstance(payload.get("days"), list)
+                or len(payload["days"]) != day_count
+            ):
+                raise VerificationError("CSV 未形成无缺日的目标月份 V2 草稿")
+            processing = payload.get("agent_processing")
+            if (
+                not isinstance(processing, dict)
+                or processing.get("model_assistance_used") is not False
+            ):
+                raise VerificationError("离线 CSV 规范化不应依赖模型")
+
+            saved_value, _ = _expect(
+                _request(
+                    agent_port,
+                    "PATCH",
+                    f"/api/v2/drafts/{draft_id}",
+                    payload={
+                        "expected_revision": revision,
+                        "payload": payload,
+                    },
+                    headers=_agent_headers(preparer_cookie, preparer_csrf),
+                ),
+                200,
+                "经办账号核对并保存草稿",
+            )
+            saved = _object_payload(saved_value, "保存草稿")
+            saved_revision = saved.get("revision")
+            review_gate = saved.get("review_gate")
+            if (
+                saved_revision != revision + 1
+                or saved.get("last_content_actor") != preparer_id
+                or saved.get("human_preparer_actor") != preparer_id
+                or saved.get("human_prepared_revision") != saved_revision
+                or not isinstance(review_gate, dict)
+                or review_gate.get("state") != "awaiting_independent_reviewer"
+            ):
+                raise VerificationError("经办保存未形成可核验的四眼复核交接状态")
+
+            confirmed_value, _ = _expect(
+                _request(
+                    agent_port,
+                    "POST",
+                    f"/api/v2/drafts/{draft_id}/confirm",
+                    payload={
+                        "expected_revision": saved_revision,
+                        "confirmer_name": "验收复核员",
+                        "confirmer_role": "企业复核负责人",
+                        "attestation": (
+                            "本人已独立逐项核对经办人保存的当前完整月报修订版。"
+                        ),
+                        "accepted": True,
+                    },
+                    headers=_agent_headers(reviewer_cookie, reviewer_csrf),
+                ),
+                202,
+                "异人复核确认并可靠排队",
+            )
+            confirmed = _object_payload(confirmed_value, "复核确认草稿")
+            submission_message_id = confirmed.get("submission_message_id")
+            submission_revision = confirmed.get("submission_revision")
+            confirmation = confirmed.get("confirmation")
+            confirmed_gate = confirmed.get("review_gate")
+            if (
+                confirmed.get("status") != "queued"
+                or not isinstance(submission_message_id, str)
+                or not submission_message_id
+                or isinstance(submission_revision, bool)
+                or not isinstance(submission_revision, int)
+                or not isinstance(confirmation, dict)
+                or confirmation.get("actor_id") != reviewer_id
+                or not isinstance(confirmed_gate, dict)
+                or confirmed_gate.get("state") != "independent_review_completed"
+            ):
+                raise VerificationError("异人复核没有形成具名确认和可靠 outbox")
+
+            submitted: dict[str, Any] | None = None
+            risks: dict[str, Any] = {"items": []}
+            report_record: dict[str, Any] | None = None
+            mine_detail: dict[str, Any] | None = None
+            exchange_attempts = 0
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if platform.process.poll() is not None:
+                    raise VerificationError("V2 监管平台在交换闭环期间退出")
+                if agent.process.poll() is not None:
+                    raise VerificationError("V2 企业智能体在交换闭环期间退出")
+                exchange_attempts += 1
+                _expect(
+                    _request(
+                        agent_port,
+                        "POST",
+                        "/api/v2/exchange/run",
+                        payload={},
+                        headers=_agent_headers(reviewer_cookie, reviewer_csrf),
+                    ),
+                    200,
+                    "驱动可靠 outbox 与分析报告交换",
+                )
+                submitted_value, _ = _expect(
+                    _request(
+                        agent_port,
+                        "GET",
+                        f"/api/v2/drafts/{draft_id}",
+                        headers={"Cookie": reviewer_cookie},
+                    ),
+                    200,
+                    "读取送达后的企业草稿",
+                )
+                submitted = _object_payload(submitted_value, "读取企业草稿")
+                risks_value, _ = _expect(
+                    _request(
+                        agent_port,
+                        "GET",
+                        "/api/v2/risks",
+                        headers={"Cookie": reviewer_cookie},
+                    ),
+                    200,
+                    "读取企业风险收件箱",
+                )
+                risks = _object_payload(risks_value, "读取企业风险收件箱")
+                report_record = _matching_analysis_report(
+                    risks, submission_message_id
+                )
+                detail_status, detail_value, _ = _request(
+                    platform_port,
+                    "GET",
+                    f"/v2/regulatory/mines/{mine_id}",
+                    headers={"Cookie": platform_cookie},
+                )
+                if detail_status == 200:
+                    mine_detail = _object_payload(
+                        detail_value, "读取监管矿井详情"
+                    )
+                elif detail_status != 404:
+                    _expect(
+                        (detail_status, detail_value, {}),
+                        200,
+                        "读取监管矿井详情",
+                    )
+                receipt = submitted.get("receipt")
+                latest_submission = (
+                    mine_detail.get("latest_submission")
+                    if isinstance(mine_detail, dict)
+                    else None
+                )
+                latest_analysis = (
+                    mine_detail.get("latest_analysis")
+                    if isinstance(mine_detail, dict)
+                    else None
+                )
+                response_summary = (
+                    mine_detail.get("response_summary")
+                    if isinstance(mine_detail, dict)
+                    else None
+                )
+                if (
+                    submitted.get("status") == "submitted"
+                    and isinstance(receipt, dict)
+                    and report_record is not None
+                    and isinstance(latest_submission, dict)
+                    and latest_submission.get("submission_id")
+                    == submission_message_id
+                    and isinstance(latest_analysis, dict)
+                    and latest_analysis.get("algorithm_version")
+                    and isinstance(response_summary, dict)
+                    and isinstance(response_summary.get("delivered"), int)
+                    and response_summary["delivered"] >= 1
+                ):
+                    break
+                time.sleep(0.2)
+            else:
+                status_text = submitted.get("status") if submitted else None
+                delivered_count = None
+                if isinstance(mine_detail, dict):
+                    summary = mine_detail.get("response_summary")
+                    if isinstance(summary, dict):
+                        delivered_count = summary.get("delivered")
+                raise VerificationError(
+                    "V2 闭环超时："
+                    f"draft={status_text}, risk={report_record is not None}, "
+                    f"platform={mine_detail is not None}, ack={delivered_count}"
+                )
+
+            if (
+                submitted is None
+                or report_record is None
+                or mine_detail is None
+            ):
+                raise VerificationError("V2 闭环完成条件与最终状态不一致")
+            receipt = _object_payload(submitted.get("receipt"), "企业接入回执")
+            receipt_payload = _object_payload(
+                receipt.get("payload"), "企业接入回执 payload"
+            )
+            latest_submission = _object_payload(
+                mine_detail.get("latest_submission"), "监管最新报送"
+            )
+            latest_analysis = _object_payload(
+                mine_detail.get("latest_analysis"), "监管最新分析"
+            )
+            response_summary = _object_payload(
+                mine_detail.get("response_summary"), "监管回执汇总"
+            )
+            report = _object_payload(report_record.get("report"), "企业分析报告")
+            report_payload = _object_payload(
+                report.get("payload"), "企业分析报告 payload"
+            )
+            report_mine = _object_payload(
+                report_payload.get("mine"), "企业分析报告矿井身份"
+            )
+            detail_mine = _object_payload(
+                mine_detail.get("mine"), "监管矿井身份"
+            )
+
+            message_ids = {
+                submission_message_id,
+                submitted.get("submission_message_id"),
+                receipt_payload.get("submission_message_id"),
+                latest_submission.get("submission_id"),
+                report_payload.get("submission_message_id"),
+            }
+            mine_ids = {
+                mine_id,
+                payload["mine"].get("mine_id"),
+                detail_mine.get("mine_id"),
+                latest_submission.get("mine_id"),
+                report_mine.get("mine_id"),
+            }
+            revisions = {
+                submission_revision,
+                receipt_payload.get("submission_revision"),
+                latest_submission.get("revision"),
+                report_payload.get("submission_revision"),
+            }
+            if message_ids != {submission_message_id}:
+                raise VerificationError("Agent、接入回执、监管库与分析报告的 message 不一致")
+            if mine_ids != {mine_id}:
+                raise VerificationError("Agent、监管库与分析报告的一矿身份不一致")
+            if revisions != {submission_revision}:
+                raise VerificationError("接入回执、监管库与分析报告的 revision 不一致")
+            algorithm_version = latest_analysis.get("algorithm_version")
+            if (
+                not isinstance(algorithm_version, str)
+                or not algorithm_version.startswith(
+                    "regulatory-five-quantity-v2"
+                )
+            ):
+                raise VerificationError("监管平台未形成 V2 算法分析结果")
+            if response_summary.get("delivered", 0) < 1:
+                raise VerificationError("监管平台未确认分析报告送达回执")
+
+            overview_value, _ = _expect(
+                _request(
+                    platform_port,
+                    "GET",
+                    "/v2/regulatory/overview",
+                    headers={"Cookie": platform_cookie},
+                ),
+                200,
+                "读取监管总览",
+            )
+            overview = _object_payload(overview_value, "读取监管总览")
+            counts = _object_payload(overview.get("counts"), "监管总览计数")
+            mines_value, _ = _expect(
+                _request(
+                    platform_port,
+                    "GET",
+                    "/v2/regulatory/mines",
+                    headers={"Cookie": platform_cookie},
+                ),
+                200,
+                "读取监管矿井列表",
+            )
+            mines = _object_payload(mines_value, "读取监管矿井列表")
+            mine_items = mines.get("items")
+            if (
+                counts.get("reporting_mines", 0) < 1
+                or not isinstance(mine_items, list)
+                or not any(
+                    isinstance(item, dict) and item.get("mine_id") == mine_id
+                    for item in mine_items
+                )
+            ):
+                raise VerificationError("监管总览和矿井列表未呈现本次 V2 报送")
+
+            audit_value, _ = _expect(
+                _request(
+                    agent_port,
+                    "GET",
+                    "/api/v2/audit",
+                    headers={"Cookie": reviewer_cookie},
+                ),
+                200,
+                "核验企业端不可变留痕",
+            )
+            audit = _object_payload(audit_value, "核验企业端不可变留痕")
+            events = audit.get("events")
+            event_types = {
+                item.get("event_type")
+                for item in events
+                if isinstance(item, dict)
+            } if isinstance(events, list) else set()
+            required_events = {
+                "five_quantity_imported",
+                "five_quantity_review_saved",
+                "five_quantity_confirmed_and_queued",
+                "five_quantity_outbox_delivered",
+                "analysis_report_stored",
+            }
+            if audit.get("valid") is not True or not required_events <= event_types:
+                raise VerificationError("企业端留痕链未完整覆盖导入、复核、送达和收件")
+
+            ready_value, _ = _expect(
+                _request(platform_port, "GET", "/readyz"),
+                200,
+                "闭环后复核监管平台就绪状态",
+            )
+            ready = _object_payload(ready_value, "闭环后监管就绪状态")
+            if ready.get("status") != "ready":
+                raise VerificationError("闭环后监管平台未保持 V2 ready")
+
+            result = {
+                "result": "passed",
+                "mode": "v2-full",
+                "processes": {
+                    "platform": "independent subprocess",
+                    "agent": "independent subprocess",
+                },
+                "boundary": "HTTP/JSON with independent message and transport HMAC",
+                "reporting_month": reporting_month,
+                "reported_days": day_count,
+                "mine_id": mine_id,
+                "submission_message_id": submission_message_id,
+                "submission_revision": submission_revision,
+                "algorithm_version": algorithm_version,
+                "analysis_report_id": report_payload.get("report_id"),
+                "delivery_acknowledged": response_summary["delivered"],
+                "exchange_attempts": exchange_attempts,
+                "checks": [
+                    "platform_readyz_with_v2_client_registry",
+                    "two_named_least_privilege_accounts",
+                    "complete_prior_month_csv_without_model",
+                    "human_preparer_saved_current_revision",
+                    "independent_reviewer_confirmed_and_queued",
+                    "durable_outbox_delivered",
+                    "platform_received_and_analyzed",
+                    "analysis_report_stored_and_acknowledged",
+                    "message_mine_revision_consistent",
+                    "enterprise_audit_chain_valid",
+                ],
+            }
+        except Exception as error:
+            diagnostics = "".join(
+                f"\n[{managed.name} log]\n"
+                + managed.log_tail(redactions=redactions)
+                for managed in managed_processes
+            )
+            raise VerificationError(f"{error}{diagnostics}") from error
+        finally:
+            for managed in reversed(managed_processes):
+                managed.stop()
+
+        if _port_accepts_connections(platform_port):
+            raise VerificationError("V2 监管平台验收后仍残留监听进程")
+        if _port_accepts_connections(agent_port):
+            raise VerificationError("V2 企业智能体验收后仍残留监听进程")
+
+    if result is None:
+        raise VerificationError("V2 验收未产生结果")
+    return result
+
+
 def verify_runtime_smoke(
     *,
     timeout: float,
@@ -2984,7 +3729,8 @@ def verify_runtime_smoke(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "以两个独立子进程黑盒验收监管平台与企业智能体的 HTTP/JSON/HMAC 链路"
+            "以两个独立子进程黑盒验收当前 V2 监管平台与企业智能体的 "
+            "HTTP/JSON/双 HMAC 链路"
         )
     )
     parser.add_argument(
@@ -2993,13 +3739,19 @@ def main() -> int:
         default=30.0,
         help="每个服务的启动超时秒数（默认 30）",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--runtime-smoke",
         action="store_true",
         help=(
             "只用两个独立解释器启动当前两产品并检查健康端点；"
             "不执行业务写入"
         ),
+    )
+    mode.add_argument(
+        "--legacy",
+        action="store_true",
+        help="显式运行已退役的 V1 全链验收；默认不会调用旧 V1 接口",
     )
     parser.add_argument(
         "--platform-python",
@@ -3019,7 +3771,12 @@ def main() -> int:
     if args.timeout <= 0:
         parser.error("--timeout 必须大于 0")
     try:
-        operation = verify_runtime_smoke if args.runtime_smoke else verify
+        if args.runtime_smoke:
+            operation = verify_runtime_smoke
+        elif args.legacy:
+            operation = verify_legacy
+        else:
+            operation = verify_v2
         result = operation(
             timeout=args.timeout,
             platform_python=args.platform_python,
@@ -3030,8 +3787,10 @@ def main() -> int:
         return 1
     if args.runtime_smoke:
         print("双进程运行时 smoke 验收通过")
+    elif args.legacy:
+        print("双进程退役 V1 端到端验收通过")
     else:
-        print("双进程端到端验收通过")
+        print("双进程 V2 端到端验收通过")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

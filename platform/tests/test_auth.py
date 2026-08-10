@@ -8,7 +8,9 @@ import sqlite3
 import pytest
 
 from mineguard.auth import (
+    AuthError,
     BootstrapConflictError,
+    CURRENT_CREDENTIAL_POLICY_VERSION,
     CsrfValidationError,
     InvalidCredentialsError,
     InvalidSessionError,
@@ -22,6 +24,7 @@ from mineguard.auth import (
     SessionExpiredError,
     UnknownPermissionError,
     authorize,
+    inspect_auth_database,
     session_cookie_header,
 )
 
@@ -225,29 +228,233 @@ def test_password_change_and_admin_reset_revoke_sessions(tmp_path) -> None:
 
     first = store.login("alice", "alice password", client_id="one")
     with pytest.raises(InvalidCredentialsError):
-        store.change_password("alice", "wrong", "new alice password")
+        store.change_password(
+            "alice", "wrong", "New-Alice-Password-2026!"
+        )
     store.change_password(
         "alice",
         "alice password",
-        "new alice password",
+        "New-Alice-Password-2026!",
     )
     with pytest.raises(InvalidSessionError):
         store.authenticate(first.session_token)
     with pytest.raises(InvalidCredentialsError):
         store.login("alice", "alice password", client_id="two")
 
-    second = store.login("alice", "new alice password", client_id="two")
+    second = store.login(
+        "alice", "New-Alice-Password-2026!", client_id="two"
+    )
     store.reset_password("alice", "reset alice password")
+    pending = store.get_user("alice")
+    assert pending is not None and pending.must_change_password is True
     with pytest.raises(InvalidSessionError):
         store.authenticate(second.session_token)
-    assert (
-        store.login(
-            "alice",
-            "reset alice password",
-            client_id="three",
-        ).principal.username
-        == "alice"
+    reset_login = store.login(
+        "alice",
+        "reset alice password",
+        client_id="three",
     )
+    assert reset_login.principal.must_change_password is True
+    store.change_password(
+        "alice", "reset alice password", "Self-Service-Password-2026!"
+    )
+    ready = store.get_user("alice")
+    assert ready is not None and ready.must_change_password is False
+    assert ready.temporary_demo is False
+    assert ready.credential_policy_version == CURRENT_CREDENTIAL_POLICY_VERSION
+
+
+def test_demo_credentials_are_durable_and_fail_closed_for_production(
+    tmp_path,
+) -> None:
+    store = LocalAuth(tmp_path / "auth.sqlite3")
+    demo = store.bootstrap_admin("admin", "123123123")
+    assert demo.must_change_password is True
+    assert demo.temporary_demo is True
+    status = store.production_credential_status()
+    assert status["production_ready"] is False
+    assert status["blocked_users"] == [
+        {
+            "username": "admin",
+            "reasons": [
+                "credential_policy_outdated",
+                "forbidden_weak_password",
+                "must_change_password",
+                "temporary_demo",
+            ],
+        }
+    ]
+
+def test_pending_strong_non_admin_keeps_production_ready_but_requires_change(
+    tmp_path,
+) -> None:
+    store = LocalAuth(tmp_path / "auth.sqlite3")
+    store.bootstrap_admin("admin", "Production-Admin-2026!")
+    store.create_user(
+        "leader",
+        "Leader-Initial-2026!",
+        Role.VIEWER,
+        ["M001"],
+        must_change_password=True,
+    )
+    status = store.production_credential_status()
+    assert status["production_ready"] is True
+    assert status["active_ready_admin_count"] == 1
+    assert status["pending_password_change_user_count"] == 1
+    assert status["blocked_user_count"] == 0
+    assert status["blocked_users"] == []
+
+    login = store.login("leader", "Leader-Initial-2026!", client_id="browser")
+    assert login.principal.must_change_password is True
+
+
+def test_inactive_demo_account_does_not_block_a_ready_administrator(
+    tmp_path,
+) -> None:
+    store = LocalAuth(tmp_path / "auth.sqlite3")
+    store.bootstrap_admin("admin", "Production-Admin-2026!")
+    store.create_user("old-demo", "123123123", Role.VIEWER, ["M001"])
+    store.set_user_active("old-demo", False)
+    status = store.production_credential_status()
+    assert status["production_ready"] is True
+    assert status["blocked_user_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "weak_password",
+    ("password", "password123", "admin123", "admin123456", "qwerty123"),
+)
+def test_unflagged_legacy_common_password_is_detected_by_digest(
+    tmp_path,
+    weak_password: str,
+) -> None:
+    store = LocalAuth(tmp_path / f"legacy-{weak_password}.sqlite3")
+    # These values are not marked temporary_demo by the legacy-compatible
+    # writer.  Production readiness must therefore identify them from their
+    # salted digest, not rely on the new purpose columns.
+    user = store.bootstrap_admin("admin", weak_password)
+    assert user.must_change_password is False
+    assert user.temporary_demo is False
+    status = store.production_credential_status()
+    assert status["production_ready"] is False
+    assert status["active_ready_admin_count"] == 0
+    assert status["blocked_users"] == [
+        {
+            "username": "admin",
+            "reasons": [
+                "credential_policy_outdated",
+                "forbidden_weak_password",
+            ],
+        }
+    ]
+
+
+def test_legacy_auth_schema_is_migrated_without_reclassifying_passwords(
+    tmp_path,
+) -> None:
+    database = tmp_path / "legacy-auth.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                username_key TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL,
+                mine_scopes_json TEXT NOT NULL,
+                active INTEGER NOT NULL,
+                password_salt BLOB NOT NULL,
+                password_hash BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+    with LocalAuth(database) as store:
+        user = store.bootstrap_admin("admin", "Production-Admin-2026!")
+        assert user.must_change_password is False
+        assert user.temporary_demo is False
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(users)")
+        }
+    assert {
+        "must_change_password",
+        "temporary_demo",
+        "credential_policy_version",
+    }.issubset(columns)
+
+
+def test_unclassified_password_outside_weak_dictionary_blocks_production(
+    tmp_path,
+) -> None:
+    store = LocalAuth(tmp_path / "unclassified.sqlite3")
+    user = store.bootstrap_admin("admin", "admin password")
+    assert user.credential_policy_version == 0
+    status = store.production_credential_status()
+    assert status["production_ready"] is False
+    assert status["outdated_credential_policy_user_count"] == 1
+    assert status["blocked_users"] == [
+        {"username": "admin", "reasons": ["credential_policy_outdated"]}
+    ]
+
+
+def test_legacy_row_stays_unclassified_until_verified_password_rotation(
+    tmp_path,
+) -> None:
+    database = tmp_path / "legacy-policy.sqlite3"
+    original_password = "Legacy-Strong-Password-2025!"
+    with LocalAuth(database) as store:
+        store.bootstrap_admin("admin", original_password)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "ALTER TABLE users DROP COLUMN credential_policy_version"
+        )
+
+    # Read-only deployment checks must fail closed before opening/migrating.
+    inspected = inspect_auth_database(database)
+    assert inspected["production_ready"] is False
+    assert inspected["blocked_users"] == [
+        {"username": "admin", "reasons": ["credential_policy_outdated"]}
+    ]
+
+    with LocalAuth(database) as migrated:
+        legacy = migrated.get_user("admin")
+        assert legacy is not None
+        assert legacy.credential_policy_version == 0
+        migrated.change_password(
+            "admin",
+            original_password,
+            "Rotated-Strong-Password-2026!",
+        )
+        upgraded = migrated.get_user("admin")
+        assert upgraded is not None
+        assert upgraded.credential_policy_version == (
+            CURRENT_CREDENTIAL_POLICY_VERSION
+        )
+        assert upgraded.must_change_password is False
+        assert migrated.production_credential_status()["production_ready"] is True
+
+
+@pytest.mark.parametrize("invalid_version", (-1, 2, "future"))
+def test_invalid_or_future_credential_policy_versions_fail_closed(
+    tmp_path,
+    invalid_version: object,
+) -> None:
+    database = tmp_path / f"invalid-policy-{invalid_version}.sqlite3"
+    with LocalAuth(database) as store:
+        store.bootstrap_admin("admin", "Ready-Admin-Password-2026!")
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE users SET credential_policy_version = ?",
+            (invalid_version,),
+        )
+    with pytest.raises(AuthError, match="invalid or unsupported"):
+        inspect_auth_database(database)
+    with LocalAuth(database) as store:
+        with pytest.raises(AuthError, match="invalid or unsupported"):
+            store.production_credential_status()
 
 
 def test_login_failures_are_limited_by_username_and_client(tmp_path) -> None:

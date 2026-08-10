@@ -96,8 +96,9 @@ mineguard start
 ```
 
 `mineguard setup` 会逐项询问 `clients.json` 完整路径、是否已有 HTTPS 反向代理、管理员
-账号和密码。密码输入时终端不会显示字符，需要再输入一次确认；正式密码至少 8 个字符，
-且不能使用演示密码 `123123123`。向导只在状态目录保存非敏感启动配置和密码摘要，不保存
+账号和密码。正式配置必须确认 HTTPS；密码输入时终端不会显示字符，需要再输入一次确认。
+正式密码至少 12 个字符，并包含大小写字母、数字、符号中的至少三类，且不能使用演示或
+常见弱口令。向导只在状态目录保存非敏感启动配置和密码摘要，不保存
 明文密码；`clients.json` 中的逐矿密钥仍留在原受控文件，因此该文件配置后不能随意移动。
 默认状态目录是当前目录下的 `.mineguard-v2`，默认端口是 `8080`，所以通常无需附加任何
 参数。`mineguard start` 仍只监听 `127.0.0.1`；正式领导端应通过单位批准的 HTTPS 反向
@@ -190,17 +191,32 @@ mineguard user disable leader_a --state-directory .mineguard-v2
 mineguard user enable leader_a  --state-directory .mineguard-v2
 mineguard user reset-password leader_a \
   --state-directory .mineguard-v2 --demo-default-password
+
+# 从旧版本升级后，如提示“凭据策略过期”，账号本人在服务器本机交互改密
+mineguard user change-password admin \
+  --state-directory .mineguard-v2
 ```
 
-不加 `--demo-default-password` 时会安全交互输入密码，也可通过
-`MINEGUARD_NEW_USER_PASSWORD` 注入。`viewer`、`reviewer`、`supervisor` 在当前 V2
+不加 `--demo-default-password` 时会安全交互输入密码。正式状态必须在服务器
+本机附着的交互终端无回显输入；不接受命令行、管道或
+`MINEGUARD_NEW_USER_PASSWORD` 环境变量。该环境变量只保留给非正式兼容流程，
+命令读取时也会立即从当前进程环境中清除。`viewer`、`reviewer`、`supervisor` 在当前 V2
 领导端均为只读且受 `--mine-id` 限制；`admin` 查看全部煤矿，只应给系统管理员。
+正式状态中新建或管理员重置的账号标记为“待换密”；该账号完成自助改密前不能访问监管
+业务。正式启动会拒绝仍启用的 `123123123`/临时演示账号，但不会因普通领导账号等待首次
+改密而阻断整个平台；至少一个正式管理员必须已完成改密。旧版本账号没有可验证的当前
+凭据策略标记，升级后必须通过上面的本机 `change-password` 验证旧密码并轮换，正式启动
+不会仅凭弱口令字典猜测其安全性。该命令拒绝管道、环境变量和命令行明文密码。演示状态
+不受此门禁影响。
 `--all-mines` 会展开为当前全部煤矿的明确授权；后续新增煤矿时再次执行
 `set-access --all-mines` 即可。账号不物理删除，离岗时使用 `disable`，以保留权限
 审计和历史留痕。
 
-正式注册表必须显式配置消息密钥和另一把不同的运输密钥；相同密钥或缺少运输密钥会
-在启动时直接拒绝。轮换时可在 `message_keys` 中短期保留旧 key ID，并用
+正式注册表必须显式填写非演示的 `sender_id`、`party_id`、`mine_id`、
+`mine_name` 和五个 `comparison_context` 维度，并配置消息密钥和另一把不同的
+运输密钥。正式门禁会检查当前及轮换窗口内的全部密钥，拒绝演示/占位 key ID、
+低多样性或短片段重复密钥、跨用途复用密钥，以及 `unclassified`、`replace`等占位
+分组值。轮换时可在 `message_keys` 中短期保留旧 key ID，并用
 `active_message_key_id` 指定当前密钥。
 
 服务启动后终端保持占用是正常现象。另开终端检查：

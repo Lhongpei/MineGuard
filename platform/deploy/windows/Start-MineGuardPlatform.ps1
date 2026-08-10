@@ -22,6 +22,49 @@ function Get-RequiredProperty {
     return $property.Value
 }
 
+function ConvertTo-WindowsCommandLineArgument {
+    param([Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $Value)
+    if ($Value.IndexOf([char]0) -ge 0) {
+        throw '拒绝把 NUL 传给 Platform 长运行进程。'
+    }
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
+    $builder = New-Object -TypeName System.Text.StringBuilder
+    [void]$builder.Append([char]'"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq [char]'\') {
+            $backslashes++
+            continue
+        }
+        if ($character -eq [char]'"') {
+            [void]$builder.Append([char]'\', (($backslashes * 2) + 1))
+            [void]$builder.Append([char]'"')
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$builder.Append([char]'\', $backslashes)
+            $backslashes = 0
+        }
+        [void]$builder.Append($character)
+    }
+    if ($backslashes -gt 0) {
+        [void]$builder.Append([char]'\', ($backslashes * 2))
+    }
+    [void]$builder.Append([char]'"')
+    return $builder.ToString()
+}
+
+function Join-WindowsCommandLineArguments {
+    param([Parameter(Mandatory = $true)] [object[]] $Arguments)
+    return (@(foreach ($argument in $Arguments) {
+                if ($null -eq $argument) {
+                    throw '拒绝把 null 作为 Platform 长运行进程参数。'
+                }
+                ConvertTo-WindowsCommandLineArgument -Value ([string]$argument)
+            }) -join ' ')
+}
+
 function Get-SafeFixedNtfsPath {
     param(
         [Parameter(Mandatory = $true)] [string] $Value,
@@ -92,6 +135,24 @@ function Assert-NoReparseTree {
     }
 }
 
+function Assert-NoResidualConfigurationTransaction {
+    param([Parameter(Mandatory = $true)] [string] $ConfigurationDirectory)
+    $inspected = 0
+    foreach ($child in Get-ChildItem -LiteralPath $ConfigurationDirectory -Force) {
+        $inspected++
+        if ($inspected -gt 256) {
+            throw '配置目录直系子项超过 256 个安全上限；无法证明不存在残留配置事务。'
+        }
+        if ($child.PSIsContainer -and
+            $child.Name -match '^\.configuration-transaction\.[A-Fa-f0-9]{32}$') {
+            throw (
+                '检测到残留配置事务目录，已拒绝启动：' + $child.FullName +
+                '。请保持服务停止，由管理员核验并清理该精确目录后重新配置。'
+            )
+        }
+    }
+}
+
 function Assert-StateBoundary {
     param([string] $Candidate, [string] $Root)
     $defaultState = Join-Path $Root 'state'
@@ -132,7 +193,35 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 $InstallRoot = Get-SafeFixedNtfsPath -Value $InstallRoot -Label '安装目录'
 $configDirectory = Get-SafeFixedNtfsPath `
     -Value (Join-Path $InstallRoot 'config') -Label '配置目录'
+$configurationMutex = New-Object -TypeName System.Threading.Mutex `
+    -ArgumentList @($false, 'Global\MineGuardPlatform.Configuration')
+$configurationMutexHeld = $false
+$serverProcess = $null
+$localControlToken = $null
+try {
+    try {
+        $configurationMutexHeld = $configurationMutex.WaitOne(
+            [TimeSpan]::FromSeconds(30)
+        )
+    } catch [System.Threading.AbandonedMutexException] {
+        $configurationMutexHeld = $true
+    }
+    if (-not $configurationMutexHeld) {
+        throw '配置事务仍在运行；30 秒内未获得机器级配置锁，已拒绝启动。'
+    }
 Assert-NoReparseTree -Path $configDirectory -Label '配置目录'
+Assert-NoResidualConfigurationTransaction `
+    -ConfigurationDirectory $configDirectory
+$configurationBlockMarker = Get-SafeFixedNtfsPath `
+    -Value (Join-Path $configDirectory '.mineguard-configuration-blocked.json') `
+    -Label '配置事务阻断标记'
+if (Test-Path -LiteralPath $configurationBlockMarker) {
+    throw (
+        '检测到未安全收尾的配置事务，已拒绝启动。请保持服务停止，由管理员查看 ' +
+        'config\.mineguard-configuration-blocked.json 中的精确 transactionDirectory，' +
+        '核验并清理该目录后，再删除该精确阻断标记并重新配置。'
+    )
+}
 $settingsPath = Get-SafeFixedNtfsPath `
     -Value (Join-Path $configDirectory 'settings.json') -Label 'settings.json'
 if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
@@ -189,21 +278,33 @@ Assert-StateOwnership -Path $stateDirectory
 
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
-Remove-Item Env:MINEGUARD_V2_CLIENTS_JSON -ErrorAction SilentlyContinue
-Remove-Item Env:MINEGUARD_V2_CLIENTS_FILE -ErrorAction SilentlyContinue
-Remove-Item Env:MINEGUARD_ADMIN_PASSWORD -ErrorAction SilentlyContinue
+$localControlEnvironment = Get-Item `
+    -LiteralPath 'Env:MINEGUARD_LOCAL_CONTROL_TOKEN' `
+    -ErrorAction SilentlyContinue
+if ($null -ne $localControlEnvironment) {
+    $localControlToken = [string]$localControlEnvironment.Value
+    if ($localControlToken -cnotmatch '^[0-9a-f]{64}$') {
+        throw '本机控制令牌格式无效；已拒绝启动。'
+    }
+}
+$inheritedMineGuardEnvironment = @(
+    Get-ChildItem Env: | Where-Object {
+        $_.Name.StartsWith(
+            'MINEGUARD_', [StringComparison]::OrdinalIgnoreCase
+        )
+    }
+)
+foreach ($environmentEntry in $inheritedMineGuardEnvironment) {
+    Remove-Item -LiteralPath ('Env:' + $environmentEntry.Name) `
+        -ErrorAction SilentlyContinue
+}
+$inheritedMineGuardEnvironment = $null
 
 if (-not [string]::IsNullOrWhiteSpace($clientsFile)) {
     $clientsFile = Get-SafeFixedNtfsPath -Value $clientsFile -Label '煤矿客户端注册表'
     if (-not (Test-Path -LiteralPath $clientsFile -PathType Leaf)) {
         throw "煤矿客户端注册表不存在：$clientsFile"
     }
-    $clientsText = Get-Content -LiteralPath $clientsFile -Raw -Encoding UTF8
-    if ($clientsText -match '(?i)REPLACE(?:[_-]|\b)|CHANGE[_-]?ME|DEMO[_-]?ONLY|NOT[_-]?FOR[_-]?PRODUCTION') {
-        throw '煤矿客户端注册表仍含示例/占位秘密；拒绝启动。'
-    }
-    $clientsText = $null
-    $env:MINEGUARD_V2_CLIENTS_FILE = $clientsFile
 }
 
 $env:MINEGUARD_V2_PLATFORM_SYSTEM_ID = [string](
@@ -217,13 +318,46 @@ $env:MINEGUARD_V2_PLATFORM_KEY_ID = [string](
 )
 
 $authDatabase = Join-Path $stateDirectory 'auth.db'
-$bootstrapSecret = Join-Path (Join-Path $InstallRoot 'config') 'bootstrap-admin-password.txt'
+$bootstrapSecret = Get-SafeFixedNtfsPath -Value (
+    Join-Path (Join-Path $InstallRoot 'config') 'bootstrap-admin-password.txt'
+) -Label '首次管理员密码文件'
 $allowDemoDefault = $false
 $demoProperty = $settings.PSObject.Properties['allowDemoDefaultPassword']
 if ($null -eq $demoProperty -or $demoProperty.Value -isnot [bool]) {
     throw 'settings.json 的 allowDemoDefaultPassword 必须是 JSON 布尔值。'
 }
 $allowDemoDefault = [bool]$demoProperty.Value
+$isFormalConfiguration = -not [string]::IsNullOrWhiteSpace($clientsFile)
+$isDemoConfiguration = -not $isFormalConfiguration
+if ($isFormalConfiguration) {
+    if ($allowDemoDefault) {
+        throw '正式配置绝不允许 allowDemoDefaultPassword=true；拒绝降级为演示模式。'
+    }
+    if (-not [bool]$secureCookieValue) {
+        throw '正式运行必须启用 Secure Cookie 并通过 HTTPS 反向代理访问。'
+    }
+} elseif (-not $allowDemoDefault -or [bool]$secureCookieValue) {
+    throw '无客户端注册表时只允许明确的本机 HTTP 演示配置；安全开关组合不一致。'
+}
+if ($isFormalConfiguration) {
+    $clientCheckArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
+        -Arguments @(
+            'config-check', '--clients-file', $clientsFile, '--production'
+        )
+    & $runtime.filePath @clientCheckArguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw '煤矿客户端注册表未通过短生命周期 MineGuard 完整校验；拒绝启动。'
+    }
+    $env:MINEGUARD_V2_CLIENTS_FILE = $clientsFile
+    $stateCheckArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
+        -Arguments @(
+            'config-check', '--state-directory', $stateDirectory, '--production'
+        )
+    & $runtime.filePath @stateCheckArguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw '状态目录包含演示/合成数据或无法通过正式用途核验；拒绝启动。'
+    }
+}
 $hasAuthUser = $false
 if (Test-Path -LiteralPath $authDatabase -PathType Leaf) {
     $checkArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
@@ -234,24 +368,75 @@ if (Test-Path -LiteralPath $authDatabase -PathType Leaf) {
     }
     $check = $checkText | Out-String | ConvertFrom-Json
     $hasAuthUser = ([int]$check.auth_user_count -ge 1)
+    if ($isFormalConfiguration -and $hasAuthUser) {
+        $productionAuthArguments = Join-MineGuardPlatformArguments `
+            -Runtime $runtime -Arguments @(
+                'config-check', '--auth-database', $authDatabase, '--production'
+            )
+        & $runtime.filePath @productionAuthArguments | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'auth.db 没有正式可用管理员，或仍有启用的演示凭据账号；拒绝启动。'
+        }
+    }
 }
-if (-not $hasAuthUser) {
-    if (Test-Path -LiteralPath $bootstrapSecret -PathType Leaf) {
-        $strictUtf8 = New-Object -TypeName System.Text.UTF8Encoding `
-            -ArgumentList @($false, $true)
-        $reader = New-Object -TypeName System.IO.StreamReader `
-            -ArgumentList @($bootstrapSecret, $strictUtf8, $true)
-        try { $password = $reader.ReadToEnd() } finally { $reader.Dispose() }
-        if ($password.Length -lt 8 -or $password.IndexOfAny([char[]]"`r`n`0") -ge 0) {
-            throw '首次管理员密码文件无效：至少 8 个字符且不得包含换行或 NUL。'
-        }
-        if ($password -match '(?i)REPLACE(?:[_-]|\b)|CHANGE[_-]?ME|DEMO[_-]?ONLY|NOT[_-]?FOR[_-]?PRODUCTION') {
-            throw '首次管理员密码仍含示例/占位文本；拒绝启动。'
-        }
-        $env:MINEGUARD_ADMIN_PASSWORD = $password
-        $password = $null
-    } elseif (-not $allowDemoDefault) {
+if (-not $hasAuthUser -and $isFormalConfiguration) {
+    Assert-NoReparseTree -Path $configDirectory -Label '配置目录'
+    if (-not (Test-Path -LiteralPath $bootstrapSecret -PathType Leaf)) {
         throw '全新状态库缺少首次管理员密码。请重新运行配置脚本并安全输入密码。'
+    }
+    $bootstrapItem = Get-Item -LiteralPath $bootstrapSecret -Force
+    if ($bootstrapItem.PSIsContainer -or
+        ($bootstrapItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw '首次管理员密码必须是配置目录中的普通文件。'
+    }
+    $bootstrapArguments = Join-MineGuardPlatformArguments `
+        -Runtime $runtime -Arguments @(
+            'bootstrap-admin', '--state-directory', $stateDirectory,
+            '--admin-username', $adminUsername,
+            '--password-file', $bootstrapSecret, '--production'
+        )
+    $bootstrapOutput = & $runtime.filePath @bootstrapArguments
+    $bootstrapExitCode = $LASTEXITCODE
+    if ($bootstrapExitCode -ne 0) {
+        $bootstrapMessage = ($bootstrapOutput | Out-String).Trim()
+        $bootstrapOutput = $null
+        throw (
+            "首次管理员摘要建立失败（退出码 $bootstrapExitCode）。" +
+            "明文文件已保留，请按错误信息修正后重试：$bootstrapMessage"
+        )
+    }
+    $bootstrapOutput = $null
+    if (Test-Path -LiteralPath $bootstrapSecret) {
+        throw '短首启进程未删除明文密码文件；已拒绝启动长运行服务。请检查 config 目录 ACL 后重试。'
+    }
+    $hasAuthUser = $true
+}
+
+if ($isFormalConfiguration) {
+    $postBootstrapAuthArguments = Join-MineGuardPlatformArguments `
+        -Runtime $runtime -Arguments @(
+            'config-check', '--auth-database', $authDatabase, '--production'
+        )
+    & $runtime.filePath @postBootstrapAuthArguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw '管理员摘要未通过正式凭据核验；已拒绝启动长运行服务。请在服务器本机安全改密后重试。'
+    }
+    Assert-NoReparseTree -Path $configDirectory -Label '配置目录'
+    if (Test-Path -LiteralPath $bootstrapSecret) {
+        throw 'auth.db 已存在但首启明文密码文件仍在；为避免误删，已拒绝启动。请以管理员身份核验账号库后运行 Set-MineGuardPlatformConfiguration.ps1 -ClearBootstrapPassword。'
+    }
+}
+
+if ($isDemoConfiguration) {
+    $demoStateArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
+        -Arguments @('config-check', '--state-directory', $stateDirectory)
+    $demoStateText = & $runtime.filePath @demoStateArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw '演示状态目录无法核验；拒绝启动。'
+    }
+    $demoStateCheck = $demoStateText | Out-String | ConvertFrom-Json
+    if ([int]$demoStateCheck.state_demo_evidence_count -lt 1) {
+        throw '演示配置缺少受控合成数据标记；拒绝用演示开关启动正式状态目录。'
     }
 }
 
@@ -265,15 +450,60 @@ $arguments = Join-MineGuardPlatformArguments -Runtime $runtime -Arguments @(
 if ([bool]$secureCookieValue) {
     $arguments += '--secure-cookie'
 }
+if ($isFormalConfiguration) {
+    $arguments += '--production'
+}
+
+Remove-Item Env:MINEGUARD_ADMIN_PASSWORD -ErrorAction SilentlyContinue
+if (Test-Path Env:MINEGUARD_ADMIN_PASSWORD) {
+    throw '无法清除首启管理员环境变量；已拒绝启动长运行服务。'
+}
 
 $exitCode = 1
-Push-Location $InstallRoot
 try {
-    & $runtime.filePath @arguments
-    $exitCode = $LASTEXITCODE
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $runtime.filePath
+    $startInfo.Arguments = Join-WindowsCommandLineArguments -Arguments $arguments
+    $startInfo.WorkingDirectory = $InstallRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $false
+    if ($null -ne $localControlToken) {
+        $startInfo.EnvironmentVariables['MINEGUARD_LOCAL_CONTROL_TOKEN'] = (
+            $localControlToken
+        )
+    }
+    try {
+        $serverProcess = [Diagnostics.Process]::Start($startInfo)
+    } finally {
+        [void]$startInfo.EnvironmentVariables.Remove(
+            'MINEGUARD_LOCAL_CONTROL_TOKEN'
+        )
+        $localControlToken = $null
+    }
+    if ($null -eq $serverProcess) {
+        throw '操作系统未能创建 Platform 长运行进程。'
+    }
+    $serverProcess.WaitForExit()
+    $exitCode = $serverProcess.ExitCode
 } finally {
-    Pop-Location
     Remove-Item Env:MINEGUARD_ADMIN_PASSWORD -ErrorAction SilentlyContinue
+}
+} finally {
+    if ($configurationMutexHeld) {
+        try { $configurationMutex.ReleaseMutex() }
+        catch { }
+    }
+    $localControlToken = $null
+    foreach ($environmentEntry in @(Get-ChildItem Env:)) {
+        if ($environmentEntry.Name.StartsWith(
+                'MINEGUARD_', [StringComparison]::OrdinalIgnoreCase
+            )) {
+            Remove-Item -LiteralPath ('Env:' + $environmentEntry.Name) `
+                -ErrorAction SilentlyContinue
+        }
+    }
+    if ($null -ne $configurationMutex) { $configurationMutex.Dispose() }
+    if ($null -ne $serverProcess) { $serverProcess.Dispose() }
 }
 if ($null -eq $exitCode) { $exitCode = 1 }
 exit $exitCode

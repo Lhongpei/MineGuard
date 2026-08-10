@@ -32,5 +32,16 @@ Assert-EANoInstanceProcesses -Context $Context
 Write-Host "Starting Enterprise Agent in the foreground. Ctrl+C stops it safely."
 # Recheck immediately before process creation to narrow the validation/use race.
 Assert-EANoInstanceProcesses -Context $Context
-& $Context.Executable "--env-file" $Context.ConfigPath "serve"
+# Foreground operation has no WinSW policy envelope. Remove any machine-level
+# values using these reserved names before the authoritative loader runs.
+foreach ($PolicyName in @(
+    "MINEGUARD_SERVICE_PRODUCTION_MODE",
+    "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED"
+)) {
+    [Environment]::SetEnvironmentVariable(
+        $PolicyName, $null, [EnvironmentVariableTarget]::Process
+    )
+}
+& $Context.Executable "--env-file" $Context.ConfigPath `
+    "--authoritative-env-file" "serve"
 exit $LASTEXITCODE

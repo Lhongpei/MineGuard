@@ -48,7 +48,10 @@
 
 Windows 原生安装、逐矿实例、WinSW 服务、日志、完整业务状态备份和恢复见
 [Windows 部署说明](deploy/windows/README.md)。Windows 配置由受 ACL 保护的严格
-`KEY=VALUE` 文件在进程启动时读取，不执行 PowerShell 代码。
+`KEY=VALUE` 文件在进程启动时读取，不执行 PowerShell 代码。正式 Windows runtime 和
+服务安装都必须从线下审批材料输入独立 Authenticode signer 指纹；签名 Setup 本身还必须在
+执行前按另一路线下 SHA-256/签名者值验真，runtime 指纹不能替代 Setup 的预执行信任。每个矿的服务使用
+自己派生的 `NT SERVICE\MineGuardEnterpriseAgent-<实例>` 身份，不再共享 LocalService。
 
 在仓库的 `agent/` 目录执行：
 
@@ -82,14 +85,32 @@ CSV 智能映射不强制依赖模型 API：未配置时仍会使用标准模板
 ```
 
 演示账号被标记为必须换密，只能查看和编辑，不能确认或报送。正式测试完整流程必须
-配置带 `confirm`、`submit` 权限的逐用户账号。
+显式启用 `ENTERPRISE_AGENT_PRODUCTION_MODE=true` 和
+`ENTERPRISE_AGENT_FOUR_EYES_REQUIRED=true`，并配置两个姓名不同、权限分离的逐用户
+账号：经办人只拥有 `read/write`，复核人只拥有 `read/confirm/submit`。仅仅不使用
+demo 账号不等于正式模式。
+
+正式凭据建议这样生成（分别为两人运行一次）：
+
+```bash
+enterprise-agent hash-password --production --json
+```
+
+输出仅含 `password_hash`、`credential_provenance`、`must_change_password`，可复制进
+用户 JSON，不含明文。正式启动前执行 `enterprise-agent config-check --production`；
+最后创建或编辑草稿的人不能确认、排队或提交。CSV/连接器/目录监视自动生成的
+草稿必须先由配置中的具名经办账号打开核对并保存，才能由另一复核账号
+确认。正式模式禁用可自报 `--actor` 的变更 CLI；审计完整性使用全链+尾锚
+校验，不会因前端只显示 200 条而放过后段篡改。
 
 ## 最小 V2 配置
 
 复制 [.env.example](.env.example) 的变量到启动环境。Linux 可由 systemd
 `EnvironmentFile`、容器 Secret 或受控 shell 注入；Windows 服务使用
-`enterprise-agent --env-file <绝对路径> serve` 读取严格 UTF-8 `KEY=VALUE` 文件。
-已有进程环境变量优先，配置文件不会被执行，也不支持变量展开或命令替换。
+`enterprise-agent --env-file <绝对路径> --authoritative-env-file serve` 读取严格 UTF-8
+`KEY=VALUE` 文件，并先清除继承的 Agent 配置命名空间，防止机器级变量跨矿覆盖身份、状态库
+或 HMAC。普通跨平台 CLI 仍保持已有进程环境变量优先；两种模式都不会执行配置文件，也不
+支持变量展开或命令替换。
 
 ```bash
 export ENTERPRISE_MINE_ID=MINE-QY-001

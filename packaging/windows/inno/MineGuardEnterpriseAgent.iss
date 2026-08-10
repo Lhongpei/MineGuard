@@ -100,6 +100,159 @@ const
 var
   RuntimeRemovalCompleted: Boolean;
   ProductInstallFailed: Boolean;
+#ifdef EnableSigning
+  SignerInputPage: TInputQueryWizardPage;
+  SignerFilePage: TInputFileWizardPage;
+  ApprovedSignerThumbprint: String;
+#else
+  UnsignedTestPage: TInputOptionWizardPage;
+#endif
+
+function NormalizeSignerThumbprint(const Value: String; var Normalized: String): Boolean;
+var
+  I: Integer;
+  Ch: String;
+begin
+  Normalized := '';
+  for I := 1 to Length(Value) do
+  begin
+    Ch := Copy(Value, I, 1);
+    if (Ch = ' ') or (Ch = #9) or (Ch = #10) or (Ch = #13) then
+    begin
+      { Offline approval sheets often group a SHA-1 thumbprint with spaces. }
+    end
+    else if Pos(UpperCase(Ch), '0123456789ABCDEF') > 0 then
+      Normalized := Normalized + UpperCase(Ch)
+    else
+    begin
+      Result := False;
+      Exit;
+    end;
+  end;
+  Result := Length(Normalized) = 40;
+end;
+
+#ifdef EnableSigning
+function MergeApprovedSignerSource(const RawValue: String; const SourceName: String;
+  var MergedValue: String; var ErrorText: String): Boolean;
+var
+  Candidate: String;
+begin
+  Result := False;
+  if Trim(RawValue) = '' then
+  begin
+    Result := True;
+    Exit;
+  end;
+  if not NormalizeSignerThumbprint(RawValue, Candidate) then
+  begin
+    ErrorText := SourceName + ' must contain exactly 40 hexadecimal SHA-1 characters.';
+    Exit;
+  end;
+  if (MergedValue <> '') and (CompareText(MergedValue, Candidate) <> 0) then
+  begin
+    ErrorText := 'The approved signer thumbprints supplied by different offline sources do not match.';
+    Exit;
+  end;
+  MergedValue := Candidate;
+  Result := True;
+end;
+
+function TryResolveApprovedSigner(var ResolvedValue: String;
+  var ErrorText: String): Boolean;
+var
+  CommandLineValue: String;
+  ImportedText: AnsiString;
+begin
+  Result := False;
+  ResolvedValue := '';
+  ErrorText := '';
+  CommandLineValue := ExpandConstant('{param:APPROVED_SIGNER_THUMBPRINT|}');
+  if not MergeApprovedSignerSource(CommandLineValue, 'Command-line approval',
+      ResolvedValue, ErrorText) then
+    Exit;
+  if not MergeApprovedSignerSource(SignerInputPage.Values[0], 'Pasted approval',
+      ResolvedValue, ErrorText) then
+    Exit;
+  if Trim(SignerFilePage.Values[0]) <> '' then
+  begin
+    if not LoadStringFromFile(SignerFilePage.Values[0], ImportedText) then
+    begin
+      ErrorText := 'The selected offline approval file could not be read.';
+      Exit;
+    end;
+    if not MergeApprovedSignerSource(String(ImportedText), 'Imported approval file',
+        ResolvedValue, ErrorText) then
+      Exit;
+  end;
+  if ResolvedValue = '' then
+  begin
+    ErrorText := 'Formal installation requires the approved signer thumbprint from independently delivered offline approval material.';
+    Exit;
+  end;
+  Result := True;
+end;
+#else
+function IsUnsignedTestMediaAuthorized(): Boolean;
+var
+  CommandLineValue: String;
+begin
+  CommandLineValue := Trim(ExpandConstant('{param:ALLOW_UNSIGNED_TEST_MEDIA|}'));
+  Result := (CommandLineValue = '1') or UnsignedTestPage.Values[0];
+end;
+#endif
+
+procedure InitializeWizard();
+begin
+#ifdef EnableSigning
+  SignerInputPage := CreateInputQueryPage(wpSelectDir,
+    'Independent signer approval',
+    'Paste the approved Agent signer SHA-1 thumbprint',
+    'Use the value from independently delivered offline approval material. The installer never trusts or prefills a value from its own media metadata.');
+  SignerInputPage.Add('Approved signer thumbprint (40 hexadecimal characters):', False);
+  SignerInputPage.Values[0] := ExpandConstant('{param:APPROVED_SIGNER_THUMBPRINT|}');
+  SignerFilePage := CreateInputFilePage(SignerInputPage.ID,
+    'Import offline signer approval',
+    'Optionally select a text file containing only the approved thumbprint',
+    'If both pasted and imported values are supplied, they must match exactly.');
+  SignerFilePage.Add('Offline approval text file:',
+    'Text files (*.txt)|*.txt|All files (*.*)|*.*', '.txt');
+#else
+  UnsignedTestPage := CreateInputOptionPage(wpSelectDir,
+    'Unsigned internal test media',
+    'This build cannot be used as a formal installation',
+    'Continue only on an isolated test machine. It cannot install a production-trusted service.',
+    False, False);
+  UnsignedTestPage.Add('I explicitly authorize this unsigned internal-test installation.');
+#endif
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  ErrorText: String;
+  ResolvedValue: String;
+begin
+  Result := True;
+#ifdef EnableSigning
+  if CurPageID = SignerFilePage.ID then
+  begin
+    if not TryResolveApprovedSigner(ResolvedValue, ErrorText) then
+    begin
+      MsgBox(ErrorText, mbError, MB_OK);
+      Result := False;
+    end
+    else
+      ApprovedSignerThumbprint := ResolvedValue;
+  end;
+#else
+  if (CurPageID = UnsignedTestPage.ID) and
+      (not IsUnsignedTestMediaAuthorized()) then
+  begin
+    MsgBox('Unsigned test media requires explicit test authorization.', mbError, MB_OK);
+    Result := False;
+  end;
+#endif
+end;
 
 function HasEnterpriseAgentService(): Boolean;
 var
@@ -162,8 +315,22 @@ begin
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ApprovalError: String;
+  ResolvedApproval: String;
 begin
   Result := '';
+#ifdef EnableSigning
+  if not TryResolveApprovedSigner(ResolvedApproval, ApprovalError) then
+    Result := ApprovalError
+  else
+    ApprovedSignerThumbprint := ResolvedApproval;
+#else
+  if not IsUnsignedTestMediaAuthorized() then
+    Result := 'Unsigned internal-test media was not explicitly authorized. Formal installation is unavailable for this build.';
+#endif
+  if Result <> '' then
+    Exit;
   if HasRunningEnterpriseAgentService() then
     Result := 'A MineGuard Enterprise Agent service is running. Stop every MineGuardEnterpriseAgent-* service before installing or upgrading the shared runtime. Registered but stopped services are preserved.'
   else if HasActiveEnterpriseAgentRuntime() then
@@ -178,6 +345,16 @@ var
 begin
   PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
   Parameters := ExpandConstant('-NoProfile -ExecutionPolicy Bypass -File "{tmp}\MineGuardEnterpriseAgentRelease\deploy\windows\Install-EnterpriseAgent.ps1" -SourceRoot "{tmp}\MineGuardEnterpriseAgentRelease" -InstallRoot "{app}" -StateRoot "{param:STATE_ROOT|{commonappdata}\MineGuard\EnterpriseAgent\instances}"');
+#ifdef EnableSigning
+  if Length(ApprovedSignerThumbprint) <> 40 then
+    RaiseException('The independently approved signer thumbprint was not resolved.');
+  Parameters := Parameters + ' -ApprovedSignerThumbprint "' +
+    ApprovedSignerThumbprint + '"';
+#else
+  if not IsUnsignedTestMediaAuthorized() then
+    RaiseException('Unsigned test media was not explicitly authorized.');
+  Parameters := Parameters + ' -AllowUnsignedTestMedia';
+#endif
   if not ExecAndLogOutput(PowerShellPath, Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode, nil) then
   begin
     ProductInstallFailed := True;

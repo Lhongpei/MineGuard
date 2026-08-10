@@ -1,4 +1,4 @@
-"""MineGuard 多源交叉验证内网影子运行版。"""
+"""MineGuard 多源交叉验证与监管核查闭环生产候选版。"""
 
 from .aggregation import (
     AggregationRequest,
@@ -49,4 +49,4 @@ __all__ = [
     "detect_temporal_anomalies",
 ]
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"

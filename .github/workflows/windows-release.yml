@@ -169,10 +169,18 @@ jobs:
           if (Test-Path -LiteralPath $readyMarker) {
             Remove-Item -LiteralPath $readyMarker -Force
           }
-          $pythonVersion = (& python -c 'import platform; print(platform.python_version())' |
+          $pythonCommand = Get-Command python.exe -ErrorAction Stop
+          $pythonExecutable = $pythonCommand.Source
+          $pythonVersion = (& $pythonExecutable `
+            -c 'import platform; print(platform.python_version())' |
             Select-Object -Last 1).Trim()
           if ($LASTEXITCODE -ne 0 -or $pythonVersion -notmatch '^3\.12\.\d+$') {
             throw 'Unable to identify the unsigned compiler-cache Python patch.'
+          }
+          $pythonSha256 = (Get-FileHash -LiteralPath $pythonExecutable `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($pythonSha256 -notmatch '^[a-f0-9]{64}$') {
+            throw 'Unable to hash the unsigned compiler-cache Python executable.'
           }
           $inputsHash = '${{ hashFiles('platform/packaging/windows/requirements-build.txt', 'platform/constraints.txt', 'platform/packaging/windows/Build-MineGuardPlatform.ps1', 'agent/packaging/windows/build-requirements.txt', 'agent/constraints.txt', 'agent/packaging/windows/Build-EnterpriseAgentBinary.ps1') }}'
           if ($inputsHash -notmatch '^[a-f0-9]{64}$') {
@@ -180,7 +188,8 @@ jobs:
           }
           $imageIdentity = "$env:ImageOS-$env:ImageVersion" -replace '[^A-Za-z0-9_.-]', '-'
           $cachePrefix = (
-            "mineguard-nuitka-clcache-v1-$imageIdentity-py$pythonVersion-$inputsHash-"
+            "mineguard-nuitka-clcache-v1-$imageIdentity-py$pythonVersion-" +
+            "python$pythonSha256-$inputsHash-"
           )
           $cacheKey = $cachePrefix + $env:GITHUB_SHA
           foreach ($entry in @(

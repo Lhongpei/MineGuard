@@ -325,6 +325,52 @@ def test_inno_scripts() -> None:
     assert "MineGuardEnterpriseAgent-*" in agent
     assert "Status -ne ''Stopped''" in platform
     assert "Status -ne ''Stopped''" in agent
+    for token in (
+        "CreateInputOptionPage",
+        "ALLOW_UNSIGNED_TEST_MEDIA",
+        "IsUnsignedTestMediaAuthorized",
+        "Unsigned Platform internal-test media",
+        "#ifndef EnableSigning",
+    ):
+        assert token in platform, f"Platform unsigned-media gate missing: {token}"
+    for token in (
+        "CreateInputQueryPage",
+        "CreateInputFilePage",
+        "APPROVED_SIGNER_THUMBPRINT",
+        "ALLOW_UNSIGNED_TEST_MEDIA",
+        "NormalizeSignerThumbprint",
+        "Length(Normalized) = 40",
+        "TryResolveApprovedSigner",
+        "NextButtonClick",
+        "PrepareToInstall",
+        "independently delivered offline approval material",
+        "-ApprovedSignerThumbprint",
+        "-AllowUnsignedTestMedia",
+    ):
+        assert token in agent, f"Agent independent signer gate missing: {token}"
+    assert "SignerCertificate.Thumbprint" not in agent, (
+        "the GUI must not derive its trust pin from the bundled executable"
+    )
+    assert "signing_certificate_thumbprint" not in agent, (
+        "the GUI must not derive its trust pin from bundled metadata"
+    )
+    install_command = agent[
+        agent.index("procedure InstallProductRuntime") : agent.index(
+            "function GetCustomSetupExitCode"
+        )
+    ]
+    signed_gate = install_command.index("#ifdef EnableSigning")
+    unsigned_gate = install_command.index("#else", signed_gate)
+    gate_end = install_command.index("#endif", unsigned_gate)
+    assert "-ApprovedSignerThumbprint" in install_command[
+        signed_gate:unsigned_gate
+    ]
+    assert "-AllowUnsignedTestMedia" not in install_command[
+        signed_gate:unsigned_gate
+    ]
+    assert "-AllowUnsignedTestMedia" in install_command[unsigned_gate:gate_end]
+    assert "SignerInputPage.Values[0]" not in install_command
+    assert "SignerFilePage.Values[0]" not in install_command
 
 
 def test_root_build_orchestration() -> None:
@@ -390,6 +436,7 @@ def test_root_build_orchestration() -> None:
         "[IO.Directory]::Move($PublishStage, $OutputDirectory)",
         "Copy-Item -LiteralPath $SourcePath",
         "Published artifact audit",
+        '"-ApprovedAgentSignerThumbprint", $NormalizedThumbprint',
     )
     for token in required:
         assert token in build, f"root build contract missing: {token}"
@@ -508,7 +555,7 @@ def test_audit_and_lifecycle() -> None:
         "retrospective_change_point",
         "anonymous_peer",
         "runtime-smoke-",
-        "/assets/app.js?v=2.8.1",
+        "/assets/app.js?v=2.9.0",
         "application/javascript; charset=utf-8",
         'id=\"frontendBootGuard\"',
         "/v2/regulatory/overview",
@@ -529,6 +576,9 @@ def test_audit_and_lifecycle() -> None:
         "function Remove-VerificationRootWithRetry",
         '[Guid]::TryParseExact($RelativeRoot, "N"',
         "Lifecycle cleanup timed out after $TimeoutSeconds seconds",
+        "ApprovedAgentSignerThumbprint",
+        "/APPROVED_SIGNER_THUMBPRINT=",
+        "/ALLOW_UNSIGNED_TEST_MEDIA=1",
         "$LifecycleAuditError = $null",
         "preserving the original lifecycle audit error",
         "-----BEGIN",
@@ -562,6 +612,12 @@ def test_audit_and_lifecycle() -> None:
     )
     assert not re.search(r"(?m)^\s*&\s*\$Installer\b", lifecycle)
     assert not re.search(r"(?m)^\s*&\s*\$Uninstallers\[", lifecycle)
+    platform_unsigned_gate = lifecycle[
+        lifecycle.index('if ($Product -eq "platform" -and $UnsignedPlatformTestMedia)') :
+        lifecycle.index('if ($Product -eq "agent")')
+    ]
+    assert '"/ALLOW_UNSIGNED_TEST_MEDIA=1"' in platform_unsigned_gate
+    assert "-UnsignedPlatformTestMedia:$ExpectUnsignedTestOnly" in audit
     gui_wait = audit[
         audit.index("function Invoke-WindowsGuiProcessAndWait") : audit.index(
             "function Invoke-ExecutableChecked"
@@ -586,6 +642,7 @@ def test_audit_and_lifecycle() -> None:
         'Get-ChildItem -LiteralPath $FixtureInstallRoot `\n        -Filter "unins*.exe"',
     ):
         assert token in wait_probe, f"fast GUI wait probe contract missing: {token}"
+    assert wait_probe.count('"/ALLOW_UNSIGNED_TEST_MEDIA=1"') == 2
     final_uninstall = lifecycle.rindex(
         "$FinalUninstallExitCode = Invoke-WindowsGuiProcessAndWait"
     )
@@ -604,6 +661,16 @@ def test_audit_and_lifecycle() -> None:
         "Remove-Item -LiteralPath $FullVerificationRoot -Recurse -Force"
         not in lifecycle_finally
     ), "lifecycle cleanup must use bounded retry instead of a one-shot delete"
+
+    failure_probe = read("scripts/Test-WindowsInstallerFailurePropagation.ps1")
+    unsigned_probe_start = failure_probe.index("$InstallArguments = @(")
+    unsigned_probe_end = failure_probe.index(
+        "$ProbeExitCode = Invoke-ProcessTreeWithTransientAccessRetry",
+        unsigned_probe_start,
+    )
+    assert '"/ALLOW_UNSIGNED_TEST_MEDIA=1"' in failure_probe[
+        unsigned_probe_start:unsigned_probe_end
+    ]
 
     platform_configuration = read(
         "platform/deploy/windows/Set-MineGuardPlatformConfiguration.ps1"

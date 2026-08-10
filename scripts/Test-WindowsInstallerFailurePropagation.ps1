@@ -266,6 +266,9 @@ function Test-OneFailureProbe {
         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
         "/DIR=$InstallRoot", "/LOG=$ProbeLog"
     )
+    # Both fixture installers are intentionally compiled without signing. The
+    # explicit flag keeps this negative test on the unsigned-test path.
+    $InstallArguments += "/ALLOW_UNSIGNED_TEST_MEDIA=1"
     if ($Product -eq "agent") {
         $InstallArguments += "/STATE_ROOT=$(Join-Path $ProbeRoot 's')"
     }

@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#07111f">
   <title>MineGuard · 矿安智察 · 煤矿智能辅助监管系统</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=2.8.1">
+  <link rel="stylesheet" href="/assets/styles.css?v=2.9.0">
 </head>
 <body>
   <div id="frontendBootGuard" class="frontend-boot-guard" role="alert">
@@ -319,6 +319,21 @@
     </form>
   </dialog>
 
-  <script src="/assets/app.js?v=2.8.1" defer></script>
+  <dialog id="passwordChangeDialog" class="login-dialog">
+    <form id="passwordChangeForm" method="dialog">
+      <div class="login-mark"><span></span></div>
+      <p class="eyebrow">首次登录安全设置</p>
+      <h2>请先修改初始密码</h2>
+      <p>完成改密后才能查看监管数据。新密码至少 12 位，并包含大小写字母、数字、符号中的至少三类。</p>
+      <label>当前密码<input id="currentPassword" autocomplete="current-password" type="password" required></label>
+      <label>新密码<input id="newPassword" autocomplete="new-password" type="password" minlength="12" required></label>
+      <label>再次输入<input id="confirmPassword" autocomplete="new-password" type="password" minlength="12" required></label>
+      <button class="primary-button" type="submit">修改密码并重新登录</button>
+      <button id="passwordChangeLogout" type="button">退出账号</button>
+      <p id="passwordChangeError" class="form-error" role="alert"></p>
+    </form>
+  </dialog>
+
+  <script src="/assets/app.js?v=2.9.0" defer></script>
 </body>
 </html>

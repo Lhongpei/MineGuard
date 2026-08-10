@@ -338,8 +338,8 @@ def test_wallboard_has_a_clean_direct_static_url(trace_api: TraceAPI) -> None:
     ("target", "expected_content_type"),
     (
         ("/", "text/html; charset=utf-8"),
-        ("/assets/app.js?v=2.8.1", "application/javascript; charset=utf-8"),
-        ("/assets/styles.css?v=2.8.1", "text/css; charset=utf-8"),
+        ("/assets/app.js?v=2.9.0", "application/javascript; charset=utf-8"),
+        ("/assets/styles.css?v=2.9.0", "text/css; charset=utf-8"),
     ),
 )
 def test_frontend_assets_use_platform_independent_explicit_mime_types(

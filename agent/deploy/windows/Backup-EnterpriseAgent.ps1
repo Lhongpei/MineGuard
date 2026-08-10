@@ -106,6 +106,10 @@ if ($WasRunning) {
     catch {
         $CurrentService = Get-Service -Name $Context.ServiceId -ErrorAction SilentlyContinue
         if ($null -ne $CurrentService -and $CurrentService.Status -eq "Stopped") {
+            $RecoveryService = Get-EAServiceContext -Context $Context
+            if ($null -eq $RecoveryService) {
+                throw "The verified service registration disappeared during backup stop recovery."
+            }
             Start-Service -Name $Context.ServiceId
         }
         throw
@@ -123,7 +127,8 @@ try {
     # Recheck immediately before SQLite backup after all path/service validation.
     Assert-EANoInstanceProcesses -Context $Context
     Invoke-NativeChecked -FilePath $Context.Executable -ArgumentList @(
-        "--env-file", $Context.ConfigPath, "--db", $Context.DatabasePath,
+        "--env-file", $Context.ConfigPath, "--authoritative-env-file",
+        "--db", $Context.DatabasePath,
         "database-backup", "--output", $SnapshotDatabase
     )
 
@@ -211,6 +216,10 @@ finally {
             -ExpectedParent $DestinationRoot -RequiredPrefix ".incomplete-"
     }
     if ($WasRunning -and -not $LeaveStopped) {
+        $RestartContext = Get-EAServiceContext -Context $Context
+        if ($null -eq $RestartContext) {
+            throw "Backup completed, but the verified Windows service registration disappeared before restart."
+        }
         Start-Service -Name $Context.ServiceId
         (Get-Service -Name $Context.ServiceId).WaitForStatus(
             "Running", [TimeSpan]::FromSeconds(30)

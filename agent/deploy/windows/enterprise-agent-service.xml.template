@@ -3,12 +3,14 @@
   <name>__SERVICE_NAME__</name>
   <description>MineGuard enterprise reporting agent instance __INSTANCE_NAME__</description>
   <executable>__EXECUTABLE__</executable>
-  <arguments>--env-file &quot;__ENV_FILE__&quot; serve</arguments>
+  <arguments>--env-file &quot;__ENV_FILE__&quot; --authoritative-env-file serve</arguments>
   <workingdirectory>__WORKING_DIRECTORY__</workingdirectory>
   <env name="PYTHONUTF8" value="1" />
   <env name="PYTHONUNBUFFERED" value="1" />
+  <env name="MINEGUARD_SERVICE_PRODUCTION_MODE" value="__PRODUCTION_MODE__" />
+  <env name="MINEGUARD_SERVICE_FOUR_EYES_REQUIRED" value="__FOUR_EYES_REQUIRED__" />
   <serviceaccount>
-    <username>NT AUTHORITY\LOCAL SERVICE</username>
+    <username>__SERVICE_ACCOUNT__</username>
   </serviceaccount>
   <startmode>Automatic</startmode>
   <delayedAutoStart>true</delayedAutoStart>

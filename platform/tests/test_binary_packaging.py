@@ -13,6 +13,7 @@ from mineguard.resources import read_package_resource
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGING = ROOT / "packaging" / "windows"
 WINDOWS_DEPLOY = ROOT / "deploy" / "windows"
+PLATFORM_INNO = ROOT.parent / "packaging" / "windows" / "inno" / "MineGuardPlatform.iss"
 
 
 def test_resource_reader_is_cwd_independent_and_rejects_traversal(
@@ -115,6 +116,74 @@ def test_platform_nuitka_build_surface_has_a_pinned_traceable_contract() -> None
     assert "New-Item -ItemType Directory -Path $releaseDirectory" not in build
     assert "--mode=onefile" not in build
     assert "Invoke-WebRequest" not in build
+
+
+def test_unsigned_platform_setup_requires_explicit_test_authorization() -> None:
+    installer = PLATFORM_INNO.read_text(encoding="utf-8")
+    for required in (
+        "#ifndef EnableSigning",
+        "UnsignedTestPage: TInputOptionWizardPage",
+        "function IsUnsignedTestMediaAuthorized(): Boolean",
+        "{param:ALLOW_UNSIGNED_TEST_MEDIA|}",
+        "CreateInputOptionPage",
+        "I explicitly authorize this unsigned internal-test Platform installation.",
+        "function NextButtonClick(CurPageID: Integer): Boolean",
+        "Unsigned Platform internal-test media was not explicitly authorized",
+        "Unsigned Platform test media was not explicitly authorized",
+    ):
+        assert required in installer
+
+    prepare = installer[
+        installer.index("function PrepareToInstall") : installer.index(
+            "procedure InstallProductRuntime"
+        )
+    ]
+    install = installer[
+        installer.index("procedure InstallProductRuntime") : installer.index(
+            "function GetCustomSetupExitCode"
+        )
+    ]
+    for guarded_region in (prepare, install):
+        gate = guarded_region.index("#ifndef EnableSigning")
+        gate_end = guarded_region.index("#endif", gate)
+        authorization = guarded_region.index(
+            "IsUnsignedTestMediaAuthorized()", gate
+        )
+        assert gate < authorization < gate_end
+
+    assert "{param:ALLOW_UNSIGNED_TEST_MEDIA|}" not in installer[
+        installer.index("[Setup]") : installer.index("[Languages]")
+    ]
+
+
+def test_windows_delivery_docs_keep_setup_as_the_formal_trust_root() -> None:
+    operations = (ROOT / "docs" / "Windows原生部署与运维.md").read_text(
+        encoding="utf-8"
+    )
+    deployed_readme = (WINDOWS_DEPLOY / "README.md").read_text(
+        encoding="utf-8-sig"
+    )
+    binary_guide = (
+        ROOT.parent / "docs" / "Windows二进制发行与安装.md"
+    ).read_text(encoding="utf-8")
+    for document in (operations, deployed_readme, binary_guide):
+        assert "正式安装的唯一信任入口" in document
+        assert "signed Setup" in document
+        assert "staging" in document
+        assert "不能认证" in document
+        assert "信任根" in document
+
+    assert "MineGuard-Platform-0.5.0-windows-x64.exe" not in binary_guide
+    assert "MineGuard-EnterpriseAgent-0.2.1-windows-x64.exe" not in binary_guide
+    assert "$PlatformVersion = '<platform-version>'" in binary_guide
+    assert "$AgentVersion = '<agent-version>'" in binary_guide
+    assert 'MineGuard-Platform-$PlatformVersion-windows-x64.exe' in binary_guide
+    assert (
+        'MineGuard-EnterpriseAgent-$AgentVersion-windows-x64.exe'
+        in binary_guide
+    )
+    assert "必须与 Platform release-manifest.json 一致" in binary_guide
+    assert "必须与 Agent release-manifest.json 一致" in binary_guide
 
 
 def test_deployment_scripts_resolve_standalone_before_development_python() -> None:

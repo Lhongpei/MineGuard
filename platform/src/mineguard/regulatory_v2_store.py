@@ -13,7 +13,8 @@ new events, never updates: an enterprise explanation is recorded as
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 import hashlib
 import json
@@ -51,6 +52,108 @@ class _DurableIdempotencyConflict(RegulatoryV2ConflictError):
 
 class RegulatoryV2NotFoundError(LookupError):
     """A requested V2 object does not exist in the caller's scope."""
+
+
+class RegulatoryV2IntegrityError(RuntimeError):
+    """The immutable regulatory ledger cannot be trusted for further writes."""
+
+
+class RegulatoryV2SchemaVersionError(RuntimeError):
+    """The regulatory database schema is unsupported or has an invalid ledger."""
+
+
+REGULATORY_V2_SCHEMA_VERSION = 1
+_SCHEMA_MIGRATIONS: dict[int, tuple[str, str]] = {
+    1: (
+        "regulatory-v2-append-only-baseline",
+        hashlib.sha256(
+            b"mineguard:regulatory-v2-schema:1:append-only-baseline"
+        ).hexdigest(),
+    ),
+}
+
+
+_IMMUTABLE_TABLES = (
+    "v2_schema_migrations",
+    "v2_agent_mine_bindings",
+    "v2_inbox_commands",
+    "v2_submissions",
+    "v2_daily_facts",
+    "v2_analysis_runs",
+    "v2_baseline_admissions",
+    "v2_peer_reference_snapshots",
+    "v2_findings",
+    "v2_analysis_reports",
+    "v2_finding_events",
+    "v2_response_batches",
+    "v2_responses",
+    "v2_delivery_acks",
+    "v2_outbox",
+    "v2_exchange_messages",
+    "v2_audit_events",
+)
+_MANAGED_TRIGGER_TABLES = frozenset((*_IMMUTABLE_TABLES, "v2_transport_nonces"))
+_HASH_BINDINGS = (
+    ("v2_submissions", "payload_json", "payload_sha256"),
+    ("v2_daily_facts", "normalized_json", "normalized_sha256"),
+    ("v2_analysis_runs", "result_json", "result_sha256"),
+    ("v2_baseline_admissions", "reasons_json", "reasons_sha256"),
+    ("v2_peer_reference_snapshots", "cohort_json", "cohort_sha256"),
+    ("v2_findings", "report_json", "report_sha256"),
+    ("v2_analysis_reports", "report_json", "report_sha256"),
+    ("v2_response_batches", "request_json", "request_sha256"),
+    ("v2_responses", "response_json", "response_sha256"),
+    ("v2_delivery_acks", "ack_json", "ack_sha256"),
+    ("v2_outbox", "payload_json", "payload_sha256"),
+    ("v2_exchange_messages", "body_json", "body_sha256"),
+)
+_ZERO_HASH = "0" * 64
+_MAX_ACTIVE_TRANSPORT_NONCES_PER_SENDER = 4096
+
+
+@dataclass(frozen=True)
+class _IntegrityCheckpoint:
+    """Trusted local state after a complete or controlled incremental check."""
+
+    data_version: int
+    schema_version: int
+    user_version: int
+    total_changes: int
+    audit_sequence: int
+    audit_hash: str
+    payload_rowids: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True)
+class _ManagedIndexContract:
+    """SQLite-version-stable description of one governed index."""
+
+    # SQLite-generated auto-index names are implementation details and can
+    # differ by build.  Application-authored index names remain part of the
+    # contract, while auto indexes are identified by their structural fields.
+    name: str | None
+    unique: int
+    origin: str
+    partial: int
+    sql: str | None
+    columns: tuple[tuple[int, int, str | None, int, str, int], ...]
+
+
+@dataclass(frozen=True)
+class _ManagedTableContract:
+    """Complete governed table shape, including constraints and indexes."""
+
+    name: str
+    sql: str
+    columns: tuple[tuple[int, str, str, int, str | None, int, int], ...]
+    foreign_keys: tuple[
+        tuple[int, int, str, str, str | None, str, str, str], ...
+    ]
+    indexes: tuple[_ManagedIndexContract, ...]
+
+
+_EXPECTED_MANAGED_SCHEMA_CONTRACT: tuple[_ManagedTableContract, ...] | None = None
+_SCHEMA_CONTRACT_LOCK = RLock()
 
 
 class EvidenceReference(StrictModel):
@@ -307,10 +410,24 @@ class RegulatoryV2Store:
         path: str | Path,
         *,
         now: Callable[[], datetime] | None = None,
+        production_mode: bool = False,
+        allow_legacy_schema_adoption: bool = False,
     ) -> None:
         self.path = str(path)
         self._now = now or (lambda: datetime.now(UTC))
+        self.production_mode = bool(production_mode)
+        self.allow_legacy_schema_adoption = bool(allow_legacy_schema_adoption)
+        if self.production_mode and self.allow_legacy_schema_adoption:
+            raise RegulatoryV2SchemaVersionError(
+                "legacy schema adoption is an explicit offline migration and "
+                "is forbidden during production startup"
+            )
         self._lock = RLock()
+        self._integrity_checkpoint: _IntegrityCheckpoint | None = None
+        # Once a running production process observes corruption, it stays
+        # failed closed until an operator repairs the database and restarts.
+        # A later transiently matching marker must never silently clear it.
+        self._integrity_failed = False
         self._connection = sqlite3.connect(
             self.path,
             timeout=15.0,
@@ -323,11 +440,42 @@ class RegulatoryV2Store:
         if self.path != ":memory:":
             self._connection.execute("PRAGMA journal_mode = WAL")
             self._connection.execute("PRAGMA synchronous = FULL")
-        self._create_schema()
+        try:
+            self._preflight_schema_version()
+            if (
+                self.production_mode
+                and self._table_exists("v2_audit_events")
+                and (
+                    not self._verify_audit_chain_locked()
+                    or not self._verify_immutable_triggers_locked(
+                        allowed_missing_tables=frozenset({"v2_schema_migrations"})
+                    )
+                )
+            ):
+                raise RegulatoryV2IntegrityError(
+                    "regulatory audit chain or append-only trigger integrity "
+                    "check failed"
+                )
+            self._create_schema()
+            self.ensure_schema_supported()
+            if self.production_mode:
+                with self._lock:
+                    if not self._run_full_integrity_check_locked():
+                        raise RegulatoryV2IntegrityError(
+                            "regulatory immutable-store integrity check failed"
+                        )
+        except BaseException:
+            self._connection.close()
+            raise
 
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+    def interrupt(self) -> None:
+        """Interrupt a long-running SQLite operation during bounded shutdown."""
+
+        self._connection.interrupt()
 
     def __enter__(self) -> "RegulatoryV2Store":
         return self
@@ -338,22 +486,499 @@ class RegulatoryV2Store:
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
+            # A machine HTTP operation may group nonce admission and several
+            # existing store calls into one outer controlled transaction. The
+            # re-entrant calls participate in that transaction; only the outer
+            # owner validates the aggregate delta and commits or rolls back.
+            if self._connection.in_transaction:
+                yield self._connection
+                return
             self._connection.execute("BEGIN IMMEDIATE")
             try:
+                checkpoint: _IntegrityCheckpoint | None = None
+                if self.production_mode:
+                    if not self._runtime_integrity_valid_locked():
+                        raise RegulatoryV2IntegrityError(
+                            "regulatory integrity check failed; write refused"
+                        )
+                    checkpoint = self._integrity_checkpoint
+                    if checkpoint is None:  # pragma: no cover - invariant guard
+                        raise RegulatoryV2IntegrityError(
+                            "regulatory integrity checkpoint is unavailable"
+                        )
                 yield self._connection
             except _DurableIdempotencyConflict:
                 # The conflicting business command is never applied, but the
                 # attempted idempotency-key reuse is itself immutable evidence.
-                self._connection.commit()
+                self._commit_controlled_transaction_locked(checkpoint)
                 raise
-            except Exception:
+            except BaseException:
                 self._connection.rollback()
+                if self.production_mode and checkpoint is not None:
+                    self._refresh_checkpoint_after_rollback_locked(checkpoint)
                 raise
             else:
-                self._connection.commit()
+                self._commit_controlled_transaction_locked(checkpoint)
+
+    @contextmanager
+    def controlled_write_scope(self) -> Iterator[None]:
+        """Atomically group authenticated nonce admission and business work."""
+
+        with self._transaction():
+            yield
+
+    def _commit_controlled_transaction_locked(
+        self,
+        checkpoint: _IntegrityCheckpoint | None,
+    ) -> None:
+        """Validate this process's append-only delta before trusting a commit."""
+
+        next_checkpoint: _IntegrityCheckpoint | None = None
+        if self.production_mode:
+            if checkpoint is None or not self._verify_increment_locked(checkpoint):
+                self._integrity_failed = True
+                self._connection.rollback()
+                raise RegulatoryV2IntegrityError(
+                    "regulatory incremental integrity check failed; write refused"
+                )
+            # Capture while BEGIN IMMEDIATE still excludes external writers.
+            # This avoids trusting an unrelated commit racing between our COMMIT
+            # and a post-commit marker read. Own commits do not change this
+            # connection's PRAGMA data_version.
+            try:
+                next_checkpoint = self._capture_checkpoint_locked()
+            except (sqlite3.DatabaseError, IndexError, TypeError) as error:
+                self._integrity_failed = True
+                self._connection.rollback()
+                raise RegulatoryV2IntegrityError(
+                    "regulatory integrity checkpoint refresh failed"
+                ) from error
+        try:
+            self._connection.commit()
+        except BaseException:
+            with suppress(sqlite3.Error):
+                self._connection.rollback()
+            if self.production_mode:
+                self._integrity_failed = True
+            raise
+        if self.production_mode:
+            assert next_checkpoint is not None
+            self._integrity_checkpoint = next_checkpoint
+
+    def _refresh_checkpoint_after_rollback_locked(
+        self,
+        checkpoint: _IntegrityCheckpoint,
+    ) -> None:
+        """Account for SQLite total_changes counting rolled-back row attempts."""
+
+        if self._integrity_failed:
+            return
+        try:
+            audit_sequence, audit_hash = self._audit_head_locked()
+            unchanged = (
+                int(self._connection.execute("PRAGMA data_version").fetchone()[0])
+                == checkpoint.data_version
+                and int(self._connection.execute("PRAGMA schema_version").fetchone()[0])
+                == checkpoint.schema_version
+                and int(self._connection.execute("PRAGMA user_version").fetchone()[0])
+                == checkpoint.user_version
+                and audit_sequence == checkpoint.audit_sequence
+                and audit_hash == checkpoint.audit_hash
+                and self._payload_rowid_heads_locked() == checkpoint.payload_rowids
+                and self._verify_managed_schema_contract_locked()
+                and self._verify_immutable_triggers_locked()
+            )
+        except (sqlite3.DatabaseError, IndexError, TypeError):
+            unchanged = False
+        if unchanged:
+            self._integrity_checkpoint = replace(
+                checkpoint,
+                total_changes=int(self._connection.total_changes),
+            )
+        else:
+            self._integrity_failed = True
+
+    def _table_exists(self, table: str) -> bool:
+        row = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _normalise_schema_sql(value: str) -> str:
+        """Token-normalise application-authored DDL without changing literals.
+
+        ``sqlite_master.sql`` preserves author formatting, while whitespace and
+        keyword case may vary across SQLite builds or dump/restore tools.  A
+        small lexer is more stable than raw-text comparison and, unlike a loose
+        substring check, still binds every CHECK expression, partial-index
+        predicate and trigger body.
+        """
+
+        tokens: list[str] = []
+        index = 0
+        length = len(value)
+        while index < length:
+            character = value[index]
+            if character.isspace():
+                index += 1
+                continue
+            if value.startswith("--", index):
+                end = value.find("\n", index + 2)
+                index = length if end < 0 else end + 1
+                continue
+            if value.startswith("/*", index):
+                end = value.find("*/", index + 2)
+                if end < 0:
+                    tokens.append(value[index:])
+                    break
+                index = end + 2
+                continue
+            if character in {"'", '"', "`"}:
+                quote = character
+                end = index + 1
+                while end < length:
+                    if value[end] == quote:
+                        if end + 1 < length and value[end + 1] == quote:
+                            end += 2
+                            continue
+                        end += 1
+                        break
+                    end += 1
+                tokens.append("quoted:" + value[index:end])
+                index = end
+                continue
+            if character == "[":
+                end = value.find("]", index + 1)
+                end = length if end < 0 else end + 1
+                tokens.append("quoted:" + value[index:end])
+                index = end
+                continue
+            if character.isalnum() or character in {"_", "$"}:
+                end = index + 1
+                while end < length and (
+                    value[end].isalnum() or value[end] in {"_", "$"}
+                ):
+                    end += 1
+                tokens.append("word:" + value[index:end].casefold())
+                index = end
+                continue
+            matched = False
+            for operator in ("->>", "<=", ">=", "<>", "!=", "==", "||", "->"):
+                if value.startswith(operator, index):
+                    tokens.append("symbol:" + operator)
+                    index += len(operator)
+                    matched = True
+                    break
+            if matched:
+                continue
+            tokens.append("symbol:" + character)
+            index += 1
+        while tokens and tokens[-1] == "symbol:;":
+            tokens.pop()
+        return "\x1f".join(tokens)
+
+    @classmethod
+    def _capture_managed_schema_contract_from(
+        cls, connection: sqlite3.Connection
+    ) -> tuple[_ManagedTableContract, ...]:
+        """Capture every governed V2 table and all of its SQLite constraints."""
+
+        table_rows = connection.execute(
+            "SELECT name,sql FROM sqlite_master "
+            "WHERE type='table' AND name GLOB 'v2_*' ORDER BY name"
+        ).fetchall()
+        contracts: list[_ManagedTableContract] = []
+        for table_row in table_rows:
+            table = str(table_row["name"])
+            table_sql = table_row["sql"]
+            if not isinstance(table_sql, str):
+                raise sqlite3.DatabaseError(
+                    f"managed table {table!r} has no canonical CREATE SQL"
+                )
+            quoted_table = '"' + table.replace('"', '""') + '"'
+            columns = tuple(
+                (
+                    int(row["cid"]),
+                    str(row["name"]),
+                    str(row["type"] or "").casefold(),
+                    int(row["notnull"]),
+                    (
+                        cls._normalise_schema_sql(str(row["dflt_value"]))
+                        if row["dflt_value"] is not None
+                        else None
+                    ),
+                    int(row["pk"]),
+                    int(row["hidden"]),
+                )
+                for row in connection.execute(
+                    f"PRAGMA table_xinfo({quoted_table})"
+                ).fetchall()
+            )
+            foreign_keys = tuple(
+                sorted(
+                    (
+                        int(row["id"]),
+                        int(row["seq"]),
+                        str(row["table"]),
+                        str(row["from"]),
+                        str(row["to"]) if row["to"] is not None else None,
+                        str(row["on_update"]).casefold(),
+                        str(row["on_delete"]).casefold(),
+                        str(row["match"]).casefold(),
+                    )
+                    for row in connection.execute(
+                        f"PRAGMA foreign_key_list({quoted_table})"
+                    ).fetchall()
+                )
+            )
+            indexes: list[_ManagedIndexContract] = []
+            for index_row in connection.execute(
+                f"PRAGMA index_list({quoted_table})"
+            ).fetchall():
+                index_name = str(index_row["name"])
+                origin = str(index_row["origin"])
+                quoted_index = '"' + index_name.replace('"', '""') + '"'
+                sql_row = connection.execute(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE type='index' AND name=?",
+                    (index_name,),
+                ).fetchone()
+                index_sql = (
+                    cls._normalise_schema_sql(str(sql_row["sql"]))
+                    if sql_row is not None and sql_row["sql"] is not None
+                    else None
+                )
+                index_columns = tuple(
+                    (
+                        int(row["seqno"]),
+                        int(row["cid"]),
+                        str(row["name"]) if row["name"] is not None else None,
+                        int(row["desc"]),
+                        str(row["coll"]).casefold(),
+                        int(row["key"]),
+                    )
+                    for row in connection.execute(
+                        f"PRAGMA index_xinfo({quoted_index})"
+                    ).fetchall()
+                )
+                indexes.append(
+                    _ManagedIndexContract(
+                        name=index_name if origin == "c" else None,
+                        unique=int(index_row["unique"]),
+                        origin=origin,
+                        partial=int(index_row["partial"]),
+                        sql=index_sql,
+                        columns=index_columns,
+                    )
+                )
+            indexes.sort(
+                key=lambda item: (
+                    item.name or "",
+                    item.origin,
+                    item.unique,
+                    item.partial,
+                    item.sql or "",
+                    repr(item.columns),
+                )
+            )
+            contracts.append(
+                _ManagedTableContract(
+                    name=table,
+                    sql=cls._normalise_schema_sql(table_sql),
+                    columns=columns,
+                    foreign_keys=foreign_keys,
+                    indexes=tuple(indexes),
+                )
+            )
+        return tuple(contracts)
+
+    @classmethod
+    def _expected_managed_schema_contract(
+        cls,
+    ) -> tuple[_ManagedTableContract, ...]:
+        global _EXPECTED_MANAGED_SCHEMA_CONTRACT
+        with _SCHEMA_CONTRACT_LOCK:
+            if _EXPECTED_MANAGED_SCHEMA_CONTRACT is not None:
+                return _EXPECTED_MANAGED_SCHEMA_CONTRACT
+            reference = object.__new__(cls)
+            reference.path = ":memory:"
+            reference._now = lambda: datetime(2000, 1, 1, tzinfo=UTC)
+            reference.production_mode = False
+            reference.allow_legacy_schema_adoption = False
+            reference._lock = RLock()
+            reference._integrity_checkpoint = None
+            reference._integrity_failed = False
+            reference._connection = sqlite3.connect(
+                ":memory:", isolation_level=None, check_same_thread=False
+            )
+            reference._connection.row_factory = sqlite3.Row
+            reference._connection.execute("PRAGMA foreign_keys = ON")
+            try:
+                reference._create_schema()
+                _EXPECTED_MANAGED_SCHEMA_CONTRACT = (
+                    cls._capture_managed_schema_contract_from(reference._connection)
+                )
+            finally:
+                reference._connection.close()
+            return _EXPECTED_MANAGED_SCHEMA_CONTRACT
+
+    def _verify_managed_schema_contract_locked(
+        self,
+        *,
+        legacy_without_ledger: bool = False,
+    ) -> bool:
+        expected = self._expected_managed_schema_contract()
+        if legacy_without_ledger:
+            expected = tuple(
+                item for item in expected if item.name != "v2_schema_migrations"
+            )
+        try:
+            # A V2-named view is not part of the extension surface and could
+            # shadow a missing table in unsafe diagnostic code.
+            if self._connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='view' AND name GLOB 'v2_*' LIMIT 1"
+            ).fetchone() is not None:
+                return False
+            actual = self._capture_managed_schema_contract_from(self._connection)
+        except (sqlite3.DatabaseError, IndexError, KeyError, TypeError, ValueError):
+            return False
+        return actual == expected
+
+    def _database_is_pristine_empty_locked(self) -> bool:
+        return self._connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' "
+            "AND type IN ('table','index','trigger','view') LIMIT 1"
+        ).fetchone() is None
+
+    def _preflight_schema_version(self) -> None:
+        """Reject an unknown future or internally inconsistent schema first.
+
+        This check deliberately runs before any ``CREATE``/``ALTER`` statement,
+        so opening a database produced by newer software cannot silently modify
+        it.  Only a genuinely empty database is bootstrapped automatically.
+        A pre-ledger V2 database requires an explicit, non-production, one-time
+        adoption flag and must match the exact historical managed fingerprint.
+        """
+
+        with self._lock:
+            user_version = int(
+                self._connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            if user_version > REGULATORY_V2_SCHEMA_VERSION:
+                raise RegulatoryV2SchemaVersionError(
+                    "database schema is newer than this MineGuard version"
+                )
+            if not self._table_exists("v2_schema_migrations"):
+                if user_version == 0 and self._database_is_pristine_empty_locked():
+                    return
+                if not self.allow_legacy_schema_adoption:
+                    raise RegulatoryV2SchemaVersionError(
+                        "database migration ledger is missing; automatic adoption "
+                        "of a non-empty database is forbidden"
+                    )
+                if user_version != 0:
+                    raise RegulatoryV2SchemaVersionError(
+                        "legacy database user_version must be zero"
+                    )
+                if not self._verify_managed_schema_contract_locked(
+                    legacy_without_ledger=True
+                ):
+                    raise RegulatoryV2SchemaVersionError(
+                        "legacy V2 schema does not match the exact adoption fingerprint"
+                    )
+                if not self._verify_immutable_triggers_locked(
+                    allowed_missing_tables=frozenset({"v2_schema_migrations"})
+                ):
+                    raise RegulatoryV2IntegrityError(
+                        "regulatory audit chain or append-only trigger integrity "
+                        "check failed"
+                    )
+                return
+            try:
+                rows = self._connection.execute(
+                    """
+                    SELECT version, migration_id, checksum
+                    FROM v2_schema_migrations ORDER BY version
+                    """
+                ).fetchall()
+            except sqlite3.DatabaseError as error:
+                raise RegulatoryV2SchemaVersionError(
+                    "database migration ledger is malformed"
+                ) from error
+            versions = [int(row["version"]) for row in rows]
+            if versions and versions != list(range(1, versions[-1] + 1)):
+                raise RegulatoryV2SchemaVersionError(
+                    "database migration ledger is not contiguous"
+                )
+            for row in rows:
+                version = int(row["version"])
+                expected = _SCHEMA_MIGRATIONS.get(version)
+                if expected is None:
+                    raise RegulatoryV2SchemaVersionError(
+                        "database schema is newer than this MineGuard version"
+                    )
+                if (row["migration_id"], row["checksum"]) != expected:
+                    raise RegulatoryV2SchemaVersionError(
+                        "database migration ledger checksum is invalid"
+                    )
+            ledger_version = versions[-1] if versions else 0
+            if user_version != ledger_version:
+                raise RegulatoryV2SchemaVersionError(
+                    "database schema version disagrees with migration ledger"
+                )
+            if ledger_version != REGULATORY_V2_SCHEMA_VERSION:
+                raise RegulatoryV2SchemaVersionError(
+                    "database schema migration is incomplete"
+                )
+            if not self._verify_managed_schema_contract_locked():
+                raise RegulatoryV2SchemaVersionError(
+                    "managed regulatory schema contract is missing or altered"
+                )
+            if not self._verify_immutable_triggers_locked():
+                raise RegulatoryV2IntegrityError(
+                    "regulatory audit chain or append-only trigger integrity "
+                    "check failed"
+                )
+
+    def ensure_schema_supported(self) -> None:
+        """Require the fully migrated schema expected by this binary."""
+
+        self._preflight_schema_version()
+        with self._lock:
+            if not self._table_exists("v2_schema_migrations"):
+                raise RegulatoryV2SchemaVersionError(
+                    "database migration ledger is missing"
+                )
+            row = self._connection.execute(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM v2_schema_migrations"
+            ).fetchone()
+            assert row is not None
+            user_version = int(
+                self._connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            if (
+                int(row["version"]) != REGULATORY_V2_SCHEMA_VERSION
+                or user_version != REGULATORY_V2_SCHEMA_VERSION
+            ):
+                raise RegulatoryV2SchemaVersionError(
+                    "database schema migration is incomplete"
+                )
 
     def _create_schema(self) -> None:
         schema = """
+        CREATE TABLE IF NOT EXISTS v2_schema_migrations (
+            version INTEGER PRIMARY KEY CHECK (version >= 1),
+            migration_id TEXT NOT NULL UNIQUE,
+            checksum TEXT NOT NULL CHECK (
+                length(checksum) = 64 AND checksum NOT GLOB '*[^0-9a-f]*'
+            ),
+            applied_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS v2_agent_mine_bindings (
             agent_id TEXT PRIMARY KEY,
             mine_id TEXT NOT NULL UNIQUE,
@@ -647,25 +1272,28 @@ class RegulatoryV2Store:
                 ON v2_submissions(root_workflow_id, revision)
                 """
             )
-            immutable_tables = (
-                "v2_agent_mine_bindings",
-                "v2_inbox_commands",
-                "v2_submissions",
-                "v2_daily_facts",
-                "v2_analysis_runs",
-                "v2_baseline_admissions",
-                "v2_peer_reference_snapshots",
-                "v2_findings",
-                "v2_analysis_reports",
-                "v2_finding_events",
-                "v2_response_batches",
-                "v2_responses",
-                "v2_delivery_acks",
-                "v2_outbox",
-                "v2_exchange_messages",
-                "v2_audit_events",
+            applied_versions = {
+                int(row["version"])
+                for row in self._connection.execute(
+                    "SELECT version FROM v2_schema_migrations"
+                ).fetchall()
+            }
+            for version in range(1, REGULATORY_V2_SCHEMA_VERSION + 1):
+                if version in applied_versions:
+                    continue
+                migration_id, checksum = _SCHEMA_MIGRATIONS[version]
+                self._connection.execute(
+                    """
+                    INSERT INTO v2_schema_migrations(
+                        version, migration_id, checksum, applied_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (version, migration_id, checksum, self._timestamp()),
+                )
+            self._connection.execute(
+                f"PRAGMA user_version = {REGULATORY_V2_SCHEMA_VERSION}"
             )
-            for table in immutable_tables:
+            for table in _IMMUTABLE_TABLES:
                 self._connection.executescript(
                     f"""
                     CREATE TRIGGER IF NOT EXISTS {table}_no_update
@@ -692,7 +1320,7 @@ class RegulatoryV2Store:
         request_time: datetime,
         expires_at: datetime,
     ) -> bool:
-        """Atomically persist an HTTP nonce; return ``False`` on replay."""
+        """Persist an HTTP nonce within a strict per-sender active-row bound."""
 
         if not sender_id.strip() or not nonce.strip():
             raise ValueError("sender_id and nonce are required")
@@ -706,6 +1334,14 @@ class RegulatoryV2Store:
                 "DELETE FROM v2_transport_nonces WHERE expires_at <= ?",
                 (current.isoformat(),),
             )
+            active_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM v2_transport_nonces WHERE sender_id = ?",
+                    (sender_id,),
+                ).fetchone()[0]
+            )
+            if active_count >= _MAX_ACTIVE_TRANSPORT_NONCES_PER_SENDER:
+                return False
             try:
                 connection.execute(
                     """
@@ -812,9 +1448,12 @@ class RegulatoryV2Store:
         payload_sha256 = _hash_text(payload_json)
         idempotency_key = idempotency_key or submission.submission_id
         received_instant = _as_utc(self._now())
-        if submission.period_end > received_instant.astimezone(
-            ZoneInfo(submission.reporting_timezone)
-        ).date():
+        if (
+            submission.period_end
+            > received_instant.astimezone(
+                ZoneInfo(submission.reporting_timezone)
+            ).date()
+        ):
             raise RegulatoryV2ConflictError(
                 "future reporting periods cannot enter regulatory history"
             )
@@ -825,9 +1464,7 @@ class RegulatoryV2Store:
                 self._assert_agent_mine(connection, agent_id, submission.mine_id)
             command_body_sha256: str | None = None
             if agent_id is not None and exchange_message is not None:
-                command_body_sha256 = _hash_text(
-                    _canonical_json(exchange_message.body)
-                )
+                command_body_sha256 = _hash_text(_canonical_json(exchange_message.body))
                 claimed = self._find_inbox_command(
                     connection,
                     sender_id=agent_id,
@@ -915,10 +1552,7 @@ class RegulatoryV2Store:
             root_workflow_id = (
                 submission.submission_id
                 if predecessor is None
-                else (
-                    predecessor["root_workflow_id"]
-                    or predecessor["submission_id"]
-                )
+                else (predecessor["root_workflow_id"] or predecessor["submission_id"])
             )
             try:
                 connection.execute(
@@ -1243,9 +1877,7 @@ class RegulatoryV2Store:
                 self._assert_agent_mine(connection, sender_id, mine_id)
             command_body_sha256: str | None = None
             if sender_id is not None and exchange_message is not None:
-                command_body_sha256 = _hash_text(
-                    _canonical_json(exchange_message.body)
-                )
+                command_body_sha256 = _hash_text(_canonical_json(exchange_message.body))
                 claimed = self._find_inbox_command(
                     connection,
                     sender_id=sender_id,
@@ -1476,9 +2108,7 @@ class RegulatoryV2Store:
                 self._assert_agent_mine(connection, sender_id, ack.mine_id)
             command_body_sha256: str | None = None
             if sender_id is not None and exchange_message is not None:
-                command_body_sha256 = _hash_text(
-                    _canonical_json(exchange_message.body)
-                )
+                command_body_sha256 = _hash_text(_canonical_json(exchange_message.body))
                 claimed = self._find_inbox_command(
                     connection,
                     sender_id=sender_id,
@@ -1548,9 +2178,7 @@ class RegulatoryV2Store:
                         result_id=ack.ack_id,
                         recorded_at=timestamp,
                     )
-                return self._delivery_ack_receipt(
-                    connection, ack.ack_id, replay=True
-                )
+                return self._delivery_ack_receipt(connection, ack.ack_id, replay=True)
             report = connection.execute(
                 """
                 SELECT mine_id, report_json FROM v2_analysis_reports
@@ -2601,55 +3229,560 @@ class RegulatoryV2Store:
 
     def verify_audit_chain(self) -> bool:
         with self._lock:
+            return self._verify_audit_chain_locked()
+
+    def _verify_audit_chain_locked(self) -> bool:
+        try:
             rows = self._connection.execute(
                 "SELECT * FROM v2_audit_events ORDER BY sequence"
-            ).fetchall()
-        previous = "0" * 64
-        for row in rows:
-            material = _audit_hash_material(
-                event_id=row["event_id"],
-                event_type=row["event_type"],
-                aggregate_type=row["aggregate_type"],
-                aggregate_id=row["aggregate_id"],
-                mine_id=row["mine_id"],
-                payload_json=row["payload_json"],
-                occurred_at=row["occurred_at"],
-                previous_hash=previous,
             )
-            if row["previous_hash"] != previous or row["event_hash"] != _hash_text(
-                material
+        except sqlite3.DatabaseError:
+            return False
+        previous = _ZERO_HASH
+        for row in rows:
+            try:
+                material = _audit_hash_material(
+                    event_id=row["event_id"],
+                    event_type=row["event_type"],
+                    aggregate_type=row["aggregate_type"],
+                    aggregate_id=row["aggregate_id"],
+                    mine_id=row["mine_id"],
+                    payload_json=row["payload_json"],
+                    occurred_at=row["occurred_at"],
+                    previous_hash=previous,
+                )
+                expected_hash = _hash_text(material)
+                if (
+                    row["previous_hash"] != previous
+                    or row["event_hash"] != expected_hash
+                ):
+                    return False
+                previous = row["event_hash"]
+            except (IndexError, TypeError):
+                return False
+        return True
+
+    @classmethod
+    def _expected_immutable_trigger_sql(cls) -> dict[str, str]:
+        expected: dict[str, str] = {}
+        for table in _IMMUTABLE_TABLES:
+            for operation in ("UPDATE", "DELETE"):
+                suffix = operation.casefold()
+                name = f"{table}_no_{suffix}"
+                expected[name] = cls._normalise_schema_sql(
+                    f"""
+                    CREATE TRIGGER {name}
+                    BEFORE {operation} ON {table}
+                    BEGIN
+                        SELECT RAISE(ABORT, '{table} is append-only');
+                    END
+                    """
+                )
+        return expected
+
+    def _verify_immutable_triggers_locked(
+        self,
+        *,
+        allowed_missing_tables: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Require every append-only trigger with its exact governed body."""
+
+        expected = self._expected_immutable_trigger_sql()
+        try:
+            existing_tables = {
+                str(row["name"])
+                for row in self._connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            missing_tables = set(_IMMUTABLE_TABLES) - existing_tables
+            if not missing_tables.issubset(allowed_missing_tables):
+                return False
+            if allowed_missing_tables:
+                governed_tables = set(_IMMUTABLE_TABLES) - missing_tables
+                expected = {
+                    name: sql
+                    for name, sql in expected.items()
+                    if any(name.startswith(f"{table}_no_") for table in governed_tables)
+                }
+            rows = self._connection.execute(
+                "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='trigger'"
+            )
+            actual: dict[str, str] = {}
+            managed_tables = existing_tables.intersection(_MANAGED_TRIGGER_TABLES)
+            for row in rows:
+                name = str(row["name"])
+                table = str(row["tbl_name"])
+                if table not in managed_tables:
+                    continue
+                # This database has no extension trigger API. Any additional
+                # trigger on a managed table is executable schema injected
+                # outside this binary and must not run inside a trusted write.
+                if name not in expected or not isinstance(row["sql"], str):
+                    return False
+                actual[name] = self._normalise_schema_sql(str(row["sql"]))
+        except (sqlite3.DatabaseError, IndexError, TypeError):
+            return False
+        return all(actual.get(name) == sql for name, sql in expected.items())
+
+    def _audit_head_locked(self) -> tuple[int, str]:
+        row = self._connection.execute(
+            "SELECT sequence,event_hash FROM v2_audit_events "
+            "ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return 0, _ZERO_HASH
+        return int(row["sequence"]), str(row["event_hash"])
+
+    def _payload_rowid_heads_locked(self) -> tuple[tuple[str, int], ...]:
+        return tuple(
+            (
+                table,
+                int(
+                    self._connection.execute(
+                        f"SELECT COALESCE(MAX(rowid),0) FROM {table}"
+                    ).fetchone()[0]
+                ),
+            )
+            for table, _, _ in _HASH_BINDINGS
+        )
+
+    def _capture_checkpoint_locked(self) -> _IntegrityCheckpoint:
+        audit_sequence, audit_hash = self._audit_head_locked()
+        return _IntegrityCheckpoint(
+            data_version=int(
+                self._connection.execute("PRAGMA data_version").fetchone()[0]
+            ),
+            schema_version=int(
+                self._connection.execute("PRAGMA schema_version").fetchone()[0]
+            ),
+            user_version=int(
+                self._connection.execute("PRAGMA user_version").fetchone()[0]
+            ),
+            total_changes=int(self._connection.total_changes),
+            audit_sequence=audit_sequence,
+            audit_hash=audit_hash,
+            payload_rowids=self._payload_rowid_heads_locked(),
+        )
+
+    def _verify_hash_bindings_locked(
+        self,
+        *,
+        after_rowids: dict[str, int] | None = None,
+    ) -> bool:
+        try:
+            for table, payload_column, hash_column in _HASH_BINDINGS:
+                if after_rowids is None:
+                    rows = self._connection.execute(
+                        f"SELECT {payload_column}, {hash_column} FROM {table}"
+                    )
+                else:
+                    rows = self._connection.execute(
+                        f"SELECT {payload_column}, {hash_column} FROM {table} "
+                        "WHERE rowid > ? ORDER BY rowid",
+                        (after_rowids[table],),
+                    )
+                for row in rows:
+                    if _hash_text(row[payload_column]) != row[hash_column]:
+                        return False
+        except (sqlite3.DatabaseError, IndexError, KeyError, TypeError):
+            return False
+        return True
+
+    def _verify_audit_delta_locked(self, checkpoint: _IntegrityCheckpoint) -> bool:
+        previous = checkpoint.audit_hash
+        latest_sequence = checkpoint.audit_sequence
+        try:
+            rows = self._connection.execute(
+                "SELECT * FROM v2_audit_events WHERE sequence > ? ORDER BY sequence",
+                (checkpoint.audit_sequence,),
+            )
+            for row in rows:
+                material = _audit_hash_material(
+                    event_id=row["event_id"],
+                    event_type=row["event_type"],
+                    aggregate_type=row["aggregate_type"],
+                    aggregate_id=row["aggregate_id"],
+                    mine_id=row["mine_id"],
+                    payload_json=row["payload_json"],
+                    occurred_at=row["occurred_at"],
+                    previous_hash=previous,
+                )
+                expected_hash = _hash_text(material)
+                if (
+                    row["previous_hash"] != previous
+                    or row["event_hash"] != expected_hash
+                ):
+                    return False
+                latest_sequence = int(row["sequence"])
+                previous = str(row["event_hash"])
+            current_sequence, current_hash = self._audit_head_locked()
+        except (sqlite3.DatabaseError, IndexError, TypeError):
+            return False
+        return (
+            current_sequence == latest_sequence
+            and current_hash == previous
+            and current_sequence >= checkpoint.audit_sequence
+        )
+
+    def _verify_increment_locked(self, checkpoint: _IntegrityCheckpoint) -> bool:
+        """Verify only rows appended by this controlled write transaction."""
+
+        try:
+            if self._integrity_failed:
+                return False
+            if int(self._connection.execute("PRAGMA data_version").fetchone()[0]) != (
+                checkpoint.data_version
             ):
                 return False
-            previous = row["event_hash"]
+            if (
+                int(self._connection.execute("PRAGMA schema_version").fetchone()[0])
+                != checkpoint.schema_version
+            ):
+                return False
+            if int(self._connection.execute("PRAGMA user_version").fetchone()[0]) != (
+                checkpoint.user_version
+            ):
+                return False
+            if self._connection.total_changes < checkpoint.total_changes:
+                return False
+            if not self._verify_immutable_triggers_locked():
+                return False
+            if not self._verify_managed_schema_contract_locked():
+                return False
+            rowids = dict(checkpoint.payload_rowids)
+            return self._verify_hash_bindings_locked(
+                after_rowids=rowids
+            ) and self._verify_audit_delta_locked(checkpoint)
+        except (sqlite3.DatabaseError, IndexError, TypeError):
+            return False
+
+    def _verify_sqlite_database_integrity_locked(self) -> bool:
+        """Validate SQLite structure and every declared foreign-key relation."""
+
+        try:
+            quick_check_rows = self._connection.execute(
+                "PRAGMA quick_check"
+            ).fetchall()
+            if (
+                len(quick_check_rows) != 1
+                or len(quick_check_rows[0]) != 1
+                or quick_check_rows[0][0] != "ok"
+            ):
+                return False
+            return (
+                self._connection.execute("PRAGMA foreign_key_check").fetchone()
+                is None
+            )
+        except (sqlite3.DatabaseError, IndexError, TypeError):
+            return False
+
+    def _run_full_integrity_check_locked(self) -> bool:
+        """Perform the expensive authoritative check and refresh trusted state."""
+
+        if self.production_mode and self._integrity_failed:
+            return False
+        started_transaction = not self._connection.in_transaction
+        try:
+            if started_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            self.ensure_schema_supported()
+            valid = (
+                self._verify_sqlite_database_integrity_locked()
+                and self._verify_managed_schema_contract_locked()
+                and self._verify_immutable_triggers_locked()
+                and self._verify_hash_bindings_locked()
+                and self._verify_audit_chain_locked()
+            )
+            if not valid:
+                if started_transaction:
+                    self._connection.rollback()
+                if self.production_mode:
+                    self._integrity_failed = True
+                return False
+            checkpoint = self._capture_checkpoint_locked()
+            if started_transaction:
+                self._connection.commit()
+        except RegulatoryV2SchemaVersionError:
+            if started_transaction:
+                with suppress(sqlite3.Error):
+                    self._connection.rollback()
+            if self.production_mode:
+                self._integrity_failed = True
+            raise
+        except (sqlite3.DatabaseError, IndexError, TypeError):
+            if started_transaction:
+                with suppress(sqlite3.Error):
+                    self._connection.rollback()
+            if self.production_mode:
+                self._integrity_failed = True
+            return False
+        self._integrity_checkpoint = checkpoint
         return True
+
+    def _runtime_integrity_valid_locked(self) -> bool:
+        """Validate constant-size markers against this process's trusted head.
+
+        Production is deliberately a single-writer deployment. ``data_version``
+        changes only when another SQLite connection commits, so accepting a
+        later internally self-consistent database would also accept a forged
+        append. Once a production checkpoint exists, every external commit or
+        out-of-band same-connection mutation therefore latches failure until a
+        reviewed repair and process restart.
+        """
+
+        if self._integrity_failed:
+            return False
+        checkpoint = self._integrity_checkpoint
+        if checkpoint is None:
+            return self._run_full_integrity_check_locked()
+        try:
+            data_version = int(
+                self._connection.execute("PRAGMA data_version").fetchone()[0]
+            )
+            schema_version = int(
+                self._connection.execute("PRAGMA schema_version").fetchone()[0]
+            )
+            user_version = int(
+                self._connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            audit_sequence, audit_hash = self._audit_head_locked()
+            schema_contract_valid = self._verify_managed_schema_contract_locked()
+            triggers_valid = self._verify_immutable_triggers_locked()
+        except (sqlite3.DatabaseError, IndexError, TypeError):
+            self._integrity_failed = True
+            return False
+        unchanged = (
+            data_version == checkpoint.data_version
+            and schema_version == checkpoint.schema_version
+            and user_version == checkpoint.user_version
+            and self._connection.total_changes == checkpoint.total_changes
+            and audit_sequence == checkpoint.audit_sequence
+            and audit_hash == checkpoint.audit_hash
+            and schema_contract_valid
+            and triggers_valid
+        )
+        if unchanged:
+            return True
+        if self.production_mode:
+            self._integrity_failed = True
+            # Preserve the more actionable future-schema exception for a
+            # same-connection marker mutation while still latching failure.
+            if user_version != checkpoint.user_version:
+                self.ensure_schema_supported()
+            return False
+        return self._run_full_integrity_check_locked()
+
+    def verify_runtime_integrity(self) -> bool:
+        """Fail-closed readiness check sampled under a stable SQLite snapshot."""
+
+        with self._lock:
+            started_transaction = not self._connection.in_transaction
+            try:
+                if started_transaction:
+                    # A production deployment has one writer. Holding the
+                    # reserved lock closes the data_version/read-marker race;
+                    # non-production keeps the lighter read transaction.
+                    self._connection.execute(
+                        "BEGIN IMMEDIATE" if self.production_mode else "BEGIN"
+                    )
+                valid = self._runtime_integrity_valid_locked()
+            except BaseException:
+                if started_transaction:
+                    with suppress(sqlite3.Error):
+                        self._connection.rollback()
+                raise
+            if started_transaction:
+                self._connection.rollback()
+            return valid
+
+    @contextmanager
+    def verified_read_snapshot(self) -> Iterator[None]:
+        """Hold a verified snapshot while a regulatory projection is built.
+
+        The HTTP layer serialises the completed projection only after leaving
+        this context. An external writer cannot commit between the production
+        integrity gate and the SELECT statements that produced that response.
+        """
+
+        with self._lock:
+            started_transaction = not self._connection.in_transaction
+            try:
+                if started_transaction:
+                    self._connection.execute(
+                        "BEGIN IMMEDIATE" if self.production_mode else "BEGIN"
+                    )
+                if self.production_mode and not self._runtime_integrity_valid_locked():
+                    raise RegulatoryV2IntegrityError(
+                        "regulatory integrity check failed; read refused"
+                    )
+                yield
+            except BaseException:
+                if started_transaction:
+                    with suppress(sqlite3.Error):
+                        self._connection.rollback()
+                raise
+            else:
+                if started_transaction:
+                    self._connection.rollback()
 
     def verify_integrity(self) -> bool:
         """Verify all immutable JSON/hash bindings and the audit hash chain."""
-
-        checks = (
-            ("v2_submissions", "payload_json", "payload_sha256"),
-            ("v2_daily_facts", "normalized_json", "normalized_sha256"),
-            ("v2_analysis_runs", "result_json", "result_sha256"),
-            ("v2_baseline_admissions", "reasons_json", "reasons_sha256"),
-            ("v2_peer_reference_snapshots", "cohort_json", "cohort_sha256"),
-            ("v2_findings", "report_json", "report_sha256"),
-            ("v2_analysis_reports", "report_json", "report_sha256"),
-            ("v2_response_batches", "request_json", "request_sha256"),
-            ("v2_responses", "response_json", "response_sha256"),
-            ("v2_delivery_acks", "ack_json", "ack_sha256"),
-            ("v2_outbox", "payload_json", "payload_sha256"),
-            ("v2_exchange_messages", "body_json", "body_sha256"),
-        )
         with self._lock:
-            for table, payload_column, hash_column in checks:
-                rows = self._connection.execute(
-                    f"SELECT {payload_column}, {hash_column} FROM {table}"
-                ).fetchall()
-                if any(
-                    _hash_text(row[payload_column]) != row[hash_column] for row in rows
-                ):
-                    return False
-        return self.verify_audit_chain()
+            return self._run_full_integrity_check_locked()
+
+    def schema_status(self) -> dict[str, Any]:
+        """Return the explicit supported/current schema and migration ledger."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT version, migration_id, checksum, applied_at
+                FROM v2_schema_migrations ORDER BY version
+                """
+            ).fetchall()
+        migrations = [dict(row) for row in rows]
+        return {
+            "current_version": migrations[-1]["version"] if migrations else 0,
+            "supported_version": REGULATORY_V2_SCHEMA_VERSION,
+            "migrations": migrations,
+        }
+
+    def record_security_event(
+        self,
+        *,
+        event_type: Literal["machine_authentication_failed"],
+        request_method: str,
+        request_path: str,
+        remote_address: str,
+        known_sender_id: str | None = None,
+        mine_id: str | None = None,
+    ) -> None:
+        """Persist a deliberately secret-free machine-authentication failure.
+
+        The caller supplies only server-selected fields. Request bodies,
+        signatures, nonces, content hashes, key identifiers and exception text
+        are intentionally not accepted by this interface.
+        """
+
+        if event_type != "machine_authentication_failed":  # pragma: no cover
+            raise ValueError("unsupported security event type")
+        self.record_authentication_failure_evidence(
+            request_method=request_method,
+            request_path=request_path,
+            remote_address=remote_address,
+            known_sender_id=known_sender_id,
+            mine_id=mine_id,
+        )
+
+    def record_authentication_failure_evidence(
+        self,
+        *,
+        request_method: str | None = None,
+        request_path: str | None = None,
+        remote_address: str | None = None,
+        known_sender_id: str | None = None,
+        mine_id: str | None = None,
+        summary_attempt_count: int | None = None,
+        summary_window_started_at: datetime | None = None,
+        summary_window_ended_at: datetime | None = None,
+        summary_final: bool | None = None,
+    ) -> None:
+        """Append a bounded first failure and/or aggregate summary atomically.
+
+        Only server-selected, secret-free fields are accepted. The HTTP layer
+        uses one transaction when a completed window summary and the first
+        failure of the next window need to be preserved together.
+        """
+
+        first_values = (request_method, request_path, remote_address)
+        has_first = any(value is not None for value in first_values)
+        if has_first and not all(isinstance(value, str) for value in first_values):
+            raise ValueError("authentication failure evidence is incomplete")
+        summary_values = (
+            summary_attempt_count,
+            summary_window_started_at,
+            summary_window_ended_at,
+            summary_final,
+        )
+        has_summary = any(value is not None for value in summary_values)
+        if has_summary and not all(value is not None for value in summary_values):
+            raise ValueError("authentication failure summary is incomplete")
+        if not has_first and not has_summary:
+            raise ValueError("authentication failure evidence is empty")
+
+        method = None
+        path = None
+        remote = None
+        if has_first:
+            assert request_method is not None
+            assert request_path is not None
+            assert remote_address is not None
+            method = request_method.upper()
+            if method not in {"GET", "HEAD", "POST"}:
+                method = "OTHER"
+            path = request_path[:512] if request_path.startswith("/") else "/"
+            remote = remote_address[:128]
+        sender = known_sender_id[:128] if known_sender_id is not None else None
+        governed_mine = mine_id[:128] if mine_id is not None else None
+        if has_summary:
+            if (
+                isinstance(summary_attempt_count, bool)
+                or not isinstance(summary_attempt_count, int)
+                or summary_attempt_count < 2
+            ):
+                raise ValueError("authentication failure summary count is invalid")
+            if not isinstance(summary_final, bool):
+                raise ValueError("authentication failure summary final flag is invalid")
+            assert summary_window_started_at is not None
+            assert summary_window_ended_at is not None
+            window_started = _as_utc(summary_window_started_at)
+            window_ended = _as_utc(summary_window_ended_at)
+            if window_ended < window_started:
+                raise ValueError("authentication failure summary window is invalid")
+
+        occurred_at = self._timestamp()
+        with self._transaction() as connection:
+            if has_summary:
+                assert summary_attempt_count is not None
+                self._append_audit(
+                    connection,
+                    event_type="machine_authentication_failure_summary",
+                    aggregate_type="security_event",
+                    aggregate_id=str(uuid4()),
+                    mine_id=governed_mine,
+                    payload={
+                        "audit_schema": "machine-security-event-summary-v1",
+                        "outcome": "rejected",
+                        "reason_code": "exchange_authentication_failed",
+                        "aggregation": "application_time_window",
+                        "window_started_at": window_started.isoformat(),
+                        "window_ended_at": window_ended.isoformat(),
+                        "attempt_count": min(summary_attempt_count, 2**63 - 1),
+                        "suppressed_count": min(summary_attempt_count - 1, 2**63 - 1),
+                        "final": summary_final,
+                        "known_sender_id": sender,
+                    },
+                    occurred_at=occurred_at,
+                )
+            if has_first:
+                self._append_audit(
+                    connection,
+                    event_type="machine_authentication_failed",
+                    aggregate_type="security_event",
+                    aggregate_id=str(uuid4()),
+                    mine_id=governed_mine,
+                    payload={
+                        "audit_schema": "machine-security-event-v1",
+                        "outcome": "rejected",
+                        "reason_code": "exchange_authentication_failed",
+                        "request_method": method,
+                        "request_path": path,
+                        "remote_address": remote,
+                        "known_sender_id": sender,
+                    },
+                    occurred_at=occurred_at,
+                )
 
     # ------------------------------------------------------------------
     # Internal transaction helpers
@@ -3041,14 +4174,9 @@ class RegulatoryV2Store:
                 relationship: {} for relationship in _RELATIONSHIP_METRIC
             }
             for row in rows:
-                payload = _canonical_daily_payload(
-                    json.loads(row["normalized_json"])
-                )
+                payload = _canonical_daily_payload(json.loads(row["normalized_json"]))
                 production = payload.get("production_t")
-                if (
-                    production is None
-                    or production <= parameters.production_epsilon_t
-                ):
+                if production is None or production <= parameters.production_epsilon_t:
                     continue
                 for relationship, metric in _RELATIONSHIP_METRIC.items():
                     value = payload.get(metric)
@@ -3083,8 +4211,7 @@ class RegulatoryV2Store:
             snapshot_id = str(
                 uuid5(
                     NAMESPACE_URL,
-                    "mineguard:v2:peer-snapshot:"
-                    f"{comparison_group}:{cutoff_date}",
+                    f"mineguard:v2:peer-snapshot:{comparison_group}:{cutoff_date}",
                 )
             )
             created_at = self._timestamp()
@@ -3417,10 +4544,7 @@ class RegulatoryV2Store:
             if signal.severity.value in {"review", "risk"}
         ]
         maximum_adjustment = max(
-            (
-                item.normalized_adjustment
-                for item in result.reconciliation.adjustments
-            ),
+            (item.normalized_adjustment for item in result.reconciliation.adjustments),
             default=0.0,
         )
         intrinsic_failures: list[str] = []

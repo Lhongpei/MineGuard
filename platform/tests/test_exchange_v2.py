@@ -21,6 +21,8 @@ from mineguard.exchange_v2 import (
     sign_exchange_message,
     transport_signature,
     validate_exchange_lineage,
+    validate_production_exchange_clients,
+    validate_production_platform_identity,
     verify_exchange_message_signature,
 )
 
@@ -28,6 +30,40 @@ from mineguard.exchange_v2 import (
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "contracts" / "examples"
 EXAMPLE_SECRET = b"example-v2-exchange-secret-not-for-production"
+PRODUCTION_COMPARISON_CONTEXT = {
+    "capacity_band": "0.9-1.2Mtpa",
+    "mining_method": "underground-longwall",
+    "shift_system": "three-shift-eight-hour",
+    "coal_type": "thermal-coal",
+    "operating_regime": "normal-production",
+}
+
+
+def _production_registry_document() -> dict[str, object]:
+    return {
+        "clients": [
+            {
+                "sender_id": "agent-mine-001",
+                "party_id": "operator-mine-001",
+                "mine_id": "MINE-001",
+                "mine_name": "沁源一号煤矿",
+                "active_message_key_id": "mine001-msg-2026q3-a7f4",
+                "message_keys": {
+                    "mine001-msg-2026q3-a7f4": (
+                        "mG8xQ2pL9vR4sT7wY3kN6cD1fH5jB0zA"
+                    ),
+                    "mine001-msg-2026q2-b9e1": (
+                        "R7cN2yK9mV4qH6xD1sP8aJ3wF5tB0zLu"
+                    ),
+                },
+                "transport_secrets": [
+                    "uC7nP2aX9dK4qW6rE1vM8sJ3hF5bT0yZ",
+                    "L4hV9sQ2nD7xK1mR6pC8wA3jY5tF0zBu",
+                ],
+                "comparison_context": dict(PRODUCTION_COMPARISON_CONTEXT),
+            }
+        ]
+    }
 
 
 @pytest.mark.parametrize(
@@ -312,6 +348,126 @@ def test_client_registry_rejects_template_secret_material(
     entry[secret_field] = "replace-with-independent-random-secret-0001"
     with pytest.raises(ValueError, match="placeholder"):
         parse_exchange_clients(json.dumps({"clients": [entry]}))
+
+
+def test_production_client_registry_accepts_governed_rotation_material() -> None:
+    clients = parse_exchange_clients(json.dumps(_production_registry_document()))
+
+    validate_production_exchange_clients(clients)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("active_message_low_diversity", "byte diversity"),
+        ("previous_message_repeated", "repeated short fragment"),
+        ("previous_transport_low_diversity", "byte diversity"),
+        ("active_key_id_placeholder", "placeholder message key ID"),
+        ("previous_key_id_placeholder", "placeholder message key ID"),
+        ("mine_name_missing", "non-placeholder mine_name"),
+        ("context_missing", "five comparison_context"),
+        ("context_unclassified", "placeholder comparison_context"),
+        ("context_replace_me", "placeholder comparison_context"),
+        ("secret_reused_during_rotation", "must not be reused"),
+    ],
+)
+def test_production_client_registry_rejects_low_quality_governance(
+    case: str,
+    message: str,
+) -> None:
+    document = _production_registry_document()
+    entry = document["clients"][0]
+    assert isinstance(entry, dict)
+    message_keys = entry["message_keys"]
+    transport_secrets = entry["transport_secrets"]
+    context = entry["comparison_context"]
+    assert isinstance(message_keys, dict)
+    assert isinstance(transport_secrets, list)
+    assert isinstance(context, dict)
+
+    if case == "active_message_low_diversity":
+        message_keys["mine001-msg-2026q3-a7f4"] = "a" * 32
+    elif case == "previous_message_repeated":
+        message_keys["mine001-msg-2026q2-b9e1"] = "0123456789ABCDEF" * 2
+    elif case == "previous_transport_low_diversity":
+        transport_secrets[1] = "b" * 32
+    elif case == "active_key_id_placeholder":
+        secret = message_keys.pop("mine001-msg-2026q3-a7f4")
+        message_keys["demo-key"] = secret
+        entry["active_message_key_id"] = "demo-key"
+    elif case == "previous_key_id_placeholder":
+        secret = message_keys.pop("mine001-msg-2026q2-b9e1")
+        message_keys["test-key"] = secret
+    elif case == "mine_name_missing":
+        del entry["mine_name"]
+    elif case == "context_missing":
+        del entry["comparison_context"]
+    elif case == "context_unclassified":
+        context["coal_type"] = "unclassified"
+    elif case == "context_replace_me":
+        context["operating_regime"] = "replace-me"
+    elif case == "secret_reused_during_rotation":
+        message_keys["mine001-msg-2026q2-b9e1"] = message_keys[
+            "mine001-msg-2026q3-a7f4"
+        ]
+    else:  # pragma: no cover - protects the parameter table itself
+        raise AssertionError(case)
+
+    # Compatibility parsing remains available for isolated demonstrations;
+    # only a production boundary applies the additional quality gate.
+    clients = parse_exchange_clients(json.dumps(document))
+    with pytest.raises(ValueError, match=message):
+        validate_production_exchange_clients(clients)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("sender_id", "synthetic-demo-agent"),
+        ("party_id", "replace-party"),
+        ("mine_id", "DEMO-MINE"),
+        ("mine_name", "示例一号煤矿"),
+    ],
+)
+def test_production_client_registry_rejects_placeholder_public_identity(
+    field: str,
+    value: str,
+) -> None:
+    document = _production_registry_document()
+    entry = document["clients"][0]
+    assert isinstance(entry, dict)
+    entry[field] = value
+
+    clients = parse_exchange_clients(json.dumps(document))
+    with pytest.raises(ValueError, match=f"placeholder {field}"):
+        validate_production_exchange_clients(clients)
+
+
+def test_production_platform_identity_accepts_defaults_and_rejects_collisions() -> None:
+    clients = parse_exchange_clients(json.dumps(_production_registry_document()))
+    validate_production_platform_identity(
+        "mineguard-qinyuan",
+        "regulator-qinyuan",
+        "regulator-key-v2",
+        clients=clients,
+    )
+
+    for values, message in (
+        (("demo-platform", "regulator-qinyuan", "gov-key-2026q3"), "placeholder"),
+        (("mineguard-qinyuan", "replace-party", "gov-key-2026q3"), "placeholder"),
+        (("mineguard-qinyuan", "regulator-qinyuan", "test-key"), "placeholder"),
+        (("invalid system", "regulator-qinyuan", "gov-key-2026q3"), "invalid"),
+        (
+            (
+                "mineguard-qinyuan",
+                "regulator-qinyuan",
+                "mine001-msg-2026q3-a7f4",
+            ),
+            "must not reuse",
+        ),
+    ):
+        with pytest.raises(ValueError, match=message):
+            validate_production_platform_identity(*values, clients=clients)
 
 
 def test_multi_finding_response_is_not_silently_truncated() -> None:

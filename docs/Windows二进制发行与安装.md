@@ -27,8 +27,10 @@ Explorer 不支持；没有 Edge/Chrome 时应先离线安装现代浏览器，�
 并停止本次启动。正式长期运行仍须由管理员按本手册后文使用单位批准的 WinSW 安装服务。
 
 正式首次配置也在同一控制中心内完成：切换到“正式内网配置”，选择经批准的
-`clients.json`、专用状态数据目录和端口，填写管理员账号及两遍密码；单位 HTTPS 反向代理
-已经就绪时，再填写领导端 HTTPS 地址。地址必须以 `https://` 开头，且不能包含账号口令、
+`clients.json`、专用状态数据目录和端口，只在主界面填写管理员账号；点击配置后，
+独立的短生命周期 helper 进程才会弹出密码窗并要求输入、确认密码。主控制中心不读取密码，
+也不接收 `SecureString`。单位 HTTPS 反向代理已经就绪时，再填写领导端 HTTPS 地址。
+地址必须以 `https://` 开头，且不能包含账号口令、
 子路径、查询参数或 `#` 片段，例如 `https://mineguard.example.gov.cn/`。控制中心
 会同时核验本机和该 HTTPS 地址的 `/healthz`；验证成功后将地址保存在受保护的本机
 配置中，下次无需重新输入。它不负责配置 DNS、证书或反向代理。正式密码不能使用
@@ -207,7 +209,8 @@ reparse point；它先把完整 JSON 刷盘到同目录随机临时文件，再�
 
 ## 5. 交付核验与安装
 
-先从独立可信渠道取得预期散列/签名者信息，再检查介质：
+正式安装的唯一信任入口是 signed Setup。先从介质之外的独立可信渠道取得预期
+SHA-256 和 signer thumbprint，并在执行 Setup 之前检查介质：
 
 ```powershell
 Get-AuthenticodeSignature .\MineGuard-Platform-*-windows-x64.exe |
@@ -220,10 +223,13 @@ Get-Content .\SHA256SUMS.txt
 安装示例。Setup 同时内置简体中文和英文安装界面，并按 Windows 界面语言自动选择：
 
 ```powershell
-& .\MineGuard-Platform-0.5.0-windows-x64.exe `
+$PlatformVersion = '<platform-version>' # 必须与 Platform release-manifest.json 一致
+$AgentVersion = '<agent-version>'       # 必须与 Agent release-manifest.json 一致
+
+& ".\MineGuard-Platform-$PlatformVersion-windows-x64.exe" `
   /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
 
-& .\MineGuard-EnterpriseAgent-0.2.1-windows-x64.exe `
+& ".\MineGuard-EnterpriseAgent-$AgentVersion-windows-x64.exe" `
   /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
 ```
 
@@ -231,6 +237,9 @@ Setup 先把子项目 release staging 展开到临时目录，再调用包内产
 复核 release manifest 和 SHA-256，做自检、原子切换 runtime、设置 ACL，并把版本清单
 落到 `release-metadata`。子脚本任何非零退出码都会中止 Setup，其 stdout/stderr 写入
 Inno Setup 日志；不会再出现“产品安装失败但 Setup 显示成功”。
+包内脚本的 manifest、SHA-256 和 Authenticode 复核是建立信任后的纵深防御，不能认证正在
+执行的脚本自身。直接展开 release staging 或以管理员运行其中 PS1，只允许用于受控构建、
+故障注入或兼容性测试，不得称为正式交付或正式安装，也不是信任根。
 
 升级前先停止服务。当前二进制版已注册且为 `Stopped` 的 Platform/Agent 服务会被保留；
 任何相关服务仍在运行时，安装器和产品脚本都会拒绝升级。同版本允许修复安装，也允许升级
@@ -256,7 +265,8 @@ Inno Setup 日志；不会再出现“产品安装失败但 Setup 显示成功�
 
 - 展示验收：在“本机展示”页确认演示边界后一键准备并启动，无需 `clients.json`；
 - 正式内网：在“正式内网配置”页选择 `clients.json` 和专用状态目录，填写端口、管理员
-  账号、两遍密码及可选的单位 HTTPS 地址，再点击“保存正式配置并启动”；HTTPS 地址不得
+  账号及可选的单位 HTTPS 地址，再点击“打开安全密码窗并配置”；独立 helper 进程会在小窗口中
+  要求输入和确认密码，完成或取消后立即退出；HTTPS 地址不得
   包含账号口令、查询参数或 `#` 片段，且只用于本次打开浏览器，不会持久保存；
 - 再次打开：点击“启动当前配置”或“打开领导端页面”，控制中心不会重写已有配置；
 - 浏览器：只支持仍在安全支持期内的 Edge/Chrome，不支持 Internet Explorer；
@@ -265,7 +275,8 @@ Inno Setup 日志；不会再出现“产品安装失败但 Setup 显示成功�
 
 演示账号 `admin / 123123123` 只在本机展示模式启用。正式模式启用 Secure Cookie，应用只
 监听 `127.0.0.1`；应先配置单位批准的 HTTPS 反向代理，再让领导端通过 HTTPS 地址访问。
-控制中心的非敏感运行记录写在受保护的 `logs\control-center-*.log`，密码不会写入该日志。
+控制中心的非敏感运行记录写在受保护的 `logs\control-center-*.log`，密码不会进入
+主控制中心、命令行或日志。
 
 ### 6.2 政府 Platform 高级命令入口
 

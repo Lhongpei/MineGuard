@@ -43,6 +43,8 @@ from .five_quantity_mapping import ApprovedColumnMapping, map_csv_inspection
 from .util import jcs_json, parse_aware_datetime, sha256_jcs, utc_now, utc_text
 
 ZERO_HASH = "0" * 64
+_FQ_SCHEMA_VERSION = 2
+_FQ_SCHEMA_COMPONENT = "five_quantity_v2"
 _DRAFT_PAYLOAD_KEYS = {
     "mine",
     "reporting_month",
@@ -654,9 +656,259 @@ def _column_mapping_sha256(value: Any) -> str:
 class FiveQuantityStore:
     """V2 tables isolated from legacy draft tables in the same local database."""
 
-    def __init__(self, repository: Any):
+    def __init__(
+        self,
+        repository: Any,
+        *,
+        four_eyes_required: bool = False,
+        human_preparer_actor_ids: frozenset[str] = frozenset(),
+    ):
         self.repository = repository
+        self.four_eyes_required = bool(four_eyes_required)
+        self.human_preparer_actor_ids = frozenset(human_preparer_actor_ids)
         self._initialize()
+
+    @staticmethod
+    def _audit_triggers_intact(db: Any) -> bool:
+        def normalise(value: str) -> str:
+            return " ".join(value.split())
+
+        expected = {
+            "fq_audit_no_update": normalise(
+                """CREATE TRIGGER fq_audit_no_update
+                BEFORE UPDATE ON fq_audit BEGIN
+                    SELECT RAISE(ABORT, 'fq_audit is append-only');
+                END"""
+            ),
+            "fq_audit_no_delete": normalise(
+                """CREATE TRIGGER fq_audit_no_delete
+                BEFORE DELETE ON fq_audit BEGIN
+                    SELECT RAISE(ABORT, 'fq_audit is append-only');
+                END"""
+            ),
+        }
+        rows = db.execute(
+            "SELECT name,sql FROM sqlite_master "
+            "WHERE type='trigger' AND tbl_name='fq_audit'",
+        ).fetchall()
+        definitions: dict[str, str] = {}
+        for row in rows:
+            name = str(row["name"])
+            sql = row["sql"]
+            if name not in expected or not isinstance(sql, str):
+                return False
+            definitions[name] = normalise(sql)
+        return definitions == expected
+
+    @staticmethod
+    def _install_audit_triggers(db: Any) -> None:
+        db.execute(
+            """CREATE TRIGGER IF NOT EXISTS fq_audit_no_update
+            BEFORE UPDATE ON fq_audit BEGIN
+                SELECT RAISE(ABORT, 'fq_audit is append-only');
+            END"""
+        )
+        db.execute(
+            """CREATE TRIGGER IF NOT EXISTS fq_audit_no_delete
+            BEFORE DELETE ON fq_audit BEGIN
+                SELECT RAISE(ABORT, 'fq_audit is append-only');
+            END"""
+        )
+
+    def _verify_audit_in_transaction(
+        self, db: Any, *, require_anchor: bool = True
+    ) -> dict[str, Any]:
+        if not self._audit_triggers_intact(db):
+            return {
+                "valid": False,
+                "failure": "audit_trigger_missing_or_replaced",
+                "event_count": 0,
+                "head_hash": ZERO_HASH,
+            }
+        rows = db.execute("SELECT * FROM fq_audit ORDER BY sequence").fetchall()
+        previous = ZERO_HASH
+        valid = True
+        failure: str | None = None
+        for expected_sequence, row in enumerate(rows, start=1):
+            try:
+                details = json.loads(str(row["details_json"]))
+            except (TypeError, json.JSONDecodeError):
+                valid = False
+                failure = "audit_details_invalid"
+                break
+            if not isinstance(details, dict):
+                valid = False
+                failure = "audit_details_invalid"
+                break
+            expected_hash = _audit_hash(
+                previous,
+                expected_sequence,
+                str(row["event_type"]),
+                str(row["actor"]),
+                str(row["occurred_at"]),
+                details,
+            )
+            if (
+                int(row["sequence"]) != expected_sequence
+                or str(row["previous_hash"]) != previous
+                or not hmac.compare_digest(str(row["event_hash"]), expected_hash)
+            ):
+                valid = False
+                failure = "audit_chain_invalid"
+                break
+            previous = str(row["event_hash"])
+        anchor = db.execute(
+            "SELECT event_count,head_hash FROM fq_audit_anchor WHERE singleton=1"
+        ).fetchone()
+        if valid and require_anchor and (
+            anchor is None
+            or int(anchor["event_count"]) != len(rows)
+            or not hmac.compare_digest(str(anchor["head_hash"]), previous)
+        ):
+            valid = False
+            failure = "audit_tail_or_anchor_mismatch"
+        return {
+            "valid": valid,
+            "failure": failure,
+            "event_count": len(rows),
+            "head_hash": previous,
+            "anchor_present": anchor is not None,
+        }
+
+    def verify_audit(self) -> dict[str, Any]:
+        """Verify the complete V2 chain, independent of display pagination."""
+
+        with self.repository._read() as db:
+            return self._verify_audit_in_transaction(db)
+
+    def runtime_integrity_boundary_intact(self, db: Any) -> bool:
+        """Check only fixed FQ guards after the trusted startup full scan.
+
+        Historical rows are deliberately not revisited here.  They are covered
+        by the Repository's external-write latch, while every controlled FQ
+        append validates and advances the singleton tail anchor transactionally.
+        """
+
+        if not self._audit_triggers_intact(db):
+            return False
+        version = db.execute(
+            "SELECT version FROM fq_schema_versions WHERE component=?",
+            (_FQ_SCHEMA_COMPONENT,),
+        ).fetchone()
+        anchor = db.execute(
+            "SELECT event_count,head_hash FROM fq_audit_anchor WHERE singleton=1"
+        ).fetchone()
+        if version is None or int(version["version"]) != _FQ_SCHEMA_VERSION:
+            return False
+        if anchor is None or int(anchor["event_count"]) < 0:
+            return False
+        head_hash = str(anchor["head_hash"])
+        return len(head_hash) == 64 and all(
+            character in "0123456789abcdef" for character in head_hash
+        )
+
+    def _outbox_four_eyes_failure(self, db: Any, outbox: Any) -> str | None:
+        """Check persisted approval state for one message, not caller claims."""
+
+        if not self.four_eyes_required:
+            return None
+        kind = str(outbox["message_kind"])
+        aggregate_id = str(outbox["aggregate_id"])
+        message_id = str(outbox["message_id"])
+        if kind == "delivery_ack":
+            return None
+        if kind == "submission":
+            aggregate = db.execute(
+                "SELECT * FROM fq_drafts WHERE draft_id=?", (aggregate_id,)
+            ).fetchone()
+            if aggregate is None:
+                return "submission_aggregate_missing"
+            if aggregate["status"] != "queued":
+                return "submission_not_queued"
+            if aggregate["submission_message_id"] != message_id:
+                return "submission_message_mismatch"
+            try:
+                confirmation = self._loads(aggregate["confirmation_json"])
+            except (TypeError, json.JSONDecodeError):
+                return "submission_confirmation_invalid"
+            if not isinstance(confirmation, dict):
+                return "submission_confirmation_missing"
+            confirmer = confirmation.get("actor_id")
+            last_actor = aggregate["last_content_actor"]
+            preparer = aggregate["human_preparer_actor"]
+            revision = int(aggregate["revision"])
+            prepared_revision = aggregate["human_prepared_revision"]
+            if (
+                not isinstance(preparer, str)
+                or not preparer
+                or preparer not in self.human_preparer_actor_ids
+            ):
+                return "submission_human_preparer_missing_or_unconfigured"
+            if not isinstance(prepared_revision, int) or prepared_revision != revision:
+                return "submission_human_prepared_revision_mismatch"
+            if not isinstance(last_actor, str) or not last_actor:
+                return "submission_last_content_actor_missing"
+            if (
+                not isinstance(confirmer, str)
+                or not confirmer
+                or confirmer in (preparer, last_actor)
+            ):
+                return "submission_independent_reviewer_missing"
+            if confirmation.get("draft_revision") != revision:
+                return "submission_confirmation_revision_mismatch"
+            return None
+        if kind == "risk_response":
+            aggregate = db.execute(
+                "SELECT * FROM fq_responses WHERE response_id=?", (aggregate_id,)
+            ).fetchone()
+            if aggregate is None:
+                return "risk_response_aggregate_missing"
+            if aggregate["status"] != "queued":
+                return "risk_response_not_queued"
+            if aggregate["message_id"] != message_id:
+                return "risk_response_message_mismatch"
+            try:
+                confirmation = self._loads(aggregate["confirmation_json"])
+            except (TypeError, json.JSONDecodeError):
+                return "risk_response_confirmation_invalid"
+            if not isinstance(confirmation, dict):
+                return "risk_response_confirmation_missing"
+            confirmer = confirmation.get("actor_id")
+            last_actor = aggregate["last_content_actor"]
+            revision = int(aggregate["revision"])
+            if (
+                not isinstance(last_actor, str)
+                or not last_actor
+                or not isinstance(confirmer, str)
+                or not confirmer
+                or confirmer == last_actor
+            ):
+                return "risk_response_independent_reviewer_missing"
+            if confirmation.get("response_revision") != revision:
+                return "risk_response_confirmation_revision_mismatch"
+            return None
+        return "unsupported_outbox_message_kind"
+
+    def assert_outbox_sendable(self, message_id: str) -> None:
+        """Recheck audit and persisted approval immediately before network I/O."""
+
+        with self.repository._read() as db:
+            integrity = self._verify_audit_in_transaction(db)
+            if not integrity["valid"]:
+                raise ConflictError(
+                    "五量审计链或审计锚点异常；本次未向监管端发送"
+                )
+            outbox = db.execute(
+                "SELECT * FROM fq_outbox WHERE message_id=?", (message_id,)
+            ).fetchone()
+            if outbox is None or outbox["status"] != "sending":
+                raise ConflictError("发送消息状态已变化；本次未向监管端发送")
+            failure = self._outbox_four_eyes_failure(db, outbox)
+            if failure is not None:
+                raise ConflictError(
+                    "发送消息未满足持久化四眼复核条件；"
+                    f"本次未向监管端发送（{failure}）"
+                )
 
     def _initialize(self) -> None:
         statements = (
@@ -687,6 +939,10 @@ class FiveQuantityStore:
                 confirmation_json TEXT,
                 submission_message_id TEXT UNIQUE,
                 receipt_json TEXT,
+                created_by TEXT,
+                last_content_actor TEXT,
+                human_preparer_actor TEXT,
+                human_prepared_revision INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(import_id) REFERENCES fq_imports(import_id)
@@ -728,6 +984,8 @@ class FiveQuantityStore:
                 confirmation_json TEXT,
                 message_id TEXT UNIQUE,
                 receipt_json TEXT,
+                created_by TEXT,
+                last_content_actor TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(report_id) REFERENCES fq_inbox(report_id)
@@ -790,18 +1048,217 @@ class FiveQuantityStore:
                 previous_hash TEXT NOT NULL,
                 event_hash TEXT NOT NULL
             )""",
-            """CREATE TRIGGER IF NOT EXISTS fq_audit_no_update
-                BEFORE UPDATE ON fq_audit BEGIN
-                    SELECT RAISE(ABORT, 'fq_audit is append-only');
-                END""",
-            """CREATE TRIGGER IF NOT EXISTS fq_audit_no_delete
-                BEFORE DELETE ON fq_audit BEGIN
-                    SELECT RAISE(ABORT, 'fq_audit is append-only');
-                END""",
+            """CREATE TABLE IF NOT EXISTS fq_audit_anchor (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                event_count INTEGER NOT NULL CHECK(event_count >= 0),
+                head_hash TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS fq_schema_versions (
+                component TEXT PRIMARY KEY,
+                version INTEGER NOT NULL CHECK(version >= 1),
+                updated_at TEXT NOT NULL
+            )""",
         )
         with self.repository._transaction() as db:
             for statement in statements:
                 db.execute(statement)
+            version_row = db.execute(
+                "SELECT version FROM fq_schema_versions WHERE component=?",
+                (_FQ_SCHEMA_COMPONENT,),
+            ).fetchone()
+            schema_version = int(version_row["version"]) if version_row else 0
+            if schema_version > _FQ_SCHEMA_VERSION:
+                raise ValueError(
+                    "本地五量数据库版本高于当前程序支持范围；"
+                    "禁止用旧程序启动或回写，请升级程序"
+                )
+            trigger_rows = db.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND name IN ('fq_audit_no_update','fq_audit_no_delete')"
+            ).fetchall()
+            if schema_version >= 1 or trigger_rows:
+                if not self._audit_triggers_intact(db):
+                    raise ValueError(
+                        "五量审计保护触发器缺失或被替换；正式流程已拒绝启动"
+                    )
+            else:
+                self._install_audit_triggers(db)
+
+            baseline = self._verify_audit_in_transaction(db, require_anchor=False)
+            if not baseline["valid"]:
+                raise ValueError(
+                    "五量审计链在数据库升级前已损坏；禁止自动修复或继续写入"
+                )
+            if schema_version < _FQ_SCHEMA_VERSION:
+                db.execute(
+                    "INSERT OR REPLACE INTO fq_audit_anchor("
+                    "singleton,event_count,head_hash,updated_at) VALUES (1,?,?,?)",
+                    (baseline["event_count"], baseline["head_hash"], utc_text()),
+                )
+            for table in ("fq_drafts", "fq_responses"):
+                columns = {
+                    str(row["name"])
+                    for row in db.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if "created_by" not in columns:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN created_by TEXT")
+                if "last_content_actor" not in columns:
+                    db.execute(
+                        f"ALTER TABLE {table} ADD COLUMN last_content_actor TEXT"
+                    )
+                if table == "fq_drafts" and "human_preparer_actor" not in columns:
+                    db.execute(
+                        "ALTER TABLE fq_drafts ADD COLUMN human_preparer_actor TEXT"
+                    )
+                if table == "fq_drafts" and "human_prepared_revision" not in columns:
+                    db.execute(
+                        "ALTER TABLE fq_drafts ADD COLUMN "
+                        "human_prepared_revision INTEGER"
+                    )
+            # Backfill actor attribution from the existing append-only V2
+            # audit log. Invalid legacy detail JSON is left NULL and will be
+            # rejected by the formal four-eyes gate instead of being guessed.
+            draft_actors: dict[str, tuple[str, str]] = {}
+            response_actors: dict[str, tuple[str, str]] = {}
+            audit_rows = (
+                db.execute(
+                    "SELECT event_type,actor,details_json FROM fq_audit "
+                    "ORDER BY sequence"
+                ).fetchall()
+                if schema_version < _FQ_SCHEMA_VERSION
+                else ()
+            )
+            for audit_row in audit_rows:
+                try:
+                    details = json.loads(str(audit_row["details_json"]))
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(details, dict):
+                    continue
+                event_type = str(audit_row["event_type"])
+                actor = str(audit_row["actor"])
+                draft_id = details.get("draft_id")
+                if (
+                    isinstance(draft_id, str)
+                    and event_type
+                    in {
+                        "five_quantity_imported",
+                        "five_quantity_machine_autofilled",
+                        "five_quantity_review_saved",
+                        "five_quantity_machine_sync_resumed",
+                    }
+                ):
+                    created, _ = draft_actors.get(draft_id, (actor, actor))
+                    draft_actors[draft_id] = (created, actor)
+                response_id = details.get("response_id")
+                if (
+                    isinstance(response_id, str)
+                    and event_type
+                    in {"risk_response_draft_created", "risk_response_saved"}
+                ):
+                    created, _ = response_actors.get(response_id, (actor, actor))
+                    response_actors[response_id] = (created, actor)
+            for draft_id, (created, latest) in draft_actors.items():
+                db.execute(
+                    "UPDATE fq_drafts SET created_by=COALESCE(created_by,?), "
+                    "last_content_actor=COALESCE(last_content_actor,?) "
+                    "WHERE draft_id=?",
+                    (created, latest, draft_id),
+                )
+                if latest in self.human_preparer_actor_ids:
+                    db.execute(
+                        "UPDATE fq_drafts SET human_preparer_actor=?,"
+                        "human_prepared_revision=revision "
+                        "WHERE draft_id=? AND human_preparer_actor IS NULL "
+                        "AND import_id IN (SELECT import_id FROM fq_imports "
+                        "WHERE acquisition_mode='manual_import')",
+                        (latest, draft_id),
+                    )
+            for response_id, (created, latest) in response_actors.items():
+                db.execute(
+                    "UPDATE fq_responses SET created_by=COALESCE(created_by,?), "
+                    "last_content_actor=COALESCE(last_content_actor,?) "
+                    "WHERE response_id=?",
+                    (created, latest, response_id),
+                )
+            if self.four_eyes_required and schema_version < _FQ_SCHEMA_VERSION:
+                # An older release may contain a locally queued, not-yet-sent
+                # record confirmed by its own editor. Reopen it safely instead
+                # of allowing the background sender to bypass the new gate.
+                for table, identifier, kind, event_type in (
+                    (
+                        "fq_drafts",
+                        "draft_id",
+                        "submission",
+                        "five_quantity_legacy_queue_reopened_for_four_eyes",
+                    ),
+                    (
+                        "fq_responses",
+                        "response_id",
+                        "risk_response",
+                        "risk_response_legacy_queue_reopened_for_four_eyes",
+                    ),
+                ):
+                    queued = db.execute(
+                        f"SELECT * FROM {table} WHERE status='queued'"
+                    ).fetchall()
+                    for aggregate in queued:
+                        aggregate_id = str(aggregate[identifier])
+                        outbox = db.execute(
+                            "SELECT * FROM fq_outbox WHERE aggregate_id=? "
+                            "AND message_kind=?",
+                            (aggregate_id, kind),
+                        ).fetchone()
+                        if outbox is not None and outbox["status"] == "succeeded":
+                            continue
+                        failure = (
+                            "queued_aggregate_missing_outbox"
+                            if outbox is None
+                            else self._outbox_four_eyes_failure(db, outbox)
+                        )
+                        if failure is None:
+                            continue
+                        if outbox is not None:
+                            db.execute(
+                                "UPDATE fq_outbox SET status='cancelled',"
+                                "idempotency_key=?,last_error=?,updated_at=? "
+                                "WHERE message_id=?",
+                                (
+                                    f"cancelled-four-eyes.{outbox['message_id']}",
+                                    failure,
+                                    utc_text(),
+                                    outbox["message_id"],
+                                ),
+                            )
+                        message_column = (
+                            "submission_message_id"
+                            if table == "fq_drafts"
+                            else "message_id"
+                        )
+                        reopened_status = (
+                            "ready_review" if table == "fq_drafts" else "draft"
+                        )
+                        db.execute(
+                            f"UPDATE {table} SET status=?,"
+                            f"confirmation_json=NULL,{message_column}=NULL,"
+                            "updated_at=? WHERE " + identifier + "=?",
+                            (reopened_status, utc_text(), aggregate_id),
+                        )
+                        self._append_audit(
+                            db,
+                            event_type,
+                            "system-migration",
+                            {
+                                identifier: aggregate_id,
+                                "cancelled_message_id": (
+                                    outbox["message_id"]
+                                    if outbox is not None
+                                    else None
+                                ),
+                                "reason": failure,
+                            },
+                        )
             contribution_columns = {
                 str(row["name"])
                 for row in db.execute(
@@ -833,10 +1290,30 @@ class FiveQuantityStore:
                 "UPDATE fq_outbox SET status='failed', "
                 "last_error='recovered_after_restart' WHERE status='sending'"
             )
+            if schema_version < _FQ_SCHEMA_VERSION:
+                db.execute(
+                    "INSERT INTO fq_schema_versions(component,version,updated_at) "
+                    "VALUES (?,?,?) ON CONFLICT(component) DO UPDATE SET "
+                    "version=excluded.version,updated_at=excluded.updated_at",
+                    (_FQ_SCHEMA_COMPONENT, _FQ_SCHEMA_VERSION, utc_text()),
+                )
+            final_integrity = self._verify_audit_in_transaction(db)
+            if not final_integrity["valid"]:
+                raise ValueError("五量审计链或审计锚点不完整；拒绝启动")
 
     @staticmethod
     def _loads(value: str | None) -> Any:
         return json.loads(value) if value is not None else None
+
+    def _is_human_preparer(self, actor: str) -> bool:
+        return actor in self.human_preparer_actor_ids
+
+    def _assert_human_preparer(self, actor: str) -> None:
+        if self.four_eyes_required and not self._is_human_preparer(actor):
+            raise ValidationBlockedError(
+                "正式流程仅允许配置中的具名经办账号接收、核对并保存草稿；"
+                "机器账号、连接器账号、系统观察器或复核账号不能充当经办人"
+            )
 
     def _append_audit(
         self,
@@ -845,6 +1322,11 @@ class FiveQuantityStore:
         actor: str,
         details: dict[str, Any],
     ) -> None:
+        integrity = self._verify_audit_in_transaction(db)
+        if not integrity["valid"]:
+            raise ConflictError(
+                "五量审计链或审计锚点异常；已拒绝写入，请联系管理员核验数据库"
+            )
         previous = db.execute(
             "SELECT sequence,event_hash FROM fq_audit ORDER BY sequence DESC LIMIT 1"
         ).fetchone()
@@ -866,6 +1348,13 @@ class FiveQuantityStore:
                 event_hash,
             ),
         )
+        db.execute(
+            "INSERT INTO fq_audit_anchor(singleton,event_count,head_hash,updated_at) "
+            "VALUES (1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET "
+            "event_count=excluded.event_count,head_hash=excluded.head_hash,"
+            "updated_at=excluded.updated_at",
+            (sequence, event_hash, occurred_at),
+        )
 
     def create_import(
         self,
@@ -875,6 +1364,12 @@ class FiveQuantityStore:
         actor: str,
     ) -> dict[str, Any]:
         now = utc_text()
+        acquisition_mode = str(imported["acquisition_mode"])
+        human_prepared = (
+            acquisition_mode == "manual_import" and self._is_human_preparer(actor)
+        )
+        if self.four_eyes_required and acquisition_mode == "manual_import":
+            self._assert_human_preparer(actor)
         with self.repository._transaction() as db:
             existing = db.execute(
                 "SELECT * FROM fq_imports WHERE content_sha256=?",
@@ -914,9 +1409,21 @@ class FiveQuantityStore:
             db.execute(
                 """INSERT INTO fq_drafts(
                     draft_id,import_id,revision,submission_revision,status,
-                    payload_json,created_at,updated_at
-                ) VALUES (?,?,1,1,'ready_review',?,?,?)""",
-                (draft_id, import_id, jcs_json(imported["payload"]), now, now),
+                    payload_json,created_by,last_content_actor,
+                    human_preparer_actor,human_prepared_revision,
+                    created_at,updated_at
+                ) VALUES (?,?,1,1,'ready_review',?,?,?,?,?,?,?)""",
+                (
+                    draft_id,
+                    import_id,
+                    jcs_json(imported["payload"]),
+                    actor,
+                    actor,
+                    actor if human_prepared else None,
+                    1 if human_prepared else None,
+                    now,
+                    now,
+                ),
             )
             self._append_audit(
                 db,
@@ -1177,13 +1684,17 @@ class FiveQuantityStore:
                     """
                     INSERT INTO fq_drafts(
                         draft_id,import_id,revision,submission_revision,status,
-                        payload_json,created_at,updated_at
-                    ) VALUES (?,?,1,1,'ready_review',?,?,?)
+                        payload_json,created_by,last_content_actor,
+                        human_preparer_actor,human_prepared_revision,
+                        created_at,updated_at
+                    ) VALUES (?,?,1,1,'ready_review',?,?,?,NULL,NULL,?,?)
                     """,
                     (
                         draft_id,
                         draft_import_id,
                         jcs_json(merged),
+                        actor,
+                        actor,
                         now,
                         now,
                     ),
@@ -1232,10 +1743,18 @@ class FiveQuantityStore:
                     db.execute(
                         """
                         UPDATE fq_drafts
-                        SET revision = ?, payload_json = ?, updated_at = ?
+                        SET revision = ?, payload_json = ?,
+                            last_content_actor = ?, human_preparer_actor = NULL,
+                            human_prepared_revision = NULL, updated_at = ?
                         WHERE draft_id = ?
                         """,
-                        (draft_revision, jcs_json(merged), now, draft_id),
+                        (
+                            draft_revision,
+                            jcs_json(merged),
+                            actor,
+                            now,
+                            draft_id,
+                        ),
                     )
 
             db.execute(
@@ -1484,9 +2003,133 @@ class FiveQuantityStore:
             "confirmation": self._loads(row["confirmation_json"]),
             "submission_message_id": row["submission_message_id"],
             "receipt": self._loads(row["receipt_json"]),
+            "created_by": row["created_by"],
+            "last_content_actor": row["last_content_actor"],
+            "human_preparer_actor": row["human_preparer_actor"],
+            "human_prepared_revision": row["human_prepared_revision"],
+            "review_gate": self._review_gate(
+                row["last_content_actor"],
+                status=row["status"],
+                confirmation=self._loads(row["confirmation_json"]),
+                human_preparer_actor=row["human_preparer_actor"],
+                human_prepared_revision=row["human_prepared_revision"],
+                current_revision=row["revision"],
+                require_human_preparer=True,
+            ),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def _review_gate(
+        self,
+        last_actor: Any,
+        *,
+        status: Any = None,
+        confirmation: Any = None,
+        human_preparer_actor: Any = None,
+        human_prepared_revision: Any = None,
+        current_revision: Any = None,
+        require_human_preparer: bool = False,
+    ) -> dict[str, Any]:
+        if not self.four_eyes_required:
+            return {
+                "required": False,
+                "state": "not_required",
+                "message": "当前为演示/调试单人流程，不代表正式报送配置",
+            }
+        if not isinstance(last_actor, str) or not last_actor:
+            return {
+                "required": True,
+                "state": "actor_record_missing",
+                "message": "历史草稿缺少经办人记录，请重新导入或另存后再复核",
+            }
+        if require_human_preparer and (
+            not isinstance(human_preparer_actor, str)
+            or not human_preparer_actor
+            or not isinstance(human_prepared_revision, int)
+            or human_prepared_revision != current_revision
+        ):
+            return {
+                "required": True,
+                "state": "awaiting_human_preparer",
+                "last_content_actor": last_actor,
+                "message": (
+                    "自动生成或历史草稿尚未由具名经办账号接收核对；"
+                    "请经办人打开草稿并点击保存，再交由另一账号复核"
+                ),
+            }
+        if status in {"queued", "submitted"} and isinstance(confirmation, dict):
+            reviewer = confirmation.get("actor_id")
+            independently_reviewed = bool(
+                isinstance(reviewer, str)
+                and reviewer
+                and reviewer != last_actor
+                and (
+                    not require_human_preparer
+                    or reviewer != human_preparer_actor
+                )
+            )
+            return {
+                "required": True,
+                "state": (
+                    "independent_review_completed"
+                    if independently_reviewed
+                    else "legacy_separation_unverified"
+                ),
+                "last_content_actor": last_actor,
+                "human_preparer_actor": human_preparer_actor,
+                "reviewer_actor": reviewer,
+                "message": (
+                    "已由不同具名账号完成四眼复核并进入受控发送流程"
+                    if independently_reviewed
+                    else "历史记录无法证明经办复核分离，不得作为新正式报送依据"
+                ),
+            }
+        return {
+            "required": True,
+            "state": "awaiting_independent_reviewer",
+            "last_content_actor": last_actor,
+            "human_preparer_actor": human_preparer_actor,
+            "message": "待另一具名账号复核；最后创建/编辑人不能确认或入发送队列",
+        }
+
+    def _assert_independent_actor(
+        self,
+        row: Any,
+        actor: str,
+        *,
+        subject: str,
+        require_human_preparer: bool = False,
+    ) -> None:
+        if not self.four_eyes_required:
+            return
+        last_actor = row["last_content_actor"]
+        if not isinstance(last_actor, str) or not last_actor:
+            raise ValidationBlockedError(
+                f"{subject}缺少可核验的创建/编辑人记录；请重新导入或另存后再复核"
+            )
+        if actor == last_actor:
+            raise ValidationBlockedError(
+                "四眼复核已启用：当前账号是本修订版的最后创建/编辑人，"
+                "请退出并由另一名具备复核报送权限的具名账号操作"
+            )
+        if require_human_preparer:
+            preparer = row["human_preparer_actor"]
+            prepared_revision = row["human_prepared_revision"]
+            if (
+                not isinstance(preparer, str)
+                or not preparer
+                or not isinstance(prepared_revision, int)
+                or prepared_revision != int(row["revision"])
+            ):
+                raise ValidationBlockedError(
+                    "该自动生成或历史草稿尚未由配置中的具名经办账号核对并保存；"
+                    "不能直接复核报送"
+                )
+            if actor == preparer:
+                raise ValidationBlockedError(
+                    "四眼复核已启用：经办保存人与确认人必须是两个不同具名账号"
+                )
 
     def get_draft(self, draft_id: str) -> dict[str, Any]:
         with self.repository._read() as db:
@@ -1618,10 +2261,12 @@ class FiveQuantityStore:
             db.execute(
                 """
                 UPDATE fq_drafts SET revision=?,status='ready_review',
-                    payload_json=?,confirmation_json=NULL,updated_at=?
+                    payload_json=?,confirmation_json=NULL,
+                    last_content_actor=?,human_preparer_actor=NULL,
+                    human_prepared_revision=NULL,updated_at=?
                 WHERE draft_id=?
                 """,
-                (revision, jcs_json(merged), now, draft_id),
+                (revision, jcs_json(merged), actor, now, draft_id),
             )
             db.execute(
                 """
@@ -1733,6 +2378,7 @@ class FiveQuantityStore:
         actor: str,
     ) -> dict[str, Any]:
         now = utc_text()
+        self._assert_human_preparer(actor)
         with self.repository._transaction() as db:
             row = db.execute(
                 "SELECT * FROM fq_drafts WHERE draft_id=?", (draft_id,)
@@ -1746,9 +2392,11 @@ class FiveQuantityStore:
             revision = expected_revision + 1
             db.execute(
                 """UPDATE fq_drafts SET revision=?,status='ready_review',
-                    payload_json=?,confirmation_json=NULL,updated_at=?
+                    payload_json=?,confirmation_json=NULL,
+                    last_content_actor=?,human_preparer_actor=?,
+                    human_prepared_revision=?,updated_at=?
                     WHERE draft_id=?""",
-                (revision, jcs_json(payload), now, draft_id),
+                (revision, jcs_json(payload), actor, actor, revision, now, draft_id),
             )
             self._append_audit(
                 db,
@@ -1776,6 +2424,11 @@ class FiveQuantityStore:
         now = utc_text()
         message_json = jcs_json(message)
         with self.repository._transaction() as db:
+            integrity = self._verify_audit_in_transaction(db)
+            if not integrity["valid"]:
+                raise ConflictError(
+                    "五量审计链或审计锚点异常；已拒绝确认和进入发送队列"
+                )
             row = db.execute(
                 "SELECT * FROM fq_drafts WHERE draft_id=?", (draft_id,)
             ).fetchone()
@@ -1783,6 +2436,12 @@ class FiveQuantityStore:
                 raise NotFoundError("五量草稿不存在")
             if int(row["revision"]) != expected_revision:
                 raise ConflictError("草稿修订号已变化")
+            self._assert_independent_actor(
+                row,
+                actor,
+                subject="五量草稿",
+                require_human_preparer=True,
+            )
             if row["status"] == "discarded":
                 raise ConflictError("已放弃草稿不能确认或报送")
             if row["status"] in {"queued", "submitted"}:
@@ -1928,12 +2587,24 @@ class FiveQuantityStore:
     def due_outbox(self, limit: int = 20) -> list[dict[str, Any]]:
         now = utc_text()
         with self.repository._transaction() as db:
+            integrity = self._verify_audit_in_transaction(db)
+            if not integrity["valid"]:
+                raise ConflictError(
+                    "五量审计链或审计锚点异常；发送队列已停止，未向监管端发送"
+                )
             rows = db.execute(
                 """SELECT * FROM fq_outbox
                    WHERE status IN ('queued','failed') AND next_attempt_at<=?
                    ORDER BY created_at LIMIT ?""",
                 (now, limit),
             ).fetchall()
+            for row in rows:
+                failure = self._outbox_four_eyes_failure(db, row)
+                if failure is not None:
+                    raise ConflictError(
+                        "发送队列存在未满足持久化四眼复核条件的消息；"
+                        f"队列已停止（{failure}）"
+                    )
             result = []
             for row in rows:
                 db.execute(
@@ -2150,9 +2821,18 @@ class FiveQuantityStore:
                 return self._response(existing)
             db.execute(
                 """INSERT INTO fq_responses(
-                    response_id,report_id,revision,status,document_json,created_at,updated_at
-                ) VALUES (?,?,1,'draft',?,?,?)""",
-                (document["response_id"], report_id, jcs_json(document), now, now),
+                    response_id,report_id,revision,status,document_json,
+                    created_by,last_content_actor,created_at,updated_at
+                ) VALUES (?,?,1,'draft',?,?,?,?,?)""",
+                (
+                    document["response_id"],
+                    report_id,
+                    jcs_json(document),
+                    actor,
+                    actor,
+                    now,
+                    now,
+                ),
             )
             self._append_audit(
                 db,
@@ -2172,6 +2852,13 @@ class FiveQuantityStore:
             "confirmation": self._loads(row["confirmation_json"]),
             "message_id": row["message_id"],
             "receipt": self._loads(row["receipt_json"]),
+            "created_by": row["created_by"],
+            "last_content_actor": row["last_content_actor"],
+            "review_gate": self._review_gate(
+                row["last_content_actor"],
+                status=row["status"],
+                confirmation=self._loads(row["confirmation_json"]),
+            ),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -2207,8 +2894,9 @@ class FiveQuantityStore:
             revision = expected_revision + 1
             db.execute(
                 """UPDATE fq_responses SET revision=?,status='draft',document_json=?,
-                    confirmation_json=NULL,updated_at=? WHERE response_id=?""",
-                (revision, jcs_json(document), now, response_id),
+                    confirmation_json=NULL,last_content_actor=?,updated_at=?
+                    WHERE response_id=?""",
+                (revision, jcs_json(document), actor, now, response_id),
             )
             self._append_audit(
                 db,
@@ -2230,6 +2918,11 @@ class FiveQuantityStore:
         now = utc_text()
         message_json = jcs_json(message)
         with self.repository._transaction() as db:
+            integrity = self._verify_audit_in_transaction(db)
+            if not integrity["valid"]:
+                raise ConflictError(
+                    "五量审计链或审计锚点异常；已拒绝风险回复确认和发送"
+                )
             row = db.execute(
                 "SELECT * FROM fq_responses WHERE response_id=?", (response_id,)
             ).fetchone()
@@ -2237,6 +2930,7 @@ class FiveQuantityStore:
                 raise NotFoundError("风险回复不存在")
             if int(row["revision"]) != expected_revision:
                 raise ConflictError("风险回复修订号已变化")
+            self._assert_independent_actor(row, actor, subject="风险回复")
             if row["status"] in {"queued", "submitted"}:
                 return self._response(row)
             db.execute(
@@ -2336,27 +3030,22 @@ class FiveQuantityStore:
 
     def audit(self, limit: int = 200) -> dict[str, Any]:
         with self.repository._read() as db:
+            integrity = self._verify_audit_in_transaction(db)
             rows = db.execute(
-                "SELECT * FROM fq_audit ORDER BY sequence LIMIT ?", (limit,)
+                "SELECT * FROM (SELECT * FROM fq_audit ORDER BY sequence DESC LIMIT ?) "
+                "ORDER BY sequence",
+                (max(1, min(int(limit), 1000)),),
             ).fetchall()
-        previous = ZERO_HASH
-        valid = True
         events = []
         for row in rows:
             details = self._loads(row["details_json"])
-            expected = _audit_hash(
-                previous,
-                row["sequence"],
-                row["event_type"],
-                row["actor"],
-                row["occurred_at"],
-                details,
-            )
-            if row["previous_hash"] != previous or row["event_hash"] != expected:
-                valid = False
-            previous = row["event_hash"]
             events.append({**dict(row), "details": details, "details_json": None})
-        return {"valid": valid, "head_hash": previous, "events": events}
+        return {
+            **integrity,
+            "displayed_count": len(events),
+            "truncated": integrity["event_count"] > len(events),
+            "events": events,
+        }
 
 
 def _validate_analysis_report(report: dict[str, Any], identity: MineIdentity) -> None:
@@ -2549,8 +3238,15 @@ class FiveQuantityRuntime:
         stable_seconds: float = 2.0,
         auto_start: bool = False,
         llm_provider: Any | None = None,
+        four_eyes_required: bool = False,
+        human_preparer_actor_ids: frozenset[str] = frozenset(),
     ):
-        self.store = FiveQuantityStore(repository)
+        self.four_eyes_required = bool(four_eyes_required)
+        self.store = FiveQuantityStore(
+            repository,
+            four_eyes_required=self.four_eyes_required,
+            human_preparer_actor_ids=human_preparer_actor_ids,
+        )
         self.identity = identity
         self.csv_persistence = FiveQuantityCsvPersistence(
             repository,
@@ -3282,6 +3978,8 @@ class FiveQuantityRuntime:
         attestation: str,
         accepted: bool,
     ) -> dict[str, Any]:
+        if actor_id == "demo":
+            raise ValidationBlockedError("演示账号只能建稿和查看，不能确认或报送")
         if accepted is not True:
             raise ValidationBlockedError("必须由企业人员明确确认后才能报送")
         draft = self.store.get_draft(draft_id)
@@ -3352,6 +4050,7 @@ class FiveQuantityRuntime:
         for item in self.store.due_outbox():
             message = item["body"]
             try:
+                self.store.assert_outbox_sendable(item["message_id"])
                 if item["message_kind"] == "submission":
                     receipt = self.platform_client.submit(message)
                     verify_message(
@@ -3562,6 +4261,8 @@ class FiveQuantityRuntime:
         attestation: str,
         accepted: bool,
     ) -> dict[str, Any]:
+        if actor_id == "demo":
+            raise ValidationBlockedError("演示账号只能建稿和查看，不能确认或报送")
         if accepted is not True:
             raise ValidationBlockedError("必须由企业人员明确确认风险回复")
         response = self.store.get_response(response_id)
@@ -3626,6 +4327,7 @@ class FiveQuantityRuntime:
             "quarantine_directory": str(self.quarantine_directory),
             "csv_mapping_preview_enabled": True,
             "csv_mapping_ai_configured": self.csv_mapping_provider is not None,
+            "four_eyes_required": self.four_eyes_required,
             "acquisition_modes": ["manual_import", "direct_collection"],
             "acquisition_trust_tiering": False,
             "message_signature_domain": MESSAGE_SIGNING_CONTEXT,

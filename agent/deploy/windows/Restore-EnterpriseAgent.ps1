@@ -39,6 +39,60 @@ function Invoke-NativeChecked {
     }
 }
 
+function Write-EAProtectedRestoreRecoveryBlock {
+    param([string]$PathValue, [object]$Document, [object]$Context)
+    if (Test-Path -LiteralPath $PathValue) {
+        throw "Restore recovery block already exists: $PathValue"
+    }
+    $Parent = Split-Path -Parent $PathValue
+    $Temporary = Join-Path $Parent (
+        ".restore-recovery-block-" + [Guid]::NewGuid().ToString("N") + ".tmp"
+    )
+    $Stream = $null
+    try {
+        $Encoding = New-Object System.Text.UTF8Encoding($false)
+        $Bytes = $Encoding.GetBytes(
+            (($Document | ConvertTo-Json -Depth 8) + "`n")
+        )
+        $Stream = [IO.File]::Open(
+            $Temporary, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::None
+        )
+        $Stream.Write($Bytes, 0, $Bytes.Length)
+        $Stream.Flush($true)
+        $Stream.Dispose()
+        $Stream = $null
+        Invoke-EAIcaclsChecked -ArgumentList @($Temporary, "/inheritance:r")
+        Invoke-EAIcaclsChecked -ArgumentList @(
+            $Temporary,
+            "/grant:r", "*S-1-5-18:F",
+            "/grant:r", "*S-1-5-32-544:F",
+            "/grant:r", "*$($Context.ServiceIdentity.Sid):RX"
+        )
+        Assert-EARestoreRecoveryBlockAcl -Context $Context -Path $Temporary
+        Move-Item -LiteralPath $Temporary -Destination $PathValue
+        Assert-EARestoreRecoveryBlockAcl -Context $Context -Path $PathValue
+    }
+    catch {
+        if ($null -ne $Stream) { $Stream.Dispose() }
+        foreach ($Candidate in @($Temporary, $PathValue)) {
+            if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+                Remove-Item -LiteralPath $Candidate -Force -ErrorAction SilentlyContinue
+            }
+        }
+        throw
+    }
+}
+
+function Invoke-EARestoreFaultInjection {
+    param([string]$Point)
+    # Internal Windows transaction tests set this process-only variable. It is
+    # deliberately unavailable as a user-facing restore switch.
+    if ([string]$env:MINEGUARD_INTERNAL_RESTORE_FAULT_INJECTION -eq $Point) {
+        throw "Injected restore transaction failure at $Point."
+    }
+}
+
 if (-not $ConfirmRestore) {
     throw "Restore requires the explicit -ConfirmRestore switch."
 }
@@ -270,8 +324,16 @@ if ($PSCmdlet.ShouldProcess(
     $StagedQuarantine = Join-Path $TransactionRoot "staged-quarantine"
     $OldQuarantine = Join-Path $TransactionRoot "pre-restore-quarantine"
     $CurrentQuarantine = Join-Path $Context.DataDirectory "five-quantity-quarantine"
-    $QuarantineSwitched = $false
-    $DatabaseRestored = $false
+    $PreRestoreDatabase = Join-Path $TransactionRoot "pre-restore-live-database.db"
+    $FailedRestoredDatabase = Join-Path $TransactionRoot "failed-restored-database.db"
+    $FailedRestoredQuarantine = Join-Path $TransactionRoot `
+        "failed-restored-quarantine"
+    $RecoveryMarkerPath = Get-EARestoreRecoveryBlockPath -Context $Context
+    $RecoveryMaterialRoot = $TransactionRoot
+    $OldQuarantineMoved = $false
+    $NewQuarantinePublished = $false
+    $DatabaseSwitchAttempted = $false
+    $Committed = $false
     New-Item -ItemType Directory -Path $TransactionParent -Force | Out-Null
     [void](Resolve-EASafeLocalPath -Name "Restore transaction parent" `
         -PathValue $TransactionParent -MustExist -RequiredType Container)
@@ -285,61 +347,234 @@ if ($PSCmdlet.ShouldProcess(
     foreach ($EvidenceFile in Get-ChildItem -LiteralPath $SnapshotQuarantine -File -Force) {
         Copy-Item -LiteralPath $EvidenceFile.FullName -Destination $StagedQuarantine
     }
+    $HadLiveDatabase = Test-Path -LiteralPath $Context.DatabasePath -PathType Leaf
+    if ($HadLiveDatabase) {
+        Assert-EAOrdinaryLeaf -Path $Context.DatabasePath -Name "Live Agent database" `
+            -MaximumBytes 32GB
+        Copy-Item -LiteralPath $Context.DatabasePath -Destination $PreRestoreDatabase
+        foreach ($Suffix in @("-wal", "-shm")) {
+            $LiveSidecar = "$($Context.DatabasePath)$Suffix"
+            if (Test-Path -LiteralPath $LiveSidecar) {
+                Assert-EAOrdinaryLeaf -Path $LiveSidecar `
+                    -Name "Live Agent database sidecar" -MaximumBytes 32GB
+                Copy-Item -LiteralPath $LiveSidecar `
+                    -Destination "$PreRestoreDatabase$Suffix"
+            }
+        }
+    }
+    elseif (Test-Path -LiteralPath $Context.DatabasePath) {
+        throw "Live Agent database path is not an ordinary file."
+    }
+    $HadLiveQuarantine = Test-Path -LiteralPath $CurrentQuarantine -PathType Container
+    if (-not $HadLiveQuarantine -and (Test-Path -LiteralPath $CurrentQuarantine)) {
+        throw "Live quarantine path is not a directory."
+    }
+    $RecoveryDocument = [ordered]@{
+        format = "mineguard-enterprise-agent-restore-recovery-block-v1"
+        created_utc = [DateTime]::UtcNow.ToString("o")
+        instance_name = $Context.InstanceName
+        service_id = $Context.ServiceId
+        transaction_id = $TransactionId
+        live_database = $Context.DatabasePath
+        live_quarantine = $CurrentQuarantine
+        had_live_database = [bool]$HadLiveDatabase
+        had_live_quarantine = [bool]$HadLiveQuarantine
+        candidate_material_roots = @($TransactionRoot, $RollbackRoot)
+        pre_restore_database_relative = "pre-restore-live-database.db"
+        pre_restore_quarantine_relative = "pre-restore-quarantine"
+        failed_restored_database_relative = "failed-restored-database.db"
+        failed_restored_quarantine_relative = "failed-restored-quarantine"
+        pre_restore_database_candidates = @(
+            (Join-Path $TransactionRoot "pre-restore-live-database.db"),
+            (Join-Path $RollbackRoot "pre-restore-live-database.db")
+        )
+        pre_restore_quarantine_candidates = @(
+            (Join-Path $TransactionRoot "pre-restore-quarantine"),
+            (Join-Path $RollbackRoot "pre-restore-quarantine")
+        )
+        instructions = @(
+            "Keep the Windows service stopped.",
+            "Use the first existing candidate_material_roots directory.",
+            "Preserve failed-restored-* evidence before replacing live paths.",
+            "Restore the pre-restore database generation and quarantine paths exactly.",
+            "Repair canonical instance ACLs and verify mine/database identity.",
+            "Delete this marker only after administrator verification, then run health checks."
+        )
+    }
+    # Publish a protected fail-close marker before the first live rename. A
+    # process crash or power loss can therefore never make Start/Restore treat
+    # a partially switched database/quarantine pair as a normal instance.
+    Write-EAProtectedRestoreRecoveryBlock -PathValue $RecoveryMarkerPath `
+        -Document $RecoveryDocument -Context $Context
     try {
         Assert-EANoInstanceProcesses -Context $Context
-        if (Test-Path -LiteralPath $CurrentQuarantine) {
-            if (-not (Test-Path -LiteralPath $CurrentQuarantine -PathType Container)) {
-                throw "Live quarantine path is not a directory."
-            }
+        if ($HadLiveQuarantine) {
             Assert-EAOrdinaryTree -Root $CurrentQuarantine -Name "Live quarantine"
             Move-Item -LiteralPath $CurrentQuarantine -Destination $OldQuarantine
+            $OldQuarantineMoved = $true
         }
         Move-Item -LiteralPath $StagedQuarantine -Destination $CurrentQuarantine
-        $QuarantineSwitched = $true
-        Invoke-NativeChecked -FilePath $Context.Executable -ArgumentList @(
-            "--env-file", $Context.ConfigPath, "--db", $Context.DatabasePath,
-            "database-restore", "--input", $SnapshotDatabase,
-            "--rollback-directory", (Join-Path $TransactionRoot "database"),
-            "--yes-service-stopped"
-        )
-        $DatabaseRestored = $true
+        $NewQuarantinePublished = $true
+        $DatabaseSwitchAttempted = $true
+        $PreviousRestoreTransaction = $env:MINEGUARD_INTERNAL_RESTORE_TRANSACTION_ID
+        try {
+            $env:MINEGUARD_INTERNAL_RESTORE_TRANSACTION_ID = $TransactionId
+            Invoke-NativeChecked -FilePath $Context.Executable -ArgumentList @(
+                "--env-file", $Context.ConfigPath, "--authoritative-env-file",
+                "--db", $Context.DatabasePath,
+                "database-restore", "--input", $SnapshotDatabase,
+                "--rollback-directory", (Join-Path $TransactionRoot "database"),
+                "--yes-service-stopped"
+            )
+        }
+        finally {
+            if ($null -eq $PreviousRestoreTransaction) {
+                Remove-Item Env:MINEGUARD_INTERNAL_RESTORE_TRANSACTION_ID `
+                    -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:MINEGUARD_INTERNAL_RESTORE_TRANSACTION_ID = `
+                    $PreviousRestoreTransaction
+            }
+        }
+        Invoke-EARestoreFaultInjection -Point "after-database-restore"
+        # Snapshot material is deliberately staged under an administrators-only
+        # ACL. Reapply the per-instance service SID after it becomes live so no
+        # restored database/evidence file retains that staging ACL.
+        Set-EAInstanceCanonicalAcl -Context $Context
+        Invoke-EARestoreFaultInjection -Point "after-acl-repair"
         New-Item -ItemType Directory -Path $RollbackParent -Force | Out-Null
         [void](Resolve-EASafeLocalPath -Name "Restore rollback parent" `
             -PathValue $RollbackParent -MustExist -RequiredType Container)
         Move-Item -LiteralPath $TransactionRoot -Destination $RollbackRoot
+        $RecoveryMaterialRoot = $RollbackRoot
+        Invoke-EARestoreFaultInjection -Point "after-rollback-publish"
+        Assert-EARestoreRecoveryBlockAcl -Context $Context `
+            -Path $RecoveryMarkerPath
+        Remove-Item -LiteralPath $RecoveryMarkerPath -Force
+        $Committed = $true
     }
     catch {
         $OriginalError = $_
-        if (-not $DatabaseRestored -and $QuarantineSwitched) {
+        $RollbackErrors = New-Object System.Collections.Generic.List[string]
+        if ($DatabaseSwitchAttempted) {
             try {
-                if (Test-Path -LiteralPath $CurrentQuarantine -PathType Container) {
-                    Move-Item -LiteralPath $CurrentQuarantine `
-                        -Destination (Join-Path $TransactionRoot "failed-restored-quarantine")
+                $FailedRestoredDatabase = Join-Path $RecoveryMaterialRoot `
+                    "failed-restored-database.db"
+                if (Test-Path -LiteralPath $Context.DatabasePath -PathType Leaf) {
+                    Move-Item -LiteralPath $Context.DatabasePath `
+                        -Destination $FailedRestoredDatabase
                 }
-                if (Test-Path -LiteralPath $OldQuarantine -PathType Container) {
-                    Move-Item -LiteralPath $OldQuarantine -Destination $CurrentQuarantine
+                foreach ($Suffix in @("-wal", "-shm")) {
+                    $LiveSidecar = "$($Context.DatabasePath)$Suffix"
+                    if (Test-Path -LiteralPath $LiveSidecar -PathType Leaf) {
+                        Move-Item -LiteralPath $LiveSidecar `
+                            -Destination "$FailedRestoredDatabase$Suffix"
+                    }
+                }
+                if ($HadLiveDatabase) {
+                    $PreRestoreDatabase = Join-Path $RecoveryMaterialRoot `
+                        "pre-restore-live-database.db"
+                    if (-not (Test-Path -LiteralPath $PreRestoreDatabase -PathType Leaf)) {
+                        throw "Pre-restore raw database is missing: $PreRestoreDatabase"
+                    }
+                    Copy-Item -LiteralPath $PreRestoreDatabase `
+                        -Destination $Context.DatabasePath
+                    foreach ($Suffix in @("-wal", "-shm")) {
+                        $SavedSidecar = "$PreRestoreDatabase$Suffix"
+                        if (Test-Path -LiteralPath $SavedSidecar -PathType Leaf) {
+                            Copy-Item -LiteralPath $SavedSidecar `
+                                -Destination "$($Context.DatabasePath)$Suffix"
+                        }
+                    }
                 }
             }
-            catch { Write-Warning "Quarantine rollback needs manual recovery: $($_.Exception.Message)" }
+            catch { $RollbackErrors.Add("Database rollback: $($_.Exception.Message)") }
         }
-        if (Test-Path -LiteralPath $TransactionRoot -PathType Container) {
+        if ($OldQuarantineMoved -or $NewQuarantinePublished) {
             try {
-                New-Item -ItemType Directory -Path $RollbackParent -Force | Out-Null
-                [void](Resolve-EASafeLocalPath -Name "Restore rollback parent" `
-                    -PathValue $RollbackParent -MustExist -RequiredType Container)
-                $FailureRoot = "$RollbackRoot-failed"
-                if (-not (Test-Path -LiteralPath $FailureRoot)) {
+                $FailedRestoredQuarantine = Join-Path $RecoveryMaterialRoot `
+                    "failed-restored-quarantine"
+                if ($NewQuarantinePublished -and
+                    (Test-Path -LiteralPath $CurrentQuarantine -PathType Container)) {
+                    Move-Item -LiteralPath $CurrentQuarantine `
+                        -Destination $FailedRestoredQuarantine
+                }
+                if ($OldQuarantineMoved) {
+                    $OldQuarantine = Join-Path $RecoveryMaterialRoot `
+                        "pre-restore-quarantine"
+                    if (-not (Test-Path -LiteralPath $OldQuarantine -PathType Container)) {
+                        throw "Pre-restore quarantine is missing: $OldQuarantine"
+                    }
+                    Move-Item -LiteralPath $OldQuarantine `
+                        -Destination $CurrentQuarantine
+                }
+            }
+            catch { $RollbackErrors.Add("Quarantine rollback: $($_.Exception.Message)") }
+        }
+        try { Set-EAInstanceCanonicalAcl -Context $Context }
+        catch { $RollbackErrors.Add("Instance ACL rollback: $($_.Exception.Message)") }
+        if ($RollbackErrors.Count -eq 0) {
+            try {
+                Assert-EARestoreRecoveryBlockAcl -Context $Context `
+                    -Path $RecoveryMarkerPath
+                Remove-Item -LiteralPath $RecoveryMarkerPath -Force
+            }
+            catch { $RollbackErrors.Add("Recovery marker removal: $($_.Exception.Message)") }
+        }
+        if ($RollbackErrors.Count -eq 0) {
+            if ($RecoveryMaterialRoot.Equals(
+                    $TransactionRoot, [StringComparison]::OrdinalIgnoreCase
+                ) -and (Test-Path -LiteralPath $TransactionRoot -PathType Container)) {
+                try {
+                    New-Item -ItemType Directory -Path $RollbackParent -Force | Out-Null
+                    $FailureRoot = "$RollbackRoot-failed"
                     Move-Item -LiteralPath $TransactionRoot -Destination $FailureRoot
                     Write-Warning "Failed restore material was preserved at $FailureRoot"
                 }
+                catch {
+                    Write-Warning "Could not publish cleanly rolled-back restore material: $($_.Exception.Message)"
+                }
             }
-            catch { Write-Warning "Could not publish failed restore material: $($_.Exception.Message)" }
+            throw $OriginalError
         }
-        throw $OriginalError
+        $FailureDetailsPath = Join-Path $RecoveryMaterialRoot `
+            "RECOVERY-FAILURE.txt"
+        try {
+            $FailureText = (
+                "Original restore error: " + $OriginalError.Exception.Message + "`r`n" +
+                "Automatic rollback errors:`r`n- " +
+                (@($RollbackErrors) -join "`r`n- ") + "`r`n"
+            )
+            [IO.File]::WriteAllText(
+                $FailureDetailsPath, $FailureText,
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+            Invoke-EAIcaclsChecked -ArgumentList @(
+                $FailureDetailsPath, "/inheritance:r"
+            )
+            Invoke-EAIcaclsChecked -ArgumentList @(
+                $FailureDetailsPath,
+                "/grant:r", "*S-1-5-18:F",
+                "/grant:r", "*S-1-5-32-544:F"
+            )
+        }
+        catch {
+            Write-Warning "Could not write recovery failure details: $($_.Exception.Message)"
+        }
+        throw (
+            "Restore failed before commit and automatic rollback was incomplete. " +
+            "The instance is fail-closed by $RecoveryMarkerPath. Recovery material: " +
+            "$RecoveryMaterialRoot. Errors: " + (@($RollbackErrors) -join "; ")
+        )
+    }
+    if (-not $Committed) {
+        throw "Restore transaction ended without an explicit commit."
     }
     Write-Host "Agent state restored. Rollback material: $RollbackRoot"
     if ($StartAfterRestore) {
-        if ($null -eq (Get-Service -Name $Context.ServiceId -ErrorAction SilentlyContinue)) {
+        $RestartContext = Get-EAServiceContext -Context $Context
+        if ($null -eq $RestartContext) {
             throw "Restore succeeded, but Windows service is not installed. Start manually."
         }
         Start-Service -Name $Context.ServiceId

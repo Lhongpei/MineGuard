@@ -221,7 +221,8 @@ exit 0
             -FilePath $FixtureInstaller `
             -ArgumentList @(
                 "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
-                "/DIR=$FailureInstallRoot", "/LOG=$FailureLog"
+                "/DIR=$FailureInstallRoot", "/LOG=$FailureLog",
+                "/ALLOW_UNSIGNED_TEST_MEDIA=1"
             )
         $FailureStopwatch.Stop()
     }
@@ -254,7 +255,8 @@ exit 0
         -FilePath $FixtureInstaller `
         -ArgumentList @(
             "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
-            "/DIR=$FixtureInstallRoot", "/LOG=$FixtureLog"
+            "/DIR=$FixtureInstallRoot", "/LOG=$FixtureLog",
+            "/ALLOW_UNSIGNED_TEST_MEDIA=1"
         )
     $InstallStopwatch.Stop()
     if ($FixtureInstallExitCode -ne 0) {

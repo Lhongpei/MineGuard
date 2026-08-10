@@ -4,19 +4,32 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hmac
+import ipaddress
 import json
 import os
+import re
 import sqlite3
 import sys
 import sysconfig
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import __version__
-from .auth import build_auth_manager, hash_password, is_loopback
+from .auth import (
+    build_auth_manager,
+    hash_password,
+    is_loopback,
+    production_credential_errors,
+    validate_production_password,
+)
 from .client import PlatformClient
-from .environment import load_environment_file
+from .environment import (
+    load_authoritative_environment_file,
+    load_environment_file,
+)
 from .errors import AgentError
 from .five_quantity_exchange import FiveQuantityPlatformClient
 from .five_quantity_runtime import FiveQuantityRuntime
@@ -28,6 +41,103 @@ from .service import EnterpriseAgentService
 from .settings import Settings
 from .skills import build_skill_registry
 from .storage import Repository
+
+_PLACEHOLDER_MARKERS = (
+    "demo",
+    "example",
+    "sample",
+    "placeholder",
+    "not-configured",
+    "not_configured",
+    "replace-me",
+    "replace_me",
+    "change-before",
+    "change_before",
+    "default-secret",
+    "test-only",
+    "test_only",
+)
+_DEFAULT_PRODUCTION_IDENTITIES = frozenset(
+    {
+        "demo-mine-001",
+        "demo-operator-001",
+        "agent-demo-mine-001",
+        "演示煤矿",
+        "演示煤矿经营主体",
+    }
+)
+_IDENTITY_PLACEHOLDER_TOKEN = re.compile(
+    r"(?:^|[^a-z0-9])(?:demo|example|sample|placeholder|replace(?:-?me)?|"
+    r"test|dummy|fake|todo)(?:$|[^a-z0-9])"
+)
+_RESERVED_PRODUCTION_HOST_SUFFIXES = (
+    ".example",
+    ".invalid",
+    ".test",
+    ".localhost",
+    ".example.com",
+    ".example.net",
+    ".example.org",
+)
+
+
+def _placeholder_or_low_quality_secret(value: str) -> str | None:
+    folded = value.strip().casefold()
+    if any(marker in folded for marker in _PLACEHOLDER_MARKERS):
+        return "仍是示例、占位或测试值"
+    if len(set(value)) < 10:
+        return "字符多样性过低"
+    for unit_length in range(1, min(9, len(value) // 4 + 1)):
+        unit = value[:unit_length]
+        if unit * (len(value) // unit_length) == value:
+            return "由短片段重复构成"
+    return None
+
+
+def _placeholder_key_id(value: str) -> bool:
+    folded = value.strip().casefold()
+    return (
+        any(marker in folded for marker in _PLACEHOLDER_MARKERS)
+        or folded in {"key", "key-v1", "key-v2", "current-key"}
+        or len(set(folded.replace("-", "").replace("_", ""))) < 5
+    )
+
+
+def _placeholder_production_identity(value: str) -> bool:
+    folded = value.strip().casefold()
+    if not folded or folded in _DEFAULT_PRODUCTION_IDENTITIES:
+        return True
+    if any(marker in folded for marker in ("演示", "示例", "测试", "占位", "待配置")):
+        return True
+    if "__" in folded or (folded.startswith("<") and folded.endswith(">")):
+        return True
+    return _IDENTITY_PLACEHOLDER_TOKEN.search(folded) is not None
+
+
+def _placeholder_production_url(url: str) -> bool:
+    hostname = (urlsplit(url).hostname or "").rstrip(".").casefold()
+    if not hostname:
+        return True
+    if hostname in {
+        "example",
+        "invalid",
+        "test",
+        "localhost",
+        "example.com",
+        "example.net",
+        "example.org",
+    } or hostname.endswith(_RESERVED_PRODUCTION_HOST_SUFFIXES):
+        return True
+    try:
+        address = ipaddress.ip_address(hostname)
+        return (
+            address.is_loopback
+            or address.is_unspecified
+            or address.is_multicast
+            or address.is_link_local
+        )
+    except ValueError:
+        return False
 
 
 def _json_object(text: str) -> dict[str, Any]:
@@ -42,6 +152,14 @@ def _json_object(text: str) -> dict[str, Any]:
 
 def _service(settings: Settings) -> EnterpriseAgentService:
     repository = Repository(settings.database_path)
+    human_preparer_actor_ids = frozenset(
+        account.actor_id
+        for account in settings.users
+        if {"read", "write"}.issubset(account.permissions)
+        and not (account.permissions & {"confirm", "submit"})
+        and not account.temporary_demo
+        and not account.must_change_password
+    )
     llm_provider = (
         OpenAICompatibleProvider(settings.llm) if settings.llm is not None else None
     )
@@ -58,6 +176,10 @@ def _service(settings: Settings) -> EnterpriseAgentService:
         poll_seconds=settings.five_quantity_poll_seconds,
         stable_seconds=settings.five_quantity_stable_seconds,
         llm_provider=llm_provider,
+        four_eyes_required=(
+            settings.four_eyes_required or settings.production_mode
+        ),
+        human_preparer_actor_ids=human_preparer_actor_ids,
     )
     return EnterpriseAgentService(
         repository,
@@ -71,6 +193,10 @@ def _service(settings: Settings) -> EnterpriseAgentService:
         ),
         agent_v2_config=settings.agent_v2,
         five_quantity_runtime=five_quantity_runtime,
+        four_eyes_required=(
+            settings.four_eyes_required or settings.production_mode
+        ),
+        production_mode=settings.production_mode,
     )
 
 
@@ -157,6 +283,8 @@ def _startup_banner(
         "\n企业可信数据填报智能体已启动（前台运行）\n"
         f"{access}\n"
         f"账号状态：{account_status}\n"
+        f"运行模式：{'正式生产' if settings.production_mode else '演示/调试'}；"
+        f"四眼复核：{'强制' if settings.four_eyes_required else '未启用'}\n"
         f"数据库：{service.repository.path}\n"
         f"本实例煤矿：{settings.five_quantity_identity.mine_name} "
         f"({settings.five_quantity_identity.mine_id})\n"
@@ -221,15 +349,63 @@ def _configuration_errors(
     if not production:
         return tuple(errors)
 
+    if not settings.production_mode:
+        errors.append(
+            "正式服务必须设置 ENTERPRISE_AGENT_PRODUCTION_MODE=true；"
+            "仅不用 demo 账号不等于正式模式"
+        )
+    if not settings.four_eyes_required:
+        errors.append(
+            "正式服务必须设置 ENTERPRISE_AGENT_FOUR_EYES_REQUIRED=true"
+        )
     if not settings.users:
         errors.append("正式服务必须配置逐用户 ENTERPRISE_AGENT_USERS_JSON")
-    elif not any(
-        {"read", "write", "confirm", "submit"}.issubset(account.permissions)
-        and not account.must_change_password
-        and not account.temporary_demo
-        for account in settings.users
-    ):
-        errors.append("正式服务至少需要一个已换密且可复核报送的账号")
+    else:
+        if len(settings.users) < 2:
+            errors.append("正式服务至少需要两个不同的具名账号执行经办与复核")
+        if len({account.name.casefold() for account in settings.users}) != len(
+            settings.users
+        ):
+            errors.append("正式服务账号姓名必须唯一，不能由同一姓名冒充四眼复核")
+        preparers = []
+        reviewers = []
+        for account in settings.users:
+            if _placeholder_production_identity(account.actor_id):
+                errors.append(
+                    f"正式账号 actor_id 不能使用默认、演示或占位身份："
+                    f"{account.actor_id}"
+                )
+            if _placeholder_production_identity(account.name):
+                errors.append(
+                    f"正式账号 {account.actor_id} 的 name 不能使用演示、"
+                    "测试、示例或占位姓名"
+                )
+            for defect in production_credential_errors(account):
+                errors.append(f"正式账号 {account.actor_id} 的凭据不合格：{defect}")
+            final_permissions = account.permissions & {"confirm", "submit"}
+            if "write" in account.permissions and final_permissions:
+                errors.append(
+                    f"正式账号 {account.actor_id} 同时拥有 write 与"
+                    " confirm/submit，违反最小权限与经办复核分离"
+                )
+            if {"read", "write"}.issubset(account.permissions) and not (
+                account.permissions & {"confirm", "submit"}
+            ):
+                preparers.append(account)
+            if {"read", "confirm", "submit"}.issubset(
+                account.permissions
+            ) and "write" not in account.permissions:
+                reviewers.append(account)
+        if not preparers:
+            errors.append(
+                "正式服务至少需要一个仅经办账号：包含 read/write，"
+                "但不含 confirm/submit"
+            )
+        if not reviewers:
+            errors.append(
+                "正式服务至少需要一个复核报送账号：包含 read/confirm/submit，"
+                "但不含 write"
+            )
     if settings.allow_anonymous_local:
         errors.append("正式服务不得启用匿名本机身份")
     if not settings.secure_cookie:
@@ -238,19 +414,94 @@ def _configuration_errors(
         "https://"
     ):
         errors.append("正式服务必须配置 HTTPS PUBLIC_ORIGIN")
+    elif _placeholder_production_url(settings.public_origin):
+        errors.append(
+            "正式服务 PUBLIC_ORIGIN 不能使用保留、示例、回环或不可路由特殊地址"
+        )
     if not is_loopback(settings.host):
         errors.append("Windows Agent 应只监听回环地址并由 HTTPS 反向代理接入")
     if settings.five_quantity_platform is None:
         errors.append("正式服务必须完整配置政府 V2 接口及两把不同 HMAC 密钥")
     elif not settings.five_quantity_platform.base_url.startswith("https://"):
         errors.append("正式服务连接政府 V2 平台必须使用 HTTPS")
+    elif _placeholder_production_url(settings.five_quantity_platform.base_url):
+        errors.append(
+            "正式服务政府 V2 地址不能使用保留、示例、回环或不可路由特殊地址"
+        )
     if settings.five_quantity_demo_secret:
         errors.append("正式服务不得使用演示应用消息密钥")
     identity = settings.five_quantity_identity
-    if identity.key_id.startswith(
-        "not-configured-"
-    ) or identity.regulator_key_id.startswith("not-configured-"):
-        errors.append("正式服务必须配置企业和政府应用签名 key ID")
+    identity_fields = [
+        ("ENTERPRISE_MINE_ID", identity.mine_id),
+        ("ENTERPRISE_MINE_NAME", identity.mine_name),
+        ("ENTERPRISE_OPERATOR_ID", identity.operator_id),
+        ("ENTERPRISE_OPERATOR_NAME", identity.operator_name),
+        ("ENTERPRISE_SYSTEM_ID", identity.system_id),
+        ("REGULATORY_SYSTEM_ID", identity.regulator_system_id),
+        ("REGULATORY_PARTY_ID", identity.regulator_party_id),
+    ]
+    if settings.five_quantity_platform is not None:
+        identity_fields.append(
+            ("PLATFORM_V2_SENDER_ID", settings.five_quantity_platform.sender_id)
+        )
+    for client in settings.connector_clients:
+        identity_fields.append(("connector client_id", client.client_id))
+        for source in client.allowed_sources:
+            identity_fields.extend(
+                (
+                    ("connector source_id", source.source_id),
+                    ("connector source_system", source.source_system),
+                )
+            )
+    for field_name, value in identity_fields:
+        if _placeholder_production_identity(value):
+            errors.append(f"正式服务字段 {field_name} 不能使用默认、演示或占位身份")
+    key_ids = [
+        ("企业当前应用签名 key ID", identity.key_id),
+        ("政府当前应用验签 key ID", identity.regulator_key_id),
+    ]
+    if identity.previous_regulator_key_id is not None:
+        key_ids.append(
+            ("政府上一把应用验签 key ID", identity.previous_regulator_key_id)
+        )
+    for label, value in key_ids:
+        if _placeholder_key_id(value):
+            errors.append(f"{label} 是占位或低质量标识，必须由密钥登记流程签发")
+    for index, (left_label, left_value) in enumerate(key_ids):
+        for right_label, right_value in key_ids[index + 1 :]:
+            if hmac.compare_digest(left_value.encode(), right_value.encode()):
+                errors.append(f"{left_label} 与 {right_label} 不得复用")
+
+    secrets_to_check: list[tuple[str, str]] = [
+        ("五量应用消息密钥", identity.message_hmac_secret),
+    ]
+    if identity.previous_message_hmac_secret is not None:
+        secrets_to_check.append(
+            ("政府上一把应用验签密钥", identity.previous_message_hmac_secret)
+        )
+    if settings.five_quantity_platform is not None:
+        secrets_to_check.append(
+            (
+                "五量运输密钥",
+                settings.five_quantity_platform.transport_hmac_secret,
+            )
+        )
+    if settings.platform is not None and settings.platform.transport_hmac_secret:
+        secrets_to_check.append(
+            ("通用报送运输密钥", settings.platform.transport_hmac_secret)
+        )
+    secrets_to_check.extend(
+        (f"连接器 {client.client_id} 密钥", client.secret)
+        for client in settings.connector_clients
+    )
+    for label, value in secrets_to_check:
+        defect = _placeholder_or_low_quality_secret(value)
+        if defect is not None:
+            errors.append(f"{label} 不合格：{defect}")
+    for index, (left_label, left_value) in enumerate(secrets_to_check):
+        for right_label, right_value in secrets_to_check[index + 1 :]:
+            if hmac.compare_digest(left_value.encode(), right_value.encode()):
+                errors.append(f"{left_label} 与 {right_label} 不得复用")
     for field, value in identity.comparison_context.items():
         if value.casefold() == "unclassified":
             errors.append(f"正式服务必须配置同类矿分组字段 {field}")
@@ -277,6 +528,14 @@ def _parser() -> argparse.ArgumentParser:
             "从严格 KEY=VALUE UTF-8 文件加载配置；已有进程环境变量优先且文件不会被执行"
         ),
     )
+    parser.add_argument(
+        "--authoritative-env-file",
+        action="store_true",
+        help=(
+            "Windows 受管服务专用：清除 Agent 配置命名空间后以显式绝对 "
+            "--env-file 为准"
+        ),
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve_parser = sub.add_parser("serve", help="启动 HTTP API 和前端")
@@ -292,6 +551,16 @@ def _parser() -> argparse.ArgumentParser:
         "--password-stdin",
         action="store_true",
         help="从标准输入读取一行密码（自动化场景）",
+    )
+    password.add_argument(
+        "--production",
+        action="store_true",
+        help="按正式账号密码策略校验后再生成摘要",
+    )
+    password.add_argument(
+        "--json",
+        action="store_true",
+        help="输出可直接复制到用户记录的安全字段（不含明文）",
     )
 
     create = sub.add_parser("create", help="新建草稿")
@@ -386,6 +655,48 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _assert_authoritative_restore_not_blocked(
+    environment_file: Path,
+    *,
+    command: str,
+) -> None:
+    """Stop managed-service startup while a Windows restore is uncommitted."""
+
+    instance_root = environment_file.resolve().parent.parent
+    marker = instance_root / "restore-recovery-block.json"
+    if not marker.exists():
+        return
+    if command != "database-restore":
+        raise ValueError(
+            "实例存在未完成恢复阻断标记，禁止启动或执行命令："
+            f"{marker}；请保持服务停止并按标记中的精确路径人工恢复"
+        )
+    transaction_id = os.environ.get(
+        "MINEGUARD_INTERNAL_RESTORE_TRANSACTION_ID",
+        "",
+    )
+    if (
+        len(transaction_id) != 32
+        or any(character not in "0123456789abcdef" for character in transaction_id)
+        or marker.is_symlink()
+        or not marker.is_file()
+        or marker.stat().st_size > 1024 * 1024
+    ):
+        raise ValueError(f"恢复阻断标记无效或当前事务未获授权：{marker}")
+    try:
+        document = json.loads(marker.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"恢复阻断标记无法安全读取：{marker}") from error
+    if (
+        not isinstance(document, dict)
+        or document.get("format")
+        != "mineguard-enterprise-agent-restore-recovery-block-v1"
+        or not isinstance(document.get("transaction_id"), str)
+        or not hmac.compare_digest(document["transaction_id"], transaction_id)
+    ):
+        raise ValueError(f"恢复阻断标记不属于当前离线恢复事务：{marker}")
+
+
 def _serve_agent(
     args: argparse.Namespace,
     *,
@@ -410,6 +721,13 @@ def _serve_agent(
             "配置 HTTPS ENTERPRISE_AGENT_PUBLIC_ORIGIN 时必须设置 "
             "ENTERPRISE_AGENT_SECURE_COOKIE=true"
         )
+    if settings.production_mode:
+        production_errors = _configuration_errors(settings, production=True)
+        if production_errors:
+            parser.error(
+                "正式模式配置检查未通过：\n- "
+                + "\n- ".join(production_errors)
+            )
     if (
         settings.public_origin is not None
         and settings.public_origin.startswith("http://")
@@ -449,6 +767,7 @@ def _serve_agent(
         )
     with lock_for_database(settings.database_path):
         service = _service(settings)
+        service.assert_production_integrity()
         serve(
             service,
             host=host,
@@ -476,15 +795,31 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        selected_environment_file = (
-            args.env_file
-            or os.environ.get(
-                "ENTERPRISE_AGENT_ENV_FILE",
-                "",
-            ).strip()
-        )
-        if selected_environment_file:
-            load_environment_file(selected_environment_file)
+        if args.authoritative_env_file:
+            if not args.env_file:
+                parser.error(
+                    "--authoritative-env-file 必须与显式 --env-file 一起使用"
+                )
+            authoritative_path = Path(args.env_file).expanduser()
+            if not authoritative_path.is_absolute():
+                parser.error(
+                    "--authoritative-env-file 要求 --env-file 使用绝对路径"
+                )
+            load_authoritative_environment_file(authoritative_path)
+            _assert_authoritative_restore_not_blocked(
+                authoritative_path,
+                command=args.command,
+            )
+        else:
+            selected_environment_file = (
+                args.env_file
+                or os.environ.get(
+                    "ENTERPRISE_AGENT_ENV_FILE",
+                    "",
+                ).strip()
+            )
+            if selected_environment_file:
+                load_environment_file(selected_environment_file)
         if args.command == "hash-password":
             if args.password_stdin:
                 password = sys.stdin.readline().rstrip("\r\n")
@@ -493,7 +828,21 @@ def main(argv: list[str] | None = None) -> int:
                 confirmation = getpass.getpass("再次输入：")
                 if password != confirmation:
                     parser.error("两次输入的密码不一致")
-            print(hash_password(password))
+            if args.production:
+                validate_production_password(password)
+            elif args.json:
+                parser.error("--json 仅可与 --production 一起使用")
+            encoded_password = hash_password(password)
+            if args.json:
+                _print(
+                    {
+                        "password_hash": encoded_password,
+                        "credential_provenance": "production_hash_command",
+                        "must_change_password": False,
+                    }
+                )
+            else:
+                print(encoded_password)
             return 0
         settings = Settings.from_environment()
         if args.db:
@@ -529,6 +878,8 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "valid": not configuration_errors,
                     "mode": "production" if args.production else "runtime",
+                    "production_mode": settings.production_mode,
+                    "four_eyes_required": settings.four_eyes_required,
                     "errors": list(configuration_errors),
                     "mine_id": settings.five_quantity_identity.mine_id,
                     "system_id": settings.five_quantity_identity.system_id,
@@ -551,6 +902,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "serve":
             return _serve_agent(args, settings=settings, parser=parser)
+        if settings.production_mode and args.command in {
+            "create",
+            "patch",
+            "import",
+            "review",
+            "confirm",
+            "submit",
+        }:
+            raise ValueError(
+                "正式模式禁止使用可自行填写 --actor 的变更 CLI；"
+                "请登录企业端前端或受认证 HTTP API，由服务端会话确定操作人"
+            )
         service = _service(settings)
         if args.command == "create":
             _print(service.create_draft(args.values, actor=args.actor))

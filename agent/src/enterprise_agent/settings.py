@@ -96,6 +96,8 @@ class Settings:
     database_path: str
     host: str
     port: int
+    production_mode: bool
+    four_eyes_required: bool
     users: tuple[UserAccount, ...]
     allow_anonymous_local: bool
     session_ttl_seconds: int
@@ -343,6 +345,14 @@ class Settings:
             database_path=database_path,
             host=host,
             port=_integer("ENTERPRISE_AGENT_PORT", 8090, 1, 65535),
+            production_mode=_boolean(
+                "ENTERPRISE_AGENT_PRODUCTION_MODE",
+                False,
+            ),
+            four_eyes_required=_boolean(
+                "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED",
+                False,
+            ),
             users=parse_users_json(os.environ.get("ENTERPRISE_AGENT_USERS_JSON")),
             allow_anonymous_local=_boolean(
                 "ENTERPRISE_AGENT_ALLOW_ANONYMOUS_LOCAL",

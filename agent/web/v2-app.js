@@ -1338,14 +1338,31 @@
       machineManaged &&
         (state.ingestionEvidence.loading || machineFreshnessState !== "fresh"),
     );
+    const reviewGate = draft.review_gate || { required: false };
+    const currentIsLastEditor = Boolean(
+      reviewGate.required &&
+        state.principal &&
+        reviewGate.last_content_actor === state.principal.actor_id,
+    );
+    const reviewActorMissing = reviewGate.state === "actor_record_missing";
+    const awaitingHumanPreparer = reviewGate.state === "awaiting_human_preparer";
     const finalizeAllowed =
       can("confirm") &&
       can("submit") &&
       !credentialsLocked() &&
-      !machineFreshnessBlocked;
+      !machineFreshnessBlocked &&
+      !currentIsLastEditor &&
+      !reviewActorMissing &&
+      !awaitingHumanPreparer;
     const windowInfo = reportingWindow(draft.payload);
     const permissionHint = credentialsLocked()
       ? "当前为临时/演示账号，必须换成正式逐用户账号后才能确认报送。"
+      : reviewActorMissing
+        ? "这份历史草稿缺少经办人记录，不能正式确认；请重新导入或另存后复核。"
+      : awaitingHumanPreparer
+        ? "这份自动生成或历史草稿还不能直接报送。请由经办账号逐项核对并点击“接收核对并保存”，之后再由另一名复核账号确认。"
+      : currentIsLastEditor
+        ? "四眼复核：你是本修订版最后创建/编辑人，请退出并由另一名复核账号确认报送。"
       : machineFreshnessBlocked
         ? state.ingestionEvidence.loading
           ? "正在核对机器来源时效和当前快照绑定，完成前不能确认报送。"
@@ -1356,13 +1373,14 @@
     target.innerHTML = `
       <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(draft.payload.mine.mine_name)}</p><h3>${escapeHtml(draft.payload.reporting_month)} 五量${escapeHtml(windowInfo.fullMonth ? "整月月报" : "月内窗口报表")}</h3><p>${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)} · ${escapeHtml(windowInfo.label)} · 修订 ${draft.revision}</p></div><span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span></div>
       <div class="fq-summary-strip"><span><strong>${draft.payload.days.length}</strong>日报天数</span><span class="${missing ? "is-warn" : "is-ok"}"><strong>${missing}</strong>缺失测量</span><span><strong>${draft.payload.sources.length}</strong>来源记录</span><span><strong>${draft.submission_revision}</strong>报送版本</span></div>
+      ${reviewGate.required ? `<div class="fq-import-warning" role="status"><strong>四眼复核：${awaitingHumanPreparer ? "先由经办人接收核对" : currentIsLastEditor ? "待另一账号接手" : reviewActorMissing ? "经办人记录缺失" : "当前账号可独立复核"}</strong><p>${escapeHtml(reviewGate.message || "最后创建/编辑人不能确认或入发送队列。")}</p></div>` : ""}
       ${windowInfo.fullMonth ? "" : `<div class="fq-import-warning"><strong>当前不是整月覆盖</strong><p>本次申报窗口仅为 ${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)}。系统不会把窗口外日期算作已填报；确认前请核对这正是本次应申报范围。</p></div>`}
       ${importWarnings.length ? `<div class="fq-import-warning"><strong>导入映射需要人工核对</strong><ul>${importWarnings.slice(0, 20).map((item) => `<li>${escapeHtml(item.reason || "存在未明确的来源字段")}</li>`).join("")}</ul></div>` : ""}
       <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。展开每一天可核对日报合计和三个班次。</div>
       ${autofillEvidenceHtml(draft)}
       <div class="fq-day-list">${days}</div>
       <div class="fq-sticky-actions">
-        <button class="button button-secondary" type="button" data-fq-action="save-draft" ${locked || !can("write") ? "disabled" : ""}>保存复核修改</button>
+        <button class="button button-secondary" type="button" data-fq-action="save-draft" ${locked || !can("write") ? "disabled" : ""}>${awaitingHumanPreparer ? "接收核对并保存" : "保存复核修改"}</button>
         ${draft.status === "ready_review" && can("write") ? '<button class="button button-danger-quiet" type="button" data-fq-action="discard-draft">放弃草稿</button>' : ""}
         ${draft.status === "queued" ? '<button class="button button-primary" type="button" data-fq-action="send-draft">立即重试发送</button>' : ""}
       </div>
@@ -1613,8 +1631,18 @@
     const attachments = response.document.attachments.length
       ? response.document.attachments.map((item, index) => `<div class="fq-attachment" data-attachment-index="${index}"><div class="fq-form-grid"><label class="field"><span>证据编号</span><input data-attachment-field="evidence_id" value="${escapeHtml(item.evidence_id)}" ${locked ? "disabled" : ""}></label><label class="field"><span>标题</span><input data-attachment-field="title" value="${escapeHtml(item.title)}" ${locked ? "disabled" : ""}></label><label class="field"><span>媒体类型</span><input data-attachment-field="media_type" value="${escapeHtml(item.media_type)}" ${locked ? "disabled" : ""}></label><label class="field"><span>文件大小（字节）</span><input type="number" min="0" data-attachment-field="size_bytes" value="${escapeHtml(item.size_bytes)}" ${locked ? "disabled" : ""}></label></div><label class="field"><span>原件 SHA-256</span><input maxlength="64" data-attachment-field="sha256" value="${escapeHtml(item.sha256)}" ${locked ? "disabled" : ""}></label>${locked ? "" : `<button class="fq-link-button is-danger" type="button" data-risk-action="remove-attachment" data-index="${index}">移除证据索引</button>`}</div>`).join("")
       : '<p class="fq-empty">尚未登记证据。原始文件留在企业本地，只向政府发送内容摘要和索引。</p>';
-    const finalizeAllowed = can("confirm") && can("submit") && !credentialsLocked();
-    return `<div class="fq-response-editor"><div class="fq-section-head"><div><h4>结构化企业回执</h4><p>状态：${escapeHtml(statusText(response.status))} · 修订 ${response.revision}</p></div></div>${cards}<div class="fq-section-head"><div><h5>证据索引</h5><p>不在这里上传原件；原件保留于企业受控位置。</p></div>${locked ? "" : '<button class="button button-secondary" type="button" data-risk-action="add-attachment">添加证据索引</button>'}</div><div id="fqAttachments">${attachments}</div><div class="fq-sticky-actions"><button class="button button-secondary" type="button" data-risk-action="save-response" ${locked || !can("write") ? "disabled" : ""}>保存回执草稿</button></div><section class="fq-confirm-card"><h4>人工确认回复</h4><div class="fq-form-grid"><label class="field"><span>确认人姓名</span><input id="fqResponseConfirmerName" value="${escapeHtml((state.principal && state.principal.name) || "")}" ${locked ? "disabled" : ""}></label><label class="field"><span>岗位/角色</span><input id="fqResponseConfirmerRole" value="${escapeHtml((state.principal && state.principal.role) || "企业负责人")}" ${locked ? "disabled" : ""}></label></div><label class="field"><span>确认说明</span><textarea id="fqResponseAttestation" rows="3" ${locked ? "disabled" : ""}>本人确认上述事实、证据索引和措施已经企业核实。</textarea></label><label class="check-row"><input id="fqResponseAccepted" type="checkbox" ${locked ? "disabled" : ""}><span>我确认并同意向政府发送本回复；理解接收回执不代表风险已消除。</span></label><button class="button button-primary" type="button" data-risk-action="confirm-response" ${locked || !finalizeAllowed ? "disabled" : ""}>确认并发送回复</button>${response.receipt ? `<div class="fq-receipt"><strong>政府已记录回复</strong><span>${escapeHtml((response.receipt.payload && response.receipt.payload.receipt_id) || response.receipt.message_id)}</span><small>风险状态：未因接收回执自动消除。</small></div>` : ""}</section></div>`;
+    const reviewGate = response.review_gate || { required: false };
+    const currentIsLastEditor = Boolean(reviewGate.required && state.principal && reviewGate.last_content_actor === state.principal.actor_id);
+    const reviewActorMissing = reviewGate.state === "actor_record_missing";
+    const finalizeAllowed = can("confirm") && can("submit") && !credentialsLocked() && !currentIsLastEditor && !reviewActorMissing;
+    const reviewHint = reviewActorMissing
+      ? "历史回复缺少经办人记录，请重新创建回复后再复核。"
+      : currentIsLastEditor
+        ? "四眼复核：你是最后创建/编辑人，请由另一名复核账号确认发送。"
+        : reviewGate.required
+          ? "四眼复核已满足账号分离：请核对后确认发送。"
+          : "确认后进入可靠发送队列。";
+    return `<div class="fq-response-editor"><div class="fq-section-head"><div><h4>结构化企业回执</h4><p>状态：${escapeHtml(statusText(response.status))} · 修订 ${response.revision}</p></div></div>${reviewGate.required ? `<div class="fq-import-warning" role="status"><strong>四眼复核</strong><p>${escapeHtml(reviewHint)}</p></div>` : ""}${cards}<div class="fq-section-head"><div><h5>证据索引</h5><p>不在这里上传原件；原件保留于企业受控位置。</p></div>${locked ? "" : '<button class="button button-secondary" type="button" data-risk-action="add-attachment">添加证据索引</button>'}</div><div id="fqAttachments">${attachments}</div><div class="fq-sticky-actions"><button class="button button-secondary" type="button" data-risk-action="save-response" ${locked || !can("write") ? "disabled" : ""}>保存回执草稿</button></div><section class="fq-confirm-card"><h4>人工确认回复</h4><p>${escapeHtml(reviewHint)}</p><div class="fq-form-grid"><label class="field"><span>确认人姓名</span><input id="fqResponseConfirmerName" value="${escapeHtml((state.principal && state.principal.name) || "")}" ${locked ? "disabled" : ""}></label><label class="field"><span>岗位/角色</span><input id="fqResponseConfirmerRole" value="${escapeHtml((state.principal && state.principal.role) || "企业负责人")}" ${locked ? "disabled" : ""}></label></div><label class="field"><span>确认说明</span><textarea id="fqResponseAttestation" rows="3" ${locked ? "disabled" : ""}>本人确认上述事实、证据索引和措施已经企业核实。</textarea></label><label class="check-row"><input id="fqResponseAccepted" type="checkbox" ${locked ? "disabled" : ""}><span>我确认并同意向政府发送本回复；理解接收回执不代表风险已消除。</span></label><button class="button button-primary" type="button" data-risk-action="confirm-response" ${locked || !finalizeAllowed ? "disabled" : ""}>确认并发送回复</button>${response.receipt ? `<div class="fq-receipt"><strong>政府已记录回复</strong><span>${escapeHtml((response.receipt.payload && response.receipt.payload.receipt_id) || response.receipt.message_id)}</span><small>风险状态：未因接收回执自动消除。</small></div>` : ""}</section></div>`;
   }
 
   async function handleRiskSubmit(event) {

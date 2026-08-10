@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 from enterprise_agent import cli
+from enterprise_agent.auth import hash_password
 from enterprise_agent.cli import _configuration_errors, main
 from enterprise_agent.environment import (
+    load_authoritative_environment_file,
     load_environment_file,
     parse_environment_file,
 )
@@ -70,6 +74,127 @@ def test_environment_file_rejects_relative_link_duplicate_and_oversize(
         parse_environment_file(link)
 
 
+def test_authoritative_environment_file_rejects_machine_configuration_pollution(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "agent.env"
+    config.write_text(
+        "\n".join(
+            (
+                r"ENTERPRISE_AGENT_DB=C:\Mine\mine-a.db",
+                "ENTERPRISE_MINE_ID=mine-a",
+                "ENTERPRISE_EXCHANGE_HMAC_SECRET=file-message-secret-32-bytes-long",
+                "PLATFORM_V2_TRANSPORT_HMAC_SECRET=file-transport-secret-32-bytes-long",
+                "ENTERPRISE_AGENT_PRODUCTION_MODE=true",
+                "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED=true",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    environment = {
+        "ENTERPRISE_AGENT_DB": r"C:\Other\mine-b.db",
+        "ENTERPRISE_MINE_ID": "mine-b",
+        "ENTERPRISE_EXCHANGE_HMAC_SECRET": "machine-message-secret",
+        "PLATFORM_V2_TRANSPORT_HMAC_SECRET": "machine-transport-secret",
+        "PLATFORM_BEARER_TOKEN": "machine-only-value",
+        "REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET": "machine-only-value",
+        "AGENT_V2_WORKER_COUNT": "8",
+        "DEEPSEEK_API_KEY": "machine-only-value",
+        "COAL_NEWS_SEARCH_ENABLED": "false",
+        "ENTERPRISE_AGENT_ENV_FILE": r"C:\Other\agent.env",
+        "MINEGUARD_SERVICE_PRODUCTION_MODE": "false",
+        "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED": "false",
+        "UNRELATED_KEEP_ME": "yes",
+    }
+
+    loaded = load_authoritative_environment_file(config, environment=environment)
+
+    assert "ENTERPRISE_AGENT_DB" in loaded
+    assert environment["ENTERPRISE_AGENT_DB"] == r"C:\Mine\mine-a.db"
+    assert environment["ENTERPRISE_MINE_ID"] == "mine-a"
+    assert environment["ENTERPRISE_EXCHANGE_HMAC_SECRET"].startswith("file-")
+    assert environment["PLATFORM_V2_TRANSPORT_HMAC_SECRET"].startswith("file-")
+    assert environment["ENTERPRISE_AGENT_PRODUCTION_MODE"] == "false"
+    assert environment["ENTERPRISE_AGENT_FOUR_EYES_REQUIRED"] == "false"
+    assert "PLATFORM_BEARER_TOKEN" not in environment
+    assert "REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET" not in environment
+    assert "AGENT_V2_WORKER_COUNT" not in environment
+    assert "DEEPSEEK_API_KEY" not in environment
+    assert "COAL_NEWS_SEARCH_ENABLED" not in environment
+    assert "ENTERPRISE_AGENT_ENV_FILE" not in environment
+    assert "MINEGUARD_SERVICE_PRODUCTION_MODE" not in environment
+    assert "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED" not in environment
+    assert environment["UNRELATED_KEEP_ME"] == "yes"
+
+
+def test_authoritative_environment_requires_explicit_absolute_file_and_strict_policy(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "agent.env"
+    config.write_text("ENTERPRISE_MINE_ID=mine-a\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="true 或 false"):
+        load_authoritative_environment_file(
+            config,
+            environment={"MINEGUARD_SERVICE_PRODUCTION_MODE": "1"},
+        )
+    reserved = tmp_path / "reserved.env"
+    reserved.write_text(
+        "MINEGUARD_SERVICE_PRODUCTION_MODE=true\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="保留的 MINEGUARD_"):
+        load_authoritative_environment_file(reserved, environment={})
+    with pytest.raises(SystemExit):
+        main(["--authoritative-env-file", "config-check"])
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--env-file",
+                "relative.env",
+                "--authoritative-env-file",
+                "config-check",
+            ]
+        )
+
+
+def test_authoritative_runtime_honors_restore_recovery_block(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config" / "agent.env"
+    config.parent.mkdir()
+    config.write_text("ENTERPRISE_MINE_ID=mine-a\n", encoding="utf-8")
+    transaction_id = "a" * 32
+    marker = tmp_path / "restore-recovery-block.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "format": "mineguard-enterprise-agent-restore-recovery-block-v1",
+                "transaction_id": transaction_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="未完成恢复阻断标记"):
+        cli._assert_authoritative_restore_not_blocked(config, command="serve")
+
+    monkeypatch.setenv(
+        "MINEGUARD_INTERNAL_RESTORE_TRANSACTION_ID",
+        transaction_id,
+    )
+    cli._assert_authoritative_restore_not_blocked(
+        config,
+        command="database-restore",
+    )
+    monkeypatch.setenv("MINEGUARD_INTERNAL_RESTORE_TRANSACTION_ID", "b" * 32)
+    with pytest.raises(ValueError, match="不属于当前离线恢复事务"):
+        cli._assert_authoritative_restore_not_blocked(
+            config,
+            command="database-restore",
+        )
+
+
 def test_windows_semicolon_watch_path_list_keeps_drive_colons() -> None:
     assert split_path_list(
         r"C:\MineGuard\Inbox;D:\煤矿 数据\收件箱",
@@ -96,6 +221,166 @@ def test_production_config_rejects_loopback_http_platform(
     assert "正式服务连接政府 V2 平台必须使用 HTTPS" in errors
 
 
+def test_production_config_rejects_default_and_placeholder_identities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    defaults = {
+        "ENTERPRISE_MINE_ID": "demo-mine-001",
+        "ENTERPRISE_MINE_NAME": "演示煤矿",
+        "ENTERPRISE_OPERATOR_ID": "demo-operator-001",
+        "ENTERPRISE_OPERATOR_NAME": "演示煤矿经营主体",
+        "ENTERPRISE_SYSTEM_ID": "agent-demo-mine-001",
+        "REGULATORY_SYSTEM_ID": "demo-regulatory-system",
+        "REGULATORY_PARTY_ID": "demo-regulatory-party",
+    }
+    for name, value in defaults.items():
+        monkeypatch.setenv(name, value)
+    errors = _configuration_errors(Settings.from_environment(), production=True)
+    for field_name in (
+        "ENTERPRISE_MINE_ID",
+        "ENTERPRISE_MINE_NAME",
+        "ENTERPRISE_OPERATOR_ID",
+        "ENTERPRISE_OPERATOR_NAME",
+        "ENTERPRISE_SYSTEM_ID",
+        "REGULATORY_SYSTEM_ID",
+        "REGULATORY_PARTY_ID",
+    ):
+        assert any(field_name in error and "占位身份" in error for error in errors)
+    for value in (
+        "test-mine",
+        "replace-me",
+        "sample_source",
+        "示例煤矿",
+        "__SYSTEM_ID__",
+    ):
+        assert cli._placeholder_production_identity(value)
+    assert not cli._placeholder_production_identity("MINE-SX-QY-2026-071")
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://replace-with-regulator-host.example",
+        "https://portal.example.com",
+        "https://portal.example.net",
+        "https://portal.example.org",
+        "https://coal.invalid",
+        "https://coal.test",
+        "https://localhost",
+        "https://127.0.0.1",
+        "https://[::1]",
+        "https://0.0.0.0",
+        "https://[::]",
+        "https://224.0.0.1",
+        "https://[ff02::1]",
+        "https://169.254.10.20",
+        "https://[fe80::1]",
+    ),
+)
+def test_production_urls_reject_reserved_example_and_loopback_hosts(url: str) -> None:
+    assert cli._placeholder_production_url(url)
+
+
+def test_production_urls_allow_real_internal_https_hosts() -> None:
+    assert not cli._placeholder_production_url("https://mineguard.internal")
+    assert not cli._placeholder_production_url("https://10.20.30.40:8443/v2")
+
+
+def test_production_accounts_reject_placeholder_ids_and_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "ENTERPRISE_AGENT_USERS_JSON",
+        json.dumps(
+            [
+                {
+                    "actor_id": "preparer-2026",
+                    "name": "测试账号",
+                    "role": "经办人",
+                    "password_hash": hash_password("MineGuard!Prepare2026"),
+                    "credential_provenance": "production_hash_command",
+                    "permissions": ["read", "write"],
+                },
+                {
+                    "actor_id": "demo-reviewer",
+                    "name": "李四",
+                    "role": "复核负责人",
+                    "password_hash": hash_password("MineGuard!Review2026"),
+                    "credential_provenance": "production_hash_command",
+                    "permissions": ["read", "confirm", "submit"],
+                },
+            ],
+            ensure_ascii=False,
+        ),
+    )
+    errors = _configuration_errors(Settings.from_environment(), production=True)
+    assert any("demo-reviewer" in error and "actor_id" in error for error in errors)
+    assert any("preparer-2026" in error and "name" in error for error in errors)
+    assert not cli._placeholder_production_identity("张三")
+
+
+def test_production_key_ids_align_with_formal_windows_recommendations() -> None:
+    for placeholder in ("key", "key-v1", "key-v2", "current-key", "demo-key"):
+        assert cli._placeholder_key_id(placeholder)
+    assert not cli._placeholder_key_id("enterprise-key-v2")
+    assert not cli._placeholder_key_id("regulator-key-v2")
+
+
+def test_production_config_reports_reserved_https_origins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "ENTERPRISE_AGENT_PUBLIC_ORIGIN",
+        "https://browser.example",
+    )
+    monkeypatch.setenv(
+        "PLATFORM_V2_BASE_URL",
+        "https://replace-with-regulator-host.example",
+    )
+    monkeypatch.setenv("ENTERPRISE_SYSTEM_ID", "agent-mine-sx-qy-2026")
+    monkeypatch.setenv("PLATFORM_V2_SENDER_ID", "agent-mine-sx-qy-2026")
+    monkeypatch.setenv(
+        "ENTERPRISE_EXCHANGE_HMAC_SECRET",
+        "message-secret-with-at-least-thirty-two-bytes",
+    )
+    monkeypatch.setenv(
+        "PLATFORM_V2_TRANSPORT_HMAC_SECRET",
+        "transport-secret-with-at-least-thirty-two-bytes",
+    )
+    errors = _configuration_errors(Settings.from_environment(), production=True)
+    assert (
+        "正式服务 PUBLIC_ORIGIN 不能使用保留、示例、回环或不可路由特殊地址"
+        in errors
+    )
+    assert (
+        "正式服务政府 V2 地址不能使用保留、示例、回环或不可路由特殊地址"
+        in errors
+    )
+
+
+def test_production_config_rejects_placeholder_connector_identities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "ENTERPRISE_AGENT_CONNECTOR_CLIENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "client_id": "sample-connector",
+                    "secret": "connector-secret-with-at-least-thirty-two-bytes",
+                    "permissions": ["autofill"],
+                    "allowed_sources": {"test-source": "示例SCADA"},
+                }
+            ],
+            ensure_ascii=False,
+        ),
+    )
+    errors = _configuration_errors(Settings.from_environment(), production=True)
+    assert any("connector client_id" in error for error in errors)
+    assert any("connector source_id" in error for error in errors)
+    assert any("connector source_system" in error for error in errors)
+
+
 def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     root = Path(__file__).resolve().parents[1] / "deploy" / "windows"
     expected = {
@@ -119,6 +404,9 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         encoding="utf-8"
     )
     assert "__ENV_FILE__" in service_xml
+    assert "--authoritative-env-file" in service_xml
+    assert "MINEGUARD_SERVICE_PRODUCTION_MODE" in service_xml
+    assert "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED" in service_xml
     assert "HMAC_SECRET" not in service_xml
     assert "DEEPSEEK_API_KEY" not in service_xml
     installer = (root / "Install-EnterpriseAgentService.ps1").read_text(
@@ -197,13 +485,223 @@ def test_windows_service_lifecycle_is_path_bound_and_transactional() -> None:
     )
 
     assert "same-name service hijack" in uninstaller
-    assert "& sc.exe delete $ServiceId" in uninstaller
+    assert "& $ScPath delete $ServiceId" in uninstaller
     assert "& $WrapperExecutable" not in uninstaller
     assert "Remove-Item -LiteralPath $ExactPath" in uninstaller
     assert "Remove-Item -LiteralPath $InstanceRoot" not in uninstaller
     assert "Configuration, database, evidence, logs and backups were preserved" in (
         uninstaller
     )
+
+
+def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
+    root = Path(__file__).resolve().parents[1] / "deploy" / "windows"
+    helper = (root / "EnterpriseAgent.WindowsSafety.ps1").read_text(
+        encoding="utf-8"
+    )
+    creator = (root / "New-EnterpriseAgentInstance.ps1").read_text(
+        encoding="utf-8"
+    )
+    runtime = (root / "Install-EnterpriseAgent.ps1").read_text(
+        encoding="utf-8"
+    )
+    service = (root / "Install-EnterpriseAgentService.ps1").read_text(
+        encoding="utf-8"
+    )
+    uninstaller = (root / "Uninstall-EnterpriseAgentService.ps1").read_text(
+        encoding="utf-8"
+    )
+    restore = (root / "Restore-EnterpriseAgent.ps1").read_text(
+        encoding="utf-8"
+    )
+    xml = (root / "enterprise-agent-service.xml.template").read_text(
+        encoding="utf-8"
+    )
+
+    assert "__SERVICE_ACCOUNT__" in xml
+    assert "LOCAL SERVICE" not in xml.upper()
+    for path in root.glob("*.ps1"):
+        script_text = path.read_text(encoding="utf-8-sig")
+        assert "*S-1-5-19:(OI)(CI)" not in script_text, (
+            f"shared LocalService authorization remains in {path.name}"
+        )
+    for token in (
+        "sc.exe showsid",
+        'AccountName = "NT SERVICE\\$ServiceId"',
+        '"ServiceSidType"',
+        "ServiceSidType -ne 1",
+        "StartName",
+        "Virtual service account SID does not match the derived service SID",
+        "Set-EAInstanceCanonicalAcl",
+        "Assert-EAInstanceWatchAcls",
+        "Assert-EAInstanceGlobalIsolation",
+        "Watch directory isolation violation",
+        "Instance port isolation violation",
+        "MineId isolation violation",
+        "SystemId isolation violation",
+    ):
+        assert token in helper
+    assert "S-1-5-19:(OI)(CI)" not in helper
+    assert '"*S-1-5-80-0:(OI)(CI)RX"' in runtime
+    assert '"*S-1-5-80-0:RX"' in runtime
+    assert "S-1-5-19:(OI)(CI)" not in runtime
+    assert "Assert-EARegisteredRuntimeServiceIdentity" in runtime
+    assert "Registered service $ServiceId uses legacy/shared identity" in runtime
+
+    assert '"*$($ServiceIdentity.Sid):(OI)(CI)RX"' in creator
+    assert '"*$($ServiceIdentity.Sid):(OI)(CI)M"' in creator
+    assert "-SkipAcl requires the explicit -DevelopmentOnly" in creator
+    assert "Grant-EAServiceWatchReadAcl" in creator
+    assert "$ExistingContexts" in creator
+    assert "overlaps existing instance" in creator
+    assert '"Global\\MineGuardEnterpriseAgent-StateRoot-' in creator
+    assert "Threading.Mutex" in creator
+    assert "WaitOne" in creator
+    assert "ReleaseMutex" in creator
+    assert creator.index("WaitOne") < creator.index("$ExistingContexts")
+    assert creator.index("$Published = $true") < creator.index("ReleaseMutex")
+    assert "MineId $MineId is already assigned" in creator
+    assert "SystemId $SystemId is already assigned" in creator
+    assert "S-1-5-19:(OI)(CI)" not in creator
+
+    assert '"sidtype", $ServiceId, "unrestricted"' in service
+    assert '"__SERVICE_ACCOUNT__"' in service
+    assert "Assert-EARegisteredServiceIdentity" in service
+    assert "Set-EAInstanceCanonicalAcl -Context $SharedContext" in service
+    assert "Assert-EAInstanceWatchAcls -Context $SharedContext" in service
+    assert "Assert-EAInstanceGlobalIsolation -Context $SharedContext" in service
+    assert "Set-EAInstanceCanonicalAcl -Context $Context" in restore
+    for broad_sid in (
+        "S-1-1-0",
+        "S-1-5-11",
+        "S-1-5-19",
+        "S-1-5-20",
+        "S-1-5-32-545",
+        "S-1-5-80-0",
+    ):
+        assert broad_sid in helper
+    watch_grant = helper[
+        helper.index("function Grant-EAServiceWatchReadAcl") : helper.index(
+            "function Assert-EAServiceWatchReadAcl"
+        )
+    ]
+    assert '"/remove:g"' not in watch_grant
+    assert "does not remove business ACLs automatically" in helper
+
+    assert "AllowLegacyLocalServiceRemoval" in uninstaller
+    assert 'if ($LegacySid -ne "S-1-5-19")' in uninstaller
+    assert "permits only the exact LocalService SID S-1-5-19" in uninstaller
+    assert "Assert-ServiceIdentityForRemoval" in uninstaller
+
+
+def test_windows_formal_install_uses_external_signer_pin_and_explicit_test_mode(
+) -> None:
+    root = Path(__file__).resolve().parents[1] / "deploy" / "windows"
+    runtime = (root / "Install-EnterpriseAgent.ps1").read_text(
+        encoding="utf-8"
+    )
+    service = (root / "Install-EnterpriseAgentService.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    for script in (runtime, service):
+        assert "ApprovedSignerThumbprint" in script
+        assert "AllowUnsignedTestMedia" in script
+        assert "Get-AuthenticodeSignature" in script
+        assert 'Status.ToString() -ne "Valid"' in script
+        assert "TimeStamperCertificate" in script
+        assert "independently approved" in script
+        assert '^[A-F0-9]{40}$' in script
+    assert "Unsigned Agent media is refused by default" in runtime
+    assert (
+        "-AllowUnsignedTestMedia is valid only for actually unsigned "
+        "internal-test media"
+        in runtime
+    )
+    assert "Unsigned test media cannot claim an approved production signer" in runtime
+    assert "Assert-InstalledAgentReleaseClassification" in service
+    assert "mineguard-enterprise-agent-windows-binary-v1" in service
+    assert (
+        "metadata does not classify the binary under the independently approved signer"
+        in service
+    )
+    assert "-AllowUnsignedTestMedia requires -AllowIncompleteDemo" in service
+    assert "source-development Python runtime" in service
+    isolated_check_call = service.index(
+        "Invoke-IsolatedAgentConfigCheck -ExecutablePath $AgentExecutable"
+    )
+    assert service.rindex("Assert-InstalledAgentReleaseClassification") < (
+        isolated_check_call
+    )
+    assert service.rindex("Assert-FormalAgentAuthenticode") < isolated_check_call
+    for prefix in (
+        "ENTERPRISE_",
+        "PLATFORM_",
+        "REGULATORY_",
+        "AGENT_V2_",
+        "DEEPSEEK_",
+        "COAL_NEWS_",
+        "MINEGUARD_SERVICE_",
+    ):
+        assert prefix in service
+    assert "Invoke-IsolatedAgentConfigCheck" in service
+    assert "[EnvironmentVariableTarget]::Process" in service
+    assert "finally {" in service
+    assert '"--authoritative-env-file", "config-check"' in service
+    assert "Formal service installation requires -Start" in service
+    start_wait = service.index("$ServiceController.WaitForStatus(")
+    health_check = service.index("& $HealthScriptPath -InstanceName")
+    install_success = service.index('Write-Host "Windows service installed')
+    assert start_wait < health_check < install_success
+    release_validation = runtime.index(
+        "$ReleaseContract = Test-BinaryReleaseManifest -ReleaseRoot $SourceRoot"
+    )
+    executable_launch = runtime.index("$CandidateReportedVersion = (")
+    state_claim = runtime.index("Initialize-EnterpriseAgentStateRoot -Root $StateRoot")
+    assert release_validation < executable_launch < state_claim
+
+
+def test_windows_powershell_has_no_adjacent_duplicate_param_or_throw_lines() -> None:
+    root = Path(__file__).resolve().parents[1] / "deploy" / "windows"
+    for path in sorted(root.glob("*.ps1")):
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        for previous, current in zip(lines, lines[1:], strict=False):
+            normalized = current.strip()
+            if normalized.startswith(("param(", "throw ")):
+                assert normalized != previous.strip(), (
+                    f"adjacent duplicate statement in {path.name}: {normalized}"
+                )
+
+
+def test_windows_powershell_parses_when_native_parser_is_available() -> None:
+    executable = shutil.which("powershell") or shutil.which("pwsh")
+    if executable is None:
+        pytest.skip("PowerShell parser is unavailable on this host")
+    root = Path(__file__).resolve().parents[1] / "deploy" / "windows"
+    parser = (
+        "$tokens=$null; $errors=$null; "
+        "[System.Management.Automation.Language.Parser]::ParseFile("
+        "$args[0],[ref]$tokens,[ref]$errors) | Out-Null; "
+        "if ($errors.Count -ne 0) { $errors | ForEach-Object { "
+        "[Console]::Error.WriteLine($_.Message) }; exit 1 }"
+    )
+    for path in sorted(root.glob("*.ps1")):
+        completed = subprocess.run(
+            [
+                executable,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                parser,
+                str(path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, (
+            f"PowerShell parser rejected {path.name}: {completed.stderr}"
+        )
 
 
 def test_windows_runtime_uninstall_is_transactional_and_preserves_instances() -> None:
@@ -278,6 +776,13 @@ def test_windows_instance_operations_share_strict_path_and_identity_context() ->
     assert "Get-EASnapshotCanonicalBytes" in helper
     assert "[Array]::Sort($FileLines, [StringComparer]::Ordinal)" in helper
     assert "Test-EAFixedTimeHexEquals" in helper
+    assert "Assert-EANoRestoreRecoveryBlock -Context $Context" in helper
+    assert "Assert-EARestoreRecoveryBlockAcl" in helper
+    assert 'return Join-Path $Context.InstanceRoot "restore-recovery-block.json"' in (
+        helper
+    )
+    assert "blocked by an incomplete restore" in helper
+    assert "manual database/quarantine recovery paths recorded" in helper
 
     creator = operations["New-EnterpriseAgentInstance.ps1"]
     assert ".instance-staging-" in creator
@@ -294,6 +799,7 @@ def test_windows_instance_operations_share_strict_path_and_identity_context() ->
     starter = operations["Start-EnterpriseAgent.ps1"]
     health = operations["Test-EnterpriseAgentHealth.ps1"]
     assert starter.count("Assert-EANoInstanceProcesses -Context $Context") >= 2
+    assert '"--authoritative-env-file" "serve"' in starter
     assert "Assert-EAInstanceIsRunning -Context $Context" in health
     assert 'primary_contract_version -ne "five-quantity-submission-v2"' in health
 
@@ -306,6 +812,7 @@ def test_windows_instance_operations_share_strict_path_and_identity_context() ->
         assert "Assert-EAProtectedSnapshotAcl" in script
         assert "Get-EAServiceContext -Context $Context" in script
         assert "Assert-EANoInstanceProcesses -Context $Context" in script
+        assert '"--authoritative-env-file"' in script
     assert (
         "A destination inside StateRoot must be inside this instance's backups"
         in backup
@@ -317,6 +824,45 @@ def test_windows_instance_operations_share_strict_path_and_identity_context() ->
     )
     assert "restore-transactions" in restore
     assert "throw $OriginalError" in restore
+    for token in (
+        "mineguard-enterprise-agent-restore-recovery-block-v1",
+        "Write-EAProtectedRestoreRecoveryBlock",
+        "Get-EARestoreRecoveryBlockPath",
+        "pre-restore-live-database.db",
+        "failed-restored-database.db",
+        "failed-restored-quarantine",
+        "$DatabaseSwitchAttempted",
+        "$RollbackErrors",
+        "automatic rollback was incomplete",
+        "MINEGUARD_INTERNAL_RESTORE_FAULT_INJECTION",
+        'Invoke-EARestoreFaultInjection -Point "after-database-restore"',
+        'Invoke-EARestoreFaultInjection -Point "after-acl-repair"',
+        'Invoke-EARestoreFaultInjection -Point "after-rollback-publish"',
+        "$Committed = $true",
+    ):
+        assert token in restore
+    marker_publish = restore.index(
+        "Write-EAProtectedRestoreRecoveryBlock -PathValue $RecoveryMarkerPath"
+    )
+    live_quarantine_switch = restore.index(
+        "Move-Item -LiteralPath $CurrentQuarantine -Destination $OldQuarantine"
+    )
+    database_restore = restore.index(
+        "Invoke-NativeChecked -FilePath $Context.Executable"
+    )
+    acl_repair = restore.index("Set-EAInstanceCanonicalAcl -Context $Context")
+    rollback_publish = restore.index(
+        "Move-Item -LiteralPath $TransactionRoot -Destination $RollbackRoot"
+    )
+    explicit_commit = restore.index("$Committed = $true")
+    assert marker_publish < live_quarantine_switch < database_restore
+    assert database_restore < acl_repair < rollback_publish < explicit_commit
+    catch_block = restore[restore.index("    catch {", database_restore) :]
+    assert "if ($DatabaseSwitchAttempted)" in catch_block
+    assert "if ($OldQuarantineMoved -or $NewQuarantinePublished)" in catch_block
+    assert catch_block.index("Database rollback:") < catch_block.index(
+        "Recovery marker removal:"
+    )
     assert "mineguard-enterprise-agent-state-snapshot-v2" in backup
     assert "hmac_key_id" in backup
     assert "Get-EASnapshotHmacSha256" in backup
@@ -513,7 +1059,7 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     binary_cleanup = installer.index(
         'if (Test-Path -LiteralPath $RollbackRuntime)'
     )
-    source_acl = installer.index("if ($BuildFromSource) {")
+    source_acl = installer.rindex("if ($BuildFromSource) {")
     assert binary_cleanup < source_acl
     operational = (
         "New-EnterpriseAgentInstance.ps1",

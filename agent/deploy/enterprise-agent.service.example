@@ -11,6 +11,7 @@ Group=enterprise-agent
 WorkingDirectory=/opt/enterprise-agent/agent
 EnvironmentFile=/etc/enterprise-agent/enterprise-agent.env
 Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/opt/enterprise-agent/agent/.venv/bin/enterprise-agent config-check --production
 ExecStart=/opt/enterprise-agent/agent/.venv/bin/enterprise-agent serve --host 127.0.0.1 --port 8090
 Restart=on-failure
 RestartSec=3

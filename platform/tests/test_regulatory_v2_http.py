@@ -7,6 +7,8 @@ import hmac
 from http.client import HTTPConnection
 import json
 from pathlib import Path
+import socket
+import sqlite3
 from threading import Event, Thread
 from types import SimpleNamespace
 from typing import Any
@@ -16,7 +18,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 import pytest
 from referencing import Registry, Resource
 
-from mineguard.auth import Principal, Role
+from mineguard.auth import AuthError, LocalAuthStore, Principal, Role
 from mineguard.exchange_v2 import (
     ExchangeClient,
     FiveQuantitySubmissionMessage,
@@ -26,12 +28,13 @@ from mineguard.exchange_v2 import (
 )
 from mineguard.external_submission import jcs_canonical_json
 from mineguard.regulatory_v2_http import (
+    RegulatoryV2HTTPServer,
     RegulatoryV2RequestHandler,
     _humanize_business_text,
     _humanize_finding_summary,
     create_server,
 )
-from mineguard.regulatory_v2_store import AuditProjection
+from mineguard.regulatory_v2_store import AuditProjection, RegulatoryV2Store
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +42,226 @@ CONTRACTS = ROOT / "contracts"
 EXAMPLE_SECRET = b"example-v2-exchange-secret-not-for-production"
 FIXED_NOW = datetime(2026, 8, 1, 0, 20, tzinfo=UTC)
 LOCAL_CONTROL_TOKEN = "a" * 64
+PRODUCTION_MESSAGE_SECRET = b"mG8xQ2pL9vR4sT7wY3kN6cD1fH5jB0zA"
+PRODUCTION_TRANSPORT_SECRET = b"uC7nP2aX9dK4qW6rE1vM8sJ3hF5bT0yZ"
+PRODUCTION_MESSAGE_KEY_ID = "mineqy001-msg-2026q3-a7f4"
+PRODUCTION_COMPARISON_CONTEXT = {
+    "capacity_band": "large",
+    "mining_method": "underground-longwall",
+    "shift_system": "three-shift-eight-hour",
+    "coal_type": "bituminous",
+    "operating_regime": "normal-production",
+}
+
+
+def _minimal_exchange_client(**overrides: Any) -> ExchangeClient:
+    values: dict[str, Any] = {
+        "sender_id": "agent-mine-qy-001",
+        "party_id": "operator-qy-001",
+        "mine_id": "MINE-QY-001",
+        "mine_name": "沁源一号煤矿",
+        "secret": PRODUCTION_MESSAGE_SECRET,
+        "transport_secret": PRODUCTION_TRANSPORT_SECRET,
+        "message_key_id": PRODUCTION_MESSAGE_KEY_ID,
+        "comparison_context": PRODUCTION_COMPARISON_CONTEXT,
+    }
+    values.update(overrides)
+    return ExchangeClient(**values)
+
+
+def _seed_ready_production_admin(path: Path) -> None:
+    with LocalAuthStore(path) as auth:
+        auth.bootstrap_admin("ready-admin", "Ready-Admin-Password-2026!")
+
+
+def test_production_server_boundary_rejects_insecure_or_incomplete_setup(
+    tmp_path: Path,
+) -> None:
+    auth_database = tmp_path / "production-auth.db"
+    _seed_ready_production_admin(auth_database)
+    client = _minimal_exchange_client()
+    common = {
+        "database_path": tmp_path / "production.db",
+        "auth_database_path": auth_database,
+        "clients": {client.sender_id: client},
+        "auth_required": True,
+        "secure_cookie": True,
+        "production_mode": True,
+    }
+    for override, message in (
+        ({"auth_required": False}, "requires government authentication"),
+        ({"secure_cookie": False}, "requires Secure session cookies"),
+        ({"clients": {}}, "requires at least one exchange client"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            create_server("127.0.0.1", 0, **(common | override))
+
+    placeholder_client = _minimal_exchange_client(sender_id="demo-agent")
+    with pytest.raises(ValueError, match="placeholder sender_id"):
+        create_server(
+            "127.0.0.1",
+            0,
+            **(common | {"clients": {placeholder_client.sender_id: placeholder_client}}),
+        )
+    with pytest.raises(ValueError, match="platform_system_id.*placeholder"):
+        create_server(
+            "127.0.0.1",
+            0,
+            **(common | {"platform_system_id": "demo-platform"}),
+        )
+    with pytest.raises(ValueError, match="must not reuse"):
+        create_server(
+            "127.0.0.1",
+            0,
+            **(common | {"platform_key_id": PRODUCTION_MESSAGE_KEY_ID}),
+        )
+
+    empty_auth = tmp_path / "empty-auth.db"
+    with pytest.raises(AuthError, match="current password policy"):
+        create_server(
+            "127.0.0.1",
+            0,
+            **(common | {"auth_database_path": empty_auth}),
+        )
+
+    # The concrete server constructor is also a trust boundary; callers may
+    # not bypass create_server and instantiate an insecure production server.
+    store = RegulatoryV2Store(tmp_path / "direct-production.db")
+    auth = LocalAuthStore(auth_database)
+    try:
+        with pytest.raises(ValueError, match="requires government authentication"):
+            RegulatoryV2HTTPServer(
+                ("127.0.0.1", 0),
+                store=store,
+                auth_store=auth,
+                clients={client.sender_id: client},
+                auth_required=False,
+                secure_cookie=True,
+                platform_system_id="mineguard-test",
+                platform_party_id="regulator-test",
+                platform_key_id="regulator-test-key",
+                local_control_token=None,
+                clock=lambda: FIXED_NOW,
+                production_mode=True,
+            )
+    finally:
+        store.close()
+        auth.close()
+
+
+def test_production_pending_user_can_only_change_password_then_relogin(
+    tmp_path: Path,
+) -> None:
+    auth_database = tmp_path / "pending-auth.db"
+    _seed_ready_production_admin(auth_database)
+    with LocalAuthStore(auth_database) as auth:
+        auth.create_user(
+            "pending-admin",
+            "Initial-Admin-2026!",
+            Role.ADMIN,
+            must_change_password=True,
+        )
+    client = _minimal_exchange_client()
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "pending.db",
+        auth_database_path=auth_database,
+        auth_required=True,
+        secure_cookie=True,
+        clients={client.sender_id: client},
+        production_mode=True,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        login_body = json.dumps(
+            {"username": "pending-admin", "password": "Initial-Admin-2026!"}
+        )
+        connection.request(
+            "POST",
+            "/v2/auth/login",
+            body=login_body,
+            headers={"Content-Type": "application/json"},
+        )
+        login = connection.getresponse()
+        login_payload = json.loads(login.read())
+        assert login.status == 200
+        assert login_payload["principal"]["must_change_password"] is True
+        assert login_payload["principal"]["password_change_required"] is True
+        cookie = login.getheader("Set-Cookie").split(";", 1)[0]
+        csrf = login_payload["csrf_token"]
+
+        connection.request("GET", "/v2/regulatory/overview", headers={"Cookie": cookie})
+        blocked = connection.getresponse()
+        blocked_payload = json.loads(blocked.read())
+        assert blocked.status == 403
+        assert blocked_payload["code"] == "PASSWORD_CHANGE_REQUIRED"
+
+        connection.request(
+            "POST",
+            "/v2/auth/change-password",
+            body=json.dumps(
+                {
+                    "current_password": "Wrong-Current-Password-2026!",
+                    "new_password": "Final-Admin-2026!",
+                }
+            ),
+            headers={
+                "Content-Type": "application/json",
+                "Cookie": cookie,
+                "X-CSRF-Token": csrf,
+            },
+        )
+        wrong_current = connection.getresponse()
+        wrong_payload = json.loads(wrong_current.read())
+        assert wrong_current.status == 422
+        assert wrong_payload["code"] == "CURRENT_PASSWORD_INVALID"
+        assert "当前密码不正确" in wrong_payload["detail"]
+
+        connection.request("GET", "/v2/auth/me", headers={"Cookie": cookie})
+        still_authenticated = connection.getresponse()
+        still_payload = json.loads(still_authenticated.read())
+        assert still_authenticated.status == 200
+        assert still_payload["principal"]["password_change_required"] is True
+
+        connection.request(
+            "POST",
+            "/v2/auth/change-password",
+            body=json.dumps(
+                {
+                    "current_password": "Initial-Admin-2026!",
+                    "new_password": "Final-Admin-2026!",
+                }
+            ),
+            headers={
+                "Content-Type": "application/json",
+                "Cookie": cookie,
+                "X-CSRF-Token": csrf,
+            },
+        )
+        changed = connection.getresponse()
+        assert changed.status == 200
+        assert json.loads(changed.read())["login_required"] is True
+
+        connection.request(
+            "POST",
+            "/v2/auth/login",
+            body=json.dumps(
+                {"username": "pending-admin", "password": "Final-Admin-2026!"}
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        relogin = connection.getresponse()
+        relogin_payload = json.loads(relogin.read())
+        assert relogin.status == 200
+        assert relogin_payload["principal"]["must_change_password"] is False
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 def test_local_control_shutdown_is_loopback_token_bound_and_graceful(
@@ -107,6 +330,495 @@ def test_local_control_shutdown_refuses_non_loopback_listener(tmp_path: Path) ->
         )
 
 
+def test_production_hmac_failure_is_persistently_audited_without_secrets(
+    tmp_path: Path,
+) -> None:
+    submission_body = (
+        CONTRACTS / "examples" / "five-quantity-submission-v2.json"
+    ).read_bytes()
+    client = _minimal_exchange_client()
+    auth_database = tmp_path / "security-auth.db"
+    _seed_ready_production_admin(auth_database)
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "security-audit.db",
+        auth_database_path=auth_database,
+        auth_required=True,
+        secure_cookie=True,
+        clients={client.sender_id: client},
+        production_mode=True,
+        clock=lambda: FIXED_NOW,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    target = "/v2/five-quantity-submissions"
+    headers = sign_transport_headers(
+        client,
+        method="POST",
+        request_target=target,
+        body=submission_body,
+        contract_version="five-quantity-submission-v2",
+        timestamp=FIXED_NOW,
+        nonce="c2VjdXJpdHktYXVkaXQtbm9uY2U",
+    )
+    deliberately_invalid_hmac = "d" * 64
+    headers["X-Exchange-Signature"] = deliberately_invalid_hmac
+    headers["Content-Type"] = "application/json"
+    try:
+        connection.request("POST", target, body=submission_body, headers=headers)
+        response = connection.getresponse()
+        problem = json.loads(response.read())
+        assert response.status == 401
+        assert problem["code"] == "EXCHANGE_AUTHENTICATION_FAILED"
+
+        event = next(
+            item
+            for item in server.store.list_audit_events(limit=20)
+            if item.event_type == "machine_authentication_failed"
+        )
+        assert event.mine_id == client.mine_id
+        assert event.payload == {
+            "audit_schema": "machine-security-event-v1",
+            "outcome": "rejected",
+            "reason_code": "exchange_authentication_failed",
+            "request_method": "POST",
+            "request_path": target,
+            "remote_address": "127.0.0.1",
+            "known_sender_id": client.sender_id,
+        }
+        serialized = json.dumps(event.model_dump(mode="json"), ensure_ascii=False)
+        assert deliberately_invalid_hmac not in serialized
+        assert PRODUCTION_MESSAGE_SECRET.decode() not in serialized
+        assert PRODUCTION_TRANSPORT_SECRET.decode() not in serialized
+        assert "X-Exchange-Nonce" not in serialized
+        assert server.store.verify_audit_chain() is True
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_repeated_invalid_hmac_is_rate_bounded_with_first_and_summary_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "bounded-security-audit.db"
+    submission_body = (
+        CONTRACTS / "examples" / "five-quantity-submission-v2.json"
+    ).read_bytes()
+    client = _minimal_exchange_client()
+    auth_database = tmp_path / "bounded-security-auth.db"
+    _seed_ready_production_admin(auth_database)
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=database,
+        auth_database_path=auth_database,
+        auth_required=True,
+        secure_cookie=True,
+        clients={client.sender_id: client},
+        production_mode=True,
+        clock=lambda: FIXED_NOW,
+    )
+    full_scan_count = 0
+    original = server.store._run_full_integrity_check_locked  # noqa: SLF001
+
+    def counted_full_scan() -> bool:
+        nonlocal full_scan_count
+        full_scan_count += 1
+        return original()
+
+    monkeypatch.setattr(
+        server.store,
+        "_run_full_integrity_check_locked",
+        counted_full_scan,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    target = "/v2/five-quantity-submissions"
+    headers = sign_transport_headers(
+        client,
+        method="POST",
+        request_target=target,
+        body=submission_body,
+        contract_version="five-quantity-submission-v2",
+        timestamp=FIXED_NOW,
+        nonce="Ym91bmRlZC1mYWlsdXJlLW5vbmNl",
+    )
+    headers["X-Exchange-Signature"] = "c" * 64
+    headers["Content-Type"] = "application/json"
+    try:
+        for _ in range(50):
+            connection.request("POST", target, body=submission_body, headers=headers)
+            response = connection.getresponse()
+            response.read()
+            assert response.status == 401
+
+        security_events = [
+            event
+            for event in server.store.list_audit_events(limit=200)
+            if event.event_type
+            in {
+                "machine_authentication_failed",
+                "machine_authentication_failure_summary",
+            }
+        ]
+        assert len(security_events) == 4
+        first = next(
+            event
+            for event in security_events
+            if event.event_type == "machine_authentication_failed"
+        )
+        assert first.payload["known_sender_id"] == client.sender_id
+        summaries = [
+            event
+            for event in security_events
+            if event.event_type == "machine_authentication_failure_summary"
+        ]
+        assert sorted(event.payload["attempt_count"] for event in summaries) == [
+            10,
+            20,
+            40,
+        ]
+        assert all(event.payload["final"] is False for event in summaries)
+        serialized = json.dumps(
+            [event.model_dump(mode="json") for event in security_events]
+        )
+        assert EXAMPLE_SECRET.decode() not in serialized
+        assert headers["X-Exchange-Signature"] not in serialized
+        assert headers["X-Exchange-Nonce"] not in serialized
+        # Fifty unauthenticated requests take only marker/trigger fast paths;
+        # none may rescan the historical immutable tables.
+        assert full_scan_count == 0
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    # Graceful shutdown adds one exact final summary, still a constant number
+    # of immutable events for all fifty rejected requests.
+    with RegulatoryV2Store(database, now=lambda: FIXED_NOW) as reopened:
+        security_events = [
+            event
+            for event in reopened.list_audit_events(limit=200)
+            if event.event_type
+            in {
+                "machine_authentication_failed",
+                "machine_authentication_failure_summary",
+            }
+        ]
+        assert len(security_events) == 5
+        final_summary = next(
+            event
+            for event in security_events
+            if event.event_type == "machine_authentication_failure_summary"
+            and event.payload["final"] is True
+        )
+        assert final_summary.payload["attempt_count"] == 50
+        assert final_summary.payload["suppressed_count"] == 49
+        assert reopened.verify_integrity() is True
+
+
+def test_valid_transport_with_invalid_application_signature_does_not_claim_nonce(
+    tmp_path: Path,
+) -> None:
+    submission_body = (
+        CONTRACTS / "examples" / "five-quantity-submission-v2.json"
+    ).read_bytes()
+    submission = json.loads(submission_body)
+    submission["signature_envelope"]["key_id"] = PRODUCTION_MESSAGE_KEY_ID
+    submission["payload"]["mine"]["mine_name"] = "沁源一号煤矿"
+    submission_body = json.dumps(
+        submission, ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    client = _minimal_exchange_client()
+    auth_database = tmp_path / "split-key-auth.db"
+    _seed_ready_production_admin(auth_database)
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "split-key.db",
+        auth_database_path=auth_database,
+        auth_required=True,
+        secure_cookie=True,
+        clients={client.sender_id: client},
+        production_mode=True,
+        clock=lambda: FIXED_NOW,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    target = "/v2/five-quantity-submissions"
+    headers = sign_transport_headers(
+        client,
+        method="POST",
+        request_target=target,
+        body=submission_body,
+        contract_version="five-quantity-submission-v2",
+        timestamp=FIXED_NOW,
+        nonce="dHJhbnNwb3J0LW9ubHktbm9uY2U",
+    )
+    headers["Content-Type"] = "application/json"
+    try:
+        connection.request("POST", target, body=submission_body, headers=headers)
+        response = connection.getresponse()
+        response.read()
+        assert response.status == 401
+        assert (
+            server.store._connection.execute(  # noqa: SLF001
+                "SELECT COUNT(*) FROM v2_transport_nonces"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_production_ready_and_machine_intake_fail_closed_after_runtime_tamper(
+    tmp_path: Path,
+) -> None:
+    submission_body = (
+        CONTRACTS / "examples" / "five-quantity-submission-v2.json"
+    ).read_bytes()
+    client = _minimal_exchange_client()
+    auth_database = tmp_path / "runtime-integrity-auth.db"
+    _seed_ready_production_admin(auth_database)
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "runtime-integrity.db",
+        auth_database_path=auth_database,
+        auth_required=True,
+        secure_cookie=True,
+        clients={client.sender_id: client},
+        production_mode=True,
+        clock=lambda: FIXED_NOW,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        connection.request("GET", "/readyz")
+        healthy = connection.getresponse()
+        healthy_payload = json.loads(healthy.read())
+        assert healthy.status == 200
+        assert healthy_payload["integrity"] == "valid"
+        assert healthy_payload["schema_version"] == 1
+
+        login_body = json.dumps(
+            {"username": "ready-admin", "password": "Ready-Admin-Password-2026!"}
+        )
+        connection.request(
+            "POST",
+            "/v2/auth/login",
+            body=login_body,
+            headers={"Content-Type": "application/json"},
+        )
+        login = connection.getresponse()
+        login.read()
+        assert login.status == 200
+        cookie = login.getheader("Set-Cookie").split(";", 1)[0]
+
+        server.store._connection.execute(  # noqa: SLF001 - simulated tampering
+            "DROP TRIGGER v2_audit_events_no_update"
+        )
+        server.store._connection.execute(  # noqa: SLF001 - simulated tampering
+            "UPDATE v2_audit_events SET event_hash = ? WHERE sequence = 1",
+            ("f" * 64,),
+        )
+
+        connection.request(
+            "GET", "/v2/regulatory/overview", headers={"Cookie": cookie}
+        )
+        refused_overview = connection.getresponse()
+        overview_problem = json.loads(refused_overview.read())
+        assert refused_overview.status == 503
+        assert overview_problem["code"] == "AUDIT_INTEGRITY_FAILED"
+
+        connection.request("GET", "/readyz")
+        not_ready = connection.getresponse()
+        readiness_problem = json.loads(not_ready.read())
+        assert not_ready.status == 503
+        assert readiness_problem["code"] == "AUDIT_INTEGRITY_FAILED"
+
+        before_nonce_count = server.store._connection.execute(  # noqa: SLF001
+            "SELECT COUNT(*) FROM v2_transport_nonces"
+        ).fetchone()[0]
+        target = "/v2/five-quantity-submissions"
+        headers = sign_transport_headers(
+            client,
+            method="POST",
+            request_target=target,
+            body=submission_body,
+            contract_version="five-quantity-submission-v2",
+            timestamp=FIXED_NOW,
+            nonce="cnVudGltZS10YW1wZXItbm9uY2U",
+        )
+        headers["Content-Type"] = "application/json"
+        connection.request("POST", target, body=submission_body, headers=headers)
+        refused = connection.getresponse()
+        refused_problem = json.loads(refused.read())
+        assert refused.status == 503
+        assert refused_problem["code"] == "AUDIT_INTEGRITY_FAILED"
+        assert (
+            server.store._connection.execute(  # noqa: SLF001
+                "SELECT COUNT(*) FROM v2_transport_nonces"
+            ).fetchone()[0]
+            == before_nonce_count
+        )
+        assert server.store.list_submissions() == []
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_production_regulatory_reads_and_export_use_checkpoint_fast_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_database = tmp_path / "checkpoint-read-auth.db"
+    _seed_ready_production_admin(auth_database)
+    client = _minimal_exchange_client()
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "checkpoint-read.db",
+        auth_database_path=auth_database,
+        auth_required=True,
+        secure_cookie=True,
+        clients={client.sender_id: client},
+        production_mode=True,
+        clock=lambda: FIXED_NOW,
+    )
+    full_scan_count = 0
+    original = server.store._run_full_integrity_check_locked  # noqa: SLF001
+
+    def counted_full_scan() -> bool:
+        nonlocal full_scan_count
+        full_scan_count += 1
+        return original()
+
+    monkeypatch.setattr(
+        server.store,
+        "_run_full_integrity_check_locked",
+        counted_full_scan,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        login_body = json.dumps(
+            {"username": "ready-admin", "password": "Ready-Admin-Password-2026!"}
+        )
+        connection.request(
+            "POST",
+            "/v2/auth/login",
+            body=login_body,
+            headers={"Content-Type": "application/json"},
+        )
+        login = connection.getresponse()
+        login.read()
+        assert login.status == 200
+        cookie = login.getheader("Set-Cookie").split(";", 1)[0]
+        for path in (
+            "/v2/regulatory/overview",
+            "/v2/regulatory/mines",
+            "/v2/regulatory/findings",
+            "/v2/regulatory/exchanges",
+            "/v2/regulatory/exchanges/export.csv?view=technical&"
+            "from=2026-07-01T00:00:00Z&to=2026-08-02T00:00:00Z",
+        ):
+            connection.request("GET", path, headers={"Cookie": cookie})
+            response = connection.getresponse()
+            response.read()
+            assert response.status == 200, path
+        assert full_scan_count == 0
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_machine_get_rechecks_checkpoint_inside_controlled_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "machine-read-race.db"
+    auth_database = tmp_path / "machine-read-race-auth.db"
+    _seed_ready_production_admin(auth_database)
+    client = _minimal_exchange_client()
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=database,
+        auth_database_path=auth_database,
+        auth_required=True,
+        secure_cookie=True,
+        clients={client.sender_id: client},
+        production_mode=True,
+        clock=lambda: FIXED_NOW,
+    )
+    original_gate = server.require_machine_write_integrity
+    injected = False
+
+    def commit_after_transport_gate() -> None:
+        nonlocal injected
+        original_gate()
+        if not injected:
+            injected = True
+            with sqlite3.connect(database) as external:
+                external.execute(
+                    """
+                    INSERT INTO v2_agent_mine_bindings(agent_id, mine_id, created_at)
+                    VALUES ('racing-agent', 'racing-mine', ?)
+                    """,
+                    (FIXED_NOW.isoformat(),),
+                )
+
+    monkeypatch.setattr(server, "require_machine_write_integrity", commit_after_transport_gate)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    target = "/v2/analysis-reports/next"
+    headers = sign_transport_headers(
+        client,
+        method="GET",
+        request_target=target,
+        body=b"",
+        contract_version="five-quantity-exchange-v2",
+        timestamp=FIXED_NOW,
+        nonce="bWFjaGluZS1yZWFkLXJhY2Utbm9uY2U",
+    )
+    try:
+        connection.request("GET", target, headers=headers)
+        response = connection.getresponse()
+        problem = json.loads(response.read())
+        assert response.status == 503
+        assert problem["code"] == "AUDIT_INTEGRITY_FAILED"
+        assert (
+            server.store._connection.execute(  # noqa: SLF001
+                "SELECT COUNT(*) FROM v2_transport_nonces"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
 def test_server_close_drains_admitted_requests_before_closing_sqlite(
     tmp_path: Path,
 ) -> None:
@@ -140,6 +852,50 @@ def test_server_close_drains_admitted_requests_before_closing_sqlite(
     assert closed.wait(2) is True
     thread.join(timeout=2)
     assert not thread.is_alive()
+
+
+def test_partial_request_body_cannot_block_bounded_shutdown(tmp_path: Path) -> None:
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "slow-body.db",
+        auth_database_path=tmp_path / "slow-body-auth.db",
+        auth_required=False,
+        clients={},
+        request_io_timeout_seconds=30,
+        drain_timeout_seconds=0.1,
+    )
+    serving = Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    client = socket.create_connection(("127.0.0.1", server.server_port), timeout=2)
+    client.sendall(
+        b"POST /v2/auth/login HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: 100\r\n\r\n{"
+    )
+    for _ in range(100):
+        if server.active_requests == 1:
+            break
+        Event().wait(0.01)
+    assert server.active_requests == 1
+    server.shutdown()
+    serving.join(timeout=2)
+    closed = Event()
+
+    def close_server() -> None:
+        server.server_close()
+        closed.set()
+
+    closer = Thread(target=close_server, daemon=True)
+    closer.start()
+    try:
+        assert closed.wait(3)
+        assert server.active_requests == 0
+        assert server._resources_closed is True  # noqa: SLF001
+    finally:
+        client.close()
+        closer.join(timeout=3)
 
 
 @pytest.mark.parametrize("token", ["short", "A" * 64, "g" * 64])
@@ -211,7 +967,9 @@ def test_government_finding_summary_groups_repeated_daily_machine_prose() -> Non
     )
 
 
-def test_government_business_text_translates_complete_algorithm_phrases_naturally() -> None:
+def test_government_business_text_translates_complete_algorithm_phrases_naturally() -> (
+    None
+):
     rendered = _humanize_business_text(
         "正向 CUSUM 累积偏移超过持续漂移阈值；"
         "EWMA 水平超过控制限；"
@@ -286,9 +1044,7 @@ def _assert_problem(document: dict[str, Any]) -> None:
     openapi = json.loads(
         (CONTRACTS / "openapi" / "five-quantity-exchange-v2.openapi.json").read_text()
     )
-    Draft202012Validator(openapi["components"]["schemas"]["Problem"]).validate(
-        document
-    )
+    Draft202012Validator(openapi["components"]["schemas"]["Problem"]).validate(document)
 
 
 def _assert_application_signature(document: dict[str, Any]) -> None:
@@ -323,9 +1079,12 @@ def _signed_enterprise_message(document: dict[str, Any]) -> bytes:
 def test_v2_report_preserves_specific_temporal_evidence_method(
     code: str, expected: str
 ) -> None:
-    assert RegulatoryV2RequestHandler._evidence_method(
-        code, f"past_only_temporal_detector:{code}"
-    ) == expected
+    assert (
+        RegulatoryV2RequestHandler._evidence_method(
+            code, f"past_only_temporal_detector:{code}"
+        )
+        == expected
+    )
 
 
 def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -> None:
@@ -388,9 +1147,7 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
     try:
         future_envelope = deepcopy(submission)
         future_envelope["created_at"] = "2030-01-01T00:00:00Z"
-        future_envelope["signature_envelope"]["signed_at"] = (
-            "2030-01-01T00:00:00Z"
-        )
+        future_envelope["signature_envelope"]["signed_at"] = "2030-01-01T00:00:00Z"
         future_status, future_problem = exchange_request(
             "POST",
             "/v2/five-quantity-submissions",
@@ -444,9 +1201,7 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
         broken_revision["signature_envelope"]["signed_at"] = broken_revision[
             "created_at"
         ]
-        broken_revision["signature_envelope"]["nonce"] = (
-            "BQUFBQUFBQUFBQUFBQUFBQ"
-        )
+        broken_revision["signature_envelope"]["nonce"] = "BQUFBQUFBQUFBQUFBQUFBQ"
         status, lineage_problem = exchange_request(
             "POST",
             "/v2/five-quantity-submissions",
@@ -496,9 +1251,7 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
         conflicting_ack["signature_envelope"]["signed_at"] = conflicting_ack[
             "created_at"
         ]
-        conflicting_ack["signature_envelope"]["nonce"] = (
-            "AwMDAwMDAwMDAwMDAwMDAw"
-        )
+        conflicting_ack["signature_envelope"]["nonce"] = "AwMDAwMDAwMDAwMDAwMDAw"
         status, problem = exchange_request(
             "POST",
             f"/v2/analysis-reports/{report['payload']['report_id']}/delivery-ack",
@@ -573,12 +1326,10 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
         invalid_correction["payload"]["finding_responses"][0][
             "corrected_submission_message_id"
         ] = submission["message_id"]
-        invalid_correction["payload"]["finding_responses"][0][
-            "response_kind"
-        ] = "correction_submitted"
-        invalid_correction["signature_envelope"]["nonce"] = (
-            "BAQEBAQEBAQEBAQEBAQEBA"
+        invalid_correction["payload"]["finding_responses"][0]["response_kind"] = (
+            "correction_submitted"
         )
+        invalid_correction["signature_envelope"]["nonce"] = "BAQEBAQEBAQEBAQEBAQEBA"
         status, correction_problem = exchange_request(
             "POST",
             f"/v2/analysis-reports/{report['payload']['report_id']}/responses",

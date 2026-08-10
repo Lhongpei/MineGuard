@@ -11,6 +11,8 @@ $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 $OutputEncoding = $utf8NoBom
 try { [Console]::OutputEncoding = $utf8NoBom } catch { }
 $script:ServiceRemovalScriptPath = [IO.Path]::GetFullPath($PSCommandPath)
+$ServiceAccount = 'NT SERVICE\MineGuardPlatform'
+$ServiceSid = 'S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346'
 
 if ($env:OS -ne 'Windows_NT') { throw '服务移除脚本只能在 Windows 上运行。' }
 if ($PSVersionTable.PSVersion.Major -lt 5 -or
@@ -199,6 +201,49 @@ function Get-RegisteredService {
     return $services[0]
 }
 
+function Assert-ServiceSidTypeUnrestricted {
+    $serviceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\MineGuardPlatform'
+    try {
+        $properties = Get-ItemProperty -LiteralPath $serviceKey -ErrorAction Stop
+    } catch {
+        throw '无法读取 MineGuardPlatform 的 ServiceSidType；拒绝移除。'
+    }
+    $property = $properties.PSObject.Properties['ServiceSidType']
+    if ($null -eq $property -or [int]$property.Value -ne 1) {
+        throw '同名服务未启用 unrestricted 专属服务 SID；拒绝移除。'
+    }
+    $sidOutput = (& "$env:SystemRoot\System32\sc.exe" `
+        'showsid' 'MineGuardPlatform' 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "sc.exe showsid 无法计算 MineGuardPlatform 服务 SID，退出码 $LASTEXITCODE。"
+    }
+    $sidMatches = @([regex]::Matches(
+        $sidOutput,
+        '(?<![0-9])S-1-5-80(?:-[0-9]+){5}(?![0-9])',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    ) | ForEach-Object { $_.Value.ToUpperInvariant() } | Select-Object -Unique)
+    if ($sidMatches.Count -ne 1 -or
+        -not $sidMatches[0].Equals(
+            $ServiceSid, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'Windows 计算的 MineGuardPlatform 服务 SID 与固定 ACL SID 不一致；拒绝移除。'
+    }
+    try {
+        $account = New-Object -TypeName Security.Principal.NTAccount `
+            -ArgumentList $ServiceAccount
+        $translated = $account.Translate(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+    } catch {
+        throw "无法把专属虚拟账号 $ServiceAccount 解析为 Windows SID；拒绝移除。"
+    }
+    if (-not $translated.Equals(
+            $ServiceSid, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw '专属虚拟账号解析所得 SID 与固定 ACL SID 不一致；拒绝移除。'
+    }
+}
+
 function Get-ServiceExecutablePath {
     param([object] $Service)
     $pathName = ([string]$Service.PathName).Trim()
@@ -215,9 +260,10 @@ function Assert-ServiceTargetsWrapper {
         throw '同名服务未精确指向批准的无参数 wrapper；拒绝同名服务劫持。'
     }
     if (-not ([string]$Service.StartName).Equals(
-            'NT AUTHORITY\LocalService', [StringComparison]::OrdinalIgnoreCase)) {
-        throw '同名服务账号不是批准的 NT AUTHORITY\LocalService；拒绝移除。'
+            $ServiceAccount, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "同名服务账号不是批准的专属虚拟账号 $ServiceAccount；拒绝移除。"
     }
+    Assert-ServiceSidTypeUnrestricted
 }
 
 function Wait-ServiceRecordAbsent {
@@ -240,12 +286,13 @@ function Assert-WrapperIntegrity {
             [string]$integrity.wrapperSha256, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'WinSW wrapper 与受保护的完整性记录不一致。'
     }
-    if ($null -ne $integrity.PSObject.Properties['product'] -and
-        ([string]$integrity.product -ne 'MineGuard Platform WinSW Service' -or
-            [string]$integrity.serviceId -ne 'MineGuardPlatform' -or
-            [string]$integrity.serviceAccount -ne 'NT AUTHORITY\LocalService' -or
-            -not ([string]$integrity.canonicalWrapperPath).Equals(
-                $Wrapper, [StringComparison]::OrdinalIgnoreCase))) {
+    if ([string]$integrity.product -ne 'MineGuard Platform WinSW Service' -or
+        [string]$integrity.serviceId -ne 'MineGuardPlatform' -or
+        [string]$integrity.serviceAccount -ne $ServiceAccount -or
+        [string]$integrity.serviceSid -ne $ServiceSid -or
+        [string]$integrity.serviceSidType -ne 'unrestricted' -or
+        -not ([string]$integrity.canonicalWrapperPath).Equals(
+            $Wrapper, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'WinSW 完整性记录的产品或服务身份不一致。'
     }
     $configHash = [string]$integrity.wrapperConfigSha256

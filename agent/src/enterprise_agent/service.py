@@ -502,6 +502,8 @@ class EnterpriseAgentService:
         skill_registry: SkillRegistry | None = None,
         agent_v2_config: AgentV2Config | None = None,
         five_quantity_runtime: FiveQuantityRuntime | None = None,
+        four_eyes_required: bool = False,
+        production_mode: bool = False,
     ):
         self.repository = repository
         self.platform_client = platform_client
@@ -515,12 +517,107 @@ class EnterpriseAgentService:
         # for one persisted idempotency record. SQLite remains the durable
         # cross-restart authority; this lock closes the in-process window.
         self._submission_lock = threading.RLock()
+        self._integrity_lock = threading.RLock()
+        self._production_integrity_snapshot: dict[str, Any] | None = None
         self._harness_lock = threading.RLock()
         self._harness: HarnessRuntime | None = None
         self._chat: CoalChatRuntime | None = None
         self._agent_v2: AgentFlowRuntime | None = None
         self._agent_jobs: AgentJobScheduler | None = None
         self._five_quantity = five_quantity_runtime
+        self.four_eyes_required = bool(four_eyes_required)
+        self.production_mode = bool(production_mode)
+
+    def _full_integrity_status(self) -> dict[str, Any]:
+        """Run the authoritative, linear-history startup verification."""
+
+        generic = self.repository.verify_all_draft_audits()
+        five_quantity = (
+            self._five_quantity.store.verify_audit()
+            if self._five_quantity is not None
+            else {"valid": True, "event_count": 0, "not_configured": True}
+        )
+        return {
+            "valid": bool(generic["valid"] and five_quantity["valid"]),
+            "generic_drafts": generic,
+            "five_quantity_v2": five_quantity,
+        }
+
+    def _runtime_integrity_boundary(self) -> dict[str, Any]:
+        additional_check = (
+            self._five_quantity.store.runtime_integrity_boundary_intact
+            if self._five_quantity is not None
+            else None
+        )
+        return self.repository.verify_runtime_integrity_boundary(
+            additional_check=additional_check
+        )
+
+    def integrity_status(self) -> dict[str, Any]:
+        """Return readiness without repeatedly walking production history.
+
+        Non-production diagnostics retain the live full scan.  A production
+        process must first pass :meth:`assert_production_integrity`; subsequent
+        health probes compare constant-size runtime guards and return counts
+        from that trusted full-scan snapshot.
+        """
+
+        if not self.production_mode:
+            return self._full_integrity_status()
+        with self._integrity_lock:
+            snapshot = self._production_integrity_snapshot
+            if snapshot is None:
+                raise ConflictError(
+                    "正式模式尚未完成启动全链核验；就绪状态拒绝放行"
+                )
+            runtime_boundary = self._runtime_integrity_boundary()
+            status = deep_copy_json(snapshot["status"])
+            completed_at = str(snapshot["completed_at"])
+            status["valid"] = True
+            status["integrity_mode"] = "runtime_constant_boundary"
+            status["runtime_boundary"] = runtime_boundary
+            status["full_scan_snapshot"] = {
+                "kind": "trusted_startup_full_scan",
+                "completed_at": completed_at,
+                "counts_are_snapshot": True,
+            }
+            for key in ("generic_drafts", "five_quantity_v2"):
+                component = status.get(key)
+                if isinstance(component, dict):
+                    component["count_source"] = "trusted_full_scan_snapshot"
+                    component["full_scan_completed_at"] = completed_at
+            return status
+
+    def assert_production_integrity(self) -> None:
+        if not self.production_mode:
+            return
+        with self._integrity_lock:
+            # Never retain an older successful result across an explicit
+            # recheck. A failed marker is latched by Repository and cannot be
+            # healed by rerunning this scan in the current process.
+            self._production_integrity_snapshot = None
+            status = self._full_integrity_status()
+            if not status["valid"]:
+                raise ValueError(
+                    "正式模式审计完整性检查失败；服务不会启动、确认、排队或发送，"
+                    "请由管理员核验数据库、审计锚点和保护触发器"
+                )
+            # Bind the cached result to the already armed marker latch and the
+            # fixed Generic/FQ trigger + anchor boundary before publication.
+            self._runtime_integrity_boundary()
+            self._production_integrity_snapshot = {
+                "completed_at": utc_text(),
+                "status": deep_copy_json(status),
+            }
+
+    def _enforce_four_eyes(self, draft_id: str, *, actor: str) -> str:
+        last_actor = self.repository.last_content_actor(draft_id)
+        if self.four_eyes_required and actor == last_actor:
+            raise ValidationBlockedError(
+                "四眼复核已启用：当前账号是本修订版的最后创建/编辑人，"
+                "请退出并由另一名具备复核权限的具名账号确认或提交"
+            )
+        return last_actor
 
     def enable_harness(self) -> HarnessRuntime:
         """Start the long-lived harness only for the HTTP serve process."""
@@ -624,7 +721,43 @@ class EnterpriseAgentService:
         return self.repository.draft_summary_page(limit=limit, offset=offset)
 
     def get_draft(self, draft_id: str) -> dict[str, Any]:
-        return self.repository.get_draft(draft_id)
+        draft = self.repository.get_draft(draft_id)
+        if self.four_eyes_required:
+            last_actor = self.repository.last_content_actor(draft_id)
+            confirmation = draft["_meta"].get("confirmation")
+            reviewer = (
+                confirmation.get("confirmer_id")
+                if isinstance(confirmation, dict)
+                else None
+            )
+            independently_confirmed = bool(
+                draft["_meta"].get("confirmed")
+                and isinstance(reviewer, str)
+                and reviewer
+                and reviewer != last_actor
+            )
+            draft["_meta"]["four_eyes"] = {
+                "required": True,
+                "last_content_actor": last_actor,
+                "state": (
+                    "independent_review_completed"
+                    if independently_confirmed
+                    else "awaiting_independent_reviewer"
+                ),
+                "reviewer_actor": reviewer,
+                "message": (
+                    "已由不同具名账号完成四眼复核"
+                    if independently_confirmed
+                    else "须由不同于最后创建/编辑人的具名账号复核并报送"
+                ),
+            }
+        else:
+            draft["_meta"]["four_eyes"] = {
+                "required": False,
+                "state": "not_required",
+                "message": "当前为演示/调试单人流程，不得据此视为正式报送配置",
+            }
+        return draft
 
     def patch_draft(
         self,
@@ -1150,6 +1283,8 @@ class EnterpriseAgentService:
         confirmation_method: str = "authenticated_click",
     ) -> dict[str, Any]:
         principal = _actor(actor)
+        if principal == "demo":
+            raise ConfirmationRequiredError("演示账号只能建稿和查看，不能确认或报送")
         if accepted is not True:
             raise ConfirmationRequiredError("必须由填报人员主动勾选确认")
         if (
@@ -1176,6 +1311,7 @@ class EnterpriseAgentService:
             raise ConflictError(
                 f"草稿已更新，当前修订号为 {stored['_meta']['revision']}"
             )
+        self._enforce_four_eyes(draft_id, actor=principal)
         document = _document(stored)
         validation = validate_draft(document)
         if not validation["valid"]:
@@ -1482,10 +1618,13 @@ class EnterpriseAgentService:
         if self.platform_client is None:
             raise PlatformError("尚未配置监管平台地址")
         submitter = _actor(actor)
+        if submitter == "demo":
+            raise ConfirmationRequiredError("演示账号只能建稿和查看，不能确认或报送")
         stored = self.repository.get_draft(draft_id)
         meta = stored["_meta"]
         if not meta["confirmed"]:
             raise ConfirmationRequiredError("确认前禁止提交")
+        self._enforce_four_eyes(draft_id, actor=submitter)
         key = (
             idempotency_key.strip()
             if isinstance(idempotency_key, str) and idempotency_key.strip()

@@ -16,6 +16,21 @@ from pathlib import Path
 
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _MAX_ENVIRONMENT_FILE_BYTES = 1024 * 1024
+_AUTHORITATIVE_CONFIGURATION_PREFIXES = (
+    "ENTERPRISE_",
+    "PLATFORM_",
+    "REGULATORY_",
+    "AGENT_V2_",
+    "DEEPSEEK_",
+    "COAL_NEWS_",
+)
+_AUTHORITATIVE_EXACT_NAMES = frozenset({"ENTERPRISE_AGENT_ENV_FILE"})
+_SERVICE_POLICY_ENVIRONMENT = {
+    "MINEGUARD_SERVICE_PRODUCTION_MODE": "ENTERPRISE_AGENT_PRODUCTION_MODE",
+    "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED": (
+        "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED"
+    ),
+}
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -133,5 +148,65 @@ def load_environment_file(
     for name, value in parse_environment_file(path).items():
         if override or name not in target:
             target[name] = value
+            loaded.append(name)
+    return tuple(loaded)
+
+
+def load_authoritative_environment_file(
+    path: str | Path,
+    *,
+    environment: MutableMapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Load one instance file as the complete Agent configuration authority.
+
+    Windows services use this mode so machine- or administrator-level
+    configuration cannot silently replace another mine's identity, database,
+    endpoint or secrets.  The only values preserved outside the file are two
+    non-secret WinSW policy controls; they are parsed before clearing and may
+    contain only the literal strings ``true`` or ``false``.
+
+    Ordinary cross-platform CLI use intentionally keeps
+    :func:`load_environment_file`'s inherited-environment precedence.
+    """
+
+    target = os.environ if environment is None else environment
+    # Parse before mutating the process so an invalid file cannot leave a
+    # long-lived embedding process with a partially cleared configuration.
+    values = parse_environment_file(path)
+    reserved_names = sorted(
+        name for name in values if name.upper().startswith("MINEGUARD_")
+    )
+    if reserved_names:
+        raise ValueError(
+            "权威环境文件不能定义保留的 MINEGUARD_ 运行控制变量："
+            + ", ".join(reserved_names)
+        )
+    service_policy: dict[str, str] = {}
+    for source_name, target_name in _SERVICE_POLICY_ENVIRONMENT.items():
+        raw_value = target.get(source_name)
+        if raw_value is None:
+            continue
+        if raw_value not in {"true", "false"}:
+            raise ValueError(f"{source_name} 只能严格设置为 true 或 false")
+        service_policy[target_name] = raw_value
+
+    for name in tuple(target):
+        normalized = name.upper()
+        if (
+            normalized in _AUTHORITATIVE_EXACT_NAMES
+            or normalized in _SERVICE_POLICY_ENVIRONMENT
+            or normalized.startswith(_AUTHORITATIVE_CONFIGURATION_PREFIXES)
+        ):
+            del target[name]
+
+    loaded: list[str] = []
+    for name, value in values.items():
+        # The configuration namespace was cleared above; assignment remains
+        # explicit to document and test the override=True contract.
+        target[name] = value
+        loaded.append(name)
+    for name, value in service_policy.items():
+        target[name] = value
+        if name not in loaded:
             loaded.append(name)
     return tuple(loaded)

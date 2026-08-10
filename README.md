@@ -195,9 +195,13 @@ PYTHONPATH=agent/src python3 -m pytest -q agent/tests
 
 进一步说明见 [V2 双系统目标架构](docs/V2双系统目标架构.md)、
 [V2 部署与运行](docs/V2部署与运行.md)、
+[正式生产部署与签字说明](docs/正式生产部署与签字说明.md)、
 [自动采集与自动填报部署指南](docs/自动采集与自动填报部署指南.md)、
 [Windows 二进制发行与安装](docs/Windows二进制发行与安装.md)、
 [Windows 原生部署与运维](docs/Windows原生部署与运维.md)、[V2 验收清单](docs/V2验收清单.md)、
 [政府平台说明](platform/README.md)和[企业智能体说明](agent/README.md)。
+
+仅停用 demo 账号不等于正式版。实地正式上线还必须使用可信签名发行介质，并完成
+HTTPS、逐矿身份与双 HMAC、企业四眼复核、备份恢复和现场验收。
 
 旧 V1 契约仅保留用于历史记录审计重放，不属于新部署的默认启动拓扑。

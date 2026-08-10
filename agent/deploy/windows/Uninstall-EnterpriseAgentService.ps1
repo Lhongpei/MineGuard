@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$InstanceName,
     [string]$StateRoot = (Join-Path $env:ProgramData "MineGuard\EnterpriseAgent\instances"),
+    [switch]$AllowLegacyLocalServiceRemoval,
     [switch]$RemoveWrapperFiles
 )
 
@@ -243,6 +244,77 @@ function Get-RegisteredService {
     return $Services[0]
 }
 
+function Get-DerivedServiceIdentity {
+    param([string]$ServiceId)
+    $ScPath = Join-Path $env:SystemRoot "System32\sc.exe"
+    if (-not (Test-Path -LiteralPath $ScPath -PathType Leaf)) {
+        throw "Windows Service Controller is missing: $ScPath"
+    }
+    $Output = @(& $ScPath showsid $ServiceId 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "sc.exe showsid failed for $ServiceId" }
+    $Matches = [regex]::Matches(
+        ($Output -join "`n"),
+        '(?<![0-9])S-1-5-80-(?:[0-9]+-){4}[0-9]+(?![0-9])',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if ($Matches.Count -ne 1) {
+        throw "Windows did not return exactly one service SID for $ServiceId."
+    }
+    return [pscustomobject]@{
+        AccountName = "NT SERVICE\$ServiceId"
+        Sid = $Matches[0].Value
+    }
+}
+
+function Assert-ServiceIdentityForRemoval {
+    param(
+        [object]$Service,
+        [string]$ServiceId,
+        [switch]$AllowLegacy
+    )
+    $Identity = Get-DerivedServiceIdentity -ServiceId $ServiceId
+    if ([string]::IsNullOrWhiteSpace([string]$Service.StartName)) {
+        throw "Windows service start identity is missing: $ServiceId"
+    }
+    if (([string]$Service.StartName).Equals(
+            $Identity.AccountName, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        $Registry = Get-ItemProperty -LiteralPath (
+            "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceId"
+        ) -Name "ServiceSidType" -ErrorAction Stop
+        if ([int]$Registry.ServiceSidType -ne 1) {
+            throw "Dedicated service $ServiceId does not have unrestricted SID type; inspect it manually before removal."
+        }
+        $Translated = (New-Object Security.Principal.NTAccount(
+            $Identity.AccountName
+        )).Translate([Security.Principal.SecurityIdentifier]).Value
+        if (-not $Translated.Equals(
+                $Identity.Sid, [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "Dedicated service identity does not match its derived SID."
+        }
+        return
+    }
+    if (-not $AllowLegacy) {
+        throw (
+            "Service $ServiceId uses a legacy/shared account. Re-run only under " +
+            "the approved migration procedure with -AllowLegacyLocalServiceRemoval."
+        )
+    }
+    try {
+        $LegacySid = (New-Object Security.Principal.NTAccount(
+            [string]$Service.StartName
+        )).Translate([Security.Principal.SecurityIdentifier]).Value
+    }
+    catch {
+        throw "Legacy migration removal refuses an unresolvable service account: $($Service.StartName)"
+    }
+    if ($LegacySid -ne "S-1-5-19") {
+        throw "Legacy migration removal permits only the exact LocalService SID S-1-5-19."
+    }
+    Write-Warning "LEGACY MIGRATION: removing the exact path-bound LocalService registration; reinstall before use."
+}
+
 function Get-ServiceExecutablePath {
     param([object]$Service, [string]$ServiceId)
     $PathName = ([string]$Service.PathName).Trim()
@@ -294,6 +366,8 @@ Assert-PathBelowRoot -Name "WinSW instance XML" -PathValue $WrapperXml -Root $Se
 $Service = Get-RegisteredService -ServiceId $ServiceId
 if ($null -ne $Service) {
     Assert-ServiceTargetsWrapper -Service $Service -ServiceId $ServiceId -ExpectedWrapper $WrapperExecutable
+    Assert-ServiceIdentityForRemoval -Service $Service -ServiceId $ServiceId `
+        -AllowLegacy:$AllowLegacyLocalServiceRemoval
 }
 
 if ($PSCmdlet.ShouldProcess($ServiceId, "stop and uninstall the exact registered Windows service")) {
@@ -301,6 +375,8 @@ if ($PSCmdlet.ShouldProcess($ServiceId, "stop and uninstall the exact registered
     $Service = Get-RegisteredService -ServiceId $ServiceId
     if ($null -ne $Service) {
         Assert-ServiceTargetsWrapper -Service $Service -ServiceId $ServiceId -ExpectedWrapper $WrapperExecutable
+        Assert-ServiceIdentityForRemoval -Service $Service -ServiceId $ServiceId `
+            -AllowLegacy:$AllowLegacyLocalServiceRemoval
         if (-not ([string]$Service.State).Equals("Stopped", [StringComparison]::OrdinalIgnoreCase)) {
             Stop-Service -Name $ServiceId -Force -ErrorAction Stop
             $Deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -309,6 +385,8 @@ if ($PSCmdlet.ShouldProcess($ServiceId, "stop and uninstall the exact registered
                 $Service = Get-RegisteredService -ServiceId $ServiceId
                 if ($null -eq $Service) { break }
                 Assert-ServiceTargetsWrapper -Service $Service -ServiceId $ServiceId -ExpectedWrapper $WrapperExecutable
+                Assert-ServiceIdentityForRemoval -Service $Service -ServiceId $ServiceId `
+                    -AllowLegacy:$AllowLegacyLocalServiceRemoval
             } while (-not ([string]$Service.State).Equals("Stopped", [StringComparison]::OrdinalIgnoreCase) -and
                 [DateTime]::UtcNow -lt $Deadline)
             if ($null -ne $Service -and
@@ -319,7 +397,10 @@ if ($PSCmdlet.ShouldProcess($ServiceId, "stop and uninstall the exact registered
         $Service = Get-RegisteredService -ServiceId $ServiceId
         if ($null -ne $Service) {
             Assert-ServiceTargetsWrapper -Service $Service -ServiceId $ServiceId -ExpectedWrapper $WrapperExecutable
-            & sc.exe delete $ServiceId | Out-Host
+            Assert-ServiceIdentityForRemoval -Service $Service -ServiceId $ServiceId `
+                -AllowLegacy:$AllowLegacyLocalServiceRemoval
+            $ScPath = Join-Path $env:SystemRoot "System32\sc.exe"
+            & $ScPath delete $ServiceId | Out-Host
             if ($LASTEXITCODE -ne 0) {
                 throw "sc.exe delete failed with exit code $LASTEXITCODE for $ServiceId"
             }
@@ -337,6 +418,9 @@ if ($PSCmdlet.ShouldProcess($ServiceId, "stop and uninstall the exact registered
             if ($null -ne $LateService) {
                 Assert-ServiceTargetsWrapper -Service $LateService -ServiceId $ServiceId `
                     -ExpectedWrapper $WrapperExecutable
+                Assert-ServiceIdentityForRemoval -Service $LateService `
+                    -ServiceId $ServiceId `
+                    -AllowLegacy:$AllowLegacyLocalServiceRemoval
                 throw "Wrapper files cannot be removed after a service registration reappeared."
             }
             if (Test-Path -LiteralPath $ExactPath) {

@@ -7,6 +7,8 @@ param(
     [string]$PythonCommand = "py",
     [string[]]$PythonArguments = @("-3.12"),
     [string]$Wheelhouse = "",
+    [string]$ApprovedSignerThumbprint = "",
+    [switch]$AllowUnsignedTestMedia,
     [switch]$AuditFailAfterRuntimeSwitch
 )
 
@@ -36,6 +38,22 @@ function Invoke-NativeChecked {
     if ($LASTEXITCODE -ne 0) {
         throw "Command failed with exit code ${LASTEXITCODE}: $FilePath"
     }
+}
+
+function Get-NormalizedApprovedSignerThumbprint {
+    param([string]$Value, [switch]$AllowEmpty)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        if ($AllowEmpty) { return "" }
+        throw "Formal binary installation requires -ApprovedSignerThumbprint from independently approved offline material."
+    }
+    if ($Value -notmatch '^[A-Fa-f0-9\s]+$') {
+        throw "ApprovedSignerThumbprint must contain exactly 40 hexadecimal SHA-1 characters (whitespace is ignored)."
+    }
+    $Normalized = ($Value -replace '\s', '').ToUpperInvariant()
+    if ($Normalized -notmatch '^[A-F0-9]{40}$') {
+        throw "ApprovedSignerThumbprint must contain exactly 40 hexadecimal SHA-1 characters."
+    }
+    return $Normalized
 }
 
 function Assert-EAOwnedPath {
@@ -516,7 +534,11 @@ function Initialize-EnterpriseAgentStateRoot {
 }
 
 function Test-BinaryReleaseManifest {
-    param([string]$ReleaseRoot)
+    param(
+        [string]$ReleaseRoot,
+        [string]$ApprovedSignerThumbprint,
+        [switch]$AllowUnsignedTestMedia
+    )
     $ManifestPath = Join-Path $ReleaseRoot "release-manifest.json"
     $ChecksumsPath = Join-Path $ReleaseRoot "SHA256SUMS.txt"
     $VersionPath = Join-Path $ReleaseRoot "VERSION.txt"
@@ -620,7 +642,9 @@ function Test-BinaryReleaseManifest {
     }
     $Executable = Join-Path $ReleaseRoot "runtime\MineGuardEnterpriseAgent.exe"
     Test-ReleaseSignatureContract -Manifest $Manifest -BuildMetadata $BuildMetadata `
-        -ExecutablePath $Executable
+        -ExecutablePath $Executable `
+        -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
+        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
     return [pscustomobject]@{
         Manifest = $Manifest
         BuildMetadata = $BuildMetadata
@@ -649,7 +673,13 @@ function Get-RequiredNullableStringProperty {
 }
 
 function Test-ReleaseSignatureContract {
-    param([object]$Manifest, [object]$BuildMetadata, [string]$ExecutablePath)
+    param(
+        [object]$Manifest,
+        [object]$BuildMetadata,
+        [string]$ExecutablePath,
+        [string]$ApprovedSignerThumbprint,
+        [switch]$AllowUnsignedTestMedia
+    )
     $ManifestSigned = Get-RequiredBooleanProperty -Object $Manifest `
         -Name "authenticode_signed" -Document "release-manifest.json"
     $MetadataSigned = Get-RequiredBooleanProperty -Object $BuildMetadata `
@@ -676,6 +706,12 @@ function Test-ReleaseSignatureContract {
     $MetadataThumbprint = ($MetadataThumbprint -replace '\s', '').ToUpperInvariant()
     $Signature = Get-AuthenticodeSignature -LiteralPath $ExecutablePath
     if ($ManifestSigned) {
+        if ($AllowUnsignedTestMedia) {
+            throw "-AllowUnsignedTestMedia is valid only for actually unsigned internal-test media."
+        }
+        if ($ApprovedSignerThumbprint -notmatch '^[A-F0-9]{40}$') {
+            throw "A signed release requires an independently approved signer thumbprint."
+        }
         if ($ManifestThumbprint -notmatch '^[A-F0-9]{40}$' -or
             $ManifestThumbprint -ne $MetadataThumbprint) {
             throw "Signed release certificate thumbprints are missing or inconsistent."
@@ -692,11 +728,19 @@ function Test-ReleaseSignatureContract {
             $null -eq $Signature.SignerCertificate -or
             $null -eq $Signature.TimeStamperCertificate -or
             ($Signature.SignerCertificate.Thumbprint -replace '\s', '').ToUpperInvariant() -ne
-                $ManifestThumbprint) {
+                $ManifestThumbprint -or
+            ($Signature.SignerCertificate.Thumbprint -replace '\s', '').ToUpperInvariant() -ne
+                $ApprovedSignerThumbprint) {
             throw "Authenticode status, signer thumbprint or timestamp does not match release metadata."
         }
     }
     else {
+        if (-not $AllowUnsignedTestMedia) {
+            throw "Unsigned Agent media is refused by default. Use -AllowUnsignedTestMedia only for an explicitly marked internal test installation."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint)) {
+            throw "Unsigned test media cannot claim an approved production signer thumbprint."
+        }
         if (-not [string]::IsNullOrWhiteSpace($ManifestThumbprint) -or
             -not [string]::IsNullOrWhiteSpace($MetadataThumbprint) -or
             -not [string]::IsNullOrWhiteSpace($ManifestTimestampUrl) -or
@@ -712,7 +756,12 @@ function Test-ReleaseSignatureContract {
 }
 
 function Test-InstalledBinaryRuntime {
-    param([string]$ApplicationRoot, [string]$RuntimeDirectory)
+    param(
+        [string]$ApplicationRoot,
+        [string]$RuntimeDirectory,
+        [string]$ApprovedSignerThumbprint,
+        [switch]$AllowUnsignedTestMedia
+    )
     $Executable = Join-Path $RuntimeDirectory "MineGuardEnterpriseAgent.exe"
     if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) { return $null }
 
@@ -820,7 +869,9 @@ function Test-InstalledBinaryRuntime {
         }
     }
     Test-ReleaseSignatureContract -Manifest $Manifest -BuildMetadata $BuildMetadata `
-        -ExecutablePath $Executable
+        -ExecutablePath $Executable `
+        -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
+        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
     $ReportedVersion = (& $Executable --version | Select-Object -Last 1).Trim()
     if ($LASTEXITCODE -ne 0 -or $ReportedVersion -ne "enterprise-agent $VersionText") {
         throw "Active compiled Agent --version does not match installed release metadata."
@@ -871,10 +922,19 @@ function Invoke-IcaclsChecked {
 function Set-EACanonicalProductTreeAcl {
     param(
         [string]$Path,
-        [ValidateSet("RX", "M")][string]$ServicePermission,
+        [switch]$RootTraverseOnly,
         [switch]$Recurse
     )
-    $ServiceGrant = "*S-1-5-19:(OI)(CI)$ServicePermission"
+    $ServiceGrant = if ($RootTraverseOnly) {
+        # S-1-5-80-0 is ALL SERVICES. It permits service-token traversal of the
+        # shared state root but deliberately does not inherit into instances.
+        "*S-1-5-80-0:RX"
+    }
+    else {
+        # Shared program files contain no tenant secrets and are executable by
+        # every dedicated virtual Agent service account.
+        "*S-1-5-80-0:(OI)(CI)RX"
+    }
     Invoke-IcaclsChecked -ArgumentList @($Path, "/reset")
     Invoke-IcaclsChecked -ArgumentList @(
         $Path, "/inheritance:r",
@@ -888,6 +948,107 @@ function Set-EACanonicalProductTreeAcl {
         Invoke-IcaclsChecked -ArgumentList @(
             (Join-Path $Path "*"), "/reset", "/T", "/C"
         )
+    }
+}
+
+function Get-EADerivedServiceIdentity {
+    param([string]$ServiceId)
+    if ($ServiceId -notmatch '^MineGuardEnterpriseAgent-[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$') {
+        throw "A registered Agent service has an invalid instance-derived name: $ServiceId"
+    }
+    $ScPath = Join-Path $env:SystemRoot "System32\sc.exe"
+    if (-not (Test-Path -LiteralPath $ScPath -PathType Leaf)) {
+        throw "Windows Service Controller is missing: $ScPath"
+    }
+    $Output = @(& $ScPath showsid $ServiceId 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "sc.exe showsid failed for $ServiceId"
+    }
+    $SidMatches = [regex]::Matches(
+        ($Output -join "`n"),
+        '(?<![0-9])S-1-5-80-(?:[0-9]+-){4}[0-9]+(?![0-9])',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if ($SidMatches.Count -ne 1) {
+        throw "Windows did not return exactly one service SID for $ServiceId."
+    }
+    return [pscustomobject]@{
+        AccountName = "NT SERVICE\$ServiceId"
+        Sid = $SidMatches[0].Value
+    }
+}
+
+function Assert-EARegisteredRuntimeServiceIdentity {
+    param([string]$ServiceId)
+    $Services = @(Get-CimInstance Win32_Service -Filter "Name='$ServiceId'" `
+        -ErrorAction Stop)
+    if ($Services.Count -ne 1) {
+        throw "The registered Agent service identity cannot be resolved uniquely: $ServiceId"
+    }
+    $Service = $Services[0]
+    $Identity = Get-EADerivedServiceIdentity -ServiceId $ServiceId
+    if (-not ([string]$Service.StartName).Equals(
+            $Identity.AccountName, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw (
+            "Registered service $ServiceId uses legacy/shared identity " +
+            "$($Service.StartName). Run Uninstall-EnterpriseAgentService.ps1 " +
+            "with the documented legacy migration switch, then reinstall it."
+        )
+    }
+    $RegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceId"
+    $Registry = Get-ItemProperty -LiteralPath $RegistryPath `
+        -Name "ServiceSidType" -ErrorAction Stop
+    if ([int]$Registry.ServiceSidType -ne 1) {
+        throw "Registered service $ServiceId does not have unrestricted service SID type. Reinstall it before runtime upgrade."
+    }
+    try {
+        $TranslatedSid = (New-Object Security.Principal.NTAccount(
+            $Identity.AccountName
+        )).Translate([Security.Principal.SecurityIdentifier]).Value
+    }
+    catch {
+        throw "Dedicated service account cannot be resolved for $ServiceId."
+    }
+    if (-not $TranslatedSid.Equals(
+            $Identity.Sid, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Dedicated service account SID does not match the service-derived SID for $ServiceId."
+    }
+}
+
+function Set-EAInstalledInstanceAcls {
+    param(
+        [string]$ApplicationRoot,
+        [string]$InstancesRoot,
+        [switch]$FormalMode
+    )
+    $HelperPath = Join-Path $ApplicationRoot `
+        "deploy\windows\EnterpriseAgent.WindowsSafety.ps1"
+    if (-not (Test-Path -LiteralPath $HelperPath -PathType Leaf)) {
+        throw "Installed Windows safety helper is missing: $HelperPath"
+    }
+    . $HelperPath
+    foreach ($Directory in Get-ChildItem -LiteralPath $InstancesRoot `
+        -Directory -Force) {
+        if ($Directory.Name -notmatch
+                '^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$') {
+            throw "StateRoot contains an unrecognized instance directory: $($Directory.FullName)"
+        }
+        $InstanceContext = Get-EAInstanceContext -InstanceName $Directory.Name `
+            -InstallRoot $ApplicationRoot -StateRoot $InstancesRoot
+        Assert-EAInstanceGlobalIsolation -Context $InstanceContext
+        if (-not [bool]$InstanceContext.Metadata.acl_hardened) {
+            if ($FormalMode) {
+                throw "Formal runtime installation refuses an instance created with -SkipAcl: $($Directory.Name)"
+            }
+            Write-Warning "DEVELOPMENT ONLY instance retains skipped ACL hardening: $($Directory.Name)"
+            continue
+        }
+        Set-EAInstanceCanonicalAcl -Context $InstanceContext
+        if ($FormalMode) {
+            Assert-EAInstanceWatchAcls -Context $InstanceContext
+        }
     }
 }
 
@@ -907,11 +1068,31 @@ if ($InstallRoot.Equals($StateRoot, [StringComparison]::OrdinalIgnoreCase) -or
     throw "InstallRoot and StateRoot must be separate, non-nested directories."
 }
 
+if ($BuildFromSource) {
+    if ($AllowUnsignedTestMedia -or
+        -not [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint)) {
+        throw "-BuildFromSource is already an explicit development-only mode and cannot be combined with binary media trust options."
+    }
+}
+else {
+    $ApprovedSignerThumbprint = Get-NormalizedApprovedSignerThumbprint `
+        -Value $ApprovedSignerThumbprint -AllowEmpty:$AllowUnsignedTestMedia
+    if ($AllowUnsignedTestMedia) {
+        if (-not [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint)) {
+            throw "Unsigned test media cannot be combined with an approved production signer thumbprint."
+        }
+        Write-Warning "UNSIGNED TEST MEDIA MODE: this installation is not production-trusted and cannot be used for a formal service."
+    }
+}
+
 $RegisteredServices = @(Get-Service -Name "MineGuardEnterpriseAgent-*" `
     -ErrorAction SilentlyContinue)
 $RunningServices = @($RegisteredServices | Where-Object { $_.Status -ne "Stopped" })
 if ($RunningServices.Count -ne 0) {
     throw "Stop all MineGuardEnterpriseAgent-* services before installing or upgrading the shared runtime."
+}
+foreach ($RegisteredService in $RegisteredServices) {
+    Assert-EARegisteredRuntimeServiceIdentity -ServiceId $RegisteredService.Name
 }
 Assert-LocalFixedPath -Name "InstallRoot" -PathValue $InstallRoot
 Assert-NotBroadProductRoot -Name "InstallRoot" -PathValue $InstallRoot
@@ -927,13 +1108,17 @@ Assert-LocalFixedPath -Name "DeployTarget" -PathValue $DeployTarget
 Assert-NoEnterpriseAgentRuntimeProcesses -RuntimeDirectory $RuntimeRoot
 
 if (-not $BuildFromSource) {
-    $ReleaseContract = Test-BinaryReleaseManifest -ReleaseRoot $SourceRoot
+    $ReleaseContract = Test-BinaryReleaseManifest -ReleaseRoot $SourceRoot `
+        -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
+        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
     $Manifest = $ReleaseContract.Manifest
     $CandidateBuildMetadata = $ReleaseContract.BuildMetadata
     $CandidateVersionText = [string]$ReleaseContract.Version
     Assert-EABinaryInstallPathBudget -Root $InstallRoot -Manifest $Manifest
     $ExistingVersionText = Test-InstalledBinaryRuntime `
-        -ApplicationRoot $InstallRoot -RuntimeDirectory $RuntimeRoot
+        -ApplicationRoot $InstallRoot -RuntimeDirectory $RuntimeRoot `
+        -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
+        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
     if ($null -ne $ExistingVersionText -and
         [version]$CandidateVersionText -lt [version]$ExistingVersionText) {
         throw "Agent downgrade from $ExistingVersionText to $CandidateVersionText is blocked by default."
@@ -1021,21 +1206,22 @@ if (-not $BuildFromSource) {
         Test-ManifestSubtree -Root $StagedDeploy -ManifestPrefix "deploy/windows/" -Manifest $Manifest
         Assert-LocalFixedPath -Name "InstallRoot" -PathValue $InstallRoot
         Assert-NotBroadProductRoot -Name "InstallRoot" -PathValue $InstallRoot
-        Set-EACanonicalProductTreeAcl -Path $InstallRoot `
-            -ServicePermission "RX"
+        Set-EACanonicalProductTreeAcl -Path $InstallRoot
         Assert-LocalFixedPath -Name "StateRoot" -PathValue $StateRoot
         Assert-NotBroadProductRoot -Name "StateRoot" -PathValue $StateRoot
         Assert-StateRootOrdinary -Root $StateRoot
         Assert-StateRootMarker -Root $StateRoot
         Set-EACanonicalProductTreeAcl -Path $StateRoot `
-            -ServicePermission "RX"
+            -RootTraverseOnly
         foreach ($StagedReadOnlyTree in @($StagedRuntime, $StagedDeploy)) {
             Set-EACanonicalProductTreeAcl -Path $StagedReadOnlyTree `
-                -ServicePermission "RX" -Recurse
+                -Recurse
         }
         $StagedExecutable = Join-Path $StagedRuntime "MineGuardEnterpriseAgent.exe"
         Test-ReleaseSignatureContract -Manifest $Manifest `
-            -BuildMetadata $CandidateBuildMetadata -ExecutablePath $StagedExecutable
+            -BuildMetadata $CandidateBuildMetadata -ExecutablePath $StagedExecutable `
+            -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
+            -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
         if (-not [bool]$Manifest.authenticode_signed) {
             Write-Warning "Installing an unsigned internal-test Enterprise Agent binary. It is not a production-trusted release."
         }
@@ -1051,6 +1237,11 @@ if (-not $BuildFromSource) {
             -ErrorAction SilentlyContinue | Where-Object { $_.Status -ne "Stopped" })
         if ($RestartedServices.Count -ne 0) {
             throw "An Enterprise Agent service restarted during upgrade; stop it before runtime replacement."
+        }
+        foreach ($LateRegisteredService in @(Get-Service `
+            -Name "MineGuardEnterpriseAgent-*" -ErrorAction SilentlyContinue)) {
+            Assert-EARegisteredRuntimeServiceIdentity `
+                -ServiceId $LateRegisteredService.Name
         }
         Assert-NoEnterpriseAgentRuntimeProcesses -RuntimeDirectory $RuntimeRoot
         if (Test-Path -LiteralPath $RuntimeRoot) {
@@ -1124,7 +1315,7 @@ if (-not $BuildFromSource) {
             }
         }
         Set-EACanonicalProductTreeAcl -Path $StagedMetadata `
-            -ServicePermission "RX" -Recurse
+            -Recurse
         if (Test-Path -LiteralPath $ReleaseMetadata) {
             Move-EAOwnedPathWithRetry `
                 -SourcePath $ReleaseMetadata -SourceParent $InstallRoot `
@@ -1140,8 +1331,13 @@ if (-not $BuildFromSource) {
             -DestinationParent $InstallRoot `
             -DestinationLeafPattern '^release-metadata$'
         $MetadataSwitched = $true
+        Set-EAInstalledInstanceAcls -ApplicationRoot $InstallRoot `
+            -InstancesRoot $StateRoot `
+            -FormalMode:(-not $AllowUnsignedTestMedia)
         $PostInstallVersion = Test-InstalledBinaryRuntime `
-            -ApplicationRoot $InstallRoot -RuntimeDirectory $RuntimeRoot
+            -ApplicationRoot $InstallRoot -RuntimeDirectory $RuntimeRoot `
+            -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
+            -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
         if ($PostInstallVersion -ne $CandidateVersionText) {
             throw "Post-install release verification returned an unexpected Agent version."
         }
@@ -1402,13 +1598,15 @@ if ($BuildFromSource) {
     Assert-LocalFixedPath -Name "InstallRoot" -PathValue $InstallRoot
     Assert-NotBroadProductRoot -Name "InstallRoot" -PathValue $InstallRoot
     Set-EACanonicalProductTreeAcl -Path $InstallRoot `
-        -ServicePermission "RX" -Recurse
+        -Recurse
     Assert-LocalFixedPath -Name "StateRoot" -PathValue $StateRoot
     Assert-NotBroadProductRoot -Name "StateRoot" -PathValue $StateRoot
     Assert-StateRootOrdinary -Root $StateRoot
     Assert-StateRootMarker -Root $StateRoot
     Set-EACanonicalProductTreeAcl -Path $StateRoot `
-        -ServicePermission "RX"
+        -RootTraverseOnly
+    Set-EAInstalledInstanceAcls -ApplicationRoot $InstallRoot `
+        -InstancesRoot $StateRoot
 }
 
 Write-Host "Enterprise Agent runtime installed."
