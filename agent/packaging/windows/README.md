@@ -36,13 +36,15 @@ and their transitive dependencies. Pip uses `--no-index` and never falls back to
 the package network when that option is present; a missing Nuitka tool cache must
 fail the isolated build rather than enabling the download switch.
 
-An unsigned build is explicitly marked as internal test media. A formal worker
-must keep the private key in the Windows certificate store and sign before the
-manifest is generated:
+An unsigned build is marked as internal test media by default. A signed formal
+worker keeps the private key in the Windows certificate store and signs before
+the manifest is generated:
 
 ```powershell
 .\packaging\windows\Build-EnterpriseAgentBinary.ps1 `
   -Wheelhouse 'D:\approved-wheelhouse' `
+  -ModelIssuerTrustStore 'D:\approved-model-trust\model-issuers.json' `
+  -ExpectedModelIssuerTrustStoreSha256 '<64-hex-offline-approved-sha256>' `
   -SignToolPath 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe' `
   -SigningCertificateThumbprint '<40-hex-character-thumbprint>' `
   -TimestampUrl 'https://<approved-rfc3161-service>' `
@@ -61,6 +63,49 @@ Signed mode rejects online pip resolution and Nuitka tool downloads: the approve
 offline wheelhouse and pre-staged Nuitka cache are mandatory. The root release
 builder additionally authenticates that wheelhouse against its externally
 approved manifest hash before it can classify an installer as a production candidate.
+It also requires a separately approved model-issuer trust store and its
+independently delivered SHA-256. The frozen Agent validates the strict
+`mineguard-model-issuer-trust-store-v1` schema before the public trust store is
+bound into the release. The repository contains a public-key-only `TEST-ONLY`
+trust store for unsigned CI; all formal candidates reject it, and no corresponding
+private key is retained.
+
+For a controlled intranet that has no Authenticode certificate, the distinct
+`-InternalUnsignedRelease` mode is available. It is not an alias for the
+default unsigned test build: it applies the same clean-Git, exact CPython,
+approved offline wheelhouse, pre-staged Nuitka cache and externally pinned
+model-trust-store gates as a signed candidate, but deliberately requires the
+resulting executable to remain `NotSigned`:
+
+```powershell
+.\packaging\windows\Build-EnterpriseAgentBinary.ps1 `
+  -PythonExecutable 'C:\ApprovedPython312\python.exe' `
+  -ExpectedPythonPatchVersion '3.12.<approved-patch>' `
+  -ExpectedPythonExecutableSha256 '<64-hex-approved-python-sha256>' `
+  -Wheelhouse 'D:\approved-wheelhouse' `
+  -ModelIssuerTrustStore 'D:\approved-model-trust\model-issuers.json' `
+  -ExpectedModelIssuerTrustStoreSha256 '<64-hex-approved-trust-sha256>' `
+  -InternalUnsignedRelease
+```
+
+This writes `release_classification: unsigned-internal-release` to both
+metadata documents. This child command only creates the standalone staging tree;
+the official formal Setup must be produced by the repository root
+`scripts\Build-WindowsBinaryRelease.ps1 -InternalUnsignedRelease` path. The root
+builder binds the child `release-manifest.json` SHA-256 into the verified Setup
+and records it as `installers[].child_release_manifest_sha256` for the separate
+approval record. A hash read only from the same untrusted media is not an external
+trust anchor. This mode provides full-tree integrity against the independently
+delivered digest; it does not establish a Windows publisher identity.
+
+For the repository's signed GitHub workflow, the protected
+`windows-production-signing` environment must define
+`WINDOWS_MODEL_ISSUER_TRUST_STORE` as the absolute local-NTFS path of that
+approved public trust-store JSON on the controlled runner, and
+`WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256` as its independently approved hash.
+The file contains issuer public keys only; model API credentials and issuer
+private keys must never be placed in workflow variables, the checkout, or the
+release artifact.
 
 The compiler is deliberately configured for Nuitka `standalone`, not `onefile`.
 The runtime must remain a directory because the executable loads its compiled
@@ -76,6 +121,7 @@ artifacts\MineGuardEnterpriseAgent-<version>-windows-x64\
   runtime\web\...
   runtime\<compiled dependencies>
   deploy\windows\...
+  model-credential-trust.json
   VERSION.txt
   build-metadata.json
   release-manifest.json
@@ -84,8 +130,9 @@ artifacts\MineGuardEnterpriseAgent-<version>-windows-x64\
 
 `release-manifest.json` is the machine-readable installation integrity contract.
 It contains relative paths, sizes, and SHA-256 values but no source checkout
-path. The deployed installer preserves all four metadata files under
-`InstallRoot\release-metadata` for incident response and version tracing.
+path. The deployed installer preserves all five metadata files, including the
+fixed `model-credential-trust.json`, under `InstallRoot\release-metadata` for
+incident response and version tracing.
 The builder assembles a random sibling staging directory and publishes it by a
 same-volume directory rename. It refuses an existing version by default;
 `-Force` is an explicit internal rebuild operation and restores the old release
@@ -94,10 +141,11 @@ if the replacement rename fails.
 The build fails if Python/C/C++ source or compiler intermediates remain under
 `runtime`. Its default smoke test executes the compiled program, requests
 `/api/v1/health`, and loads the bundled frontend. `-SkipSmokeTest` is only for
-local compiler diagnosis and must not be used by a release pipeline.
+local compiler diagnosis; the script rejects it for signed and
+`-InternalUnsignedRelease` formal candidates.
 
-The manifest hashes detect accidental corruption; they do not authenticate the
-publisher. Release automation must Authenticode-sign the executable and final
-installer using credentials supplied by the controlled Windows signing worker.
-No signing private key belongs in this repository or in build arguments logged
-by CI.
+The manifest hashes detect corruption but authenticate a formal release only when
+their expected digest is delivered through an independent approval channel. The
+optional signed path additionally uses Authenticode; the
+`INTERNAL-UNSIGNED` path deliberately has no signing private key or Windows
+publisher identity.

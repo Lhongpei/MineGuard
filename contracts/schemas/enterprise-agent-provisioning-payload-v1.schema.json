@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:enterprise-agent-provisioning-payload:v1",
+  "title": "Enterprise Agent Provisioning Plaintext Payload V1",
+  "description": "Plaintext after authenticated decryption of an enterprise-agent-provisioning bundle. It must never be written to logs or retained as an unprotected file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "bundle_id",
+    "pair_id",
+    "profile_version",
+    "config",
+    "locked_keys"
+  ],
+  "properties": {
+    "kind": {
+      "const": "enterprise-agent-provisioning"
+    },
+    "bundle_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "pair_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "profile_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "config": {
+      "type": "object",
+      "minProperties": 24,
+      "maxProperties": 27,
+      "propertyNames": {
+        "$ref": "#/$defs/lockedKey"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 16384,
+        "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$"
+      },
+      "required": [
+        "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED",
+        "ENTERPRISE_AGENT_PRODUCTION_MODE",
+        "ENTERPRISE_AGENT_PUBLIC_ORIGIN",
+        "ENTERPRISE_AGENT_SECURE_COOKIE",
+        "ENTERPRISE_CAPACITY_BAND",
+        "ENTERPRISE_COAL_TYPE",
+        "ENTERPRISE_EXCHANGE_HMAC_SECRET",
+        "ENTERPRISE_EXCHANGE_KEY_ID",
+        "ENTERPRISE_MINE_ID",
+        "ENTERPRISE_MINE_NAME",
+        "ENTERPRISE_MINING_METHOD",
+        "ENTERPRISE_OPERATING_REGIME",
+        "ENTERPRISE_OPERATOR_ID",
+        "ENTERPRISE_OPERATOR_NAME",
+        "ENTERPRISE_REPORTING_TIMEZONE",
+        "ENTERPRISE_SHIFT_SYSTEM",
+        "ENTERPRISE_SYSTEM_ID",
+        "PLATFORM_V3_BASE_URL",
+        "PLATFORM_V3_CA_BUNDLE",
+        "PLATFORM_V3_SENDER_ID",
+        "PLATFORM_V3_TRANSPORT_HMAC_SECRET",
+        "REGULATORY_EXCHANGE_KEY_ID",
+        "REGULATORY_PARTY_ID",
+        "REGULATORY_SYSTEM_ID"
+      ],
+      "properties": {
+        "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED": {
+          "const": "true"
+        },
+        "ENTERPRISE_AGENT_PRODUCTION_MODE": {
+          "const": "true"
+        },
+        "ENTERPRISE_AGENT_PUBLIC_ORIGIN": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://[^/?#]+(?::[0-9]{1,5})?$",
+          "maxLength": 2048
+        },
+        "ENTERPRISE_AGENT_SECURE_COOKIE": {
+          "const": "true"
+        },
+        "ENTERPRISE_EXCHANGE_HMAC_SECRET": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "PLATFORM_V3_BASE_URL": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://[^/?#]+(?::[0-9]{1,5})?$",
+          "maxLength": 2048
+        },
+        "PLATFORM_V3_CA_BUNDLE": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "PLATFORM_V3_TRANSPORT_HMAC_SECRET": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        }
+      }
+    },
+    "locked_keys": {
+      "type": "array",
+      "minItems": 24,
+      "maxItems": 27,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/lockedKey"
+      }
+    }
+  },
+  "$defs": {
+    "lockedKey": {
+      "type": "string",
+      "enum": [
+        "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED",
+        "ENTERPRISE_AGENT_PRODUCTION_MODE",
+        "ENTERPRISE_AGENT_PUBLIC_ORIGIN",
+        "ENTERPRISE_AGENT_SECURE_COOKIE",
+        "ENTERPRISE_CAPACITY_BAND",
+        "ENTERPRISE_COAL_TYPE",
+        "ENTERPRISE_EXCHANGE_HMAC_SECRET",
+        "ENTERPRISE_EXCHANGE_KEY_ID",
+        "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON",
+        "ENTERPRISE_MINE_ID",
+        "ENTERPRISE_MINE_NAME",
+        "ENTERPRISE_MINING_METHOD",
+        "ENTERPRISE_OPERATING_REGIME",
+        "ENTERPRISE_OPERATOR_ID",
+        "ENTERPRISE_OPERATOR_NAME",
+        "ENTERPRISE_REPORTING_TIMEZONE",
+        "ENTERPRISE_SHIFT_SYSTEM",
+        "ENTERPRISE_SYSTEM_ID",
+        "PLATFORM_V3_BASE_URL",
+        "PLATFORM_V3_CA_BUNDLE",
+        "PLATFORM_V3_SENDER_ID",
+        "PLATFORM_V3_TRANSPORT_HMAC_SECRET",
+        "REGULATORY_EXCHANGE_KEY_ID",
+        "REGULATORY_PARTY_ID",
+        "REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET",
+        "REGULATORY_PREVIOUS_EXCHANGE_KEY_ID",
+        "REGULATORY_SYSTEM_ID"
+      ]
+    }
+  }
+}

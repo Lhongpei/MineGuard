@@ -22,6 +22,8 @@ RUNTIME_DISTRIBUTIONS: Final[tuple[str, ...]] = (
     "tzdata",
     "olefile",
     "xlrd",
+    "cryptography",
+    "cffi",
 )
 
 

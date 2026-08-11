@@ -9,8 +9,11 @@ code.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 from datetime import datetime, timedelta
@@ -18,11 +21,28 @@ from pathlib import Path
 import re
 import sys
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 CONTRACT_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = {
+    "enterprise-agent-provisioning-bundle-v1.json": (
+        "provisioning-bundle-v1.schema.json"
+    ),
+    "platform-client-registration-bundle-v1.json": (
+        "provisioning-bundle-v1.schema.json"
+    ),
+    "enterprise-agent-provisioning-payload-v1.json": (
+        "enterprise-agent-provisioning-payload-v1.schema.json"
+    ),
+    "platform-client-registration-payload-v1.json": (
+        "platform-client-registration-payload-v1.schema.json"
+    ),
+    "model-credential-bundle-v1.json": ("model-credential-bundle-v1.schema.json"),
+    "model-credential-profile-v1.json": ("model-credential-profile-v1.schema.json"),
+    "model-credential-payload-v1.json": ("model-credential-payload-v1.schema.json"),
+    "model-issuer-trust-store-v1.json": ("model-issuer-trust-store-v1.schema.json"),
     "enterprise-autofill-ingestion-v1.json": (
         "enterprise-autofill-ingestion-v1.schema.json"
     ),
@@ -76,9 +96,7 @@ EXPECTED_CONNECTOR_VECTORS = {
         "0e968a5eeb8817be737e890a049fb5617f22bb3569711273b65c706ce832af4c",
     ),
 }
-CONNECTOR_EXAMPLE_SECRET = (
-    b"example-enterprise-connector-secret-not-for-production"
-)
+CONNECTOR_EXAMPLE_SECRET = b"example-enterprise-connector-secret-not-for-production"
 EXPECTED_EDGE_BODY_SHA256 = (
     "f289284d73836288cae3191eeac928b62d78c8988418e1016e4f956c08af2aab"
 )
@@ -130,15 +148,9 @@ EXPECTED_V3_VECTORS = {
     ),
 }
 V3_EXAMPLE_SECRET = b"example-v3-exchange-secret-not-for-production"
-V3_APPLICATION_SIGNATURE_DOMAIN = (
-    "MINEGUARD-TEN-QUANTITY-EXCHANGE-HMAC-SHA256-V3"
-)
-V3_HTTP_SIGNATURE_DOMAIN = (
-    "MINEGUARD-TEN-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V3"
-)
-V2_APPLICATION_SIGNATURE_DOMAIN = (
-    "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2"
-)
+V3_APPLICATION_SIGNATURE_DOMAIN = "MINEGUARD-TEN-QUANTITY-EXCHANGE-HMAC-SHA256-V3"
+V3_HTTP_SIGNATURE_DOMAIN = "MINEGUARD-TEN-QUANTITY-EXCHANGE-HTTP-HMAC-SHA256-V3"
+V2_APPLICATION_SIGNATURE_DOMAIN = "MINEGUARD-FIVE-QUANTITY-EXCHANGE-HMAC-SHA256-V2"
 V3_TEN_QUANTITY_GROUPS = {
     "airflow": ["ventilation_m3_min"],
     "electricity": ["electricity_kwh"],
@@ -225,9 +237,63 @@ V3_EXPECTED_BODY_SHA256 = (
 V3_EXPECTED_TRANSPORT_SIGNATURE = (
     "8db2b067cbe5af7cabfe40cbb0887e42ec0384cbbac48cba3cab6e4ce11b7165"
 )
-V3_TRANSPORT_EXAMPLE_SECRET = (
-    b"example-v3-transport-secret-not-for-production"
-)
+V3_TRANSPORT_EXAMPLE_SECRET = b"example-v3-transport-secret-not-for-production"
+
+PROVISIONING_EXAMPLES = {
+    "enterprise-agent-provisioning": (
+        "enterprise-agent-provisioning-bundle-v1.json",
+        "enterprise-agent-provisioning-payload-v1.json",
+    ),
+    "platform-client-registration": (
+        "platform-client-registration-bundle-v1.json",
+        "platform-client-registration-payload-v1.json",
+    ),
+}
+PROVISIONING_AGENT_CONFIG_REQUIRED = {
+    "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED",
+    "ENTERPRISE_AGENT_PRODUCTION_MODE",
+    "ENTERPRISE_AGENT_PUBLIC_ORIGIN",
+    "ENTERPRISE_AGENT_SECURE_COOKIE",
+    "ENTERPRISE_CAPACITY_BAND",
+    "ENTERPRISE_COAL_TYPE",
+    "ENTERPRISE_EXCHANGE_HMAC_SECRET",
+    "ENTERPRISE_EXCHANGE_KEY_ID",
+    "ENTERPRISE_MINE_ID",
+    "ENTERPRISE_MINE_NAME",
+    "ENTERPRISE_MINING_METHOD",
+    "ENTERPRISE_OPERATING_REGIME",
+    "ENTERPRISE_OPERATOR_ID",
+    "ENTERPRISE_OPERATOR_NAME",
+    "ENTERPRISE_REPORTING_TIMEZONE",
+    "ENTERPRISE_SHIFT_SYSTEM",
+    "ENTERPRISE_SYSTEM_ID",
+    "PLATFORM_V3_BASE_URL",
+    "PLATFORM_V3_CA_BUNDLE",
+    "PLATFORM_V3_SENDER_ID",
+    "PLATFORM_V3_TRANSPORT_HMAC_SECRET",
+    "REGULATORY_EXCHANGE_KEY_ID",
+    "REGULATORY_PARTY_ID",
+    "REGULATORY_SYSTEM_ID",
+}
+PROVISIONING_AGENT_CONFIG_OPTIONAL = {
+    "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON",
+    "REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET",
+    "REGULATORY_PREVIOUS_EXCHANGE_KEY_ID",
+}
+MODEL_CREDENTIAL_EXAMPLE_API_KEY = "EXAMPLE_ONLY_NOT_A_REAL_PROVIDER_CREDENTIAL_2026"
+MODEL_CREDENTIAL_EXAMPLE_CIPHERTEXT = "A" * 23
+MODEL_CREDENTIAL_EXAMPLE_SIGNATURE = "A" * 86
+MODEL_CREDENTIAL_CAPABILITIES = {
+    "chat",
+    "extraction",
+    "coal-news-search",
+}
+MODEL_CREDENTIAL_EXAMPLES = {
+    "bundle": "model-credential-bundle-v1.json",
+    "profile": "model-credential-profile-v1.json",
+    "payload": "model-credential-payload-v1.json",
+    "trust_store": "model-issuer-trust-store-v1.json",
+}
 
 
 class ContractValidationError(RuntimeError):
@@ -958,9 +1024,7 @@ def _check_v3_fixed_vectors(messages: dict[str, dict[str, Any]]) -> None:
             raise ContractValidationError(
                 f"{filename}: declared V3 signature is incorrect"
             )
-    submission_path = (
-        CONTRACT_ROOT / "examples" / "ten-quantity-submission-v3.json"
-    )
+    submission_path = CONTRACT_ROOT / "examples" / "ten-quantity-submission-v3.json"
     body_sha256 = hashlib.sha256(submission_path.read_bytes()).hexdigest()
     if body_sha256 != V3_EXPECTED_BODY_SHA256:
         raise ContractValidationError(
@@ -1015,10 +1079,7 @@ def _check_v3_metric_catalog(common_schema: dict[str, Any]) -> None:
     daily_properties = daily_set.get("properties", {})
     shift_required = shift_set.get("required", [])
     shift_properties = shift_set.get("properties", {})
-    if (
-        daily_required != V3_DAILY_METRICS
-        or list(daily_properties) != V3_DAILY_METRICS
-    ):
+    if daily_required != V3_DAILY_METRICS or list(daily_properties) != V3_DAILY_METRICS:
         raise ContractValidationError(
             "V3 dailyMeasurementSet must require exactly all eleven catalog metrics"
         )
@@ -1053,17 +1114,13 @@ def _check_v3_metric_catalog(common_schema: dict[str, Any]) -> None:
         constraints = definitions[definition_name]["allOf"][1]["properties"]
         if constraints.get("metric_code", {}).get("const") != metric:
             raise ContractValidationError(f"V3 {metric} metric code drifted")
-    tonnage_constraints = definitions["tonnageMeasurement"]["allOf"][1][
-        "properties"
-    ]
+    tonnage_constraints = definitions["tonnageMeasurement"]["allOf"][1]["properties"]
     if (
         tonnage_constraints.get("unit", {}).get("const") != "t"
         or tonnage_constraints.get("aggregation", {}).get("const") != "sum"
         or tonnage_constraints.get("value", {}).get("minimum") != 0
     ):
-        raise ContractValidationError(
-            "V3 tonnage metrics must be non-negative t/sum"
-        )
+        raise ContractValidationError("V3 tonnage metrics must be non-negative t/sum")
     for definition_name in (
         "ventilationMeasurement",
         "electricityMeasurement",
@@ -1151,10 +1208,9 @@ def _check_v3_openapi_semantics(openapi: dict[str, Any]) -> None:
     parameters = openapi.get("components", {}).get("parameters", {})
     for parameter_name, contract_version in expected_parameters.items():
         parameter = parameters.get(parameter_name, {})
-        if (
-            parameter.get("name") != "X-Exchange-Contract-Version"
-            or parameter.get("schema") != {"const": contract_version}
-        ):
+        if parameter.get("name") != "X-Exchange-Contract-Version" or parameter.get(
+            "schema"
+        ) != {"const": contract_version}:
             raise ContractValidationError(
                 f"V3 OpenAPI {parameter_name} must freeze {contract_version}"
             )
@@ -1306,10 +1362,9 @@ def _check_v3_submission_semantics(submission: dict[str, Any]) -> None:
     for day_index, day in enumerate(days):
         quantity = day["reported_quantity"]
         daily_measurements = quantity["daily_total"]
-        if (
-            len(daily_measurements) != len(V3_DAILY_METRICS)
-            or set(daily_measurements) != set(V3_DAILY_METRICS)
-        ):
+        if len(daily_measurements) != len(V3_DAILY_METRICS) or set(
+            daily_measurements
+        ) != set(V3_DAILY_METRICS):
             raise ContractValidationError(
                 f"days[{day_index}].daily_total must contain exact V3 metrics"
             )
@@ -1351,7 +1406,9 @@ def _check_v3_submission_semantics(submission: dict[str, Any]) -> None:
                         "time_weighted_average",
                         "snapshot",
                     }:
-                        raise ContractValidationError("V3 airflow aggregation is invalid")
+                        raise ContractValidationError(
+                            "V3 airflow aggregation is invalid"
+                        )
                 elif measurement["aggregation"] != "sum":
                     raise ContractValidationError(
                         f"V3 {metric_code} aggregation must be sum"
@@ -1436,9 +1493,7 @@ def _check_v3_workflow_semantics(messages: dict[str, dict[str, Any]]) -> None:
             "timing and history modules"
         )
     known_metrics = {
-        metric
-        for values in V3_TEN_QUANTITY_GROUPS.values()
-        for metric in values
+        metric for values in V3_TEN_QUANTITY_GROUPS.values() for metric in values
     }
     if any(
         not set(finding["affected_metrics"]) <= known_metrics
@@ -1517,6 +1572,397 @@ def _aware_datetime(value: Any, field: str) -> datetime:
     return parsed
 
 
+def _canonical_model_base_url(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > 2048
+        or "%" in value
+        or any(
+            character.isspace() or ord(character) < 32 or ord(character) == 127
+            for character in value
+        )
+    ):
+        raise ContractValidationError(
+            "model credential provider.base_url is not canonical"
+        )
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ContractValidationError(
+            "model credential provider.base_url is not a valid URL"
+        ) from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ContractValidationError(
+            "model credential provider.base_url must be a plain HTTPS base URL"
+        )
+    if port is not None and not 1 <= port <= 65_535:
+        raise ContractValidationError(
+            "model credential provider.base_url has an invalid port"
+        )
+
+    hostname = parsed.hostname.lower()
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            hostname.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ContractValidationError(
+                "model credential provider.base_url hostname must be ASCII"
+            ) from exc
+        if any(
+            not label
+            or len(label) > 63
+            or re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?",
+                label,
+            )
+            is None
+            for label in hostname.split(".")
+        ):
+            raise ContractValidationError(
+                "model credential provider.base_url hostname is not canonical"
+            )
+        canonical_host = hostname
+    else:
+        canonical_host = address.compressed
+
+    path = parsed.path
+    if path:
+        segments = path[1:].split("/") if path.startswith("/") else []
+        if (
+            not segments
+            or path.endswith("/")
+            or "//" in path
+            or any(segment in {"", ".", ".."} for segment in segments)
+            or re.fullmatch(
+                r"/[A-Za-z0-9._~!$&'()*+,;=:@-]+"
+                r"(?:/[A-Za-z0-9._~!$&'()*+,;=:@-]+)*",
+                path,
+            )
+            is None
+        ):
+            raise ContractValidationError(
+                "model credential provider.base_url path is not canonical"
+            )
+
+    authority_host = f"[{canonical_host}]" if ":" in canonical_host else canonical_host
+    authority = authority_host if port in {None, 443} else f"{authority_host}:{port}"
+    canonical = urlunsplit(("https", authority, path, "", ""))
+    if value != canonical:
+        raise ContractValidationError(
+            "model credential provider.base_url is not canonical"
+        )
+    return canonical
+
+
+def _check_model_credential_examples(documents: dict[Path, Any]) -> None:
+    example_root = CONTRACT_ROOT / "examples"
+    paths = {
+        label: example_root / filename
+        for label, filename in MODEL_CREDENTIAL_EXAMPLES.items()
+    }
+    bundle = documents[paths["bundle"]]
+    profile = documents[paths["profile"]]
+    payload = documents[paths["payload"]]
+    trust_store = documents[paths["trust_store"]]
+    if not all(
+        isinstance(item, dict) for item in (bundle, profile, payload, trust_store)
+    ):
+        raise ContractValidationError(
+            "model credential examples must contain JSON objects"
+        )
+    protected = bundle.get("protected")
+    if not isinstance(protected, dict):
+        raise ContractValidationError(
+            "model credential examples must contain JSON objects"
+        )
+
+    if (
+        trust_store.get("format") != "mineguard-model-issuer-trust-store-v1"
+        or protected.get("contract_version") != "mineguard-model-credential-bundle-v1"
+        or protected.get("bundle_kind") != "enterprise-agent-model-credential"
+        or payload.get("kind") != protected.get("bundle_kind")
+    ):
+        raise ContractValidationError(
+            "model credential example kind or contract version drifted"
+        )
+
+    profile_to_protected = (
+        "credential_id",
+        "credential_version",
+        "subject",
+        "install_before",
+        "runtime_not_after",
+        "issuer_id",
+        "issuer_key_id",
+        "issuer_key_epoch",
+    )
+    for field in profile_to_protected:
+        if profile.get(field) != protected.get(field):
+            raise ContractValidationError(
+                f"model credential profile/protected {field} mismatch"
+            )
+
+    payload_to_profile = (
+        "credential_id",
+        "credential_version",
+        "subject",
+        "provider",
+    )
+    for field in payload_to_profile:
+        if payload.get(field) != profile.get(field):
+            raise ContractValidationError(
+                f"model credential payload/profile {field} mismatch"
+            )
+    if payload.get("bundle_id") != protected.get("bundle_id"):
+        raise ContractValidationError(
+            "model credential payload/protected bundle_id mismatch"
+        )
+    uuid_v4 = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+        r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    )
+    for field in ("bundle_id", "credential_id"):
+        if uuid_v4.fullmatch(str(protected.get(field, ""))) is None:
+            raise ContractValidationError(
+                f"model credential protected.{field} must be canonical UUIDv4"
+            )
+    subject = payload.get("subject")
+    if not isinstance(subject, dict) or set(subject) != {
+        "mine_id",
+        "system_id",
+        "party_id",
+        "pair_id",
+    }:
+        raise ContractValidationError(
+            "model credential subject must bind mine/system/party/pair"
+        )
+    provisioning_bundle = documents[
+        example_root / "enterprise-agent-provisioning-bundle-v1.json"
+    ]
+    provisioning_payload = documents[
+        example_root / "enterprise-agent-provisioning-payload-v1.json"
+    ]
+    provisioning_protected = provisioning_bundle.get("protected")
+    if not isinstance(provisioning_protected, dict) or not isinstance(
+        provisioning_protected.get("subject"), dict
+    ):
+        raise ContractValidationError(
+            "enterprise provisioning example lacks its protected subject"
+        )
+    expected_subject = dict(provisioning_protected["subject"])
+    expected_subject["pair_id"] = provisioning_protected.get("pair_id")
+    if (
+        subject != expected_subject
+        or provisioning_payload.get("pair_id") != expected_subject["pair_id"]
+    ):
+        raise ContractValidationError(
+            "model credential example subject is not bound to the verified "
+            "enterprise provisioning pair"
+        )
+
+    declared_payload_hash = hashlib.sha256(_compact_sorted_json(payload)).hexdigest()
+    if protected.get("payload_sha256") != declared_payload_hash:
+        raise ContractValidationError(
+            "model credential example payload_sha256 is incorrect"
+        )
+    provider = payload.get("provider")
+    if not isinstance(provider, dict):
+        raise ContractValidationError(
+            "model credential example provider must be an object"
+        )
+    if set(provider) != {
+        "provider_id",
+        "protocol",
+        "base_url",
+        "model",
+        "capabilities",
+        "timeout_seconds",
+        "max_retries",
+    }:
+        raise ContractValidationError(
+            "model credential example provider fields drifted"
+        )
+    capabilities = provider.get("capabilities")
+    if (
+        not isinstance(capabilities, list)
+        or not capabilities
+        or capabilities != sorted(set(capabilities))
+        or not set(capabilities) <= MODEL_CREDENTIAL_CAPABILITIES
+    ):
+        raise ContractValidationError(
+            "model credential example capabilities are invalid"
+        )
+    if provider.get("base_url") != "https://api.example.invalid/v1":
+        raise ContractValidationError(
+            "model credential example must use the explicit example HTTPS base URL"
+        )
+    if provider.get("protocol") != "openai-compatible-chat-completions":
+        raise ContractValidationError("model credential example protocol drifted")
+    _canonical_model_base_url(provider["base_url"])
+    declared_provider_hash = hashlib.sha256(_compact_sorted_json(provider)).hexdigest()
+    if protected.get("provider_config_sha256") != declared_provider_hash:
+        raise ContractValidationError(
+            "model credential example provider_config_sha256 is incorrect"
+        )
+
+    utc_time = re.compile(
+        r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+        r"[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    )
+    times: dict[str, datetime] = {}
+    for field in ("issued_at", "install_before", "runtime_not_after"):
+        value = protected.get(field)
+        if not isinstance(value, str) or utc_time.fullmatch(value) is None:
+            raise ContractValidationError(
+                f"model credential protected.{field} must use canonical UTC Z time"
+            )
+        times[field] = _aware_datetime(value, f"model credential {field}")
+    if not (times["issued_at"] < times["install_before"] < times["runtime_not_after"]):
+        raise ContractValidationError(
+            "model credential example validity windows are incorrectly ordered"
+        )
+
+    if payload.get("api_key") != MODEL_CREDENTIAL_EXAMPLE_API_KEY:
+        raise ContractValidationError(
+            "model credential payload example must use the documented sentinel key"
+        )
+    if (
+        bundle.get("ciphertext") != MODEL_CREDENTIAL_EXAMPLE_CIPHERTEXT
+        or bundle.get("signature") != MODEL_CREDENTIAL_EXAMPLE_SIGNATURE
+    ):
+        raise ContractValidationError(
+            "model credential bundle example must use explicit non-working placeholders"
+        )
+    for label in ("profile", "bundle"):
+        encoded = json.dumps(
+            documents[paths[label]],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if "api_key" in encoded or MODEL_CREDENTIAL_EXAMPLE_API_KEY in encoded:
+            raise ContractValidationError(
+                f"model credential {label} example leaked its API key"
+            )
+
+    for example_path in example_root.glob("*.json"):
+        for node in _walk(documents[example_path]):
+            if "api_key" not in node:
+                continue
+            if (
+                example_path != paths["payload"]
+                or node is not payload
+                or node["api_key"] != MODEL_CREDENTIAL_EXAMPLE_API_KEY
+            ):
+                raise ContractValidationError(
+                    f"{example_path}: unapproved api_key in contract example"
+                )
+
+    if set(trust_store) != {"format", "issuers"}:
+        raise ContractValidationError("model issuer trust store example fields drifted")
+    issuers = trust_store.get("issuers")
+    if not isinstance(issuers, list) or not issuers:
+        raise ContractValidationError(
+            "model issuer trust store example must contain issuers"
+        )
+    key_ids: list[str] = []
+    identities: set[tuple[str, str]] = set()
+    issuer_epochs: set[tuple[str, int]] = set()
+    fingerprints: set[str] = set()
+    for index, issuer in enumerate(issuers):
+        if not isinstance(issuer, dict) or set(issuer) != {
+            "issuer_id",
+            "issuer_key_id",
+            "issuer_key_epoch",
+            "public_key_pem",
+            "public_key_sha256",
+        }:
+            raise ContractValidationError(
+                f"model issuer trust store issuer[{index}] fields drifted"
+            )
+        issuer_id = issuer.get("issuer_id")
+        key_id = issuer.get("issuer_key_id")
+        key_epoch = issuer.get("issuer_key_epoch")
+        fingerprint = issuer.get("public_key_sha256")
+        if not all(isinstance(item, str) for item in (issuer_id, key_id, fingerprint)):
+            raise ContractValidationError(
+                f"model issuer trust store issuer[{index}] identity is invalid"
+            )
+        if type(key_epoch) is not int or not 1 <= key_epoch <= 2_147_483_647:
+            raise ContractValidationError(
+                f"model issuer trust store issuer[{index}] key epoch is invalid"
+            )
+        identity = (issuer_id, key_id)
+        issuer_epoch = (issuer_id, key_epoch)
+        if issuer_epoch in issuer_epochs:
+            raise ContractValidationError(
+                "model issuer trust store example reuses an issuer key epoch"
+            )
+        if identity in identities or key_id in key_ids or fingerprint in fingerprints:
+            raise ContractValidationError(
+                "model issuer trust store example contains duplicate anchors"
+            )
+        pem = issuer.get("public_key_pem")
+        if not isinstance(pem, str) or "\r" in pem or "PRIVATE KEY" in pem:
+            raise ContractValidationError(
+                f"model issuer trust store issuer[{index}] PEM is invalid"
+            )
+        lines = pem.splitlines()
+        if (
+            len(lines) != 3
+            or lines[0] != "-----BEGIN PUBLIC KEY-----"
+            or lines[2] != "-----END PUBLIC KEY-----"
+            or not pem.endswith("\n")
+        ):
+            raise ContractValidationError(
+                f"model issuer trust store issuer[{index}] PEM is not canonical"
+            )
+        try:
+            der = base64.b64decode(lines[1], validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ContractValidationError(
+                f"model issuer trust store issuer[{index}] PEM is invalid"
+            ) from exc
+        ed25519_spki_prefix = bytes.fromhex("302a300506032b6570032100")
+        if len(der) != 44 or not der.startswith(ed25519_spki_prefix):
+            raise ContractValidationError(
+                f"model issuer trust store issuer[{index}] is not Ed25519 SPKI"
+            )
+        actual = hashlib.sha256(der).hexdigest()
+        if not hmac.compare_digest(actual, fingerprint):
+            raise ContractValidationError(
+                f"model issuer trust store issuer[{index}] fingerprint mismatch"
+            )
+        identities.add(identity)
+        issuer_epochs.add(issuer_epoch)
+        key_ids.append(key_id)
+        fingerprints.add(fingerprint)
+    if key_ids != sorted(key_ids):
+        raise ContractValidationError(
+            "model issuer trust store example must be sorted by issuer_key_id"
+        )
+    first = issuers[0]
+    if first.get("issuer_id") != profile.get("issuer_id") or first.get(
+        "issuer_key_id"
+    ) != profile.get("issuer_key_id") or first.get(
+        "issuer_key_epoch"
+    ) != profile.get("issuer_key_epoch"):
+        raise ContractValidationError(
+            "model issuer trust store example does not anchor the example profile"
+        )
+
+
 def _optional_jsonschema_validation(documents: dict[Path, Any]) -> str:
     try:
         from jsonschema import Draft202012Validator, FormatChecker
@@ -1557,6 +2003,210 @@ def _optional_jsonschema_validation(documents: dict[Path, Any]) -> str:
             raise ContractValidationError(
                 f"{example_path}: schema validation failed: {details}"
             )
+
+    provisioning_schema = documents[
+        CONTRACT_ROOT / "schemas" / "provisioning-bundle-v1.schema.json"
+    ]
+    provisioning_validator = Draft202012Validator(
+        provisioning_schema,
+        registry=registry,
+        format_checker=FormatChecker(),
+    )
+    provisioning_example = documents[
+        CONTRACT_ROOT / "examples" / "enterprise-agent-provisioning-bundle-v1.json"
+    ]
+
+    def clone_provisioning_example() -> dict[str, Any]:
+        return json.loads(json.dumps(provisioning_example))
+
+    boundary = clone_provisioning_example()
+    boundary["protected"]["profile_version"] = 2_147_483_647
+    boundary["protected"]["issued_at"] = "2026-07-27T08:00:00.123456Z"
+    boundary["protected"]["expires_at"] = "2026-08-10T00:00:00.1Z"
+    boundary["ciphertext"] = "A" * 23
+    boundary_errors = list(provisioning_validator.iter_errors(boundary))
+    if boundary_errors:
+        raise ContractValidationError(
+            "provisioning schema rejected its max version, fractional time, "
+            "or 17-byte ciphertext boundary"
+        )
+
+    invalid_boundaries: list[tuple[str, dict[str, Any]]] = []
+    too_large_version = clone_provisioning_example()
+    too_large_version["protected"]["profile_version"] = 2_147_483_648
+    invalid_boundaries.append(("profile_version above int32", too_large_version))
+    excessive_fraction = clone_provisioning_example()
+    excessive_fraction["protected"]["issued_at"] = "2026-07-27T08:00:00.1234567Z"
+    invalid_boundaries.append(("seven fractional digits", excessive_fraction))
+    tag_only_ciphertext = clone_provisioning_example()
+    tag_only_ciphertext["ciphertext"] = "A" * 22
+    invalid_boundaries.append(("tag-only ciphertext", tag_only_ciphertext))
+    for label, invalid in invalid_boundaries:
+        if not list(provisioning_validator.iter_errors(invalid)):
+            raise ContractValidationError(
+                f"provisioning schema accepted invalid boundary: {label}"
+            )
+
+    model_bundle_schema = documents[
+        CONTRACT_ROOT / "schemas" / "model-credential-bundle-v1.schema.json"
+    ]
+    model_payload_schema = documents[
+        CONTRACT_ROOT / "schemas" / "model-credential-payload-v1.schema.json"
+    ]
+    model_profile_schema = documents[
+        CONTRACT_ROOT / "schemas" / "model-credential-profile-v1.schema.json"
+    ]
+    model_trust_schema = documents[
+        CONTRACT_ROOT / "schemas" / "model-issuer-trust-store-v1.schema.json"
+    ]
+    model_bundle_validator = Draft202012Validator(
+        model_bundle_schema,
+        registry=registry,
+        format_checker=FormatChecker(),
+    )
+    model_payload_validator = Draft202012Validator(
+        model_payload_schema,
+        registry=registry,
+        format_checker=FormatChecker(),
+    )
+    model_profile_validator = Draft202012Validator(
+        model_profile_schema,
+        registry=registry,
+        format_checker=FormatChecker(),
+    )
+    model_trust_validator = Draft202012Validator(
+        model_trust_schema,
+        registry=registry,
+        format_checker=FormatChecker(),
+    )
+    model_bundle_example = documents[
+        CONTRACT_ROOT / "examples" / "model-credential-bundle-v1.json"
+    ]
+    model_payload_example = documents[
+        CONTRACT_ROOT / "examples" / "model-credential-payload-v1.json"
+    ]
+    model_profile_example = documents[
+        CONTRACT_ROOT / "examples" / "model-credential-profile-v1.json"
+    ]
+    model_trust_example = documents[
+        CONTRACT_ROOT / "examples" / "model-issuer-trust-store-v1.json"
+    ]
+
+    model_boundary = json.loads(json.dumps(model_bundle_example))
+    model_boundary["protected"]["credential_version"] = 2_147_483_647
+    model_boundary["ciphertext"] = "A" * 23
+    if list(model_bundle_validator.iter_errors(model_boundary)):
+        raise ContractValidationError(
+            "model credential schema rejected its max version or "
+            "17-byte ciphertext boundary"
+        )
+
+    invalid_model_boundaries: list[tuple[str, Any, dict[str, Any]]] = []
+    model_too_large_version = json.loads(json.dumps(model_bundle_example))
+    model_too_large_version["protected"]["credential_version"] = 2_147_483_648
+    invalid_model_boundaries.append(
+        (
+            "credential_version above int32",
+            model_bundle_validator,
+            model_too_large_version,
+        )
+    )
+    model_fractional_time = json.loads(json.dumps(model_bundle_example))
+    model_fractional_time["protected"]["issued_at"] = "2026-08-11T08:00:00.1Z"
+    invalid_model_boundaries.append(
+        (
+            "fractional issued_at",
+            model_bundle_validator,
+            model_fractional_time,
+        )
+    )
+    model_tag_only = json.loads(json.dumps(model_bundle_example))
+    model_tag_only["ciphertext"] = "A" * 22
+    invalid_model_boundaries.append(
+        ("tag-only ciphertext", model_bundle_validator, model_tag_only)
+    )
+    model_short_key = json.loads(json.dumps(model_payload_example))
+    model_short_key["api_key"] = "A" * 15
+    invalid_model_boundaries.append(
+        ("short API key", model_payload_validator, model_short_key)
+    )
+    model_timeout = json.loads(json.dumps(model_payload_example))
+    model_timeout["provider"]["timeout_seconds"] = 121
+    invalid_model_boundaries.append(
+        ("timeout above maximum", model_payload_validator, model_timeout)
+    )
+    model_http_base = json.loads(json.dumps(model_profile_example))
+    model_http_base["provider"]["base_url"] = "http://api.example.invalid"
+    invalid_model_boundaries.append(
+        ("non-HTTPS provider URL", model_profile_validator, model_http_base)
+    )
+    model_query_base = json.loads(json.dumps(model_profile_example))
+    model_query_base["provider"]["base_url"] = (
+        "https://api.example.invalid/v1?tenant=example"
+    )
+    invalid_model_boundaries.append(
+        ("provider URL query", model_profile_validator, model_query_base)
+    )
+    model_unknown_capability = json.loads(json.dumps(model_payload_example))
+    model_unknown_capability["provider"]["capabilities"] = ["vision"]
+    invalid_model_boundaries.append(
+        (
+            "unknown model capability",
+            model_payload_validator,
+            model_unknown_capability,
+        )
+    )
+    model_unsorted_capabilities = json.loads(json.dumps(model_payload_example))
+    model_unsorted_capabilities["provider"]["capabilities"] = [
+        "extraction",
+        "chat",
+    ]
+    invalid_model_boundaries.append(
+        (
+            "unsorted model capabilities",
+            model_payload_validator,
+            model_unsorted_capabilities,
+        )
+    )
+    model_non_uuid_credential = json.loads(json.dumps(model_profile_example))
+    model_non_uuid_credential["credential_id"] = "mine-provider-main"
+    invalid_model_boundaries.append(
+        (
+            "non-UUID credential_id",
+            model_profile_validator,
+            model_non_uuid_credential,
+        )
+    )
+    model_missing_pair = json.loads(json.dumps(model_profile_example))
+    del model_missing_pair["subject"]["pair_id"]
+    invalid_model_boundaries.append(
+        ("missing subject pair_id", model_profile_validator, model_missing_pair)
+    )
+    model_legacy_origin = json.loads(json.dumps(model_profile_example))
+    model_legacy_origin["provider"]["api_origin"] = model_legacy_origin["provider"].pop(
+        "base_url"
+    )
+    invalid_model_boundaries.append(
+        (
+            "legacy provider api_origin",
+            model_profile_validator,
+            model_legacy_origin,
+        )
+    )
+    model_wrong_trust_format = json.loads(json.dumps(model_trust_example))
+    model_wrong_trust_format["format"] = "mineguard-model-issuer-trust-v1"
+    invalid_model_boundaries.append(
+        (
+            "legacy trust store format",
+            model_trust_validator,
+            model_wrong_trust_format,
+        )
+    )
+    for label, validator, invalid in invalid_model_boundaries:
+        if not list(validator.iter_errors(invalid)):
+            raise ContractValidationError(
+                f"model credential schema accepted invalid boundary: {label}"
+            )
     return f"{len(EXAMPLES)} 个示例均通过 Draft 2020-12 schema 校验"
 
 
@@ -1587,9 +2237,7 @@ def main() -> int:
                 f"{openapi_path}: OpenAPI document must use version 3.1.0"
             )
     _check_v3_openapi_semantics(
-        documents[
-            CONTRACT_ROOT / "openapi" / "ten-quantity-exchange-v3.openapi.json"
-        ]
+        documents[CONTRACT_ROOT / "openapi" / "ten-quantity-exchange-v3.openapi.json"]
     )
 
     submission_schema = documents[
@@ -1636,6 +2284,7 @@ def main() -> int:
         documents[CONTRACT_ROOT / "schemas" / "analysis-report-v3.schema.json"]
     )
     _check_v3_workflow_semantics(v3_messages)
+    _check_model_credential_examples(documents)
 
     text_suffixes = {".json", ".md", ".py", ".txt", ".yaml", ".yml"}
     all_text = "\n".join(
@@ -1654,7 +2303,8 @@ def main() -> int:
     print(
         f"OK: {len(json_paths)} 个 JSON 文件可解析；"
         f"{len(ids)} 个 schema ID 唯一；本地引用、V1 三层完整性和 "
-        "V2 双向消息及 V3 十量提交/报告签名与状态绑定向量通过。"
+        "V2 双向消息、V3 十量提交/报告签名与状态绑定向量及 "
+        "企业模型凭据包跨层摘要通过。"
     )
     print(f"OK: {schema_result}。")
     return 0

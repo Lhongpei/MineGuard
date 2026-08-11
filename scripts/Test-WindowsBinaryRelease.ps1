@@ -5,6 +5,7 @@ param(
     [Parameter(ParameterSetName = "Release")][string]$ArtifactDirectory = "",
     [Parameter(ParameterSetName = "Release")][switch]$RequireSigned,
     [Parameter(ParameterSetName = "Release")][switch]$ExpectUnsignedTestOnly,
+    [Parameter(ParameterSetName = "Release")][switch]$ExpectInternalUnsignedRelease,
     [Parameter(ParameterSetName = "Release")][switch]$ExpectLegacyServer2012R2CompatibilityTest,
     [Parameter(ParameterSetName = "Release")][switch]$SkipRuntimeSmoke,
     [Parameter(ParameterSetName = "Release")][switch]$TestInstallerLifecycle,
@@ -21,11 +22,17 @@ $env:PYTHONUTF8 = "1"
 if ($env:OS -ne "Windows_NT") {
     throw "Windows binary release verification must run on native Windows."
 }
-if ($RequireSigned -and $ExpectUnsignedTestOnly) {
-    throw "RequireSigned and ExpectUnsignedTestOnly are mutually exclusive."
+$SelectedReleaseModes = @(
+    $RequireSigned.IsPresent,
+    $ExpectUnsignedTestOnly.IsPresent,
+    $ExpectInternalUnsignedRelease.IsPresent
+) | Where-Object { $_ }
+if (@($SelectedReleaseModes).Count -gt 1) {
+    throw "RequireSigned, ExpectUnsignedTestOnly and ExpectInternalUnsignedRelease are mutually exclusive."
 }
 if ($ExpectLegacyServer2012R2CompatibilityTest -and
-    (-not $ExpectUnsignedTestOnly -or $RequireSigned)) {
+    (-not $ExpectUnsignedTestOnly -or $RequireSigned -or
+        $ExpectInternalUnsignedRelease)) {
     throw "ExpectLegacyServer2012R2CompatibilityTest requires ExpectUnsignedTestOnly and cannot be signed."
 }
 if ($TestInstallerLifecycle -and -not $ArtifactDirectory) {
@@ -43,9 +50,9 @@ if ($TestInstallerLifecycle -and $RequireSigned -and
     [string]::IsNullOrWhiteSpace($ApprovedAgentSignerThumbprint)) {
     throw "Signed Agent installer lifecycle requires independently supplied ApprovedAgentSignerThumbprint."
 }
-if ($ExpectUnsignedTestOnly -and
+if (($ExpectUnsignedTestOnly -or $ExpectInternalUnsignedRelease) -and
     -not [string]::IsNullOrWhiteSpace($ApprovedAgentSignerThumbprint)) {
-    throw "Unsigned test lifecycle cannot claim an approved Agent signer thumbprint."
+    throw "Unsigned lifecycle cannot claim an approved Agent signer thumbprint."
 }
 
 function Get-FullExistingDirectory {
@@ -276,9 +283,9 @@ function Assert-AuthenticodeClassification {
             throw "A valid timestamped Authenticode signature is required: $PathValue"
         }
     }
-    elseif ($ExpectUnsignedTestOnly) {
+    elseif ($ExpectUnsignedTestOnly -or $ExpectInternalUnsignedRelease) {
         if ($Signature.Status -ne "NotSigned") {
-            throw "Unsigned test input unexpectedly has Authenticode status $($Signature.Status): $PathValue"
+            throw "Expected unsigned input has Authenticode status $($Signature.Status): $PathValue"
         }
     }
     return [string]$Signature.Status
@@ -729,8 +736,16 @@ function Test-RootArtifactManifest {
     if ([string]$Manifest.format -ne "mineguard-windows-installers-v1") {
         throw "Unsupported root Windows release manifest."
     }
-    $ExpectedClassification = if ($RequireSigned) { "signed-production-candidate" } else { "unsigned-test-artifacts" }
-    if (($RequireSigned -or $ExpectUnsignedTestOnly) -and [string]$Manifest.classification -ne $ExpectedClassification) {
+    $ExpectedClassification = if ($RequireSigned) {
+        "signed-production-candidate"
+    } elseif ($ExpectInternalUnsignedRelease) {
+        "unsigned-internal-release"
+    } else {
+        "unsigned-test-artifacts"
+    }
+    if (($RequireSigned -or $ExpectUnsignedTestOnly -or
+            $ExpectInternalUnsignedRelease) -and
+        [string]$Manifest.classification -ne $ExpectedClassification) {
         throw "Root release classification mismatch."
     }
     if ($ExpectLegacyServer2012R2CompatibilityTest) {
@@ -749,7 +764,11 @@ function Test-RootArtifactManifest {
             "legacy-windows-server-2012r2-test-v1") {
         throw "A legacy Windows Server 2012 R2 release was not explicitly requested."
     }
-    if ($RequireSigned) {
+    if ($RequireSigned -or $ExpectInternalUnsignedRelease) {
+        if ([bool]$Manifest.source_dirty -or
+            [string]$Manifest.source_revision -notmatch '^[A-Fa-f0-9]{40}$') {
+            throw "Strict root release does not identify a clean Git revision."
+        }
         $WheelhouseEvidence = $Manifest.wheelhouse_supply_chain
         $ActualManifestSha256 = [string]$WheelhouseEvidence.manifest_sha256
         $ExpectedManifestSha256 = [string]$WheelhouseEvidence.expected_manifest_sha256
@@ -758,7 +777,31 @@ function Test-RootArtifactManifest {
             $ActualManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
             $ExpectedManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
             -not $ActualManifestSha256.Equals($ExpectedManifestSha256, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Signed root release lacks a verified external wheelhouse-manifest trust anchor."
+            throw "Strict root release lacks a verified external wheelhouse-manifest trust anchor."
+        }
+        $Toolchain = $Manifest.toolchain
+        if (-not [bool]$Toolchain.python_external_anchor_verified -or
+            -not [bool]$Toolchain.inno_external_anchor_verified -or
+            -not [bool]$Toolchain.model_issuer_trust_external_anchor_verified -or
+            [bool]$Toolchain.model_issuer_trust_test_only -or
+            [string]$Toolchain.python_executable_sha256 -notmatch
+                '^[A-Fa-f0-9]{64}$' -or
+            [string]$Toolchain.inno_setup_path_sha256 -notmatch
+                '^[A-Fa-f0-9]{64}$' -or
+            [string]$Toolchain.model_issuer_trust_sha256 -notmatch
+                '^[A-Fa-f0-9]{64}$') {
+            throw "Strict root release lacks fixed Python, Inno or production model-trust anchors."
+        }
+        if ($ExpectInternalUnsignedRelease -and
+            ([bool]$Manifest.authenticode_signing.enabled -or
+            [bool]$Toolchain.signtool_external_anchor_verified -or
+            [string]$Manifest.authenticity_mode -ne "out-of-band-sha256" -or
+            -not [bool]$Manifest.production_approved -or
+            -not [bool]$Manifest.installer_external_sha256_required -or
+            -not [bool]$Manifest.compatibility_profile.production_approved -or
+            -not [bool]$Manifest.compatibility_profile.unsigned_internal_release -or
+            -not [bool]$Manifest.compatibility_profile.installer_external_sha256_required)) {
+            throw "INTERNAL-UNSIGNED release evidence incorrectly claims signing or omits its external-hash gate."
         }
     }
     $Installers = @($Manifest.installers)
@@ -779,6 +822,10 @@ function Test-RootArtifactManifest {
         if ($ExpectUnsignedTestOnly -and $Relative -notmatch 'UNSIGNED-TEST-ONLY') {
             throw "Unsigned installer filename lacks the required UNSIGNED-TEST-ONLY marker: $Relative"
         }
+        if ($ExpectInternalUnsignedRelease -and
+            $Relative -notmatch '-INTERNAL-UNSIGNED\.exe$') {
+            throw "INTERNAL-UNSIGNED installer filename lacks its required marker: $Relative"
+        }
         if ($ExpectLegacyServer2012R2CompatibilityTest -and
             $Relative -notmatch '-LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY\.exe$') {
             throw "Legacy Windows Server 2012 R2 installer filename lacks its required profile marker: $Relative"
@@ -787,8 +834,14 @@ function Test-RootArtifactManifest {
             $Relative -match '-LEGACY-SERVER-2012R2-') {
             throw "An unrequested legacy Windows Server 2012 R2 installer is present: $Relative"
         }
-        if ($RequireSigned -and $Relative -match 'UNSIGNED-TEST-ONLY') {
-            throw "A signed production candidate uses an unsigned-test filename: $Relative"
+        if ($RequireSigned -and
+            $Relative -match '(?:UNSIGNED-TEST-ONLY|INTERNAL-UNSIGNED)') {
+            throw "A signed production candidate uses an unsigned filename: $Relative"
+        }
+        foreach ($HashProperty in @("sha256", "runtime_sha256", "child_release_manifest_sha256")) {
+            if ([string]$Entry.$HashProperty -notmatch '^[A-Fa-f0-9]{64}$') {
+                throw "Root manifest installer entry has an invalid $HashProperty value: $Relative"
+            }
         }
         $Hash = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($Hash -ne ([string]$Entry.sha256).ToLowerInvariant()) {
@@ -804,6 +857,11 @@ function Test-RootArtifactManifest {
         $RecordedSignerThumbprint = (([string]$Entry.signer_thumbprint) -replace '\s', '').ToUpperInvariant()
         if ($ActualSignerThumbprint -ne $RecordedSignerThumbprint) {
             throw "Recorded signer thumbprint does not match the installer: $Relative"
+        }
+        if ($ExpectInternalUnsignedRelease -and
+            (-not [string]::IsNullOrWhiteSpace($RecordedSignerThumbprint) -or
+                [bool]$Entry.timestamped)) {
+            throw "INTERNAL-UNSIGNED installer evidence must not claim a signer or timestamp: $Relative"
         }
         if ($RequireSigned) {
             $RootSignerThumbprint = (([string]$Manifest.authenticode_signing.normalized_signer_thumbprint) -replace '\s', '').ToUpperInvariant()
@@ -1027,9 +1085,19 @@ function Invoke-InstallerLifecycleTest {
         [string]$Installer,
         [string]$ApprovedAgentSignerThumbprint,
         [switch]$UnsignedPlatformTestMedia,
-        [switch]$UnsignedAgentTestMedia
+        [switch]$UnsignedAgentTestMedia,
+        [switch]$InternalUnsignedPlatformMedia,
+        [switch]$InternalUnsignedAgentMedia
     )
     $Identity = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (($UnsignedPlatformTestMedia -and $InternalUnsignedPlatformMedia) -or
+        ($UnsignedAgentTestMedia -and $InternalUnsignedAgentMedia) -or
+        ($Product -eq "platform" -and
+            ($UnsignedAgentTestMedia -or $InternalUnsignedAgentMedia)) -or
+        ($Product -eq "agent" -and
+            ($UnsignedPlatformTestMedia -or $InternalUnsignedPlatformMedia))) {
+        throw "Installer lifecycle release-media flags do not match the selected product and classification."
+    }
     if (-not $Identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw "Installer lifecycle verification requires an elevated Administrator runner."
     }
@@ -1045,9 +1113,71 @@ function Invoke-InstallerLifecycleTest {
     }
     New-Item -ItemType Directory -Path $VerificationRoot -Force | Out-Null
     $LifecycleAuditError = $null
+    $ProbeService = $null
     try {
-        $ProbeService = New-ServiceStateProbe -ServiceName $ServiceName -ProbeRoot $VerificationRoot
         $InstallArguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$InstallRoot", "/LOG=$(Join-Path $VerificationRoot 'install.log')")
+        if ($InternalUnsignedPlatformMedia -or $InternalUnsignedAgentMedia) {
+            $InstallerSha256 = (Get-FileHash -LiteralPath $Installer `
+                -Algorithm SHA256).Hash
+            $WrongInstallerSha256 = if ($InstallerSha256 -eq ('0' * 64)) {
+                'F' * 64
+            } else {
+                '0' * 64
+            }
+            $NegativeCases = @(
+                [pscustomobject]@{
+                    name = 'missing authorization and digest'
+                    arguments = @(
+                        "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                        "/SP-", "/DIR=$InstallRoot",
+                        "/LOG=$(Join-Path $VerificationRoot 'negative-missing.log')"
+                    )
+                },
+                [pscustomobject]@{
+                    name = 'incorrect externally approved digest'
+                    arguments = @(
+                        "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                        "/SP-", "/DIR=$InstallRoot",
+                        "/LOG=$(Join-Path $VerificationRoot 'negative-wrong.log')",
+                        "/ALLOWUNSIGNEDINTERNALRELEASE=1",
+                        "/EXPECTEDINSTALLERSHA256=$WrongInstallerSha256"
+                    )
+                }
+            )
+            foreach ($NegativeCase in $NegativeCases) {
+                $NegativeExitCode = Invoke-WindowsGuiProcessAndWait `
+                    -FilePath $Installer -ArgumentList $NegativeCase.arguments
+                if ($NegativeExitCode -eq 0) {
+                    throw "$Product INTERNAL-UNSIGNED installer accepted $($NegativeCase.name)."
+                }
+                foreach ($ForbiddenMutation in @(
+                    (Join-Path $InstallRoot 'runtime'),
+                    (Join-Path $InstallRoot 'release-metadata'),
+                    (Join-Path $InstallRoot 'service'),
+                    (Join-Path $InstallRoot 'deploy')
+                )) {
+                    if (Test-Path -LiteralPath $ForbiddenMutation) {
+                        throw "$Product INTERNAL-UNSIGNED negative probe mutated product state: $ForbiddenMutation"
+                    }
+                }
+                if (Test-Path -LiteralPath $InstallRoot -PathType Container) {
+                    $UnexpectedInstallContent = Get-ChildItem -LiteralPath `
+                        $InstallRoot -Force | Select-Object -First 1
+                    if ($null -ne $UnexpectedInstallContent) {
+                        throw "$Product INTERNAL-UNSIGNED negative probe left installation content."
+                    }
+                    Remove-Item -LiteralPath $InstallRoot -Force
+                }
+                if ($Product -eq 'agent' -and
+                    (Test-Path -LiteralPath $AgentStateRoot)) {
+                    throw 'Agent INTERNAL-UNSIGNED negative probe created enterprise state.'
+                }
+            }
+            $InstallArguments += @(
+                "/ALLOWUNSIGNEDINTERNALRELEASE=1",
+                "/EXPECTEDINSTALLERSHA256=$InstallerSha256"
+            )
+        }
         if ($Product -eq "platform" -and $UnsignedPlatformTestMedia) {
             $InstallArguments += "/ALLOW_UNSIGNED_TEST_MEDIA=1"
         }
@@ -1056,7 +1186,7 @@ function Invoke-InstallerLifecycleTest {
             if ($UnsignedAgentTestMedia) {
                 $InstallArguments += "/ALLOW_UNSIGNED_TEST_MEDIA=1"
             }
-            else {
+            elseif (-not $InternalUnsignedAgentMedia) {
                 if ($ApprovedAgentSignerThumbprint -notmatch '^[A-F0-9]{40}$') {
                     throw "Agent lifecycle is missing the independently supplied approved signer thumbprint."
                 }
@@ -1069,7 +1199,7 @@ function Invoke-InstallerLifecycleTest {
         $InstallExitCode = Invoke-WindowsGuiProcessAndWait `
             -FilePath $Installer -ArgumentList $InstallArguments
         if ($InstallExitCode -ne 0) {
-            throw "$Product installer rejected a registered but Stopped service with exit code $InstallExitCode."
+            throw "$Product clean installer returned exit code $InstallExitCode."
         }
         $RuntimeExecutable = if ($Product -eq "platform") {
             Join-Path $InstallRoot "runtime\MineGuardPlatform.exe"
@@ -1104,6 +1234,36 @@ function Invoke-InstallerLifecycleTest {
                 [string]$WizardProbe.component -ne `
                     "mineguard-platform-control-center") {
                 throw "Platform control center headless self-test failed."
+            }
+        }
+        else {
+            $ModelCredentialWizard = Join-Path $OperationsDirectory `
+                "Start-EnterpriseAgentModelCredentialWizard.ps1"
+            $InstalledModelTrustStore = Join-Path $InstallRoot `
+                "release-metadata\model-credential-trust.json"
+            foreach ($RequiredAgentModelFile in @(
+                $ModelCredentialWizard,
+                $InstalledModelTrustStore
+            )) {
+                if (-not (Test-Path -LiteralPath $RequiredAgentModelFile `
+                        -PathType Leaf)) {
+                    throw "Agent managed model credential file is missing: $RequiredAgentModelFile"
+                }
+            }
+            $ModelWizardProbeText = & $ModelCredentialWizard `
+                -InstallRoot $InstallRoot -SelfTest | Out-String
+            $ModelWizardProbe = $ModelWizardProbeText | ConvertFrom-Json
+            if ([string]$ModelWizardProbe.status -ne "ok" -or
+                [string]$ModelWizardProbe.component -ne
+                    "enterprise-agent-model-credential-wizard" -or
+                -not [bool]$ModelWizardProbe.trust_store_present -or
+                [bool]$ModelWizardProbe.trust_store_editable -or
+                [bool]$ModelWizardProbe.api_configuration_editable -or
+                -not ([string]$ModelWizardProbe.trust_store).Equals(
+                    $InstalledModelTrustStore,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw "Agent model credential wizard headless self-test failed."
             }
         }
         $PreservationRoot = if ($Product -eq "platform") { $InstallRoot } else { Join-Path $AgentStateRoot "ci-preservation" }
@@ -1224,6 +1384,13 @@ function Invoke-InstallerLifecycleTest {
             throw "$Product install must contain exactly one Inno uninstaller."
         }
 
+        # The product installers intentionally reject an unrelated or
+        # identity-mismatched stopped service.  Create this isolated probe only
+        # after the clean install, then use it to exercise the outer install
+        # and uninstall running/registered-service guards without making the
+        # clean product transaction deterministically fail.
+        $ProbeService = New-ServiceStateProbe -ServiceName $ServiceName `
+            -ProbeRoot $VerificationRoot
         Start-Service -Name $ServiceName
         $ProbeService.WaitForStatus("Running", [TimeSpan]::FromSeconds(20))
         $RunningUpgradeArguments = @($InstallArguments | Where-Object { $_ -notlike "/LOG=*" })
@@ -1432,14 +1599,46 @@ if (-not $SkipRuntimeSmoke) {
 if ($ArtifactDirectory) {
     $ArtifactDirectory = Get-FullExistingDirectory -PathValue $ArtifactDirectory -Label "ArtifactDirectory"
     $RootRelease = Test-RootArtifactManifest -ArtifactsRoot $ArtifactDirectory
+    foreach ($RuntimeDefinition in @(
+        [pscustomobject]@{
+            product_id = "platform"
+            release = $PlatformRelease
+        },
+        [pscustomobject]@{
+            product_id = "enterprise-agent"
+            release = $AgentRelease
+        }
+    )) {
+        $InstallerEntry = @($RootRelease.manifest.installers | Where-Object {
+            [string]$_.product_id -eq $RuntimeDefinition.product_id
+        })
+        if ($InstallerEntry.Count -ne 1) {
+            throw "Root release is missing the child runtime evidence for $($RuntimeDefinition.product_id)."
+        }
+        $ActualRuntimeSha256 = (Get-FileHash -LiteralPath `
+            $RuntimeDefinition.release.executable -Algorithm SHA256).Hash
+        $ActualChildManifestSha256 = (Get-FileHash -LiteralPath `
+            (Join-Path $RuntimeDefinition.release.root "release-manifest.json") `
+            -Algorithm SHA256).Hash
+        if (-not $ActualRuntimeSha256.Equals(
+                [string]$InstallerEntry[0].runtime_sha256,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            -not $ActualChildManifestSha256.Equals(
+                [string]$InstallerEntry[0].child_release_manifest_sha256,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Root release child runtime evidence mismatch: $($RuntimeDefinition.product_id)."
+        }
+    }
     if ($TestInstallerLifecycle) {
         Invoke-InstallerLifecycleTest -Product platform `
             -Installer $RootRelease.installers["platform"] `
-            -UnsignedPlatformTestMedia:$ExpectUnsignedTestOnly
+            -UnsignedPlatformTestMedia:$ExpectUnsignedTestOnly `
+            -InternalUnsignedPlatformMedia:$ExpectInternalUnsignedRelease
         Invoke-InstallerLifecycleTest -Product agent `
             -Installer $RootRelease.installers["enterprise-agent"] `
             -ApprovedAgentSignerThumbprint $ApprovedAgentSignerThumbprint `
-            -UnsignedAgentTestMedia:$ExpectUnsignedTestOnly
+            -UnsignedAgentTestMedia:$ExpectUnsignedTestOnly `
+            -InternalUnsignedAgentMedia:$ExpectInternalUnsignedRelease
     }
 }
 

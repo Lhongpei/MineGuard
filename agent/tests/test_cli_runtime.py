@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import socket
@@ -8,14 +9,217 @@ import sys
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from uuid import uuid4
 
 from conftest import complete_values, ensure_event_snapshot
 
 from enterprise_agent.cli import main
+from enterprise_agent.model_credentials import model_credential_state_path
 from enterprise_agent.service import EnterpriseAgentService
 from enterprise_agent.storage import Repository
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_model_rotation_accepts_sanitized_authoritative_environment(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """Windows removes old model pointers before validating a replacement."""
+
+    pair_id = str(uuid4())
+    settings = SimpleNamespace(
+        production_mode=False,
+        provisioning_status=SimpleNamespace(managed=True, pair_id=pair_id),
+        five_quantity_identity=SimpleNamespace(
+            mine_id="MINE-QY-001",
+            system_id="agent-mine-qy-001",
+            operator_id="operator-qy-001",
+        ),
+        # A sanitized import environment intentionally reports no active
+        # runtime credential even though predecessor files remain on disk.
+        model_credential_status=SimpleNamespace(managed=False),
+    )
+    monkeypatch.setattr(
+        "enterprise_agent.cli.Settings.from_environment", lambda: settings
+    )
+    captured: dict[str, object] = {}
+
+    def fake_install(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            summary={
+                "managed": True,
+                "mine_id": "MINE-QY-001",
+                "system_id": "agent-mine-qy-001",
+                "credential_version": 2,
+            }
+        )
+
+    monkeypatch.setattr(
+        "enterprise_agent.cli.install_model_credential_bundle", fake_install
+    )
+    bundle = tmp_path / "rotation.mgllm"
+    bundle.write_text("{}\n", encoding="utf-8")
+    activation = tmp_path / "rotation.activation"
+    activation.write_text("A" * 43 + "\n", encoding="ascii")
+    if os.name != "nt":
+        activation.chmod(0o600)
+    trust = tmp_path / "trust.json"
+    trust.write_text("{}\n", encoding="utf-8")
+    final_lock = tmp_path / "model-credential-lock.json"
+    final_lock.write_text("old-lock\n", encoding="utf-8")
+    model_credential_state_path(final_lock).write_text(
+        "old-state\n", encoding="utf-8"
+    )
+    final_store = tmp_path / "model-credentials.dpapi"
+    final_store.write_text("old-store\n", encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "model-credential-import",
+                "--bundle",
+                str(bundle),
+                "--activation-code-file",
+                str(activation),
+                "--trust-store",
+                str(trust),
+                "--lock-output",
+                str(tmp_path / "new-lock.json"),
+                "--lock-env-path",
+                str(final_lock),
+                "--secret-store",
+                str(tmp_path / "new-store.dpapi"),
+                "--secret-store-env-path",
+                str(final_store),
+                "--current-lock",
+                str(final_lock),
+            ]
+        )
+        == 0
+    )
+    assert captured["current_lock_path"] == final_lock
+    assert captured["expected_subject"] == {
+        "mine_id": "MINE-QY-001",
+        "system_id": "agent-mine-qy-001",
+        "party_id": "operator-qy-001",
+        "pair_id": pair_id,
+    }
+    assert json.loads(capsys.readouterr().out)["credential_version"] == 2
+
+
+def test_model_rotation_accepts_new_versioned_linux_final_paths(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    pair_id = str(uuid4())
+    settings = SimpleNamespace(
+        production_mode=False,
+        provisioning_status=SimpleNamespace(managed=True, pair_id=pair_id),
+        five_quantity_identity=SimpleNamespace(
+            mine_id="MINE-QY-001",
+            system_id="agent-mine-qy-001",
+            operator_id="operator-qy-001",
+        ),
+        model_credential_status=SimpleNamespace(managed=False),
+    )
+    monkeypatch.setattr(
+        "enterprise_agent.cli.Settings.from_environment", lambda: settings
+    )
+    captured: dict[str, object] = {}
+
+    def fake_install(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            summary={
+                "managed": True,
+                "mine_id": "MINE-QY-001",
+                "system_id": "agent-mine-qy-001",
+                "credential_version": 2,
+            }
+        )
+
+    monkeypatch.setattr(
+        "enterprise_agent.cli.install_model_credential_bundle", fake_install
+    )
+    bundle = tmp_path / "rotation-v2.mgllm"
+    bundle.write_text("{}\n", encoding="utf-8")
+    activation = tmp_path / "rotation-v2.activation"
+    activation.write_text("A" * 43 + "\n", encoding="ascii")
+    if os.name != "nt":
+        activation.chmod(0o600)
+    trust = tmp_path / "trust.json"
+    trust.write_text("{}\n", encoding="utf-8")
+    current_lock = tmp_path / "model-credential-v1.lock.json"
+    current_lock.write_text("old-lock\n", encoding="utf-8")
+    current_store = tmp_path / "model-credential-v1.secret.json"
+    current_store.write_text("old-store\n", encoding="utf-8")
+    monkeypatch.setenv(
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE", str(current_lock)
+    )
+    monkeypatch.setenv(
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE", str(current_store)
+    )
+    new_lock = tmp_path / "model-credential-v2.lock.json"
+    new_store = tmp_path / "model-credential-v2.secret.json"
+
+    assert (
+        main(
+            [
+                "model-credential-import",
+                "--bundle",
+                str(bundle),
+                "--activation-code-file",
+                str(activation),
+                "--trust-store",
+                str(trust),
+                "--lock-output",
+                str(new_lock),
+                "--lock-env-path",
+                str(new_lock),
+                "--secret-store",
+                str(new_store),
+                "--secret-store-env-path",
+                str(new_store),
+                "--current-lock",
+                str(current_lock),
+            ]
+        )
+        == 0
+    )
+    assert captured["current_lock_path"] == current_lock
+    assert captured["lock_environment_path"] == new_lock
+    assert os.environ["MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE"] == str(
+        current_lock
+    )
+    assert os.environ["MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE"] == str(
+        current_store
+    )
+    assert json.loads(capsys.readouterr().out)["credential_version"] == 2
+
+
+def test_self_check_exercises_provisioning_crypto_without_loading_settings(
+    monkeypatch,
+    capsys,
+) -> None:
+    def fail_if_settings_are_loaded():
+        raise AssertionError("self-check must not load instance settings")
+
+    monkeypatch.setattr(
+        "enterprise_agent.cli.Settings.from_environment",
+        fail_if_settings_are_loaded,
+    )
+
+    assert main(["self-check"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result == {
+        "status": "ok",
+        "provisioning_crypto": "ed25519+aes-256-gcm+scrypt",
+    }
 
 
 def _free_port() -> int:

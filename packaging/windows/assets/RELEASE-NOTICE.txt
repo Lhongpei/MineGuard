@@ -9,9 +9,15 @@ Trust classification
 --------------------
 An installer whose name contains "UNSIGNED-TEST-ONLY" is an unsigned test
 artifact. It is for isolated acceptance testing only and is not a
-production-trusted release. A production candidate must have a valid
-organization-approved Authenticode signature, an approved timestamp and a
-SHA-256 that matches the separately delivered release manifest.
+production-trusted release. A formal release is either a valid,
+organization-approved, timestamped Authenticode build or an installer whose
+name explicitly contains "INTERNAL-UNSIGNED". The latter has no authenticated
+Windows publisher identity and must be matched against the exact installer
+SHA-256 delivered through an approval channel separate from the media. A hash
+stored only beside the installer is not an external trust anchor. Formal service
+installation also verifies the independently approved child release-manifest
+SHA-256 against the complete standalone runtime, operations scripts and release
+metadata file set.
 
 Contents and visibility
 -----------------------

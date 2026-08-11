@@ -2192,18 +2192,33 @@ def _temporal_signals(
         values = effective[observed_date]
         explosives = float(values.get("explosives_kg") or 0.0)
         detonators = float(values.get("detonators_count") or 0.0)
-        if explosives > 0.0 or detonators > 0.0:
-            zero_basis = "产量及开采量" if has_extraction_scope else "产量"
+        zero_basis = "产量及开采量" if has_extraction_scope else "产量"
+        if detonators > 0.0:
+            signals.append(
+                AnalysisSignal(
+                    code="detonators_during_nonproduction_candidate",
+                    severity=SignalSeverity.RISK,
+                    message=(
+                        f"{observed_date.isoformat()} {zero_basis}为零但使用雷管 "
+                        f"{detonators:g} 枚，需结合掘进、检修或统计边界说明"
+                    ),
+                    date=observed_date,
+                    metric="detonators_count",
+                    observed=detonators,
+                    basis="state_aware_context_rule_not_physical_violation",
+                )
+            )
+        if explosives > 0.0:
             signals.append(
                 AnalysisSignal(
                     code="explosives_during_nonproduction_candidate",
                     severity=SignalSeverity.RISK,
                     message=(
-                        f"{observed_date.isoformat()} {zero_basis}为零但存在火工品使用，"
-                        "需结合掘进、检修或统计边界说明"
+                        f"{observed_date.isoformat()} {zero_basis}为零但使用炸药 "
+                        f"{explosives:g} 千克，需结合掘进、检修或统计边界说明"
                     ),
                     date=observed_date,
-                    metric="detonators_count,explosives_kg",
+                    metric="explosives_kg",
                     observed=explosives,
                     basis="state_aware_context_rule_not_physical_violation",
                 )

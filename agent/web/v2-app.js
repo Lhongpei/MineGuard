@@ -8,36 +8,36 @@
       code: "safety_support",
       label: "安全生产支撑",
       quantities: [
-        { code: "airflow", label: "风量", shift: true, metrics: [["ventilation_m3_min", "风量", "m³/min"]] },
-        { code: "electricity", label: "电量", shift: true, metrics: [["electricity_kwh", "电量", "kWh"]] },
+        { code: "airflow", label: "风量", shiftRequired: true, metrics: [["ventilation_m3_min", "风量", "m³/min"]] },
+        { code: "electricity", label: "电量", shiftRequired: true, metrics: [["electricity_kwh", "电量", "kWh"]] },
         {
           code: "blasting_materials",
           label: "火工品量",
-          shift: true,
+          shiftRequired: true,
           metrics: [
             ["detonators_count", "雷管", "发"],
             ["explosives_kg", "炸药", "kg"],
           ],
         },
-        { code: "mine_entry_personnel", label: "入井人员量", shift: true, metrics: [["mine_entry_persons", "入井人员量", "人次"]] },
+        { code: "mine_entry_personnel", label: "入井人员量", shiftRequired: true, metrics: [["mine_entry_persons", "入井人员量", "人次"]] },
       ],
     },
     {
       code: "production_flow",
       label: "生产煤流",
       quantities: [
-        { code: "production", label: "产量（企业报表）", shift: true, metrics: [["production_t", "产量（企业报表）", "t"]] },
-        { code: "extraction", label: "开采量（采掘计量）", shift: true, metrics: [["extraction_t", "开采量（采掘计量）", "t"]] },
-        { code: "transport", label: "运输量", shift: true, metrics: [["transport_t", "运输量", "t"]] },
-        { code: "washing", label: "洗煤量（入洗原煤）", shift: true, metrics: [["wash_feed_t", "洗煤量（入洗原煤）", "t"]] },
+        { code: "production", label: "产量（企业报表）", shiftRequired: true, metrics: [["production_t", "产量（企业报表）", "t"]] },
+        { code: "extraction", label: "开采量（采掘计量）", shiftRequired: true, metrics: [["extraction_t", "开采量（采掘计量）", "t"]] },
+        { code: "transport", label: "运输量", shiftRequired: false, metrics: [["transport_t", "运输量", "t"]] },
+        { code: "washing", label: "洗煤量（入洗原煤）", shiftRequired: false, metrics: [["wash_feed_t", "洗煤量（入洗原煤）", "t"]] },
       ],
     },
     {
       code: "business_documents",
       label: "经营票据",
       quantities: [
-        { code: "sales", label: "销售量", shift: false, metrics: [["sales_t", "销售量", "t"]] },
-        { code: "invoiced", label: "开票量（吨）", shift: false, metrics: [["invoiced_quantity_t", "开票量（吨）", "t"]] },
+        { code: "sales", label: "销售量", shiftRequired: false, metrics: [["sales_t", "销售量", "t"]] },
+        { code: "invoiced", label: "开票量（吨）", shiftRequired: false, metrics: [["invoiced_quantity_t", "开票量（吨）", "t"]] },
       ],
     },
   ]);
@@ -102,10 +102,11 @@
     ["mine_entry_persons", "入井人员量", "人次", true],
     ["production_t", "产量（企业报表）", "t", true],
     ["extraction_t", "开采量（采掘计量）", "t", true],
-    ["sales_t", "销售量", "t", false],
+    // 商业四量的班次不是必填，但来源确有班次列时仍允许人工确认映射。
+    ["sales_t", "销售量", "t", true],
     ["transport_t", "运输量", "t", true],
     ["wash_feed_t", "洗煤量（入洗原煤）", "t", true],
-    ["invoiced_quantity_t", "开票量（吨）", "t", false],
+    ["invoiced_quantity_t", "开票量（吨）", "t", true],
   ]);
   const IMPORT_PERIODS = Object.freeze([
     ["daily_total", "日报合计"],
@@ -1398,7 +1399,7 @@
     const integerMetric = ["detonators_count", "mine_entry_persons"].includes(metric);
     if (!measurement || measurementIsNotApplicable(measurement)) {
       const status = measurementIsNotApplicable(measurement) ||
-        (scope !== "daily_total" && !quantity.shift)
+        (scope !== "daily_total" && !quantity.shiftRequired)
         ? "无需班次"
         : scope === "daily_total"
           ? "未接入此项"
@@ -1415,7 +1416,7 @@
       ? missing
         ? `${missing} 项缺失`
         : "已到"
-      : scope !== "daily_total" && !quantity.shift
+      : scope !== "daily_total" && !quantity.shiftRequired
         ? "无需班次"
         : "未接入";
     return `<section class="fq-quantity-group ${quantity.metrics.length > 1 ? "is-fire-material" : ""} ${present ? "is-present" : "is-unavailable"}" data-quantity-code="${quantity.code}"><h6><span>${escapeHtml(quantity.label)}</span><small>${stateLabel}</small></h6>${quantity.metrics.map(
@@ -1437,7 +1438,7 @@
     const applicable = scope === "daily_total"
       ? section.quantities
       : section.quantities.filter(
-        (quantity) => quantity.shift || quantityPresentInValues(values, quantity),
+        (quantity) => quantity.shiftRequired || quantityPresentInValues(values, quantity),
       );
     const received = applicable.filter((quantity) =>
       quantityPresentInValues(values, quantity),
@@ -1469,7 +1470,7 @@
     const target = $("fqDraftDetail");
     const draft = state.currentDraft;
     if (!draft) return;
-    const locked = ["queued", "submitted", "discarded"].includes(draft.status);
+    const locked = ["queued", "submitted", "acknowledged", "discarded"].includes(draft.status);
     const importRecord = state.imports.find(
       (item) => item.import_id === draft.import_id,
     );
@@ -1507,7 +1508,7 @@
             ["producing", "生产"], ["stopped", "停产"], ["maintenance", "检修"], ["restarting", "复产过渡"], ["unknown", "待确认"],
           ].map(([value, label]) => `<option value="${value}" ${day.operating_state === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
           ${dailyGroup}
-          <details class="fq-shift-review"><summary><span><strong>班次高级明细</strong><small>按需展开零点班、八点班和四点班；销售量、开票量不强制填班次。</small></span><em>展开</em></summary>${shiftGroups}</details>
+          <details class="fq-shift-review"><summary><span><strong>班次高级明细</strong><small>按需展开零点班、八点班和四点班；销售量、运输量、洗煤量和开票量不强制填班次。</small></span><em>展开</em></summary>${shiftGroups}</details>
         </details>`;
       })
       .join("");
@@ -1560,15 +1561,17 @@
       <div class="fq-summary-strip"><span><strong>${draft.payload.days.length}</strong>日报天数</span><span class="${receivedQuantityCount < 10 ? "is-warn" : "is-ok"}"><strong>${receivedQuantityCount}/10</strong>十量已到</span><span class="${missing ? "is-warn" : "is-ok"}"><strong>${missing}</strong>已接入字段缺失</span><span><strong>${draft.payload.sources.length}</strong>来源记录</span><span><strong>${draft.submission_revision}</strong>报送版本</span></div>
       ${receivedQuantityCount === 5 ? '<div class="fq-import-warning"><strong>当前是旧版 V2 五量数据：已到 5/10</strong><p>新增的开采量、销售量、运输量、洗煤量和开票量尚未接入；页面不会用历史比例、算法或 0 补齐。</p></div>' : receivedQuantityCount < 10 ? `<div class="fq-import-warning"><strong>十量尚未全部接入：已到 ${receivedQuantityCount}/10</strong><p>未接入项保持明确缺失，不会阻止查看旧报文，也不会由 Agent 猜测填补。</p></div>` : ""}
       ${reviewGate.required ? `<div class="fq-import-warning" role="status"><strong>四眼复核：${awaitingHumanPreparer ? "先由经办人接收核对" : currentIsLastEditor ? "待另一账号接手" : reviewActorMissing ? "经办人记录缺失" : "当前账号可独立复核"}</strong><p>${escapeHtml(reviewGate.message || "最后创建/编辑人不能确认或入发送队列。")}</p></div>` : ""}
+      ${draft.predecessor ? `<div class="fq-import-warning" role="status"><strong>这是第 ${escapeHtml(draft.submission_revision)} 版正式更正草稿</strong><p>同一报送链继续编号；直接前序消息 ${escapeHtml(shortHash(draft.predecessor.message_id))} 及其签名摘要已锁定，保存本草稿不会覆盖历史报文。为避免修订链中断，更正草稿创建后不能放弃或删除，可暂存并在后续继续复核。</p></div>` : ""}
       ${windowInfo.fullMonth ? "" : `<div class="fq-import-warning"><strong>当前不是整月覆盖</strong><p>本次申报窗口仅为 ${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)}。系统不会把窗口外日期算作已填报；确认前请核对这正是本次应申报范围。</p></div>`}
       ${importWarnings.length ? `<div class="fq-import-warning"><strong>导入映射需要人工核对</strong><ul>${importWarnings.slice(0, 20).map((item) => `<li>${escapeHtml(item.reason || "存在未明确的来源字段")}</li>`).join("")}</ul></div>` : ""}
-      <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。每天先核对十量日报合计；只有需要时再展开三个班次，销售量和开票量不强制提供班次实值。</div>
+      <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。每天先核对十量日报合计；只有需要时再展开三个班次，销售量、运输量、洗煤量和开票量不强制提供班次实值。</div>
       ${autofillEvidenceHtml(draft)}
       <div class="fq-day-list">${days}</div>
       <div class="fq-sticky-actions">
         <button class="button button-secondary" type="button" data-fq-action="save-draft" ${locked || !can("write") ? "disabled" : ""}>${awaitingHumanPreparer ? "接收核对并保存" : "保存复核修改"}</button>
-        ${draft.status === "ready_review" && can("write") ? '<button class="button button-danger-quiet" type="button" data-fq-action="discard-draft">放弃草稿</button>' : ""}
+        ${draft.status === "ready_review" && !draft.predecessor && can("write") ? '<button class="button button-danger-quiet" type="button" data-fq-action="discard-draft">放弃草稿</button>' : ""}
         ${draft.status === "queued" ? '<button class="button button-primary" type="button" data-fq-action="send-draft">立即重试发送</button>' : ""}
+        ${["submitted", "acknowledged"].includes(draft.status) && draft.contract_version === "ten-quantity-submission-v3" && can("write") ? '<button class="button button-primary" type="button" data-fq-action="create-correction">创建更正草稿</button>' : ""}
       </div>
       <section class="fq-confirm-card">
         <h4>人工确认并报送</h4><p>${escapeHtml(permissionHint)}</p>
@@ -1584,7 +1587,7 @@
   }
 
   function handleDraftEdit(event) {
-    if (!state.currentDraft || ["queued", "submitted"].includes(state.currentDraft.status)) return;
+    if (!state.currentDraft || ["queued", "submitted", "acknowledged", "discarded"].includes(state.currentDraft.status)) return;
     const input = event.target;
     const dayIndex = Number(input.dataset.day);
     if (!Number.isInteger(dayIndex)) return;
@@ -1649,6 +1652,39 @@
         ]);
         renderDraft();
         message("已按最新机器来源快照重建草稿，原手工修改摘要已写入审计链。", "success");
+      } catch (error) {
+        message(error.message, "error");
+        button.disabled = false;
+      }
+      return;
+    }
+    if (action === "create-correction") {
+      const accepted = window.confirm(
+        `将以政府已回执的第 ${state.currentDraft.submission_revision} 版为不可变前序，创建第 ${state.currentDraft.submission_revision + 1} 版可编辑草稿。原报文和回执不会被覆盖，是否继续？`,
+      );
+      if (!accepted) return;
+      button.disabled = true;
+      try {
+        const result = await api(
+          `/api/v2/drafts/${encodeURIComponent(state.currentDraft.draft_id)}/correction`,
+          {
+            method: "POST",
+            body: {
+              expected_revision: state.currentDraft.revision,
+              expected_submission_revision: state.currentDraft.submission_revision,
+              accepted: true,
+            },
+          },
+        );
+        const correction = result.draft;
+        await Promise.all([loadDrafts(false), loadAudit(false)]);
+        await openDraft(correction.draft_id);
+        message(
+          result.duplicate
+            ? "该前序版本的更正草稿已存在，已为你打开；系统没有创建分叉。"
+            : `第 ${correction.submission_revision} 版更正草稿已创建，请修改后保存并交由另一账号复核。`,
+          "success",
+        );
       } catch (error) {
         message(error.message, "error");
         button.disabled = false;

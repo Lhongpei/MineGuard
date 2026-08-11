@@ -3,10 +3,12 @@
 本目录由 MineGuard Platform Windows 安装包部署。普通使用者不需要进入这个目录，也不
 需要输入 PowerShell 命令；本页前两节先说明图形控制中心，后面的命令只供管理员高级运维。
 
-正式安装的唯一信任入口，是在执行前已按介质外审批记录核对 SHA-256 和签名者指纹的
-signed Setup。直接展开 staging 或运行其中的管理员 PowerShell 只能用于受控构建、故障注入或
-兼容性测试，不得称为正式安装。脚本对 release manifest、文件摘要和 Authenticode 的再校验只是
-建立信任后的纵深防御，不能认证正在执行的脚本自身，也不是信任根。
+正式安装的信任入口是 Setup 介质本身。有证书模式在执行前核对 Setup
+SHA-256 和签名者指纹，使用 signed Setup；显式的 `INTERNAL-UNSIGNED` 受控内网模式
+不核验签名者，必须从安装介质之外的独立批准记录核对 Setup SHA-256，并在
+安装正式服务时再输入该产品的子发行清单 SHA-256。直接展开 staging 不能认证其中脚本
+自身，不是信任根。默认 `unsigned-test-artifacts` 仍只能用于兼容性测试，
+不能安装正式服务。
 
 ## 1. 一键打开本机展示
 
@@ -25,7 +27,41 @@ signed Setup。直接展开 staging 或运行其中的管理员 PowerShell 只�
 
 ## 2. 用控制中心配置正式内网
 
-首次正式配置前，管理员先准备单位批准的逐矿 `clients.json` 和用途单一的本机 NTFS 状态
+新部署优先从开始菜单打开 **MineGuard 企业接入包与注册向导**。它按三个页面完成：
+
+1. 初始化口令加密的签发密钥，并把 SPKI-DER SHA-256 登记到独立审批记录；
+2. 逐矿填写企业身份和比较组信息。向导用四个互不包含的目录分别保存企业接入包、政府
+   注册包、企业激活码、政府激活码。企业交付目录只有 `.mgprov`、签发公钥、政府 HTTPS
+   CA 和无秘密交接清单；`.mgprov` 与企业激活码必须通过两个独立渠道交付。每次生成的
+   12 位独立核验码只显示给监管人员，并写入监管机
+   `provisioning-registrations\<矿-v版本>\企业独立核验记录.txt`，绝不写进企业交付目录；
+   应通过电话或审批单等第三条介质外渠道告知企业；
+3. 企业安装不需要回传 `.mgreg`。监管人员选择本机一直保管的配对 `.mgreg` 和 Platform
+   激活码，向导验签后事务写入 `clients.json`、Platform 身份及签发信任锚。若正式服务
+   正在运行，界面会明确提示短暂停服；只有操作员确认后才停止，并在成功或失败后自动恢复。
+
+首次成功生成后，向导会在管理员签发目录保存不含秘密的 `authority-policy.json`，后续煤矿
+自动复用并锁定 issuer、Platform 身份、Platform URL 和 CA 等监管固定项，避免多矿误填成
+互不兼容的注册表。每次继续签发前还会重新计算固定公钥和 CA 的 SHA-256，与该策略文件
+固定时间比较；文件被替换时闭锁。当前 Windows 向导不会自动迁移签发密钥、CA、Platform
+身份或监管 URL，这类整体变更必须先停止签发并按单位批准的迁移方案处理。签发私钥永远
+不进入企业交付目录；企业交付目录中的
+`enterprise-install-manifest.json` 可让企业向导自动填入文件、实例名和散列，但现场仍须
+输入上述介质外 12 位核验码。监管注册、激活码和签发机构目录使用安装根下带所有权标记的
+固定 NTFS 专用目录；向导不会对用户任意选择的宽泛目录递归改 ACL。
+
+首次选择并验真的政府 HTTPS CA 会先原子复制到
+`provisioning-authority\platform-ca.pem`，策略只绑定这个管理员专用固定副本，不依赖 U 盘
+盘符或原始交付路径。第一次生成前，向导会创建
+`provisioning-authority\authority-policy.pending.json`；四区材料和固定策略全部成功后，
+才原子发布 `authority-policy.json` 并删除 pending 标记。策略保存、ACL 或发布任一步失败时
+不会显示“生成成功”，pending 标记会保留并闭锁后续签发。此时不得直接删除标记或继续交付
+已经生成的材料；应先核对固定 CA、四区输出和审计记录，再按单位批准的恢复流程处理。
+旧版本策略如果仍引用 U 盘或其他外部 CA 路径，本版本会明确拒绝且不会静默复制或改写；
+管理员应停止签发，依据旧策略摘要与独立审批记录完成显式 CA 策略迁移；不能在本向导中
+直接覆盖旧策略。
+
+旧版手工注册方式仍可用：管理员先准备单位批准的逐矿 `clients.json` 和用途单一的本机 NTFS 状态
 目录。打开控制中心并切换到“正式内网配置”，依次：
 
 1. 选择 `clients.json` 和状态数据目录，确认本机端口；
@@ -109,14 +145,39 @@ $ApprovedPlatformSigner = '<从独立审批记录取得的40位代码签名证�
 没有完成改密的正式管理员、或包含演示/合成记录的状态库都会被拒绝；演示数据不能原地
 转换为正式数据。
 
+如果已安装明确标记为 `INTERNAL-UNSIGNED` 的内网候选版，不填写签名者指纹，
+改为从介质外独立批准记录取得 Platform 的 `child_release_manifest_sha256`。该值位于
+根发行 `release-manifest.json` 对应 Platform 项中，交付前必须连同 Setup SHA-256 一起
+抄入介质外审批记录：
+
+```powershell
+$ApprovedPlatformReleaseManifestSha256 = '<介质外独立批准的64位子发行清单SHA-256>'
+
+.\Install-MineGuardPlatformService.ps1 `
+  -WinSWExecutable 'D:\approved-tools\WinSW-x64.exe' `
+  -ExpectedSha256 $ApprovedWinSWSha256 `
+  -Production `
+  -AllowUnsignedInternalRelease `
+  -ExpectedReleaseManifestSha256 $ApprovedPlatformReleaseManifestSha256 `
+  -InstallRoot 'C:\ProgramData\MineGuard\Platform' `
+  -StartService
+```
+
+该通道只接受 `unsigned-internal-release`；签名候选版、默认未签名测试版或
+分类与构建元数据不一致的介质都会被拒绝。这只替换 Authenticode 发布者验证，
+不会关闭 `-Production`、Secure Cookie、HTTPS 反向代理、正式账号、状态用途、客户端
+注册表、受管签发信任或健康检查等门禁。
+
 配置脚本使用机器级命名 Mutex 串行化全部配置事务。若异常中断或回滚不完整，固定的
 `config\.mineguard-configuration-blocked.json` 会阻止再次配置和启动；请按标记中的精确
 `transactionDirectory` 停服核验、清理后，再删除该固定标记并重新配置。
 标记不是唯一依据：两条入口还会有界扫描 config 直系子目录，任何精确的
 `.configuration-transaction.<32位十六进制>` 残留都会独立阻断。
 
-图形控制中心的“正式服务安装”页提供相同门禁：签名者指纹和 WinSW 摘要必须由操作员从
-介质外审批记录手工填写，界面不会从 `build-metadata.json` 自动填入信任锚。
+图形控制中心的“正式服务安装”页会识别发布分类：签名候选版要求签名者
+指纹，`INTERNAL-UNSIGNED` 要求子发行清单 SHA-256 并弹出无发布者身份的风险确认，
+默认未签名测试版直接禁用正式服务按钮。所有信任锚都必须由操作员从介质外
+批准记录手工填写，界面不会从 `build-metadata.json` 自动填入。
 
 ## 5. 健康检查、备份与恢复
 

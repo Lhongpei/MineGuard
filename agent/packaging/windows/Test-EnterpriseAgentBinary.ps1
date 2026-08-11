@@ -81,7 +81,7 @@ try {
                     "VIRTUAL_ENV_PROMPT"
                 ) -or
                 $_.Name -match `
-                    '^(ENTERPRISE_|PLATFORM_|DEEPSEEK_|OPENAI_|COAL_NEWS_)' -or
+                    '^(ENTERPRISE_|PLATFORM_|DEEPSEEK_|OPENAI_|COAL_NEWS_|MINEGUARD_AGENT_)' -or
                 $_.Name -match '(?i)(API_KEY|SECRET|TOKEN|PASSWORD)$'
             } |
             ForEach-Object { $_.Name } |

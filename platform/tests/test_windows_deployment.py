@@ -27,6 +27,8 @@ POWERSHELL_SCRIPTS = {
     "Uninstall-MineGuardPlatformRuntime.ps1",
     "Resolve-MineGuardPlatformExecutable.ps1",
     "Configure-MineGuardPlatformFormal.ps1",
+    "Invoke-MineGuardPlatformProvisioning.ps1",
+    "Start-MineGuardPlatformProvisioningWizard.ps1",
 }
 
 
@@ -155,13 +157,155 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
     assert "Invoke-WebRequest" not in install
     assert "Start-BitsTransfer" not in install
     assert "version[1] -ne 12" in install
-    assert "icacls.exe" in install and "@('/T', '/C')" in install
+    acl_start = install.index("function Set-MineGuardDirectoryAcl")
+    acl_end = install.index("function Test-MineGuardPlatformRuntimeProcess", acl_start)
+    acl_helper = install[acl_start:acl_end]
+    for token in (
+        "DirectorySecurity",
+        "FileSecurity",
+        "SetAccessRuleProtection($true, $false)",
+        "[IO.Directory]::SetAccessControl",
+        "[IO.File]::SetAccessControl",
+    ):
+        assert token in acl_helper
+    assert "icacls" not in acl_helper.lower()
+    assert "'/reset'" not in acl_helper and '"/reset"' not in acl_helper
     assert install.count("'Configure-MineGuardPlatformFormal.ps1'") >= 2
     assert "Assert-InstalledServiceSecurityBoundary" in install
     assert "platformSystemId = 'mineguard-qinyuan'" in install
     assert "platformPartyId = 'regulator-qinyuan'" in install
     assert "mineguard-government" not in install
     assert "regulator-government" not in install
+
+    provisioning_core = (
+        WINDOWS / "Invoke-MineGuardPlatformProvisioning.ps1"
+    ).read_text(encoding="utf-8-sig")
+    provisioning_wizard = (
+        WINDOWS / "Start-MineGuardPlatformProvisioningWizard.ps1"
+    ).read_text(encoding="utf-8-sig")
+    for required in (
+        "provision', 'issuer-init'",
+        "provision', 'create-pair'",
+        "provision', 'import-registration'",
+        "--passphrase-file",
+        "--activation-code-file",
+        "--expected-public-key-sha256",
+        "--expected-issuer-key-id",
+        "ManagedProvisioningRequired = $true",
+        "Set-AdministratorOnlyAcl",
+        ".provisioning-work-",
+        "--enterprise-bundle-directory",
+        "--platform-registration-directory",
+        "--enterprise-activation-directory",
+        "--platform-activation-directory",
+        "Assert-ValidPemCertificateChain",
+        "PRIVATE\\s+KEY",
+        "X509Certificate2",
+        "企业独立核验记录.txt",
+        "independent_handover_record",
+        "Initialize-OwnedProtectedRoot",
+        ".mineguard-provisioning-root.json",
+        "Assert-NoReparseTree",
+        "Assert-SeparateDirectoryTrees",
+        "[switch] $ManageServiceLifecycle",
+        "Stop-Service -Name 'MineGuardPlatform'",
+        "Start-Service -Name 'MineGuardPlatform'",
+        "WaitForStatus(",
+        "Publish-FixedAuthorityCa",
+        "platform-ca.pem",
+        ".platform-ca.pending.",
+        "拒绝静默替换",
+        "authority_platform_ca_file",
+    ):
+        assert required in provisioning_core
+    assert "-Passphrase $plain" not in provisioning_core
+    assert "-AdminPassword $" not in provisioning_core
+    for required in (
+        "System.Windows.Forms",
+        "1. 初始化签发密钥",
+        "2. 生成企业接入包",
+        "3. 导入监管注册包",
+        "*.activation",
+        "SPKI SHA-256",
+        "不要长期同盘保存",
+        "-STA",
+        "Verb = 'runas'",
+        "Assert-AuthorityPolicyMaterial",
+        "issuer_public_key_sha256",
+        "platform_ca_sha256",
+        "Test-FixedTimeText",
+        "contains_secrets=false",
+        "independent_handover_record",
+        "ManageServiceLifecycle",
+        "确认短暂停服",
+        "mineguard-authority-policy-pending-v1",
+        "authority-policy.pending.json",
+        "New-AuthorityPolicyPending",
+        "Read-AuthorityPolicyPending",
+        "[IO.FileMode]::CreateNew",
+        ".authority-policy.",
+        "-AllowMatchingPending",
+        "引用了外部或可移动路径的旧版 CA",
+        "监管固定策略和 CA 固定副本已原子发布",
+    ):
+        assert required in provisioning_wizard
+    assert "$policyWarning" not in provisioning_wizard
+    assert "注意：监管固定项未能保存" not in provisioning_wizard
+    pending_create = provisioning_wizard.index(
+        "$pendingTransactionId = New-AuthorityPolicyPending"
+    )
+    pair_create = provisioning_wizard.index("$result = & $coreScript @parameters")
+    policy_publish = provisioning_wizard.index(
+        "Save-AuthorityPolicy -Result $result"
+    )
+    success_status = provisioning_wizard.index('"生成成功（{0}')
+    assert pending_create < pair_create < policy_publish < success_status
+    assert provisioning_core.index("Assert-ValidPemCertificateChain -Path $snapshotCa") < (
+        provisioning_core.index("'provision', 'create-pair'")
+    )
+    assert provisioning_core.index("Stop-Service -Name 'MineGuardPlatform'") < (
+        provisioning_core.index("& $configurationScript @configurationArguments")
+    )
+    assert provisioning_core.index("& $configurationScript @configurationArguments") < (
+        provisioning_core.index("Start-Service -Name 'MineGuardPlatform'")
+    )
+    import_mutex = provisioning_core.index(
+        "Global\\MineGuardPlatform.Configuration",
+        provisioning_core.index("# ImportRegistration"),
+    )
+    settings_snapshot = provisioning_core.index(
+        "Get-Content -LiteralPath $settingsPath", import_mutex
+    )
+    nested_configuration = provisioning_core.index(
+        "& $configurationScript @configurationArguments", settings_snapshot
+    )
+    mutex_release = provisioning_core.index(
+        "$configurationMutex.ReleaseMutex()", nested_configuration
+    )
+    service_restore = provisioning_core.index(
+        "Start-Service -Name 'MineGuardPlatform'", mutex_release
+    )
+    assert (
+        import_mutex
+        < settings_snapshot
+        < nested_configuration
+        < mutex_release
+        < service_restore
+    )
+    assert "Set-AdministratorOnlyAcl -Path $BundleOutputDirectory -Recurse" not in (
+        provisioning_core
+    )
+    assert "Get-SafeLocalPath -Value $InstallRoot" in provisioning_core
+    assert "$box.Tag = $button" in provisioning_wizard
+    assert not any(mark in provisioning_wizard for mark in "“”‘’")
+    provisioning_readme = (WINDOWS / "README.md").read_text(encoding="utf-8")
+    for required in (
+        "provisioning-authority\\platform-ca.pem",
+        "authority-policy.pending.json",
+        "不会显示“生成成功”",
+        "不会静默复制或改写",
+    ):
+        assert required in provisioning_readme
 
     start = (WINDOWS / "Start-MineGuardPlatform.ps1").read_text(encoding="utf-8-sig")
     assert "Resolve-MineGuardPlatformExecutable" in start
@@ -341,9 +485,14 @@ def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
         "Write-ServerCaptureLine",
         "Install-MineGuardPlatformService.ps1",
         "Configure-MineGuardPlatformFormal.ps1",
-        "ExpectedSignerThumbprint = $ExpectedSignerThumbprint",
+        "$parameters['ExpectedSignerThumbprint'] = $ExpectedSignerThumbprint",
         "Production = $true",
         "签名者指纹必须是从介质外审批记录取得",
+        "Get-InstalledPlatformReleaseClassification",
+        "unsigned-internal-release",
+        "ExpectedReleaseManifestSha256",
+        "AllowUnsignedInternalRelease",
+        "确认 INTERNAL-UNSIGNED 风险与外部摘要",
     ):
         assert required in wizard
     assert wizard.index("Test-MineGuardHealth -Port") < wizard.index(
@@ -362,7 +511,8 @@ def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
     assert "formalAccessUrl = $Uri.AbsoluteUri" in wizard
     assert "Test-MineGuardHealthUrl -Url $formalHealthUrl.AbsoluteUri" in wizard
     assert "Test-Path -LiteralPath $path -PathType Leaf" in wizard
-    assert "build-metadata.json" not in wizard
+    assert wizard.count("build-metadata.json") == 1
+    assert "signingCertificateThumbprint" not in wizard
     assert "$AdminPassword" not in wizard
     assert "-AdminPassword" not in wizard
     assert "$passwordInput" not in wizard
@@ -403,6 +553,9 @@ def test_windows_runtime_uninstall_is_transactional_and_data_preserving() -> Non
     )
     for required in (
         "InternalInnoUninstall",
+        "TrustedScriptSha256",
+        "TrustedScriptBytes",
+        "$script:TrustedInMemoryInvocation",
         "Assert-PlatformReleaseIdentity",
         "Assert-PlatformQuiescent",
         "$script:UninstallScriptPath",
@@ -414,6 +567,7 @@ def test_windows_runtime_uninstall_is_transactional_and_data_preserving() -> Non
         "Platform uninstall quarantine contains an unexpected item",
     ):
         assert required in script
+    assert "exit 0" not in script
     assert '$TargetNames = @("runtime", "deploy", "service", "release-metadata")' in script
     for preserved in ("config", "state", "backups", "logs"):
         expanded = (
@@ -512,6 +666,13 @@ def test_windows_configuration_and_service_templates_fail_closed() -> None:
     assert "wrapperConfigSha256" in service_install
     assert "[switch] $Production" in service_install
     assert "ExpectedSignerThumbprint" in service_install
+    assert "[switch] $AllowUnsignedInternalRelease" in service_install
+    assert "[string] $ExpectedReleaseManifestSha256 = ''" in service_install
+    assert "Assert-InternalUnsignedRuntimeIntegrity" in service_install
+    assert "unsigned-internal-release" in service_install
+    assert "Platform 子发行清单 SHA-256 与介质外独立批准值不一致" in service_install
+    assert "release-trust-anchor.json" in service_install
+    assert "演示配置不得声明 -Production、内网未签名授权" in service_install
     assert "signed-production-candidate" in service_install
     assert "Get-AuthenticodeSignature" in service_install
     assert "TimeStamperCertificate" in service_install
@@ -629,6 +790,11 @@ def test_platform_service_lifecycle_is_path_bound_and_transactional() -> None:
         "Security.Principal.NTAccount",
         "ExpectedSignerThumbprint",
         "Assert-ProductionRuntimeSignature",
+        "Assert-InternalUnsignedRuntimeIntegrity",
+        "AllowUnsignedInternalRelease",
+        "ExpectedReleaseManifestSha256",
+        "unsigned-internal-release",
+        "release-trust-anchor.json",
     ):
         assert required in install
     assert install.count("Get-FileHash -LiteralPath $WinSWExecutable") >= 2

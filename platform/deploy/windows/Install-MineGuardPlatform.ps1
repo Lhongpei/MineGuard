@@ -5,6 +5,8 @@ param(
     [string] $PythonExecutable,
     [string] $Wheelhouse,
     [ValidateRange(1, 65535)] [int] $Port = 8080,
+    [switch] $AllowUnsignedInternalRelease,
+    [string] $ExpectedReleaseManifestSha256 = '',
     [switch] $AuditFailAfterRuntimeSwitch
 )
 
@@ -107,6 +109,17 @@ function Test-PathEqualOrChild {
         $candidateFull.StartsWith(
             $parentFull + '\', [StringComparison]::OrdinalIgnoreCase
         )
+}
+
+function Assert-MineGuardNoReparseTree {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    foreach ($item in @((Get-Item -LiteralPath $Path -Force)) + @(
+            Get-ChildItem -LiteralPath $Path -Force -Recurse)) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "安装目录树不能包含 reparse point：$($item.FullName)"
+        }
+    }
 }
 
 function Assert-NotBroadOrSystemInstallRoot {
@@ -326,25 +339,106 @@ function Set-MineGuardDirectoryAcl {
     param(
         [string] $Path,
         [string] $ServicePermission,
-        [switch] $Recurse
+        [switch] $Recurse,
+        [switch] $UsersReadExecute
     )
-    $serviceGrant = ('*{0}:(OI)(CI){1}' -f $ServiceSid, $ServicePermission)
-    & "$env:SystemRoot\System32\icacls.exe" $Path '/reset' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "重置 NTFS 根目录 ACL 失败：$Path" }
-    $aclArguments = @(
-        $Path, '/inheritance:r',
-        '/grant:r', '*S-1-5-18:(OI)(CI)F',
-        '/grant:r', '*S-1-5-32-544:(OI)(CI)F',
-        '/grant:r', $serviceGrant
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "ACL 目标不存在：$Path"
+    }
+    $rootItem = Get-Item -LiteralPath $Path -Force
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "ACL 根必须是普通目录：$Path"
+    }
+    $serviceRights = switch ($ServicePermission) {
+        'RX' { [Security.AccessControl.FileSystemRights]::ReadAndExecute }
+        'M' { [Security.AccessControl.FileSystemRights]::Modify }
+        default { throw "不支持的 Platform 服务 ACL 权限：$ServicePermission" }
+    }
+    $administrators = New-Object Security.Principal.SecurityIdentifier(
+        'S-1-5-32-544'
     )
-    & "$env:SystemRoot\System32\icacls.exe" @aclArguments | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "设置 NTFS 根目录 ACL 失败：$Path" }
+    $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+    $service = New-Object Security.Principal.SecurityIdentifier($ServiceSid)
+    $users = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $none = [Security.AccessControl.PropagationFlags]::None
+    $containerAndObject = `
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+
+    function Set-OneMineGuardAcl {
+        param([IO.FileSystemInfo] $Item)
+        $isDirectory = $Item.PSIsContainer
+        $security = if ($isDirectory) {
+            New-Object Security.AccessControl.DirectorySecurity
+        }
+        else {
+            New-Object Security.AccessControl.FileSecurity
+        }
+        $security.SetAccessRuleProtection($true, $false)
+        $security.SetOwner($administrators)
+        $inheritance = if ($isDirectory) {
+            $containerAndObject
+        }
+        else {
+            [Security.AccessControl.InheritanceFlags]::None
+        }
+        foreach ($definition in @(
+            [pscustomobject]@{
+                Sid = $system
+                Rights = [Security.AccessControl.FileSystemRights]::FullControl
+            },
+            [pscustomobject]@{
+                Sid = $administrators
+                Rights = [Security.AccessControl.FileSystemRights]::FullControl
+            },
+            [pscustomobject]@{
+                Sid = $service
+                Rights = $serviceRights
+            }
+        )) {
+            $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+                $definition.Sid,
+                $definition.Rights,
+                $inheritance,
+                $none,
+                $allow
+            )
+            [void]$security.AddAccessRule($rule)
+        }
+        if ($UsersReadExecute) {
+            $usersRule = New-Object Security.AccessControl.FileSystemAccessRule(
+                $users,
+                [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+                $inheritance,
+                $none,
+                $allow
+            )
+            [void]$security.AddAccessRule($usersRule)
+        }
+        if ($isDirectory) {
+            [IO.Directory]::SetAccessControl($Item.FullName, $security)
+            $applied = [IO.Directory]::GetAccessControl($Item.FullName)
+        }
+        else {
+            [IO.File]::SetAccessControl($Item.FullName, $security)
+            $applied = [IO.File]::GetAccessControl($Item.FullName)
+        }
+        if (-not $applied.AreAccessRulesProtected) {
+            throw "ACL 意外保留了继承：$($Item.FullName)"
+        }
+    }
+
+    # 每个对象只执行一次完整 protected DACL 写入；禁止先 /reset 再收紧所
+    # 产生的短暂父目录继承窗口。
+    Set-OneMineGuardAcl -Item $rootItem
     if ($Recurse) {
-        $descendantPattern = Join-Path $Path '*'
-        $resetArguments = @($descendantPattern, '/reset') + @('/T', '/C')
-        & "$env:SystemRoot\System32\icacls.exe" @resetArguments | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "重置 NTFS 子项 ACL 继承失败：$Path"
+        foreach ($item in Get-ChildItem -LiteralPath $Path -Force -Recurse) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Platform 产品树不能包含 reparse point：$($item.FullName)"
+            }
+            Set-OneMineGuardAcl -Item $item
         }
     }
 }
@@ -386,6 +480,9 @@ $binaryMode = Test-Path -LiteralPath $binarySource -PathType Leaf
 $sourceMode = Test-Path -LiteralPath $sourceProject -PathType Leaf
 if (-not $binaryMode -and -not $sourceMode) {
     throw "源目录既不是 Platform 二进制发布包，也不是开发源码目录：$SourceDirectory"
+}
+if ($AllowUnsignedInternalRelease -and -not $binaryMode) {
+    throw 'AllowUnsignedInternalRelease 只能授权安装标记为 unsigned-internal-release 的二进制发布包。'
 }
 if ((Test-PathEqualOrChild -Candidate $InstallRoot -Parent $SourceDirectory) -or
     (Test-PathEqualOrChild -Candidate $SourceDirectory -Parent $InstallRoot)) {
@@ -449,6 +546,25 @@ if ($binaryMode) {
             throw "发布包包含未列入 SHA256SUMS.txt 的文件：$($item.FullName)"
         }
     }
+    $normalizedExpectedManifestSha256 = (
+        $ExpectedReleaseManifestSha256 -replace '\s', ''
+    ).ToUpperInvariant()
+    if ($AllowUnsignedInternalRelease) {
+        if ($normalizedExpectedManifestSha256 -cnotmatch '^[A-F0-9]{64}$') {
+            throw 'INTERNAL-UNSIGNED 产品安装要求由已核验 Setup 传入 64 位 ExpectedReleaseManifestSha256。'
+        }
+        $actualReleaseManifestSha256 = (Get-FileHash -LiteralPath `
+            $releaseManifest -Algorithm SHA256).Hash
+        if (-not $actualReleaseManifestSha256.Equals(
+                $normalizedExpectedManifestSha256,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Platform 子发行清单与已核验 Setup 固化的 SHA-256 不一致；禁止执行候选程序。'
+        }
+    } elseif (-not [string]::IsNullOrWhiteSpace(
+            $normalizedExpectedManifestSha256
+        )) {
+        throw 'ExpectedReleaseManifestSha256 只能与 -AllowUnsignedInternalRelease 同时使用。'
+    }
     try {
         $manifest = Get-Content -LiteralPath $releaseManifest -Raw -Encoding UTF8 |
             ConvertFrom-Json
@@ -476,13 +592,27 @@ if ($binaryMode) {
         [bool]$manifest.authenticodeVerified -ne [bool]$manifest.codeSigned) {
         throw 'release-manifest.json 的 Authenticode 验证状态无效。'
     }
+    $declaredClassification = [string]$manifest.releaseClassification
     $expectedClassification = if ([bool]$manifest.codeSigned) {
         'signed-production-candidate'
+    } elseif ($declaredClassification -eq 'unsigned-internal-release') {
+        'unsigned-internal-release'
     } else {
         'unsigned-test-artifacts'
     }
     if ([string]$manifest.releaseClassification -ne $expectedClassification) {
         throw 'release-manifest.json 的发布分类与代码签名状态不一致。'
+    }
+    if ($expectedClassification -eq 'unsigned-internal-release' -and
+        -not $AllowUnsignedInternalRelease) {
+        throw (
+            '检测到 INTERNAL-UNSIGNED 内网无签名正式发行介质；必须由 Setup 显式传入 ' +
+            '-AllowUnsignedInternalRelease，并在执行 Setup 前根据介质外审批记录核对其 SHA-256。'
+        )
+    }
+    if ($expectedClassification -ne 'unsigned-internal-release' -and
+        $AllowUnsignedInternalRelease) {
+        throw 'AllowUnsignedInternalRelease 与当前发布分类不匹配；拒绝扩大未签名授权范围。'
     }
     $manifestFiles = @{}
     foreach ($entry in @($manifest.files)) {
@@ -521,6 +651,24 @@ if ($binaryMode) {
             -not $manifestFiles.ContainsKey($authenticatedPath)) {
             throw "release-manifest.json 未覆盖发布文件：$authenticatedPath"
         }
+    }
+    $trustedLauncherRelative = `
+        'deploy/windows/Open-MineGuardPlatformControlCenter.ps1'
+    $trustedLauncherEntries = @($manifest.files | Where-Object {
+        [string]$_.path -ceq $trustedLauncherRelative
+    })
+    if ($trustedLauncherEntries.Count -ne 1) {
+        throw 'Platform 子发行清单必须唯一认证桌面 launcher 原字节。'
+    }
+    $trustedLauncherSource = Join-Path $SourceDirectory `
+        $trustedLauncherRelative.Replace('/', '\')
+    $trustedLauncherSha256 = `
+        ([string]$trustedLauncherEntries[0].sha256).ToUpperInvariant()
+    if (-not (Test-Path -LiteralPath $trustedLauncherSource -PathType Leaf) -or
+        $trustedLauncherSha256 -cnotmatch '^[A-F0-9]{64}$' -or
+        (Get-FileHash -LiteralPath $trustedLauncherSource -Algorithm SHA256).Hash `
+            -cne $trustedLauncherSha256) {
+        throw 'Platform 桌面 launcher 与子发行清单固定 SHA-256 不一致。'
     }
     $buildMetadataPath = Join-Path $SourceDirectory 'build-metadata.json'
     try {
@@ -564,7 +712,14 @@ if ($binaryMode) {
         if ($unsignedSignature.Status -ne 'NotSigned') {
             throw '发布清单声明未签名，但 Platform 主程序实际带有签名或签名状态异常。'
         }
-        Write-Warning '当前为未签名内部测试版，不是生产可信发布。'
+        if ($expectedClassification -eq 'unsigned-internal-release') {
+            Write-Warning (
+                '当前为 INTERNAL-UNSIGNED 内网无签名正式发行，没有 Windows 发布者身份。' +
+                '只能在受控内网中使用，后续安装正式服务必须再输入介质外独立批准的子发行清单 SHA-256。'
+            )
+        } else {
+            Write-Warning '当前为未签名内部测试版，不是生产可信发布。'
+        }
     }
     Assert-MineGuardBinaryInstallPathBudget -Root $InstallRoot `
         -Manifest $manifest
@@ -679,6 +834,7 @@ $directories = @(
     (Join-Path $InstallRoot 'backups'),
     (Join-Path $InstallRoot 'logs'),
     (Join-Path $InstallRoot 'service'),
+    (Join-Path $InstallRoot 'launcher'),
     (Join-Path $InstallRoot 'release-metadata')
 )
 foreach ($directory in $directories) {
@@ -692,6 +848,7 @@ foreach ($directory in $directories) {
 if ($binaryMode) {
     $runtimeTarget = Join-Path $InstallRoot 'runtime'
     $serviceTarget = Join-Path $InstallRoot 'service'
+    $launcherTarget = Join-Path $InstallRoot 'launcher'
     $metadataTarget = Join-Path $InstallRoot 'release-metadata'
     $serviceSource = $PSScriptRoot
     $service = Get-Service -Name 'MineGuardPlatform' -ErrorAction SilentlyContinue
@@ -712,6 +869,10 @@ if ($binaryMode) {
         $env:MINEGUARD_RELEASE_AUDIT_MODE -ne 'installer-rollback-test') {
         throw 'AuditFailAfterRuntimeSwitch 仅允许发布流水线回滚测试使用。'
     }
+    # The trusted Setup bootstrap has already authenticated the staged source.
+    # Protect the destination parent before creating any executable incoming
+    # directory so an unprivileged local process cannot win a copy/use race.
+    Set-MineGuardDirectoryAcl -Path $InstallRoot -ServicePermission 'RX'
     $runtimeIncoming = Join-Path $InstallRoot (
         '.runtime.incoming.' + [Guid]::NewGuid().ToString('N')
     )
@@ -724,6 +885,12 @@ if ($binaryMode) {
     $servicePrevious = Join-Path $InstallRoot (
         '.service.previous.' + [Guid]::NewGuid().ToString('N')
     )
+    $launcherIncoming = Join-Path $InstallRoot (
+        '.launcher.incoming.' + [Guid]::NewGuid().ToString('N')
+    )
+    $launcherPrevious = Join-Path $InstallRoot (
+        '.launcher.previous.' + [Guid]::NewGuid().ToString('N')
+    )
     $metadataIncoming = Join-Path $InstallRoot (
         '.release-metadata.incoming.' + [Guid]::NewGuid().ToString('N')
     )
@@ -732,23 +899,26 @@ if ($binaryMode) {
     )
     $runtimePreviousMoved = $false
     $servicePreviousMoved = $false
+    $launcherPreviousMoved = $false
     $metadataPreviousMoved = $false
     $runtimeActivated = $false
     $serviceActivated = $false
+    $launcherActivated = $false
     $metadataActivated = $false
     $transactionComplete = $false
     $settingsCreated = $false
     $settingsPath = Join-Path (Join-Path $InstallRoot 'config') 'settings.json'
     $incomingLeafPattern = `
-        '^\.(?:runtime|service|release-metadata)\.incoming\.[a-f0-9]{32}$'
+        '^\.(?:runtime|service|launcher|release-metadata)\.incoming\.[a-f0-9]{32}$'
     $previousLeafPattern = `
-        '^\.(?:runtime|service|release-metadata)\.previous\.[a-f0-9]{32}$'
+        '^\.(?:runtime|service|launcher|release-metadata)\.previous\.[a-f0-9]{32}$'
     $transactionError = $null
     $rollbackErrors = New-Object System.Collections.Generic.List[string]
     $cleanupErrors = New-Object System.Collections.Generic.List[string]
     try {
         New-Item -ItemType Directory -Path $runtimeIncoming | Out-Null
         New-Item -ItemType Directory -Path $serviceIncoming | Out-Null
+        New-Item -ItemType Directory -Path $launcherIncoming | Out-Null
         New-Item -ItemType Directory -Path $metadataIncoming | Out-Null
         foreach ($item in Get-ChildItem `
             -LiteralPath (Join-Path $SourceDirectory 'runtime') -Force) {
@@ -762,6 +932,14 @@ if ($binaryMode) {
             if ($file.Extension -in @('.ps1', '.xml', '.example')) {
                 Copy-Item -LiteralPath $file.FullName -Destination $serviceIncoming
             }
+        }
+        $incomingLauncher = Join-Path $launcherIncoming `
+            'Open-MineGuardPlatformControlCenter.ps1'
+        Copy-Item -LiteralPath $trustedLauncherSource `
+            -Destination $incomingLauncher
+        if ((Get-FileHash -LiteralPath $incomingLauncher -Algorithm SHA256).Hash `
+                -cne $trustedLauncherSha256) {
+            throw '候选 launcher 未保持子发行清单认证的原字节。'
         }
         $existingWrapper = Join-Path $serviceTarget 'MineGuard.Platform.exe'
         $existingWrapperConfig = $existingWrapper + '.config'
@@ -815,6 +993,21 @@ if ($binaryMode) {
             Copy-Item -LiteralPath (Join-Path $SourceDirectory $metadataName) `
                 -Destination (Join-Path $metadataIncoming $metadataName)
         }
+        if ($AllowUnsignedInternalRelease) {
+            $releaseTrustAnchor = [ordered]@{
+                schemaVersion = 1
+                product = 'MineGuard Platform release trust anchor'
+                releaseClassification = 'unsigned-internal-release'
+                childReleaseManifestSha256 = `
+                    $normalizedExpectedManifestSha256.ToLowerInvariant()
+            }
+            [IO.File]::WriteAllText(
+                (Join-Path $metadataIncoming 'release-trust-anchor.json'),
+                (($releaseTrustAnchor | ConvertTo-Json -Depth 3) +
+                    [Environment]::NewLine),
+                $utf8NoBom
+            )
+        }
         foreach ($requiredScript in @(
             'Start-MineGuardPlatform.ps1',
             'Start-MineGuardPlatformWizard.ps1',
@@ -835,17 +1028,14 @@ if ($binaryMode) {
             [IO.FileAttributes]::ReparsePoint) {
             throw '目标 service 不能是符号链接、junction 或其他 reparse point。'
         }
+        if ((Get-Item -LiteralPath $launcherTarget -Force).Attributes -band
+            [IO.FileAttributes]::ReparsePoint) {
+            throw '目标 launcher 不能是符号链接、junction 或其他 reparse point。'
+        }
         if ((Get-Item -LiteralPath $metadataTarget -Force).Attributes -band
             [IO.FileAttributes]::ReparsePoint) {
             throw '目标 release-metadata 不能是 reparse point。'
         }
-        Set-MineGuardDirectoryAcl -Path $runtimeIncoming `
-            -ServicePermission 'RX' -Recurse
-        Set-MineGuardDirectoryAcl -Path $serviceIncoming `
-            -ServicePermission 'RX' -Recurse
-        Set-MineGuardDirectoryAcl -Path $metadataIncoming `
-            -ServicePermission 'RX' -Recurse
-
         if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
             $settings = [ordered]@{
                 schemaVersion = 1
@@ -859,6 +1049,10 @@ if ($binaryMode) {
                 platformSystemId = 'mineguard-qinyuan'
                 platformPartyId = 'regulator-qinyuan'
                 platformKeyId = 'regulator-key-v2'
+                managedProvisioningRequired = $false
+                provisioningTrustedPublicKeyFile = ''
+                provisioningExpectedPublicKeySha256 = ''
+                provisioningExpectedIssuerKeyId = ''
             }
             [System.IO.File]::WriteAllText(
                 $settingsPath,
@@ -867,7 +1061,20 @@ if ($binaryMode) {
             )
             $settingsCreated = $true
         }
-        Set-MineGuardDirectoryAcl -Path $InstallRoot -ServicePermission 'RX'
+        # Canonicalize the entire Inno-created tree before the first directory
+        # switch. This removes stale writable ACEs and makes any ACL failure a
+        # pre-commit failure instead of leaving a committed runtime half-frozen.
+        Assert-MineGuardNoReparseTree -Path $InstallRoot
+        Set-MineGuardDirectoryAcl -Path $InstallRoot `
+            -ServicePermission 'RX' -Recurse
+        Set-MineGuardDirectoryAcl -Path $runtimeIncoming `
+            -ServicePermission 'RX' -Recurse
+        Set-MineGuardDirectoryAcl -Path $serviceIncoming `
+            -ServicePermission 'RX' -Recurse
+        Set-MineGuardDirectoryAcl -Path $metadataIncoming `
+            -ServicePermission 'RX' -Recurse
+        Set-MineGuardDirectoryAcl -Path $launcherIncoming `
+            -ServicePermission 'RX' -UsersReadExecute -Recurse
         Set-MineGuardDirectoryAcl -Path (Join-Path $InstallRoot 'config') `
             -ServicePermission 'RX' -Recurse
         foreach ($writableDirectory in @(
@@ -877,6 +1084,11 @@ if ($binaryMode) {
         )) {
             Set-MineGuardDirectoryAcl -Path $writableDirectory `
                 -ServicePermission 'M' -Recurse
+        }
+        $docsDirectory = Join-Path $InstallRoot 'docs'
+        if (Test-Path -LiteralPath $docsDirectory -PathType Container) {
+            Set-MineGuardDirectoryAcl -Path $docsDirectory `
+                -ServicePermission 'RX' -UsersReadExecute -Recurse
         }
 
         $service = Get-Service -Name 'MineGuardPlatform' -ErrorAction SilentlyContinue
@@ -922,6 +1134,18 @@ if ($binaryMode) {
             -DestinationPath $metadataTarget -DestinationParent $InstallRoot `
             -DestinationLeafPattern '^release-metadata$'
         $metadataActivated = $true
+        Move-MineGuardOwnedPathWithRetry `
+            -SourcePath $launcherTarget -SourceParent $InstallRoot `
+            -SourceLeafPattern '^launcher$' `
+            -DestinationPath $launcherPrevious -DestinationParent $InstallRoot `
+            -DestinationLeafPattern $previousLeafPattern
+        $launcherPreviousMoved = $true
+        Move-MineGuardOwnedPathWithRetry `
+            -SourcePath $launcherIncoming -SourceParent $InstallRoot `
+            -SourceLeafPattern $incomingLeafPattern `
+            -DestinationPath $launcherTarget -DestinationParent $InstallRoot `
+            -DestinationLeafPattern '^launcher$'
+        $launcherActivated = $true
 
         $installedExecutable = Join-Path $runtimeTarget 'MineGuardPlatform.exe'
         Invoke-CheckedNative -Command $installedExecutable -Arguments @('self-check') `
@@ -943,6 +1167,16 @@ if ($binaryMode) {
             ) -PathType Leaf)) {
             throw '切换后的 release-metadata 缺少发布清单。'
         }
+        $installedLauncherFiles = @(Get-ChildItem -LiteralPath $launcherTarget `
+            -File -Force -Recurse)
+        $installedLauncher = Join-Path $launcherTarget `
+            'Open-MineGuardPlatformControlCenter.ps1'
+        if ($installedLauncherFiles.Count -ne 1 -or
+            -not (Test-Path -LiteralPath $installedLauncher -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $installedLauncher -Algorithm SHA256).Hash `
+                -cne $trustedLauncherSha256) {
+            throw '切换后的公开 launcher 不是子发行清单认证的唯一原字节文件。'
+        }
         if ($AuditFailAfterRuntimeSwitch) {
             Write-Host 'MINEGUARD_RELEASE_AUDIT_MARKER=platform-post-switch'
             throw '发布审计故障注入：验证二进制切换后的完整回滚。'
@@ -960,6 +1194,42 @@ if ($binaryMode) {
                 $rollbackErrors.Add(
                     "清理本次新建 settings.json 失败：$($_.Exception.Message)"
                 )
+            }
+        }
+
+        if ($launcherActivated) {
+            try {
+                Move-MineGuardOwnedPathWithRetry `
+                    -SourcePath $launcherTarget -SourceParent $InstallRoot `
+                    -SourceLeafPattern '^launcher$' `
+                    -DestinationPath $launcherIncoming `
+                    -DestinationParent $InstallRoot `
+                    -DestinationLeafPattern $incomingLeafPattern
+                $launcherActivated = $false
+            } catch {
+                $rollbackErrors.Add(
+                    "隔离候选 launcher 失败：$($_.Exception.Message)"
+                )
+            }
+        }
+        if ($launcherPreviousMoved) {
+            if ($launcherActivated) {
+                $rollbackErrors.Add('候选 launcher 未能隔离，无法恢复原目录。')
+            } else {
+                try {
+                    Move-MineGuardOwnedPathWithRetry `
+                        -SourcePath $launcherPrevious `
+                        -SourceParent $InstallRoot `
+                        -SourceLeafPattern $previousLeafPattern `
+                        -DestinationPath $launcherTarget `
+                        -DestinationParent $InstallRoot `
+                        -DestinationLeafPattern '^launcher$'
+                    $launcherPreviousMoved = $false
+                } catch {
+                    $rollbackErrors.Add(
+                        "恢复原 launcher 失败：$($_.Exception.Message)"
+                    )
+                }
             }
         }
 
@@ -1072,7 +1342,8 @@ if ($binaryMode) {
         }
     } finally {
         foreach ($incomingPath in @(
-            $runtimeIncoming, $serviceIncoming, $metadataIncoming
+            $runtimeIncoming, $serviceIncoming, $launcherIncoming,
+            $metadataIncoming
         )) {
             try {
                 Remove-MineGuardOwnedPathWithRetry -Path $incomingPath `
@@ -1106,7 +1377,8 @@ if ($binaryMode) {
         throw 'Platform 二进制切换未完成。'
     }
     foreach ($oldPath in @(
-        $runtimePrevious, $servicePrevious, $metadataPrevious
+        $runtimePrevious, $servicePrevious, $launcherPrevious,
+        $metadataPrevious
     )) {
         try {
             Remove-MineGuardOwnedPathWithRetry -Path $oldPath `
@@ -1175,6 +1447,10 @@ if (-not $binaryMode) {
             platformSystemId = 'mineguard-qinyuan'
             platformPartyId = 'regulator-qinyuan'
             platformKeyId = 'regulator-key-v2'
+            managedProvisioningRequired = $false
+            provisioningTrustedPublicKeyFile = ''
+            provisioningExpectedPublicKeySha256 = ''
+            provisioningExpectedIssuerKeyId = ''
         }
         [System.IO.File]::WriteAllText(
             $settingsPath,

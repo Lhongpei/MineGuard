@@ -91,190 +91,163 @@ internal static class MineGuardGuiWaitProbe
     }
     Write-Host "Windows GUI process wait and argument round-trip probe passed."
 
-    $RepositoryRoot = Split-Path -Parent $PSScriptRoot
     $InnoCompiler = Join-Path ${env:ProgramFiles(x86)} `
         "Inno Setup 6\ISCC.exe"
-    $InnoScript = Join-Path $RepositoryRoot `
-        "packaging\windows\inno\MineGuardPlatform.iss"
-    $AssetsRoot = Join-Path $RepositoryRoot "packaging\windows\assets"
-    foreach ($RequiredPath in @($InnoCompiler, $InnoScript, $AssetsRoot)) {
-        if (-not (Test-Path -LiteralPath $RequiredPath)) {
-            throw "Platform Inno fixture input is missing: $RequiredPath"
-        }
+    if (-not (Test-Path -LiteralPath $InnoCompiler -PathType Leaf)) {
+        throw "Inno compiler is unavailable for the dedicated GUI wait fixture: $InnoCompiler"
     }
 
-    $FixtureStage = Join-Path $ProbeRoot "stage"
-    $FixtureRuntime = Join-Path $FixtureStage "runtime"
-    $FixtureDeploy = Join-Path $FixtureStage "deploy\windows"
     $FixtureOutput = Join-Path $ProbeRoot "out"
-    New-Item -ItemType Directory -Path $FixtureRuntime -Force | Out-Null
-    New-Item -ItemType Directory -Path $FixtureDeploy -Force | Out-Null
     New-Item -ItemType Directory -Path $FixtureOutput -Force | Out-Null
-    Copy-Item -LiteralPath $ProbeExecutable `
-        -Destination (Join-Path $FixtureRuntime "MineGuardPlatform.exe")
+    $InnoScript = Join-Path $ProbeRoot "fixture-gui-wait.iss"
+    $InnoSource = @'
+#ifndef FixturePayload
+  #error FixturePayload is required.
+#endif
+#ifndef OutputDir
+  #error OutputDir is required.
+#endif
+#ifndef ArtifactFileName
+  #error ArtifactFileName is required.
+#endif
+#ifndef FixtureAppId
+  #error FixtureAppId is required.
+#endif
 
-    $FixtureInstallerScript = @'
-[CmdletBinding()]
-param([string]$SourceDirectory, [string]$InstallRoot)
-Set-StrictMode -Version 2.0
-$ErrorActionPreference = "Stop"
-Start-Sleep -Milliseconds 1200
-if ($env:MINEGUARD_INNO_FIXTURE_FAIL -eq "1") {
-    Write-Error "Intentional fixture failure after the Inno AfterInstall callback."
-    exit 23
-}
-$runtime = Join-Path $InstallRoot "runtime"
-$service = Join-Path $InstallRoot "service"
-$metadata = Join-Path $InstallRoot "release-metadata"
-foreach ($directory in @($runtime, $service, $metadata)) {
-    New-Item -ItemType Directory -Path $directory -Force | Out-Null
-}
-Copy-Item -LiteralPath (Join-Path $SourceDirectory "runtime\MineGuardPlatform.exe") `
-    -Destination $runtime
-Copy-Item -LiteralPath (Join-Path $SourceDirectory "deploy\windows\Install-MineGuardPlatform.ps1") `
-    -Destination $service
-foreach ($name in @(
-    "VERSION.txt", "build-metadata.json", "release-manifest.json", "SHA256SUMS.txt"
-)) {
-    Copy-Item -LiteralPath (Join-Path $SourceDirectory $name) -Destination $metadata
-}
-[IO.File]::WriteAllText(
-    (Join-Path $runtime "afterinstall-root.txt"),
-    [IO.Path]::GetFullPath($InstallRoot)
-)
-exit 0
-'@
-    $FixtureUninstallerScript = @'
-[CmdletBinding()]
-param([string]$InstallRoot, [switch]$InternalInnoUninstall)
-Set-StrictMode -Version 2.0
-$ErrorActionPreference = "Stop"
-foreach ($name in @("runtime", "service", "release-metadata")) {
-    $path = Join-Path $InstallRoot $name
-    if (Test-Path -LiteralPath $path) {
-        Remove-Item -LiteralPath $path -Recurse -Force
-    }
-}
-exit 0
+[Setup]
+AppId={#FixtureAppId}
+AppName=MineGuard GUI wait probe fixture
+AppVersion=0.0.1
+DefaultDirName={localappdata}\MineGuard\GuiWaitProbeFixture
+PrivilegesRequired=lowest
+ArchitecturesAllowed=x64compatible and not arm64
+ArchitecturesInstallIn64BitMode=x64compatible
+OutputDir={#OutputDir}
+OutputBaseFilename={#ArtifactFileName}
+Compression=lzma2
+SolidCompression=yes
+DisableProgramGroupPage=yes
+DisableReadyPage=yes
+DisableWelcomePage=yes
+UsePreviousAppDir=no
+CloseApplications=no
+RestartIfNeededByRun=no
+SetupLogging=yes
+CreateUninstallRegKey=no
+
+[Files]
+Source: "{#FixturePayload}"; DestDir: "{app}\runtime"; DestName: "GuiWaitProbe.exe"; Flags: ignoreversion; AfterInstall: CompleteFixtureInstall
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}\runtime"
+
+[Code]
+const
+  FixtureFailureExitCode = 1001;
+
+var
+  FixtureInstallFailed: Boolean;
+
+procedure CompleteFixtureInstall();
+var
+  MarkerPath: String;
+begin
+  Sleep(1200);
+  if CompareText(Trim(ExpandConstant('{param:FIXTUREFAIL|0}')), '1') = 0 then
+  begin
+    FixtureInstallFailed := True;
+    RaiseException('Intentional dedicated Inno fixture failure.');
+  end;
+  MarkerPath := ExpandConstant('{app}\runtime\afterinstall-root.txt');
+  if not SaveStringToFile(MarkerPath, ExpandConstant('{app}'), False) then
+  begin
+    FixtureInstallFailed := True;
+    RaiseException('Dedicated Inno fixture could not write its completion marker.');
+  end;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  if FixtureInstallFailed then
+    Result := FixtureFailureExitCode
+  else
+    Result := 0;
+end;
 '@
     $Utf8NoBom = New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText(
-        (Join-Path $FixtureDeploy "Install-MineGuardPlatform.ps1"),
-        $FixtureInstallerScript,
-        $Utf8NoBom
-    )
-    [IO.File]::WriteAllText(
-        (Join-Path $FixtureDeploy "Uninstall-MineGuardPlatformRuntime.ps1"),
-        $FixtureUninstallerScript,
-        $Utf8NoBom
-    )
-    [IO.File]::WriteAllText(
-        (Join-Path $FixtureStage "VERSION.txt"), "0.0.1", $Utf8NoBom
-    )
-    [IO.File]::WriteAllText(
-        (Join-Path $FixtureStage "build-metadata.json"),
-        '{"version":"0.0.1","fixture":true}',
-        $Utf8NoBom
-    )
-    [IO.File]::WriteAllText(
-        (Join-Path $FixtureStage "release-manifest.json"),
-        '{"schemaVersion":1,"product":"MineGuard Platform","fixture":true}',
-        $Utf8NoBom
-    )
-    [IO.File]::WriteAllText(
-        (Join-Path $FixtureStage "SHA256SUMS.txt"),
-        "fixture-only; validated through the guarded AfterInstall boundary",
-        $Utf8NoBom
+        $InnoScript, $InnoSource, $Utf8NoBom
     )
 
-    $FixtureAppId = "MineGuardPlatformInnoFixture-" + `
+    $FixtureAppId = "MineGuardGuiWaitFixture-" + `
         [Guid]::NewGuid().ToString("N")
-    $FixtureArtifactName = "MineGuardPlatformInnoFixture"
+    $FixtureArtifactName = "MineGuardGuiWaitFixture"
     $CompileExitCode = Invoke-WindowsGuiProcessAndWait `
         -FilePath $InnoCompiler `
         -ArgumentList @(
             "/Qp",
-            "/DStageRoot=$FixtureStage",
-            "/DAssetsRoot=$AssetsRoot",
+            "/DFixturePayload=$ProbeExecutable",
             "/DOutputDir=$FixtureOutput",
-            "/DAppVersion=0.0.1",
-            "/DNumericVersion=0.0.1.0",
             "/DArtifactFileName=$FixtureArtifactName",
-            "/DApplicationId=$FixtureAppId",
+            "/DFixtureAppId=$FixtureAppId",
             $InnoScript
         )
     if ($CompileExitCode -ne 0) {
-        throw "Platform Inno fixture compilation returned $CompileExitCode."
+        throw "Dedicated Inno fixture compilation returned $CompileExitCode."
     }
     $FixtureInstaller = Join-Path $FixtureOutput ($FixtureArtifactName + ".exe")
     if (-not (Test-Path -LiteralPath $FixtureInstaller -PathType Leaf)) {
-        throw "Platform Inno fixture compiler did not create its installer."
+        throw "Dedicated Inno fixture compiler did not create its installer."
     }
 
-    $FailureInstallRoot = Join-Path $ProbeRoot "Failed Platform Root"
+    $FailureInstallRoot = Join-Path $ProbeRoot "Failed Fixture Root"
     $FailureLog = Join-Path $ProbeRoot "failed install.log"
-    $PreviousFixtureFailure = $env:MINEGUARD_INNO_FIXTURE_FAIL
-    try {
-        $env:MINEGUARD_INNO_FIXTURE_FAIL = "1"
-        $FailureStopwatch = [Diagnostics.Stopwatch]::StartNew()
-        $FailureExitCode = Invoke-WindowsGuiProcessAndWait `
-            -FilePath $FixtureInstaller `
-            -ArgumentList @(
-                "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
-                "/DIR=$FailureInstallRoot", "/LOG=$FailureLog",
-                "/ALLOW_UNSIGNED_TEST_MEDIA=1"
-            )
-        $FailureStopwatch.Stop()
-    }
-    finally {
-        if ($null -eq $PreviousFixtureFailure) {
-            Remove-Item Env:MINEGUARD_INNO_FIXTURE_FAIL `
-                -ErrorAction SilentlyContinue
-        }
-        else {
-            $env:MINEGUARD_INNO_FIXTURE_FAIL = $PreviousFixtureFailure
-        }
-    }
+    $FailureStopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $FailureExitCode = Invoke-WindowsGuiProcessAndWait `
+        -FilePath $FixtureInstaller `
+        -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
+            "/DIR=$FailureInstallRoot", "/LOG=$FailureLog",
+            "/FIXTUREFAIL=1"
+        )
+    $FailureStopwatch.Stop()
     if ($FailureExitCode -ne 1001) {
-        throw "Platform Inno fixture returned $FailureExitCode instead of 1001."
+        throw "Dedicated Inno fixture returned $FailureExitCode instead of 1001."
     }
     if ($FailureStopwatch.ElapsedMilliseconds -lt 900) {
-        throw "Platform Inno failure path returned before AfterInstall finished."
+        throw "Dedicated Inno failure path returned before AfterInstall finished."
     }
     if (Test-Path -LiteralPath (Join-Path $FailureInstallRoot "runtime")) {
-        throw "Failed Platform Inno fixture left an installed runtime."
+        throw "Failed dedicated Inno fixture left an installed runtime."
     }
     if (Test-Path -LiteralPath $FailureInstallRoot) {
         Remove-Item -LiteralPath $FailureInstallRoot -Recurse -Force
     }
 
-    $FixtureInstallRoot = Join-Path $ProbeRoot "Custom Platform Root"
+    $FixtureInstallRoot = Join-Path $ProbeRoot "Custom Fixture Root"
     $FixtureLog = Join-Path $ProbeRoot "successful install.log"
     $InstallStopwatch = [Diagnostics.Stopwatch]::StartNew()
     $FixtureInstallExitCode = Invoke-WindowsGuiProcessAndWait `
         -FilePath $FixtureInstaller `
         -ArgumentList @(
             "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
-            "/DIR=$FixtureInstallRoot", "/LOG=$FixtureLog",
-            "/ALLOW_UNSIGNED_TEST_MEDIA=1"
+            "/DIR=$FixtureInstallRoot", "/LOG=$FixtureLog"
         )
     $InstallStopwatch.Stop()
     if ($FixtureInstallExitCode -ne 0) {
-        throw "Platform Inno fixture install returned $FixtureInstallExitCode."
+        throw "Dedicated Inno fixture install returned $FixtureInstallExitCode."
     }
     if ($InstallStopwatch.ElapsedMilliseconds -lt 900) {
-        throw "Platform Inno success path returned before AfterInstall finished."
+        throw "Dedicated Inno success path returned before AfterInstall finished."
     }
     $FixtureExpectedFiles = @(
-        (Join-Path $FixtureInstallRoot "runtime\MineGuardPlatform.exe"),
-        (Join-Path $FixtureInstallRoot "service\Install-MineGuardPlatform.ps1"),
-        (Join-Path $FixtureInstallRoot "release-metadata\release-manifest.json"),
+        (Join-Path $FixtureInstallRoot "runtime\GuiWaitProbe.exe"),
         (Join-Path $FixtureInstallRoot "runtime\afterinstall-root.txt"),
         $FixtureLog
     )
     foreach ($ExpectedFile in $FixtureExpectedFiles) {
         if (-not (Test-Path -LiteralPath $ExpectedFile -PathType Leaf)) {
-            throw "Platform Inno fixture is missing: $ExpectedFile"
+            throw "Dedicated Inno fixture is missing: $ExpectedFile"
         }
     }
     $RecordedInstallRoot = Get-Content -LiteralPath (
@@ -284,19 +257,19 @@ exit 0
             [IO.Path]::GetFullPath($FixtureInstallRoot),
             [StringComparison]::OrdinalIgnoreCase
         )) {
-        throw "Platform Inno fixture did not preserve the custom /DIR argument."
+        throw "Dedicated Inno fixture did not preserve the custom /DIR argument."
     }
 
     $FixtureUninstallers = @(Get-ChildItem -LiteralPath $FixtureInstallRoot `
         -Filter "unins*.exe" -File)
     if ($FixtureUninstallers.Count -ne 1) {
-        throw "Platform Inno fixture must create exactly one uninstaller."
+        throw "Dedicated Inno fixture must create exactly one uninstaller."
     }
     $FixtureUninstallExitCode = Invoke-WindowsGuiProcessAndWait `
         -FilePath $FixtureUninstallers[0].FullName `
         -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
     if ($FixtureUninstallExitCode -ne 0) {
-        throw "Platform Inno fixture uninstall returned $FixtureUninstallExitCode."
+        throw "Dedicated Inno fixture uninstall returned $FixtureUninstallExitCode."
     }
     $UninstallerCleanupDeadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
@@ -306,15 +279,13 @@ exit 0
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $UninstallerCleanupDeadline)
     if ($InnoResidue.Count -ne 0) {
-        throw "Platform Inno fixture uninstaller did not clean up its own files."
+        throw "Dedicated Inno fixture uninstaller did not clean up its own files."
     }
-    foreach ($RemovedDirectory in @("runtime", "service", "release-metadata")) {
-        if (Test-Path -LiteralPath (Join-Path $FixtureInstallRoot $RemovedDirectory)) {
-            throw "Platform Inno fixture uninstall left $RemovedDirectory."
-        }
+    if (Test-Path -LiteralPath (Join-Path $FixtureInstallRoot "runtime")) {
+        throw "Dedicated Inno fixture uninstall left its runtime directory."
     }
     Write-Host (
-        "Real Platform Inno /DIR, AfterInstall, exit-code and uninstall " +
+        "Dedicated Inno /DIR, AfterInstall, exit-code and uninstall " +
         "fixture passed."
     )
 }

@@ -9,6 +9,8 @@ param(
     [string]$Wheelhouse = "",
     [string]$ApprovedSignerThumbprint = "",
     [switch]$AllowUnsignedTestMedia,
+    [switch]$AllowUnsignedInternalRelease,
+    [string]$ExpectedReleaseManifestSha256 = "",
     [switch]$AuditFailAfterRuntimeSwitch
 )
 
@@ -204,7 +206,7 @@ function Assert-EABinaryInstallPathBudget {
         }
         elseif ($Relative -in @(
                 "VERSION.txt", "build-metadata.json", "release-manifest.json",
-                "SHA256SUMS.txt"
+                "model-credential-trust.json", "SHA256SUMS.txt"
             )) {
             $TransactionLeaf = ".release-metadata-rollback-" + $SyntheticGuid
             $TransactionRelative = $Relative
@@ -537,7 +539,8 @@ function Test-BinaryReleaseManifest {
     param(
         [string]$ReleaseRoot,
         [string]$ApprovedSignerThumbprint,
-        [switch]$AllowUnsignedTestMedia
+        [switch]$AllowUnsignedTestMedia,
+        [switch]$AllowUnsignedInternalRelease
     )
     $ManifestPath = Join-Path $ReleaseRoot "release-manifest.json"
     $ChecksumsPath = Join-Path $ReleaseRoot "SHA256SUMS.txt"
@@ -644,7 +647,8 @@ function Test-BinaryReleaseManifest {
     Test-ReleaseSignatureContract -Manifest $Manifest -BuildMetadata $BuildMetadata `
         -ExecutablePath $Executable `
         -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
-        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
+        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia `
+        -AllowUnsignedInternalRelease:$AllowUnsignedInternalRelease
     return [pscustomobject]@{
         Manifest = $Manifest
         BuildMetadata = $BuildMetadata
@@ -672,14 +676,44 @@ function Get-RequiredNullableStringProperty {
     return [string]$Property.Value
 }
 
+function Get-OptionalReleaseClassification {
+    param([object]$Object, [string]$Document)
+    $Property = $Object.PSObject.Properties["release_classification"]
+    if ($null -eq $Property) { return "" }
+    if ($Property.Value -isnot [string] -or
+        [string]::IsNullOrWhiteSpace([string]$Property.Value)) {
+        throw "$Document release_classification must be a non-empty JSON string when present."
+    }
+    $Value = [string]$Property.Value
+    if ($Value -notin @(
+            "signed-production-candidate",
+            "unsigned-internal-release",
+            "unsigned-test-only"
+        )) {
+        throw "$Document contains an unsupported release_classification."
+    }
+    return $Value
+}
+
 function Test-ReleaseSignatureContract {
     param(
         [object]$Manifest,
         [object]$BuildMetadata,
         [string]$ExecutablePath,
         [string]$ApprovedSignerThumbprint,
-        [switch]$AllowUnsignedTestMedia
+        [switch]$AllowUnsignedTestMedia,
+        [switch]$AllowUnsignedInternalRelease
     )
+    if ($AllowUnsignedTestMedia -and $AllowUnsignedInternalRelease) {
+        throw "Unsigned test and unsigned internal release modes are mutually exclusive."
+    }
+    $ManifestClassification = Get-OptionalReleaseClassification `
+        -Object $Manifest -Document "release-manifest.json"
+    $MetadataClassification = Get-OptionalReleaseClassification `
+        -Object $BuildMetadata -Document "build-metadata.json"
+    if ($ManifestClassification -ne $MetadataClassification) {
+        throw "Release manifest and build metadata classifications are inconsistent."
+    }
     $ManifestSigned = Get-RequiredBooleanProperty -Object $Manifest `
         -Name "authenticode_signed" -Document "release-manifest.json"
     $MetadataSigned = Get-RequiredBooleanProperty -Object $BuildMetadata `
@@ -709,6 +743,13 @@ function Test-ReleaseSignatureContract {
         if ($AllowUnsignedTestMedia) {
             throw "-AllowUnsignedTestMedia is valid only for actually unsigned internal-test media."
         }
+        if ($AllowUnsignedInternalRelease) {
+            throw "-AllowUnsignedInternalRelease is valid only for an actually unsigned internal release."
+        }
+        if ($ManifestClassification -and
+            $ManifestClassification -ne "signed-production-candidate") {
+            throw "Signed release metadata has an incompatible release_classification."
+        }
         if ($ApprovedSignerThumbprint -notmatch '^[A-F0-9]{40}$') {
             throw "A signed release requires an independently approved signer thumbprint."
         }
@@ -735,10 +776,26 @@ function Test-ReleaseSignatureContract {
         }
     }
     else {
-        if (-not $AllowUnsignedTestMedia) {
-            throw "Unsigned Agent media is refused by default. Use -AllowUnsignedTestMedia only for an explicitly marked internal test installation."
+        if ($AllowUnsignedInternalRelease) {
+            if ($ManifestClassification -ne "unsigned-internal-release") {
+                throw "-AllowUnsignedInternalRelease requires metadata explicitly classified as unsigned-internal-release."
+            }
+        }
+        elseif ($AllowUnsignedTestMedia) {
+            # Empty classification remains accepted solely for already-built
+            # legacy test media. New builds state unsigned-test-only explicitly.
+            if ($ManifestClassification -and
+                $ManifestClassification -ne "unsigned-test-only") {
+                throw "-AllowUnsignedTestMedia accepts only unsigned-test-only media."
+            }
+        }
+        else {
+            throw "Unsigned Agent media is refused by default. Use the separately controlled internal-release or test-media switch only for a matching release classification."
         }
         if (-not [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint)) {
+            if ($AllowUnsignedInternalRelease) {
+                throw "An unsigned internal release cannot claim an approved signer thumbprint."
+            }
             throw "Unsigned test media cannot claim an approved production signer thumbprint."
         }
         if (-not [string]::IsNullOrWhiteSpace($ManifestThumbprint) -or
@@ -760,21 +817,29 @@ function Test-InstalledBinaryRuntime {
         [string]$ApplicationRoot,
         [string]$RuntimeDirectory,
         [string]$ApprovedSignerThumbprint,
-        [switch]$AllowUnsignedTestMedia
+        [switch]$AllowUnsignedTestMedia,
+        [switch]$AllowUnsignedInternalRelease,
+        [switch]$RequireModelTrustStore
     )
     $Executable = Join-Path $RuntimeDirectory "MineGuardEnterpriseAgent.exe"
     if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) { return $null }
 
     $MetadataRoot = Join-Path $ApplicationRoot "release-metadata"
     $DeployRoot = Join-Path $ApplicationRoot "deploy\windows"
+    $ModelTrustPath = Join-Path $MetadataRoot `
+        "model-credential-trust.json"
     $VersionPath = Join-Path $MetadataRoot "VERSION.txt"
     $ManifestPath = Join-Path $MetadataRoot "release-manifest.json"
     $BuildMetadataPath = Join-Path $MetadataRoot "build-metadata.json"
     $ChecksumsPath = Join-Path $MetadataRoot "SHA256SUMS.txt"
-    foreach ($Required in @(
+    $RequiredInstalledPaths = @(
         $MetadataRoot, $DeployRoot, $VersionPath, $ManifestPath,
         $BuildMetadataPath, $ChecksumsPath
-    )) {
+    )
+    if ($RequireModelTrustStore) {
+        $RequiredInstalledPaths += $ModelTrustPath
+    }
+    foreach ($Required in $RequiredInstalledPaths) {
         if (-not (Test-Path -LiteralPath $Required)) {
             if ($env:MINEGUARD_RELEASE_AUDIT_MODE -eq "installer-guard-test") {
                 Write-Host "MINEGUARD_RELEASE_AUDIT_MARKER=agent-missing-metadata"
@@ -809,7 +874,10 @@ function Test-InstalledBinaryRuntime {
         $Relative = $File.FullName.Substring($MetadataRoot.Length).TrimStart('\').Replace('\', '/')
         Assert-SafeReleaseRelativePath -Relative $Relative -Context "Installed release metadata"
         if ($Relative -eq "SHA256SUMS.txt") { continue }
-        if ($Relative -notin @("VERSION.txt", "build-metadata.json", "release-manifest.json") -or
+        if ($Relative -notin @(
+                "VERSION.txt", "build-metadata.json", "release-manifest.json",
+                "model-credential-trust.json"
+            ) -or
             $Actual.ContainsKey($Relative)) {
             throw "Installed release metadata contains an unexpected or duplicate file: $Relative"
         }
@@ -871,7 +939,8 @@ function Test-InstalledBinaryRuntime {
     Test-ReleaseSignatureContract -Manifest $Manifest -BuildMetadata $BuildMetadata `
         -ExecutablePath $Executable `
         -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
-        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
+        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia `
+        -AllowUnsignedInternalRelease:$AllowUnsignedInternalRelease
     $ReportedVersion = (& $Executable --version | Select-Object -Last 1).Trim()
     if ($LASTEXITCODE -ne 0 -or $ReportedVersion -ne "enterprise-agent $VersionText") {
         throw "Active compiled Agent --version does not match installed release metadata."
@@ -911,43 +980,110 @@ function Test-ManifestSubtree {
     }
 }
 
-function Invoke-IcaclsChecked {
-    param([string[]]$ArgumentList)
-    & icacls.exe @ArgumentList | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "icacls failed with exit code $LASTEXITCODE"
-    }
-}
-
 function Set-EACanonicalProductTreeAcl {
     param(
         [string]$Path,
         [switch]$RootTraverseOnly,
-        [switch]$Recurse
+        [switch]$Recurse,
+        [switch]$UsersReadExecute
     )
-    $ServiceGrant = if ($RootTraverseOnly) {
-        # S-1-5-80-0 is ALL SERVICES. It permits service-token traversal of the
-        # shared state root but deliberately does not inherit into instances.
-        "*S-1-5-80-0:RX"
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Canonical ACL target does not exist: $Path"
     }
-    else {
-        # Shared program files contain no tenant secrets and are executable by
-        # every dedicated virtual Agent service account.
-        "*S-1-5-80-0:(OI)(CI)RX"
+    $RootItem = Get-Item -LiteralPath $Path -Force
+    if (-not $RootItem.PSIsContainer -or
+        ($RootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Canonical product-tree ACL root must be an ordinary directory: $Path"
     }
-    Invoke-IcaclsChecked -ArgumentList @($Path, "/reset")
-    Invoke-IcaclsChecked -ArgumentList @(
-        $Path, "/inheritance:r",
-        "/grant:r", "*S-1-5-18:(OI)(CI)F",
-        "/grant:r", "*S-1-5-32-544:(OI)(CI)F",
-        "/grant:r", $ServiceGrant
+    $Administrators = New-Object Security.Principal.SecurityIdentifier(
+        "S-1-5-32-544"
     )
+    $System = New-Object Security.Principal.SecurityIdentifier("S-1-5-18")
+    $AllServices = New-Object Security.Principal.SecurityIdentifier("S-1-5-80-0")
+    $Users = New-Object Security.Principal.SecurityIdentifier("S-1-5-32-545")
+    $Allow = [Security.AccessControl.AccessControlType]::Allow
+    $None = [Security.AccessControl.PropagationFlags]::None
+    $ContainerAndObject = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+
+    function Set-OneCanonicalAcl {
+        param([IO.FileSystemInfo]$Item, [switch]$TraverseOnly)
+        $IsDirectory = $Item.PSIsContainer
+        $Security = if ($IsDirectory) {
+            New-Object Security.AccessControl.DirectorySecurity
+        }
+        else {
+            New-Object Security.AccessControl.FileSecurity
+        }
+        $Security.SetAccessRuleProtection($true, $false)
+        $Security.SetOwner($Administrators)
+        $Inheritance = if ($IsDirectory) {
+            $ContainerAndObject
+        }
+        else {
+            [Security.AccessControl.InheritanceFlags]::None
+        }
+        foreach ($Definition in @(
+            [pscustomobject]@{
+                Sid = $System
+                Rights = [Security.AccessControl.FileSystemRights]::FullControl
+                Inheritance = $Inheritance
+            },
+            [pscustomobject]@{
+                Sid = $Administrators
+                Rights = [Security.AccessControl.FileSystemRights]::FullControl
+                Inheritance = $Inheritance
+            },
+            [pscustomobject]@{
+                Sid = $AllServices
+                Rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+                Inheritance = $(if ($IsDirectory -and $TraverseOnly) {
+                    [Security.AccessControl.InheritanceFlags]::None
+                } else { $Inheritance })
+            }
+        )) {
+            $Rule = New-Object Security.AccessControl.FileSystemAccessRule(
+                $Definition.Sid,
+                $Definition.Rights,
+                $Definition.Inheritance,
+                $None,
+                $Allow
+            )
+            [void]$Security.AddAccessRule($Rule)
+        }
+        if ($UsersReadExecute) {
+            $UsersRule = New-Object Security.AccessControl.FileSystemAccessRule(
+                $Users,
+                [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+                $Inheritance,
+                $None,
+                $Allow
+            )
+            [void]$Security.AddAccessRule($UsersRule)
+        }
+        if ($IsDirectory) {
+            [IO.Directory]::SetAccessControl($Item.FullName, $Security)
+            $Applied = [IO.Directory]::GetAccessControl($Item.FullName)
+        }
+        else {
+            [IO.File]::SetAccessControl($Item.FullName, $Security)
+            $Applied = [IO.File]::GetAccessControl($Item.FullName)
+        }
+        if (-not $Applied.AreAccessRulesProtected) {
+            throw "Canonical ACL unexpectedly retained inheritance: $($Item.FullName)"
+        }
+    }
+
+    # Set a complete protected DACL in one SetAccessControl operation per item;
+    # never expose the /reset -> /inheritance:r partial-ACL window.
+    Set-OneCanonicalAcl -Item $RootItem -TraverseOnly:$RootTraverseOnly
     if ($Recurse) {
-        # Never combine /inheritance:r with /T: that protects every existing
-        # child before the root ACEs can propagate and can produce empty DACLs.
-        Invoke-IcaclsChecked -ArgumentList @(
-            (Join-Path $Path "*"), "/reset", "/T", "/C"
-        )
+        foreach ($Item in Get-ChildItem -LiteralPath $Path -Force -Recurse) {
+            if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Canonical product tree cannot contain a reparse point: $($Item.FullName)"
+            }
+            Set-OneCanonicalAcl -Item $Item
+        }
     }
 }
 
@@ -1017,6 +1153,292 @@ function Assert-EARegisteredRuntimeServiceIdentity {
     }
 }
 
+function ConvertTo-EANativeArgument {
+    param([AllowEmptyString()][string]$Value)
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
+    $Builder = New-Object Text.StringBuilder
+    [void]$Builder.Append([char]'"')
+    $BackslashCount = 0
+    foreach ($Character in $Value.ToCharArray()) {
+        if ($Character -eq [char]'\') {
+            $BackslashCount += 1
+            continue
+        }
+        if ($Character -eq [char]'"') {
+            [void]$Builder.Append([char]'\', (($BackslashCount * 2) + 1))
+            [void]$Builder.Append([char]'"')
+            $BackslashCount = 0
+            continue
+        }
+        if ($BackslashCount -gt 0) {
+            [void]$Builder.Append([char]'\', $BackslashCount)
+            $BackslashCount = 0
+        }
+        [void]$Builder.Append($Character)
+    }
+    if ($BackslashCount -gt 0) {
+        [void]$Builder.Append([char]'\', ($BackslashCount * 2))
+    }
+    [void]$Builder.Append([char]'"')
+    return $Builder.ToString()
+}
+
+function Test-EAConfigurationEnvironmentName {
+    param([string]$Name)
+    foreach ($Prefix in @(
+        "ENTERPRISE_", "PLATFORM_", "REGULATORY_", "AGENT_V2_",
+        "DEEPSEEK_", "COAL_NEWS_", "MINEGUARD_"
+    )) {
+        if ($Name.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Invoke-EACandidateModelLockTrustCheck {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string]$LockPath,
+        [Parameter(Mandatory = $true)][string]$TrustStorePath,
+        [ValidateRange(1024, 1048576)][int]$MaximumOutputCharacters = 65536
+    )
+    $Arguments = @(
+        "model-credential-lock-trust-check",
+        "--lock", $LockPath,
+        "--trust-store", $TrustStorePath
+    )
+    $Serialized = @($Arguments | ForEach-Object {
+        if ($null -eq $_) { throw "Candidate trust check has a null argument." }
+        ConvertTo-EANativeArgument -Value ([string]$_)
+    }) -join ' '
+    $StartInfo = New-Object Diagnostics.ProcessStartInfo
+    $StartInfo.FileName = $Executable
+    $StartInfo.Arguments = $Serialized
+    $StartInfo.WorkingDirectory = Split-Path -Parent $Executable
+    $StartInfo.UseShellExecute = $false
+    $StartInfo.CreateNoWindow = $true
+    $StartInfo.RedirectStandardOutput = $true
+    $StartInfo.RedirectStandardError = $true
+    $StartInfo.StandardOutputEncoding = New-Object Text.UTF8Encoding($false)
+    $StartInfo.StandardErrorEncoding = New-Object Text.UTF8Encoding($false)
+    foreach ($Name in @($StartInfo.EnvironmentVariables.Keys)) {
+        if (Test-EAConfigurationEnvironmentName -Name ([string]$Name)) {
+            $StartInfo.EnvironmentVariables.Remove([string]$Name)
+        }
+    }
+    $StartInfo.EnvironmentVariables["PYTHONUTF8"] = "1"
+    $StartInfo.EnvironmentVariables["PYTHONUNBUFFERED"] = "1"
+
+    $Process = New-Object Diagnostics.Process
+    $Process.StartInfo = $StartInfo
+    try {
+        if (-not $Process.Start()) {
+            throw "Candidate Agent trust-check process could not be started."
+        }
+        $Stdout = $Process.StandardOutput.ReadToEnd()
+        $Stderr = $Process.StandardError.ReadToEnd()
+        $Process.WaitForExit()
+        if ($Stdout.Length -gt $MaximumOutputCharacters -or
+            $Stderr.Length -gt $MaximumOutputCharacters) {
+            throw "Candidate Agent trust-check output exceeded the safety limit."
+        }
+        if ($Process.ExitCode -ne 0) {
+            $SafeError = $Stderr.Trim()
+            if ([string]::IsNullOrWhiteSpace($SafeError)) {
+                $SafeError = "candidate Agent exited with code $($Process.ExitCode)"
+            }
+            throw "Candidate model trust rejected the active lock: $SafeError"
+        }
+        try { $Result = $Stdout | ConvertFrom-Json }
+        catch { throw "Candidate model trust check did not return valid JSON." }
+        if ($null -eq $Result -or $Result -is [Array] -or
+            $Result.PSObject.Properties.Count -eq 0) {
+            throw "Candidate model trust check did not return one JSON object."
+        }
+        return $Result
+    }
+    finally { $Process.Dispose() }
+}
+
+function Assert-EAUpgradeOrdinaryLeaf {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [ValidateRange(1, 16777216)][long]$MaximumBytes = 1MB
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "$Name is missing: $Path"
+    }
+    $Item = Get-Item -LiteralPath $Path -Force
+    if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $Item.Length -le 0 -or $Item.Length -gt $MaximumBytes) {
+        throw "$Name is unsafe or outside its size limit: $Path"
+    }
+}
+
+function Read-EAUpgradeModelBindings {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Assert-EAUpgradeOrdinaryLeaf -Path $Path -Name "Instance configuration" `
+        -MaximumBytes 1MB
+    $SelectedNames = @(
+        "ENTERPRISE_MINE_ID",
+        "ENTERPRISE_SYSTEM_ID",
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
+        "MINEGUARD_AGENT_MODEL_TRUST_STORE"
+    )
+    $Seen = @{}
+    $Selected = @{}
+    $LineNumber = 0
+    foreach ($Original in Get-Content -LiteralPath $Path -Encoding UTF8) {
+        $LineNumber += 1
+        $Line = $Original.Trim()
+        if ([string]::IsNullOrWhiteSpace($Line) -or $Line.StartsWith("#")) {
+            continue
+        }
+        if ($Line.StartsWith("export ")) {
+            $Line = $Line.Substring(7).TrimStart()
+        }
+        $Separator = $Line.IndexOf("=")
+        if ($Separator -lt 1) {
+            throw "Invalid KEY=VALUE record at config line $LineNumber."
+        }
+        $Key = $Line.Substring(0, $Separator).Trim()
+        if ($Key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$' -or
+            $Seen.ContainsKey($Key)) {
+            throw "Invalid or duplicate config key at line $LineNumber."
+        }
+        $Seen[$Key] = $true
+        $Value = $Line.Substring($Separator + 1).Trim()
+        if ($Value.Length -ge 1 -and $Value[0] -in @([char]34, [char]39)) {
+            if ($Value.Length -lt 2 -or
+                $Value[$Value.Length - 1] -ne $Value[0]) {
+                throw "Unterminated quoted config value at line $LineNumber."
+            }
+            $Value = $Value.Substring(1, $Value.Length - 2)
+        }
+        if ($Value.IndexOf([char]0) -ge 0) {
+            throw "Config value contains a forbidden control character at line $LineNumber."
+        }
+        if ($SelectedNames -contains $Key) { $Selected[$Key] = $Value }
+    }
+    return $Selected
+}
+
+function Invoke-EAActiveModelTrustCompatibilityPreflight {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstancesRoot,
+        [Parameter(Mandatory = $true)][string]$CandidateExecutable,
+        [Parameter(Mandatory = $true)][string]$CandidateTrustStore
+    )
+    if (-not (Test-Path -LiteralPath $InstancesRoot)) {
+        Write-Host "Candidate model trust preflight: no existing StateRoot."
+        return
+    }
+    if (-not (Test-Path -LiteralPath $InstancesRoot -PathType Container)) {
+        throw "StateRoot exists but is not a directory: $InstancesRoot"
+    }
+    Assert-StateRootOrdinary -Root $InstancesRoot
+    $MarkerPath = Join-Path $InstancesRoot `
+        ".mineguard-enterprise-agent-instances.json"
+    $HasMarker = Test-Path -LiteralPath $MarkerPath -PathType Leaf
+    if ($HasMarker) { Assert-StateRootMarker -Root $InstancesRoot }
+
+    $ManagedCount = 0
+    foreach ($Item in Get-ChildItem -LiteralPath $InstancesRoot -Force) {
+        if (-not $Item.PSIsContainer) {
+            if ($HasMarker -and $Item.FullName.Equals(
+                    $MarkerPath, [StringComparison]::OrdinalIgnoreCase
+                )) {
+                continue
+            }
+            throw "StateRoot contains an unrecognized top-level item: $($Item.FullName)"
+        }
+        if (-not (Test-RecognizableLegacyInstance -Directory $Item)) {
+            throw "StateRoot contains an unrecognized instance directory: $($Item.FullName)"
+        }
+
+        $ConfigPath = Join-Path $Item.FullName "config\agent.env"
+        $Values = Read-EAUpgradeModelBindings -Path $ConfigPath
+        $LockName = "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE"
+        $StoreName = "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE"
+        $TrustName = "MINEGUARD_AGENT_MODEL_TRUST_STORE"
+        $LockValue = if ($Values.ContainsKey($LockName)) {
+            ([string]$Values[$LockName]).Trim()
+        } else { "" }
+        $StoreValue = if ($Values.ContainsKey($StoreName)) {
+            ([string]$Values[$StoreName]).Trim()
+        } else { "" }
+        if ($Values.ContainsKey($TrustName) -and
+            -not [string]::IsNullOrWhiteSpace([string]$Values[$TrustName])) {
+            throw "Instance $($Item.Name) overrides the release model trust store."
+        }
+        if ([string]::IsNullOrWhiteSpace($LockValue) -and
+            [string]::IsNullOrWhiteSpace($StoreValue)) {
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($LockValue) -or
+            [string]::IsNullOrWhiteSpace($StoreValue)) {
+            throw "Instance $($Item.Name) has an incomplete managed model pointer pair."
+        }
+
+        $ExpectedLock = Join-Path $Item.FullName `
+            "config\model-credential-lock.json"
+        $ExpectedState = [IO.Path]::ChangeExtension(
+            $ExpectedLock, ".state.json"
+        )
+        $ExpectedStore = Join-Path $Item.FullName `
+            "config\model-credentials.dpapi"
+        Assert-LocalFixedPath -Name "Instance model lock" -PathValue $LockValue
+        Assert-LocalFixedPath -Name "Instance model secret store" `
+            -PathValue $StoreValue
+        $ResolvedLock = [IO.Path]::GetFullPath($LockValue)
+        $ResolvedStore = [IO.Path]::GetFullPath($StoreValue)
+        if (-not $ResolvedLock.Equals(
+                [IO.Path]::GetFullPath($ExpectedLock),
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or -not $ResolvedStore.Equals(
+                [IO.Path]::GetFullPath($ExpectedStore),
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "Instance $($Item.Name) model credential pointers are not fixed inside its config directory."
+        }
+        Assert-EAUpgradeOrdinaryLeaf -Path $ResolvedLock `
+            -Name "Instance model lock" -MaximumBytes 1MB
+        Assert-EAUpgradeOrdinaryLeaf -Path $ExpectedState `
+            -Name "Instance model anti-rollback state" -MaximumBytes 1MB
+        Assert-EAUpgradeOrdinaryLeaf -Path $ResolvedStore `
+            -Name "Instance model secret store" -MaximumBytes 1MB
+
+        $Result = Invoke-EACandidateModelLockTrustCheck `
+            -Executable $CandidateExecutable -LockPath $ResolvedLock `
+            -TrustStorePath $CandidateTrustStore
+        if ($Result.valid -isnot [bool] -or -not [bool]$Result.valid -or
+            [string]$Result.verification_scope -ne
+                "signed-envelope-and-issuer-only" -or
+            $Result.secret_store_accessed -isnot [bool] -or
+            [bool]$Result.secret_store_accessed -or
+            $Result.api_key_accessed -isnot [bool] -or
+            [bool]$Result.api_key_accessed -or
+            -not $Values.ContainsKey("ENTERPRISE_MINE_ID") -or
+            -not $Values.ContainsKey("ENTERPRISE_SYSTEM_ID") -or
+            [string]$Result.mine_id -ne
+                [string]$Values["ENTERPRISE_MINE_ID"] -or
+            [string]$Result.system_id -ne
+                [string]$Values["ENTERPRISE_SYSTEM_ID"] -or
+            [string]::IsNullOrWhiteSpace([string]$Result.issuer_id) -or
+            [string]::IsNullOrWhiteSpace([string]$Result.issuer_key_id)) {
+            throw "Candidate model trust check returned an invalid or cross-instance result for $($Item.Name)."
+        }
+        $ManagedCount += 1
+    }
+    Write-Host (
+        "Candidate model trust preflight passed for $ManagedCount active " +
+        "managed model credential lock(s)."
+    )
+}
+
 function Set-EAInstalledInstanceAcls {
     param(
         [string]$ApplicationRoot,
@@ -1069,19 +1491,59 @@ if ($InstallRoot.Equals($StateRoot, [StringComparison]::OrdinalIgnoreCase) -or
 }
 
 if ($BuildFromSource) {
-    if ($AllowUnsignedTestMedia -or
-        -not [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint)) {
+    if ($AllowUnsignedTestMedia -or $AllowUnsignedInternalRelease -or
+        -not [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint) -or
+        -not [string]::IsNullOrWhiteSpace($ExpectedReleaseManifestSha256)) {
         throw "-BuildFromSource is already an explicit development-only mode and cannot be combined with binary media trust options."
     }
 }
 else {
+    if ($AllowUnsignedTestMedia -and $AllowUnsignedInternalRelease) {
+        throw "-AllowUnsignedTestMedia and -AllowUnsignedInternalRelease are mutually exclusive."
+    }
     $ApprovedSignerThumbprint = Get-NormalizedApprovedSignerThumbprint `
-        -Value $ApprovedSignerThumbprint -AllowEmpty:$AllowUnsignedTestMedia
+        -Value $ApprovedSignerThumbprint `
+        -AllowEmpty:($AllowUnsignedTestMedia -or $AllowUnsignedInternalRelease)
     if ($AllowUnsignedTestMedia) {
         if (-not [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint)) {
             throw "Unsigned test media cannot be combined with an approved production signer thumbprint."
         }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedReleaseManifestSha256)) {
+            throw "ExpectedReleaseManifestSha256 cannot be used with unsigned test media."
+        }
         Write-Warning "UNSIGNED TEST MEDIA MODE: this installation is not production-trusted and cannot be used for a formal service."
+    }
+    elseif ($AllowUnsignedInternalRelease) {
+        if (-not [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint)) {
+            throw "An unsigned internal release cannot be combined with an approved signer thumbprint."
+        }
+        Write-Warning (
+            "UNSIGNED INTERNAL RELEASE MODE: no publisher identity is available. " +
+            "Continue only after the Setup SHA-256 was verified against " +
+            "independently delivered approval material."
+        )
+        $ExpectedReleaseManifestSha256 = (
+            $ExpectedReleaseManifestSha256 -replace '\s', ''
+        ).ToUpperInvariant()
+        if ($ExpectedReleaseManifestSha256 -cnotmatch '^[A-F0-9]{64}$') {
+            throw "INTERNAL-UNSIGNED product installation requires ExpectedReleaseManifestSha256 from the already verified Setup."
+        }
+        $CandidateManifestPath = Join-Path $SourceRoot "release-manifest.json"
+        if (-not (Test-Path -LiteralPath $CandidateManifestPath -PathType Leaf)) {
+            throw "INTERNAL-UNSIGNED product installation is missing release-manifest.json."
+        }
+        $ActualReleaseManifestSha256 = (Get-FileHash -LiteralPath `
+            $CandidateManifestPath -Algorithm SHA256).Hash
+        if (-not $ActualReleaseManifestSha256.Equals(
+                $ExpectedReleaseManifestSha256,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The Agent child release manifest does not match the SHA-256 fixed by the verified Setup; candidate execution is blocked."
+        }
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace(
+            $ExpectedReleaseManifestSha256
+        )) {
+        throw "ExpectedReleaseManifestSha256 is reserved for -AllowUnsignedInternalRelease."
     }
 }
 
@@ -1110,7 +1572,8 @@ Assert-NoEnterpriseAgentRuntimeProcesses -RuntimeDirectory $RuntimeRoot
 if (-not $BuildFromSource) {
     $ReleaseContract = Test-BinaryReleaseManifest -ReleaseRoot $SourceRoot `
         -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
-        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
+        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia `
+        -AllowUnsignedInternalRelease:$AllowUnsignedInternalRelease
     $Manifest = $ReleaseContract.Manifest
     $CandidateBuildMetadata = $ReleaseContract.BuildMetadata
     $CandidateVersionText = [string]$ReleaseContract.Version
@@ -1118,14 +1581,16 @@ if (-not $BuildFromSource) {
     $ExistingVersionText = Test-InstalledBinaryRuntime `
         -ApplicationRoot $InstallRoot -RuntimeDirectory $RuntimeRoot `
         -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
-        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
+        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia `
+        -AllowUnsignedInternalRelease:$AllowUnsignedInternalRelease
     if ($null -ne $ExistingVersionText -and
         [version]$CandidateVersionText -lt [version]$ExistingVersionText) {
         throw "Agent downgrade from $ExistingVersionText to $CandidateVersionText is blocked by default."
     }
     $BinaryRuntime = Join-Path $SourceRoot "runtime"
     $BinaryExecutable = Join-Path $BinaryRuntime "MineGuardEnterpriseAgent.exe"
-    foreach ($Required in @($BinaryExecutable, $DeploySource)) {
+    $ModelTrustSource = Join-Path $SourceRoot "model-credential-trust.json"
+    foreach ($Required in @($BinaryExecutable, $DeploySource, $ModelTrustSource)) {
         if (-not (Test-Path -LiteralPath $Required)) {
             throw "Binary release is incomplete: $Required"
         }
@@ -1169,6 +1634,16 @@ if (-not $BuildFromSource) {
         throw "AuditFailAfterRuntimeSwitch is reserved for the release rollback audit."
     }
 
+    # This uses only each active lock's signed envelope and the candidate
+    # release trust store.  It deliberately runs before creating/adopting
+    # directories, rewriting ACLs or switching runtime/release metadata, and
+    # never opens the DPAPI secret store.  A removed issuer key therefore
+    # leaves the complete prior installation untouched.
+    Invoke-EAActiveModelTrustCompatibilityPreflight `
+        -InstancesRoot $StateRoot `
+        -CandidateExecutable $BinaryExecutable `
+        -CandidateTrustStore $ModelTrustSource
+
     # Do not create or adopt mutable product/state directories until the binary
     # media, signature contract, executable version and upgrade direction have
     # all passed their read-only checks above.
@@ -1176,6 +1651,11 @@ if (-not $BuildFromSource) {
     Initialize-EnterpriseAgentStateRoot -Root $StateRoot
     Assert-LocalFixedPath -Name "InstallRoot" -PathValue $InstallRoot
     Assert-LocalFixedPath -Name "StateRoot" -PathValue $StateRoot
+    Assert-NotBroadProductRoot -Name "InstallRoot" -PathValue $InstallRoot
+    # The trusted Setup bootstrap has authenticated the candidate source.
+    # Harden the destination parent before executable staging directories are
+    # created so ordinary local users cannot modify a copied file before use.
+    Set-EACanonicalProductTreeAcl -Path $InstallRoot
 
     $StagedRuntime = Join-Path $InstallRoot (".runtime-stage-" + [Guid]::NewGuid().ToString("N"))
     $RollbackRuntime = Join-Path $InstallRoot (".runtime-rollback-" + [Guid]::NewGuid().ToString("N"))
@@ -1206,23 +1686,25 @@ if (-not $BuildFromSource) {
         Test-ManifestSubtree -Root $StagedDeploy -ManifestPrefix "deploy/windows/" -Manifest $Manifest
         Assert-LocalFixedPath -Name "InstallRoot" -PathValue $InstallRoot
         Assert-NotBroadProductRoot -Name "InstallRoot" -PathValue $InstallRoot
-        Set-EACanonicalProductTreeAcl -Path $InstallRoot
         Assert-LocalFixedPath -Name "StateRoot" -PathValue $StateRoot
         Assert-NotBroadProductRoot -Name "StateRoot" -PathValue $StateRoot
         Assert-StateRootOrdinary -Root $StateRoot
         Assert-StateRootMarker -Root $StateRoot
         Set-EACanonicalProductTreeAcl -Path $StateRoot `
             -RootTraverseOnly
-        foreach ($StagedReadOnlyTree in @($StagedRuntime, $StagedDeploy)) {
-            Set-EACanonicalProductTreeAcl -Path $StagedReadOnlyTree `
-                -Recurse
-        }
+        Set-EACanonicalProductTreeAcl -Path $StagedRuntime -Recurse
+        Set-EACanonicalProductTreeAcl -Path $StagedDeploy `
+            -UsersReadExecute -Recurse
         $StagedExecutable = Join-Path $StagedRuntime "MineGuardEnterpriseAgent.exe"
         Test-ReleaseSignatureContract -Manifest $Manifest `
             -BuildMetadata $CandidateBuildMetadata -ExecutablePath $StagedExecutable `
             -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
-            -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
-        if (-not [bool]$Manifest.authenticode_signed) {
+            -AllowUnsignedTestMedia:$AllowUnsignedTestMedia `
+            -AllowUnsignedInternalRelease:$AllowUnsignedInternalRelease
+        if ($AllowUnsignedInternalRelease) {
+            Write-Warning "Installing an explicitly classified unsigned internal Enterprise Agent release."
+        }
+        elseif (-not [bool]$Manifest.authenticode_signed) {
             Write-Warning "Installing an unsigned internal-test Enterprise Agent binary. It is not a production-trusted release."
         }
         $StagedVersion = (& $StagedExecutable --version | Select-Object -Last 1).Trim()
@@ -1244,6 +1726,21 @@ if (-not $BuildFromSource) {
                 -ServiceId $LateRegisteredService.Name
         }
         Assert-NoEnterpriseAgentRuntimeProcesses -RuntimeDirectory $RuntimeRoot
+        # Inno has already created its uninstaller, documentation and uninstall
+        # helper by this point. Canonicalize the complete existing/staged tree
+        # while every switch flag is still false, so any ACL failure is handled
+        # by the guarded transaction before candidate code becomes active.
+        Set-EACanonicalProductTreeAcl -Path $InstallRoot -Recurse
+        foreach ($PublicTree in @(
+            $StagedDeploy,
+            $DeployTarget,
+            (Join-Path $InstallRoot "docs")
+        )) {
+            if (Test-Path -LiteralPath $PublicTree -PathType Container) {
+                Set-EACanonicalProductTreeAcl -Path $PublicTree `
+                    -UsersReadExecute -Recurse
+            }
+        }
         if (Test-Path -LiteralPath $RuntimeRoot) {
             Move-EAOwnedPathWithRetry `
                 -SourcePath $RuntimeRoot -SourceParent $InstallRoot `
@@ -1278,7 +1775,10 @@ if (-not $BuildFromSource) {
             -DestinationLeafPattern '^windows$'
         $DeploySwitched = $true
         New-Item -ItemType Directory -Path $StagedMetadata | Out-Null
-        foreach ($MetadataName in @("VERSION.txt", "build-metadata.json", "release-manifest.json", "SHA256SUMS.txt")) {
+        foreach ($MetadataName in @(
+            "VERSION.txt", "build-metadata.json", "release-manifest.json",
+            "model-credential-trust.json", "SHA256SUMS.txt"
+        )) {
             $MetadataSource = Join-Path $SourceRoot $MetadataName
             if (-not (Test-Path -LiteralPath $MetadataSource -PathType Leaf)) {
                 throw "Binary release trace metadata is missing: $MetadataName"
@@ -1286,8 +1786,8 @@ if (-not $BuildFromSource) {
             Copy-Item -LiteralPath $MetadataSource -Destination $StagedMetadata
         }
         $StagedMetadataFiles = @(Get-ChildItem -LiteralPath $StagedMetadata -File -Force)
-        if ($StagedMetadataFiles.Count -ne 4) {
-            throw "Installed release metadata staging must contain exactly four files."
+        if ($StagedMetadataFiles.Count -ne 5) {
+            throw "Installed release metadata staging must contain exactly five files."
         }
         $StagedChecksums = Read-ReleaseChecksums `
             -ChecksumsPath (Join-Path $StagedMetadata "SHA256SUMS.txt")
@@ -1302,7 +1802,8 @@ if (-not $BuildFromSource) {
             }
         }
         foreach ($VerifiedMetadataName in @(
-            "VERSION.txt", "build-metadata.json", "release-manifest.json"
+            "VERSION.txt", "build-metadata.json", "release-manifest.json",
+            "model-credential-trust.json"
         )) {
             $MetadataFile = Get-Item -LiteralPath (Join-Path $StagedMetadata $VerifiedMetadataName)
             $MetadataDigest = (Get-FileHash -LiteralPath $MetadataFile.FullName -Algorithm SHA256).Hash
@@ -1337,7 +1838,9 @@ if (-not $BuildFromSource) {
         $PostInstallVersion = Test-InstalledBinaryRuntime `
             -ApplicationRoot $InstallRoot -RuntimeDirectory $RuntimeRoot `
             -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
-            -AllowUnsignedTestMedia:$AllowUnsignedTestMedia
+            -AllowUnsignedTestMedia:$AllowUnsignedTestMedia `
+            -AllowUnsignedInternalRelease:$AllowUnsignedInternalRelease `
+            -RequireModelTrustStore
         if ($PostInstallVersion -ne $CandidateVersionText) {
             throw "Post-install release verification returned an unexpected Agent version."
         }
@@ -1592,6 +2095,34 @@ if (-not $DeployInstalled) {
     New-Item -ItemType Directory -Path $DeployTarget -Force | Out-Null
     foreach ($DeployFile in Get-ChildItem -LiteralPath $DeploySource -Force) {
         Copy-Item -LiteralPath $DeployFile.FullName -Destination $DeployTarget -Recurse -Force
+    }
+}
+if (-not $BuildFromSource) {
+    # The guarded binary transaction applied every ACL before its first switch.
+    # Post-commit is read-only and cannot convert a successful commit into a
+    # failed Setup with no rollback path.
+    try {
+        $UnsafePostCommitAcl = @(
+            @((Get-Item -LiteralPath $InstallRoot -Force)) + @(
+                Get-ChildItem -LiteralPath $InstallRoot -Force -Recurse
+            ) | Where-Object {
+                ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                -not (Get-Acl -LiteralPath $_.FullName).AreAccessRulesProtected
+            }
+        )
+        if ($UnsafePostCommitAcl.Count -ne 0) {
+            Write-Warning (
+                "Post-commit ACL verification found a non-canonical item; " +
+                "the committed release remains active and requires administrator review: " +
+                $UnsafePostCommitAcl[0].FullName
+            )
+        }
+    }
+    catch {
+        Write-Warning (
+            "Post-commit ACL verification could not complete; the committed " +
+            "release remains active: $($_.Exception.Message)"
+        )
     }
 }
 if ($BuildFromSource) {

@@ -9,6 +9,7 @@
   <env name="PYTHONUNBUFFERED" value="1" />
   <env name="MINEGUARD_SERVICE_PRODUCTION_MODE" value="__PRODUCTION_MODE__" />
   <env name="MINEGUARD_SERVICE_FOUR_EYES_REQUIRED" value="__FOUR_EYES_REQUIRED__" />
+  <env name="MINEGUARD_SERVICE_PROVISIONING_MANAGED_REQUIRED" value="__PROVISIONING_MANAGED_REQUIRED__" />
   <serviceaccount>
     <username>__SERVICE_ACCOUNT__</username>
   </serviceaccount>

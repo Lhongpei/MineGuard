@@ -5,3 +5,9 @@ openpyxl==3.1.5
 et-xmlfile==2.0.0
 xlrd==2.0.1
 tzdata==2025.2; platform_system == "Windows"
+# Provisioning profiles use Ed25519 signatures and AES-256-GCM envelopes.
+# Pin the complete native dependency chain so the audited Windows wheelhouse
+# and Nuitka runtime cannot silently select another crypto implementation.
+cryptography==46.0.5
+cffi==2.0.0
+pycparser==3.0

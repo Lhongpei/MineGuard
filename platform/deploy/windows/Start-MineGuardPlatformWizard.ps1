@@ -176,6 +176,49 @@ foreach ($requiredPath in @(
     }
 }
 
+function Get-InstalledPlatformReleaseClassification {
+    $metadataRoot = Join-Path $InstallRoot 'release-metadata'
+    $manifestPath = Join-Path $metadataRoot 'release-manifest.json'
+    $buildMetadataPath = Join-Path $metadataRoot 'build-metadata.json'
+    try {
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $buildMetadataPath -PathType Leaf)) {
+            return 'invalid-or-development'
+        }
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        $build = Get-Content -LiteralPath $buildMetadataPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        if ([string]$manifest.product -ne 'MineGuard Platform' -or
+            [string]$build.product -ne 'MineGuard Platform' -or
+            $manifest.codeSigned -isnot [bool] -or
+            $build.codeSigned -isnot [bool] -or
+            [bool]$manifest.codeSigned -ne [bool]$build.codeSigned -or
+            [string]$manifest.releaseClassification -ne
+                [string]$build.releaseClassification) {
+            return 'invalid-or-development'
+        }
+        $classification = [string]$manifest.releaseClassification
+        if ($classification -notin @(
+                'signed-production-candidate',
+                'unsigned-internal-release',
+                'unsigned-test-artifacts'
+            )) {
+            return 'invalid-or-development'
+        }
+        if (([bool]$manifest.codeSigned) -ne
+            ($classification -eq 'signed-production-candidate')) {
+            return 'invalid-or-development'
+        }
+        return $classification
+    } catch {
+        return 'invalid-or-development'
+    }
+}
+
+$script:InstalledReleaseClassification = `
+    Get-InstalledPlatformReleaseClassification
+
 if (-not ('MineGuardGuiProcessCapture' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -539,16 +582,36 @@ $winSWConfigSha256Text.Size = New-Object System.Drawing.Size(656, 25)
 $winSWConfigSha256Text.Font = $monoFont
 $serviceTab.Controls.Add($winSWConfigSha256Text)
 
-Add-ServiceInstallLabel -Text '签名者指纹' -Y 135
-$signerThumbprintText = New-Object System.Windows.Forms.TextBox
-$signerThumbprintText.Location = New-Object System.Drawing.Point(132, 135)
-$signerThumbprintText.Size = New-Object System.Drawing.Size(656, 25)
-$signerThumbprintText.Font = $monoFont
-$serviceTab.Controls.Add($signerThumbprintText)
+$releaseApprovalLabel = New-Object System.Windows.Forms.Label
+$releaseApprovalLabel.Location = New-Object System.Drawing.Point(18, 135)
+$releaseApprovalLabel.Size = New-Object System.Drawing.Size(112, 25)
+$releaseApprovalLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$releaseApprovalLabel.Text = if (
+    $script:InstalledReleaseClassification -eq 'unsigned-internal-release'
+    ) { '发行清单 SHA-256' } else { '签名者指纹' }
+$serviceTab.Controls.Add($releaseApprovalLabel)
+$releaseTrustText = New-Object System.Windows.Forms.TextBox
+$releaseTrustText.Location = New-Object System.Drawing.Point(132, 135)
+$releaseTrustText.Size = New-Object System.Drawing.Size(656, 25)
+$releaseTrustText.Font = $monoFont
+$serviceTab.Controls.Add($releaseTrustText)
+
+$independentRuntimeShaCheck = New-Object System.Windows.Forms.CheckBox
+$independentRuntimeShaCheck.Text = (
+    '我已通过待安装介质之外的独立渠道核对上述 Platform 发行清单 SHA-256'
+)
+$independentRuntimeShaCheck.Location = New-Object System.Drawing.Point(132, 166)
+$independentRuntimeShaCheck.Size = New-Object System.Drawing.Size(656, 34)
+$independentRuntimeShaCheck.ForeColor = $red
+$independentRuntimeShaCheck.Checked = $false
+$independentRuntimeShaCheck.Visible = (
+    $script:InstalledReleaseClassification -eq 'unsigned-internal-release'
+)
+$serviceTab.Controls.Add($independentRuntimeShaCheck)
 
 $serviceInstallButton = New-Object System.Windows.Forms.Button
 $serviceInstallButton.Text = '核验并安装正式服务'
-$serviceInstallButton.Location = New-Object System.Drawing.Point(20, 182)
+$serviceInstallButton.Location = New-Object System.Drawing.Point(20, 214)
 $serviceInstallButton.Size = New-Object System.Drawing.Size(205, 42)
 $serviceInstallButton.BackColor = [System.Drawing.Color]::FromArgb(34, 91, 158)
 $serviceInstallButton.ForeColor = [System.Drawing.Color]::White
@@ -556,14 +619,25 @@ $serviceInstallButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
 $serviceTab.Controls.Add($serviceInstallButton)
 
 $serviceInstallHint = New-Object System.Windows.Forms.Label
-$serviceInstallHint.Text = (
-    '先完成正式配置和前台验收。三个摘要/指纹必须从介质之外的单位审批记录手工填写；' +
-    '.config 不存在时对应 SHA-256 留空。安装完成后自动启动服务。'
-)
+$serviceInstallHint.Text = if (
+    $script:InstalledReleaseClassification -eq 'unsigned-internal-release'
+) {
+    '内网无签名正式发行没有 Windows 发布者身份。子发行清单和 WinSW SHA-256 必须从介质外独立批准记录手工填写并显式确认；仅用于受控内网。'
+} elseif ($script:InstalledReleaseClassification -eq
+    'signed-production-candidate') {
+    '先完成正式配置和前台验收。WinSW 摘要和签名者指纹必须从介质外的单位审批记录手工填写。'
+} else {
+    '当前是未签名测试介质或发布元数据无法识别；禁止安装正式 Windows 服务。'
+}
 $serviceInstallHint.ForeColor = $amber
-$serviceInstallHint.Location = New-Object System.Drawing.Point(242, 178)
-$serviceInstallHint.Size = New-Object System.Drawing.Size(545, 62)
+$serviceInstallHint.Location = New-Object System.Drawing.Point(242, 207)
+$serviceInstallHint.Size = New-Object System.Drawing.Size(545, 76)
 $serviceTab.Controls.Add($serviceInstallHint)
+if ($script:InstalledReleaseClassification -notin @(
+        'signed-production-candidate', 'unsigned-internal-release'
+    )) {
+    $serviceInstallButton.Enabled = $false
+}
 
 $buttonPanel = New-Object System.Windows.Forms.Panel
 $buttonPanel.Location = New-Object System.Drawing.Point(22, 470)
@@ -686,17 +760,25 @@ function Set-BusyState {
     $demoButton.Enabled = (-not $Busy) -and
         (-not $managedServerRunning) -and
         ($script:ConfigurationState.kind -in @('pristine', 'demo'))
+    $formalReleaseEligible = $script:InstalledReleaseClassification -in @(
+        'signed-production-candidate', 'unsigned-internal-release'
+    )
     $formalButton.Enabled = (-not $Busy) -and
-        ($script:ConfigurationState.kind -eq 'pristine')
-    $startCurrentButton.Enabled = (-not $Busy) -and
-        ($script:ConfigurationState.kind -in @('demo', 'formal'))
+        ($script:ConfigurationState.kind -eq 'pristine') -and
+        $formalReleaseEligible
+    $startCurrentButton.Enabled = (-not $Busy) -and (
+        ($script:ConfigurationState.kind -eq 'demo') -or
+        (($script:ConfigurationState.kind -eq 'formal') -and
+            $formalReleaseEligible)
+    )
     $openButton.Enabled = (-not $Busy) -and
         ($script:ConfigurationState.kind -in @('demo', 'formal'))
     $monthPicker.Enabled = (-not $Busy) -and (-not $managedServerRunning)
     $demoPort.Enabled = (-not $Busy) -and
         ($script:ConfigurationState.kind -eq 'pristine')
     $formalInputsEnabled = (-not $Busy) -and
-        ($script:ConfigurationState.kind -eq 'pristine')
+        ($script:ConfigurationState.kind -eq 'pristine') -and
+        $formalReleaseEligible
     $clientsBrowse.Enabled = $formalInputsEnabled
     $stateBrowse.Enabled = $formalInputsEnabled
     $clientsText.Enabled = $formalInputsEnabled
@@ -707,13 +789,17 @@ function Set-BusyState {
     $platformPartyInput.Enabled = $formalInputsEnabled
     $platformKeyInput.Enabled = $formalInputsEnabled
     $formalAccessUrl.Enabled = -not $Busy
+    $serviceReleaseEligible = $formalReleaseEligible
     $serviceInstallEnabled = (-not $Busy) -and
-        ($script:ConfigurationState.kind -eq 'formal')
+        ($script:ConfigurationState.kind -eq 'formal') -and
+        $serviceReleaseEligible
     $winSWBrowse.Enabled = $serviceInstallEnabled
     $winSWText.Enabled = $serviceInstallEnabled
     $winSWSha256Text.Enabled = $serviceInstallEnabled
     $winSWConfigSha256Text.Enabled = $serviceInstallEnabled
-    $signerThumbprintText.Enabled = $serviceInstallEnabled
+    $releaseTrustText.Enabled = $serviceInstallEnabled
+    $independentRuntimeShaCheck.Enabled = $serviceInstallEnabled -and
+        ($script:InstalledReleaseClassification -eq 'unsigned-internal-release')
     $serviceInstallButton.Enabled = $serviceInstallEnabled
     $refreshButton.Enabled = -not $Busy
 }
@@ -765,17 +851,35 @@ function Get-ConfigurationState {
     try {
         $settings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 |
             ConvertFrom-Json
-        $expectedNames = @(
+        $coreExpectedNames = @(
             'schemaVersion', 'host', 'port', 'stateDirectory', 'clientsFile',
             'adminUsername', 'secureCookie', 'allowDemoDefaultPassword',
             'platformSystemId', 'platformPartyId', 'platformKeyId'
         )
+        $provisioningExpectedNames = @(
+            'managedProvisioningRequired',
+            'provisioningTrustedPublicKeyFile',
+            'provisioningExpectedPublicKeySha256',
+            'provisioningExpectedIssuerKeyId'
+        )
+        $expectedNames = @($coreExpectedNames + $provisioningExpectedNames)
         $actualNames = @($settings.PSObject.Properties.Name)
-        if ($actualNames.Count -ne $expectedNames.Count -or
-            @($actualNames | Where-Object { $expectedNames -notcontains $_ }).Count -gt 0) {
+        $isLegacyFieldSet = (
+            $actualNames.Count -eq $coreExpectedNames.Count -and
+            @($actualNames | Where-Object {
+                    $coreExpectedNames -notcontains $_
+                }).Count -eq 0
+        )
+        $isCurrentFieldSet = (
+            $actualNames.Count -eq $expectedNames.Count -and
+            @($actualNames | Where-Object {
+                    $expectedNames -notcontains $_
+                }).Count -eq 0
+        )
+        if (-not $isLegacyFieldSet -and -not $isCurrentFieldSet) {
             throw '配置字段集合不符合已知格式'
         }
-        foreach ($requiredName in $expectedNames) {
+        foreach ($requiredName in $coreExpectedNames) {
             $property = $settings.PSObject.Properties[$requiredName]
             if ($null -eq $property -or $null -eq $property.Value) {
                 throw "缺少字段 $requiredName"
@@ -803,7 +907,9 @@ function Get-ConfigurationState {
                 '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' -or
             [string]$settings.platformKeyId -notmatch `
                 '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' -or
-            [string]$settings.stateDirectory -notmatch '^[A-Za-z]:\\') {
+            [string]$settings.stateDirectory -notmatch '^[A-Za-z]:\\' -or
+            ($isCurrentFieldSet -and
+                $settings.managedProvisioningRequired -isnot [bool])) {
             throw '配置版本、监听地址或安全开关不符合已知格式'
         }
         $port = [int]$settings.port
@@ -1453,7 +1559,9 @@ function Start-ServiceInstallOperation {
         [string] $WinSWExecutable,
         [string] $ExpectedSha256,
         [string] $ExpectedConfigSha256,
-        [string] $ExpectedSignerThumbprint
+        [string] $ExpectedSignerThumbprint,
+        [string] $ExpectedReleaseManifestSha256,
+        [bool] $UseInternalUnsigned
     )
     if ($null -ne $script:OperationPowerShell -or
         $null -ne $script:FormalConfigProcess) {
@@ -1467,7 +1575,9 @@ param(
     [string] $WinSWExecutable,
     [string] $ExpectedSha256,
     [string] $ExpectedConfigSha256,
-    [string] $ExpectedSignerThumbprint
+    [string] $ExpectedSignerThumbprint,
+    [string] $ExpectedReleaseManifestSha256,
+    [bool] $UseInternalUnsigned
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -1476,8 +1586,13 @@ $parameters = @{
     ExpectedSha256 = $ExpectedSha256
     InstallRoot = $InstallRoot
     Production = $true
-    ExpectedSignerThumbprint = $ExpectedSignerThumbprint
     StartService = $true
+}
+if ($UseInternalUnsigned) {
+    $parameters['AllowUnsignedInternalRelease'] = $true
+    $parameters['ExpectedReleaseManifestSha256'] = $ExpectedReleaseManifestSha256
+} else {
+    $parameters['ExpectedSignerThumbprint'] = $ExpectedSignerThumbprint
 }
 if (-not [string]::IsNullOrWhiteSpace($ExpectedConfigSha256)) {
     $parameters['ExpectedConfigSha256'] = $ExpectedConfigSha256
@@ -1488,7 +1603,8 @@ if (-not [string]::IsNullOrWhiteSpace($ExpectedConfigSha256)) {
     [void]$script:OperationPowerShell.AddScript($worker)
     foreach ($argument in @(
         $serviceInstallScript, $InstallRoot, $WinSWExecutable,
-        $ExpectedSha256, $ExpectedConfigSha256, $ExpectedSignerThumbprint
+        $ExpectedSha256, $ExpectedConfigSha256, $ExpectedSignerThumbprint,
+        $ExpectedReleaseManifestSha256, $UseInternalUnsigned
     )) {
         [void]$script:OperationPowerShell.AddArgument($argument)
     }
@@ -1500,7 +1616,11 @@ if (-not [string]::IsNullOrWhiteSpace($ExpectedConfigSha256)) {
         $script:OperationAsync = $script:OperationPowerShell.BeginInvoke()
         Set-BusyState -Busy $true
         $statusLabel.Text = '正在核验并安装服务...'
-        Add-Log '开始正式服务安装；签名者指纹来自用户填写的线下审批记录。'
+        if ($UseInternalUnsigned) {
+            Add-Log '开始内网无签名正式发行服务安装；发行清单 SHA-256 来自用户显式确认的介质外独立批准记录，并将覆盖完整 standalone 文件树。' 'warning'
+        } else {
+            Add-Log '开始正式服务安装；签名者指纹来自用户填写的线下审批记录。'
+        }
     } catch {
         $script:OperationPowerShell.Dispose()
         $script:OperationPowerShell = $null
@@ -1887,6 +2007,20 @@ $formalButton.Add_Click({
     })
 
 $serviceInstallButton.Add_Click({
+        $currentReleaseClassification = `
+            Get-InstalledPlatformReleaseClassification
+        if ($currentReleaseClassification -ne
+            $script:InstalledReleaseClassification) {
+            Add-Log '发布元数据在控制中心打开后发生变化；请关闭并重新打开控制中心后再操作。' 'error'
+            return
+        }
+        if ($currentReleaseClassification -notin @(
+                'signed-production-candidate',
+                'unsigned-internal-release'
+            )) {
+            Add-Log '当前未签名测试介质或无效发布不得安装正式 Windows 服务。' 'error'
+            return
+        }
         Refresh-ConfigurationState
         if ($script:ConfigurationState.kind -ne 'formal') {
             Add-Log '请先完成正式内网配置和前台验收，再安装正式服务。' 'error'
@@ -1925,14 +2059,42 @@ $serviceInstallButton.Add_Click({
             Add-Log '所选 WinSW 不带 companion .config；对应 SHA-256 必须留空。' 'error'
             return
         }
-        $approvedSigner = ($signerThumbprintText.Text -replace '\s', '').ToUpperInvariant()
-        if ($approvedSigner -notmatch '^[A-F0-9]{40}$') {
-            Add-Log '签名者指纹必须是从介质外审批记录取得的 40 位证书 SHA-1 指纹。' 'error'
-            return
+        $approvedReleaseAnchor = (
+            $releaseTrustText.Text -replace '\s', ''
+        ).ToUpperInvariant()
+        $useInternalUnsigned = $currentReleaseClassification -eq
+            'unsigned-internal-release'
+        $approvedSigner = ''
+        $approvedManifest = ''
+        if ($useInternalUnsigned) {
+            if ($approvedReleaseAnchor -notmatch '^[A-F0-9]{64}$') {
+                Add-Log '发行清单 SHA-256 必须是从安装介质之外的独立批准记录取得的 64 位十六进制值。' 'error'
+                return
+            }
+            if (-not $independentRuntimeShaCheck.Checked) {
+                Add-Log '必须显式勾选确认：已通过待安装介质之外的独立渠道核对 Platform 发行清单 SHA-256。' 'error'
+                return
+            }
+            $approvedManifest = $approvedReleaseAnchor
+            $confirmationText = (
+                '该 INTERNAL-UNSIGNED 介质没有 Authenticode，Windows 无法验证发布者身份。' +
+                '你已勾选确认 Platform 发行清单 SHA-256 来自安装介质之外的独立渠道；' +
+                'WinSW SHA-256 也必须来自独立批准记录，' +
+                '且本机位于受控内网。继续后仍会启用全部正式配置和 Secure Cookie 门禁。'
+            )
+            $confirmationTitle = '确认 INTERNAL-UNSIGNED 风险与外部摘要'
+        } else {
+            if ($approvedReleaseAnchor -notmatch '^[A-F0-9]{40}$') {
+                Add-Log '签名者指纹必须是从介质外审批记录取得的 40 位证书 SHA-1 指纹。' 'error'
+                return
+            }
+            $approvedSigner = $approvedReleaseAnchor
+            $confirmationText = '请确认 WinSW 摘要和 Platform 签名者指纹均来自待安装介质之外的单位审批记录。继续后将安装并启动正式 Windows 服务。'
+            $confirmationTitle = '确认外部信任锚'
         }
         $answer = [System.Windows.Forms.MessageBox]::Show(
-            '请确认 WinSW 摘要和 Platform 签名者指纹均来自待安装介质之外的单位审批记录。继续后将安装并启动正式 Windows 服务。',
-            '确认外部信任锚',
+            $confirmationText,
+            $confirmationTitle,
             [System.Windows.Forms.MessageBoxButtons]::OKCancel,
             [System.Windows.Forms.MessageBoxIcon]::Warning
         )
@@ -1940,7 +2102,9 @@ $serviceInstallButton.Add_Click({
         Start-ServiceInstallOperation -WinSWExecutable $winSWPathValue `
             -ExpectedSha256 $approvedWinSW.ToUpperInvariant() `
             -ExpectedConfigSha256 $approvedConfig.ToUpperInvariant() `
-            -ExpectedSignerThumbprint $approvedSigner
+            -ExpectedSignerThumbprint $approvedSigner `
+            -ExpectedReleaseManifestSha256 $approvedManifest `
+            -UseInternalUnsigned $useInternalUnsigned
     })
 
 $startCurrentButton.Add_Click({ Start-ConfiguredServer -Mode existing })

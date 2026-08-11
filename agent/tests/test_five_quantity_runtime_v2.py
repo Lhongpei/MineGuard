@@ -150,13 +150,13 @@ class FakeGovernment:
         payload = {
             "receipt_id": str(uuid4()),
             "submission_message_id": message["message_id"],
+            "submission_revision": message["revision"],
             "received_at": utc_text(),
-            "accepted_revision": message["revision"],
             "received_payload_sha256": message["signature_envelope"]["payload_sha256"],
-            "queue_state": "queued_for_analysis",
+            "intake_status": "accepted",
+            "analysis_state": "queued",
             "regulatory_outcome": "not_determined_at_intake",
-            "analysis_report_id": None,
-            "warnings": [],
+            "analysis_run_id": str(uuid4()),
         }
         return self._message(
             "intake-receipt-v2",

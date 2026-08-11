@@ -8,6 +8,7 @@ import io
 import json
 import math
 import re
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -48,6 +49,161 @@ _VALUE_UNIT_SUFFIXES = {
     "transport_t": ("t", "吨"),
     "wash_feed_t": ("t", "吨"),
     "invoiced_quantity_t": ("t", "吨"),
+}
+_HEADER_UNIT_ALIASES = {
+    "ventilation_m3_min": frozenset(
+        {"m3/min", "m³/min", "立方米/分钟", "立方米每分钟"}
+    ),
+    "electricity_kwh": frozenset({"kwh", "千瓦时", "度"}),
+    "detonators_count": frozenset({"count", "发", "枚", "个"}),
+    "explosives_kg": frozenset({"kg", "千克", "公斤"}),
+    "mine_entry_persons": frozenset({"person", "人次", "人"}),
+    **{
+        metric: frozenset({"t", "吨"})
+        for metric in (
+            "production_t",
+            "extraction_t",
+            "sales_t",
+            "transport_t",
+            "wash_feed_t",
+            "invoiced_quantity_t",
+        )
+    },
+}
+_HEADER_SEMANTIC_QUALIFIERS = {
+    "detonators_count": frozenset({"雷管", "火工品雷管"}),
+    "explosives_kg": frozenset({"炸药", "火工品炸药"}),
+    "production_t": frozenset({"企业报表", "报表口径"}),
+    "extraction_t": frozenset({"采掘计量", "工作面采出"}),
+    "transport_t": frozenset({"出矿/外运", "出矿外运"}),
+    "wash_feed_t": frozenset({"入洗原煤", "入洗量"}),
+    "invoiced_quantity_t": frozenset(
+        {"正常/蓝票实物吨数", "正常蓝票实物吨数", "正常/蓝票", "正常蓝票"}
+    ),
+}
+_HEADER_NON_UNIT_QUALIFIERS = frozenset(
+    {
+        "日报",
+        "日合计",
+        "零点班",
+        "八点班",
+        "四点班",
+        "0点班",
+        "8点班",
+        "16点班",
+    }
+)
+_HEADER_BRACKET_PAIRS = {"(": ")", "[": "]", "{": "}"}
+_HEADER_UNIT_PREFIXES = ("单位:", "unit:")
+_HEADER_DANGEROUS_UNIT_ALIASES = {
+    "ventilation_m3_min": frozenset(
+        {
+            "m3/s",
+            "m3/h",
+            "m3/sec",
+            "m3/hour",
+            "m3s-1",
+            "m3h-1",
+            "m3·s-1",
+            "m3·s−1",
+            "m3·h-1",
+            "m3·h−1",
+            "立方米/秒",
+            "立方米每秒",
+            "立方米/小时",
+            "立方米每小时",
+        }
+    ),
+    "electricity_kwh": frozenset(
+        {
+            "wh",
+            "mwh",
+            "mw·h",
+            "兆瓦时",
+            "万kwh",
+            "千kwh",
+            "万千瓦时",
+            "千千瓦时",
+            "万度",
+            "千度",
+        }
+    ),
+    "detonators_count": frozenset(
+        {
+            "g",
+            "mg",
+            "kg",
+            "t",
+            "kt",
+            "克",
+            "千克",
+            "公斤",
+            "吨",
+            "万发",
+            "千发",
+            "万枚",
+            "千枚",
+            "万个",
+            "千个",
+        }
+    ),
+    "explosives_kg": frozenset(
+        {
+            "g",
+            "mg",
+            "t",
+            "kt",
+            "克",
+            "吨",
+            "万kg",
+            "千kg",
+            "万吨",
+            "千吨",
+        }
+    ),
+    "mine_entry_persons": frozenset(
+        {
+            "g",
+            "mg",
+            "kg",
+            "t",
+            "kt",
+            "克",
+            "千克",
+            "公斤",
+            "吨",
+            "万人",
+            "千人",
+            "万人次",
+            "千人次",
+            "kperson",
+        }
+    ),
+    **{
+        metric: frozenset(
+            {
+                "g",
+                "mg",
+                "kg",
+                "kt",
+                "克",
+                "千克",
+                "公斤",
+                "千吨",
+                "万吨",
+                "千t",
+                "万t",
+            }
+        )
+        for metric in (
+            "production_t",
+            "extraction_t",
+            "sales_t",
+            "transport_t",
+            "wash_feed_t",
+            "invoiced_quantity_t",
+        )
+    },
 }
 _DATE_ALIASES = {"日期", "date", "统计日期"}
 _INFERRED_DATE_HEADER_HINTS = (
@@ -179,10 +335,6 @@ _SHIFT_ALIASES = {
     "合计": "daily_total",
     "daily": "daily_total",
 }
-_FIRE_NUMBER = re.compile(
-    r"(?:(?:数码电子|电子|工业|煤矿许用|乳化|水胶|铵油|粉状)\s*)?"
-    r"(雷管|炸药)\s*[:：=]?\s*(-?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+))"
-)
 _UNSUPPORTED_FIRE_COMPONENT_ALIASES = ("导爆索", "导爆管", "起爆具")
 _EXPLICIT_MISSING_VALUES = {"", "-", "—", "/", "无", "缺失"}
 _FORMULA_PREFIXES = ("=", "+", "@")
@@ -212,6 +364,7 @@ class TableLayout:
     width: int
     normalized_headers: tuple[str, ...]
     display_headers: tuple[str, ...]
+    header_segments: tuple[tuple[str, ...], ...]
     date_inferred: bool
 
 
@@ -425,7 +578,18 @@ def _csv_sheets(content: bytes) -> list[ParsedSheet]:
 
 
 def _normal_text(value: Any) -> str:
-    return str(value).strip().replace(" ", "").replace("\u3000", "").casefold()
+    normal = unicodedata.normalize("NFKC", str(value)).strip().casefold()
+    normal = normal.translate(
+        str.maketrans(
+            {
+                "【": "[",
+                "】": "]",
+                "〔": "[",
+                "〕": "]",
+            }
+        )
+    )
+    return re.sub(r"[\s\u3000]+", "", normal)
 
 
 def _number(
@@ -508,57 +672,6 @@ def _date_value(value: Any) -> date | None:
         except ValueError:
             continue
     return None
-
-
-def _fire_values(
-    value: Any,
-) -> tuple[int | None, int | float | None, str | None]:
-    if value is None or value == "":
-        return None, None, None
-    if isinstance(value, (int, float)):
-        return (
-            None,
-            None,
-            "火工品量是包含不同单位子项的类别，单个数值无法判断是雷管还是炸药",
-        )
-    raw_text = str(value).strip()
-    if _number(raw_text) is not None:
-        return (
-            None,
-            None,
-            "火工品量是包含不同单位子项的类别，单个数值无法判断是雷管还是炸药",
-        )
-    matches: dict[str, list[str]] = {"雷管": [], "炸药": []}
-    for name, raw in _FIRE_NUMBER.findall(raw_text):
-        matches[name].append(raw)
-    if not matches["雷管"] and not matches["炸药"]:
-        return None, None, "火工品量未明确写出雷管和/或炸药子项"
-
-    warnings: list[str] = []
-    detonators: int | None = None
-    explosives: int | float | None = None
-    if len(matches["雷管"]) > 1:
-        warnings.append("同一单元格包含多个雷管数值，无法判断是否已含合计")
-    elif matches["雷管"]:
-        detonators = _number(matches["雷管"][0], integer=True)
-        if detonators is None:
-            warnings.append("雷管数量必须是非负整数")
-    if len(matches["炸药"]) > 1:
-        warnings.append("同一单元格包含多个炸药数值，无法判断是否已含合计")
-    elif matches["炸药"]:
-        explosives = _number(matches["炸药"][0])
-        if explosives is None:
-            warnings.append("炸药数量必须是非负数")
-
-    residual = _FIRE_NUMBER.sub("", raw_text)
-    residual = re.sub(
-        r"(?:千克|公斤|kg|KG|发|枚|个|\s|[,，;；、/|()（）+])+",
-        "",
-        residual,
-    )
-    if residual:
-        warnings.append(f"还包含未识别的火工品内容：{residual[:40]}")
-    return detonators, explosives, "；".join(warnings) or None
 
 
 def _measurement(metric: str, value: Any, source_id: str) -> dict[str, Any]:
@@ -675,12 +788,213 @@ def _shift_match(value: str) -> str | None:
     )
 
 
-def csv_header_unit_issue(metric: str, source_header: str) -> str | None:
+def _normal_values(values: Any) -> frozenset[str]:
+    return frozenset(_normal_text(value) for value in values)
+
+
+def _strip_unit_prefix(value: str) -> str:
+    for prefix in _HEADER_UNIT_PREFIXES:
+        if value.startswith(prefix):
+            return value[len(prefix) :]
+    return value
+
+
+def _extract_header_annotations(
+    value: str,
+) -> tuple[str, list[str], str | None]:
+    """Return text outside brackets and fail closed on malformed annotations."""
+
+    outside: list[str] = []
+    annotations: list[str] = []
+    active_open: str | None = None
+    active_content: list[str] = []
+    for character in value:
+        if character in _HEADER_BRACKET_PAIRS:
+            if active_open is not None:
+                return "", [], "来源表头注记括号嵌套或未闭合"
+            active_open = character
+            active_content = []
+            continue
+        if character in _HEADER_BRACKET_PAIRS.values():
+            if (
+                active_open is None
+                or _HEADER_BRACKET_PAIRS[active_open] != character
+            ):
+                return "", [], "来源表头注记括号不匹配或未闭合"
+            annotations.append("".join(active_content))
+            active_open = None
+            active_content = []
+            continue
+        if active_open is None:
+            outside.append(character)
+        else:
+            active_content.append(character)
+    if active_open is not None:
+        return "", [], "来源表头注记括号未闭合"
+    return "".join(outside), annotations, None
+
+
+def _approved_header_qualifiers(metric: str) -> frozenset[str]:
+    return frozenset(
+        {
+            *_normal_values(_HEADER_UNIT_ALIASES[metric]),
+            *_normal_values(_HEADER_NON_UNIT_QUALIFIERS),
+            *_normal_values(_HEADER_SEMANTIC_QUALIFIERS.get(metric, ())),
+            *_normal_values(_SHIFT_ALIASES),
+            "daily_total",
+            "daily",
+            "日统计",
+            "合计",
+        }
+    )
+
+
+def _annotation_issue(metric: str, annotation: str) -> str | None:
+    qualifier = _strip_unit_prefix(_normal_text(annotation))
+    if not qualifier:
+        return "来源表头括号内单位或口径为空；系统不会猜测单位"
+    if qualifier in _approved_header_qualifiers(metric):
+        return None
+    return (
+        f"来源表头单位或口径“{qualifier}”未获批准；系统不会静默换算，"
+        f"请按固定单位 {UNITS[metric]} 导出后再导入"
+    )
+
+
+def _target_metric_aliases(metric: str) -> tuple[str, ...]:
+    aliases = {
+        _normal_text(alias)
+        for alias, target, _legacy in _METRIC_ALIASES
+        if target == metric
+    }
+    return tuple(sorted(aliases, key=len, reverse=True))
+
+
+def _header_modifiers(metric: str) -> frozenset[str]:
+    modifiers = {
+            *_normal_values(_HEADER_NON_UNIT_QUALIFIERS),
+            *_normal_values(_HEADER_SEMANTIC_QUALIFIERS.get(metric, ())),
+            *_normal_values(_SHIFT_ALIASES),
+            "daily_total",
+            "daily",
+            "日统计",
+            "合计",
+    }
+    if metric in {"detonators_count", "explosives_kg"}:
+        modifiers.update(
+            _normal_values(("火工品量", "火工品", "爆破器材量", "民爆物品量"))
+        )
+    return frozenset(modifiers)
+
+
+def _metric_alias_residual(metric: str, value: str) -> tuple[bool, str]:
+    aliases = _target_metric_aliases(metric)
+    found = any(alias in value for alias in aliases)
+    if not found:
+        return False, value
+    if value in _approved_header_qualifiers(metric):
+        return True, ""
+    result = value
+    for alias in aliases:
+        result = result.replace(alias, "")
+    for modifier in sorted(_header_modifiers(metric), key=len, reverse=True):
+        result = result.replace(modifier, "")
+    for business_suffix in ("使用数量", "使用量", "数量", "个数", "量"):
+        result = result.replace(business_suffix, "")
+    result = result.strip("|/_:;,.·-—")
+    result = _strip_unit_prefix(result)
+    return True, result.strip("|/_:;,.·-—")
+
+
+def _unit_suffix_state(metric: str, value: str) -> str | None:
+    """Classify an explicit suffix while ignoring a canonical metric code."""
+
+    approved = _normal_values(_HEADER_UNIT_ALIASES[metric])
+    dangerous = _normal_values(_HEADER_DANGEROUS_UNIT_ALIASES[metric])
+    found_alias, residual = _metric_alias_residual(metric, value)
+    if found_alias:
+        if not residual or residual in approved:
+            return "approved"
+        return "dangerous"
+
+    residual = value.strip("|/_:;,.·-—")
+    residual = _strip_unit_prefix(residual).strip("|/_:;,.·-—")
+    if not residual:
+        return None
+    candidates = sorted(approved | dangerous, key=len, reverse=True)
+    for candidate in candidates:
+        if not residual.endswith(candidate):
+            continue
+        prefix = residual[: -len(candidate)]
+        if prefix:
+            previous = prefix[-1]
+            if previous.isascii() and previous.isalpha():
+                continue
+        return "approved" if candidate in approved else "dangerous"
+    return None
+
+
+def _header_detail_issue(metric: str, detail: str) -> str | None:
+    normal = _normal_text(detail)
+    outside, annotations, bracket_issue = _extract_header_annotations(normal)
+    if bracket_issue is not None:
+        return f"{bracket_issue}；系统不会猜测单位"
+    for annotation in annotations:
+        issue = _annotation_issue(metric, annotation)
+        if issue is not None:
+            return issue
+    stripped = _strip_unit_prefix(outside).strip("|/_:;,.·-—")
+    if not stripped and annotations:
+        return None
+    if stripped in _approved_header_qualifiers(metric):
+        return None
+    matched = _metric_match(stripped)
+    if matched is not None and matched[0] == metric:
+        state = _unit_suffix_state(metric, stripped)
+        if state != "dangerous":
+            return None
+    state = _unit_suffix_state(metric, stripped)
+    if state == "approved":
+        return None
+    if state == "dangerous":
+        return (
+            f"来源多层表头单位“{detail}”不是固定单位 {UNITS[metric]}；"
+            "系统不会静默换算"
+        )
+    return (
+        f"来源多层表头注记“{detail}”未获批准；系统不会猜测单位，"
+        f"请按固定单位 {UNITS[metric]} 导出后再导入"
+    )
+
+
+def csv_header_unit_issue(
+    metric: str,
+    source_header: str,
+    *,
+    header_segments: tuple[str, ...] | None = None,
+) -> str | None:
     """Reject source semantics/units that cannot be silently treated as V3."""
 
     if metric not in METRICS or not isinstance(source_header, str):
         return "来源字段或规范指标非法"
     normal = _normal_text(source_header)
+    outside, annotations, bracket_issue = _extract_header_annotations(normal)
+    if bracket_issue is not None:
+        return f"{bracket_issue}；系统不会猜测单位"
+    for annotation in annotations:
+        issue = _annotation_issue(metric, annotation)
+        if issue is not None:
+            return issue
+
+    segments = header_segments
+    if segments is None and " / " in source_header:
+        segments = tuple(source_header.split(" / "))
+    if segments is not None:
+        for detail in segments[1:]:
+            issue = _header_detail_issue(metric, detail)
+            if issue is not None:
+                return issue
+
     if metric == "invoiced_quantity_t" and any(
         token in normal
         for token in ("金额", "价税", "人民币", "元", "万元", "票数", "张数")
@@ -702,51 +1016,53 @@ def csv_header_unit_issue(metric: str, source_header: str) -> str | None:
         token in normal for token in ("企业报表产量", "报表产量")
     ):
         return "来源表示企业报表产量，不能作为开采量导入"
-    if metric in {
-        "production_t",
-        "extraction_t",
-        "sales_t",
-        "transport_t",
-        "wash_feed_t",
-        "invoiced_quantity_t",
-    } and any(
-        token in normal for token in ("万吨", "千吨", "公斤", "千克", "(kg)", "（kg）")
-    ):
-        return "来源煤量单位不是吨；系统不会静默换算，请先按吨导出"
-    if metric == "explosives_kg" and any(
-        token in normal for token in ("万吨", "千吨", "(t)", "（t）", "吨")
-    ):
-        return "来源炸药单位不是千克；系统不会静默换算，请先按千克导出"
-    if metric == "electricity_kwh" and any(
-        token in normal
-        for token in ("mwh", "兆瓦时", "万度", "(wh)", "（wh）")
-    ):
-        return "来源电量单位不是千瓦时；系统不会静默换算，请先按 kWh 导出"
-    if metric == "ventilation_m3_min" and any(
-        token in normal
-        for token in (
-            "m3/s",
-            "m³/s",
-            "m3/h",
-            "m³/h",
-            "立方米/秒",
-            "立方米每秒",
-            "立方米/小时",
-            "立方米每小时",
+    if _unit_suffix_state(metric, outside) == "dangerous":
+        return (
+            f"来源表头单位不是固定单位 {UNITS[metric]}；系统不会静默换算，"
+            "请先按规范单位导出"
         )
-    ):
-        return "来源风量单位不是立方米/分钟；系统不会静默换算，请先按 m3/min 导出"
     return None
 
 
-def _looks_like_header_detail(row: list[Any], date_column: int) -> bool:
+def _looks_like_header_detail(
+    row: list[Any],
+    date_column: int,
+    *,
+    base_header: list[Any] | None = None,
+) -> bool:
     for index, value in enumerate(row):
         if index == date_column or not isinstance(value, str):
             continue
         normal = _normal_text(value)
         if normal and (_metric_match(normal) or _shift_match(normal)):
             return True
-    return False
+    if base_header is None:
+        return False
+    raw_date = row[date_column] if date_column < len(row) else None
+    if not _explicit_missing(raw_date):
+        return False
+    width = min(MAX_COLUMNS, max(len(row), len(base_header)))
+    inherited_headers = _filled_header_row(base_header, width)
+    found = False
+    for index in range(width):
+        if index == date_column:
+            continue
+        value = row[index] if index < len(row) else None
+        if _explicit_missing(value):
+            continue
+        if (
+            not isinstance(value, str)
+            or _date_value(value) is not None
+            or _number(value) is not None
+            or _formula_like(value)
+        ):
+            return False
+        if not inherited_headers[index] or _metric_match(
+            inherited_headers[index]
+        ) is None:
+            return False
+        found = True
+    return found
 
 
 def _filled_header_row(row: list[Any], width: int) -> list[str]:
@@ -810,6 +1126,10 @@ def _build_layout(
         )[:240]
         for column in range(width)
     )
+    header_segments = tuple(
+        tuple(dict.fromkeys(row[column] for row in display_rows if row[column]))
+        for column in range(width)
+    )
     return TableLayout(
         header_start=header_start,
         data_start=data_start,
@@ -817,6 +1137,7 @@ def _build_layout(
         width=width,
         normalized_headers=normalized_headers,
         display_headers=display_headers,
+        header_segments=header_segments,
         date_inferred=date_inferred,
     )
 
@@ -904,7 +1225,11 @@ def _find_table_layout(sheet: ParsedSheet) -> TableLayout:
             )
             if _date_value(candidate_date) is not None:
                 break
-            if not _looks_like_header_detail(candidate, date_column):
+            if not _looks_like_header_detail(
+                candidate,
+                date_column,
+                base_header=row,
+            ):
                 break
             if not _safe_declared_header_row(
                 candidate,
@@ -1002,6 +1327,7 @@ def _find_table(
     layout = _find_table_layout(sheet)
     mapping: dict[int, tuple[str, str]] = {}
     warnings: list[dict[str, Any]] = []
+    blocked_generic_fire = False
     if layout.date_inferred:
         warnings.append(
             {
@@ -1019,12 +1345,13 @@ def _find_table(
         if mapping_override is not None:
             target = mapping_override.get(column)
             if target is not None:
-                if target[0] != "fire_material":
-                    unit_issue = csv_header_unit_issue(
-                        target[0], layout.display_headers[column]
-                    )
-                    if unit_issue is not None:
-                        raise ImportContentError(unit_issue)
+                unit_issue = csv_header_unit_issue(
+                    target[0],
+                    layout.display_headers[column],
+                    header_segments=layout.header_segments[column],
+                )
+                if unit_issue is not None:
+                    raise ImportContentError(unit_issue)
                 mapping[column] = target
             elif combined:
                 warnings.append(
@@ -1088,22 +1415,37 @@ def _find_table(
             continue
         metric, legacy, alias = matched
         shift = _shift_match(combined) or "daily_total"
-        if metric != "fire_material":
-            unit_issue = csv_header_unit_issue(
+        if metric == "fire_material":
+            blocked_generic_fire = True
+            warnings.append(
+                {
+                    "kind": "generic_fire_material_requires_atomic_columns",
+                    "source_column": column,
+                    "source_header": layout.display_headers[column],
+                    "reason": (
+                        "十量 V3 不接收火工品总栏；必须拆为雷管和炸药两列，"
+                        "并分别使用 count 与 kg 固定单位"
+                    ),
+                    "requires_human_review": True,
+                }
+            )
+            continue
+        unit_issue = csv_header_unit_issue(
                 metric,
                 layout.display_headers[column],
+                header_segments=layout.header_segments[column],
             )
-            if unit_issue is not None:
-                warnings.append(
-                    {
-                        "kind": "incompatible_source_unit",
-                        "source_column": column,
-                        "source_header": layout.display_headers[column],
-                        "reason": unit_issue,
-                        "requires_human_review": True,
-                    }
-                )
-                continue
+        if unit_issue is not None:
+            warnings.append(
+                {
+                    "kind": "incompatible_source_unit",
+                    "source_column": column,
+                    "source_header": layout.display_headers[column],
+                    "reason": unit_issue,
+                    "requires_human_review": True,
+                }
+            )
+            continue
         mapping[column] = (metric, shift)
         if legacy:
             warnings.append(
@@ -1121,6 +1463,10 @@ def _find_table(
         return layout.data_start, layout.date_column, mapping, warnings
     if mapping_override is not None:
         raise ImportContentError("至少需要确认一个十量字段映射")
+    if blocked_generic_fire:
+        raise ImportContentError(
+            "火工品量必须拆为雷管和炸药两个原子字段，并分别使用 count 与 kg"
+        )
     raise ImportContentError("未找到可识别的十量表头")
 
 
@@ -1175,26 +1521,6 @@ def _normalise_sheet(
                 "requires_human_review": True,
             }
         )
-    for period in ("daily_total", *SHIFT_KEYS):
-        generic_columns = columns_by_target.get(("fire_material", period), [])
-        explicit_columns = [
-            *columns_by_target.get(("detonators_count", period), []),
-            *columns_by_target.get(("explosives_kg", period), []),
-        ]
-        if generic_columns and explicit_columns:
-            blocked_columns.update(generic_columns)
-            suggestions.append(
-                {
-                    "kind": "overlapping_fire_material_columns",
-                    "source_columns": generic_columns + explicit_columns,
-                    "period": period,
-                    "reason": (
-                        "同时存在火工品总栏和明确子项栏；为避免重复计算，"
-                        "仅采用明确的雷管/炸药子项栏"
-                    ),
-                    "requires_human_review": True,
-                }
-            )
     for row_index in range(start_row, min(len(sheet.rows), MAX_ROWS)):
         row = sheet.rows[row_index]
         raw_date = row[date_column] if date_column < len(row) else None
@@ -1231,54 +1557,34 @@ def _normalise_sheet(
                 continue
             value = row[column] if column < len(row) else None
             target = daily if period == "daily_total" else shifts[period]
-            if group == "fire_material":
-                detonators, explosives, warning = _fire_values(value)
-                target["detonators_count"] = _measurement(
-                    "detonators_count", detonators, source_id
+            measurement = _measurement(group, value, source_id)
+            target[group] = measurement
+            if not _explicit_missing(value) and measurement["value"] is None:
+                formula_like = _formula_like(value)
+                measurement["quality_flags"].append("source_format_warning")
+                suggestions.append(
+                    {
+                        "kind": (
+                            "formula_like_cell"
+                            if formula_like
+                            else "invalid_numeric_cell"
+                        ),
+                        "source_column": column,
+                        "source_row": row_index + 1,
+                        "metric": group,
+                        "period": period,
+                        "reason": (
+                            "单元格疑似公式、命令前缀或非法数值格式，"
+                            "未执行且未写入数值"
+                            if formula_like
+                            else (
+                                "单元格不符合该字段的安全数值范围，"
+                                "未猜测或写入数值"
+                            )
+                        ),
+                        "requires_human_review": True,
+                    }
                 )
-                target["explosives_kg"] = _measurement(
-                    "explosives_kg", explosives, source_id
-                )
-                if warning:
-                    suggestions.append(
-                        {
-                            "kind": "ambiguous_fire_material_value",
-                            "source_column": column,
-                            "source_row": row_index + 1,
-                            "period": period,
-                            "reason": warning,
-                            "requires_human_review": True,
-                        }
-                    )
-            else:
-                measurement = _measurement(group, value, source_id)
-                target[group] = measurement
-                if not _explicit_missing(value) and measurement["value"] is None:
-                    formula_like = _formula_like(value)
-                    measurement["quality_flags"].append("source_format_warning")
-                    suggestions.append(
-                        {
-                            "kind": (
-                                "formula_like_cell"
-                                if formula_like
-                                else "invalid_numeric_cell"
-                            ),
-                            "source_column": column,
-                            "source_row": row_index + 1,
-                            "metric": group,
-                            "period": period,
-                            "reason": (
-                                "单元格疑似公式、命令前缀或非法数值格式，"
-                                "未执行且未写入数值"
-                                if formula_like
-                                else (
-                                    "单元格不符合该字段的安全数值范围，"
-                                    "未猜测或写入数值"
-                                )
-                            ),
-                            "requires_human_review": True,
-                        }
-                    )
         shift_documents: dict[str, Any] = {}
         for key in SHIFT_KEYS:
             start_at, end_at = _shift_window(day_value, key, timezone)
@@ -1642,7 +1948,11 @@ def inspect_five_quantity_csv(
                     if legacy
                     else f"表头包含已批准别名“{alias}”"
                 )
-                unit_issue = csv_header_unit_issue(target_metric, header)
+                unit_issue = csv_header_unit_issue(
+                    target_metric,
+                    header,
+                    header_segments=layout.header_segments[column],
+                )
                 if unit_issue is not None:
                     target_metric = None
                     target_period = None
@@ -1763,7 +2073,7 @@ def _column_mapping_override(
             or not 0 <= column < MAX_COLUMNS
         ):
             raise ImportContentError("CSV 来源列编号非法")
-        if metric not in {*METRICS, "fire_material"} or period not in PERIOD_KEYS:
+        if metric not in METRICS or period not in PERIOD_KEYS:
             raise ImportContentError("CSV 字段映射目标不在十量白名单内")
         target = (metric, period)
         if column in result:

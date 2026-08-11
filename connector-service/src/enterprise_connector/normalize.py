@@ -17,13 +17,15 @@ from .quantity_catalog import (
     AGGREGATIONS,
     INTEGER_METRICS,
     METRICS,
+    OPTIONAL_SHIFT_METRICS,
+    SCOPES,
     TEN_QUANTITY_SOURCE_CONTRACT,
     TEN_QUANTITY_SUBMISSION_CONTRACT,
     UNITS,
+    mapping_target_scopes,
 )
 from .reporting import reporting_cutoff
 
-SCOPES = ("daily_total", "zero_shift", "eight_shift", "four_shift")
 _MAX_AGENT_CONTENT_BYTES = 2 * 1024 * 1024
 _MAX_MEASUREMENT = Decimal("1000000000000000")
 _NUMBER_TEXT = re.compile(
@@ -232,19 +234,21 @@ def _reduce(values: list[tuple[datetime, int | float]], mapping: FieldMapping) -
     return raw_values[-1]
 
 
-def _measurement(metric: str, value: int | float | None, source_ref: str) -> dict[str, Any]:
+def _measurement(
+    metric: str,
+    value: int | float | None,
+    source_ref: str,
+    *,
+    null_flag: str = "missing",
+) -> dict[str, Any]:
     return {
         "metric_code": metric,
         "value": value,
         "unit": UNITS[metric],
         "aggregation": AGGREGATIONS[metric],
-        "quality_flags": ["reported"] if value is not None else ["missing"],
+        "quality_flags": ["reported"] if value is not None else [null_flag],
         "source_refs": [source_ref],
     }
-
-
-def _set(source_ref: str) -> dict[str, dict[str, Any]]:
-    return {metric: _measurement(metric, None, source_ref) for metric in METRICS}
 
 
 def _shift_window(day: date, scope: str, zone: ZoneInfo) -> tuple[str, str]:
@@ -293,6 +297,7 @@ def normalize_batches(
     dates: dict[str, set[date]] = defaultdict(set)
     filenames: dict[str, set[str]] = defaultdict(set)
     mapping_seen: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    observed_scopes: dict[str, set[str]] = defaultdict(set)
     latest_observed_at: dict[str, datetime] = {}
     record_counts: dict[str, int] = defaultdict(int)
 
@@ -307,6 +312,7 @@ def normalize_batches(
             record_counts[month] += 1
             day = timestamp.date()
             row_scope = _scope_for(record, timestamp, pipeline)
+            observed_scopes[month].add(row_scope)
             dates[month].add(day)
             filenames[month].add(batch.original_filename)
             for mapping in pipeline.mappings:
@@ -369,15 +375,41 @@ def normalize_batches(
             complete_days.append(cursor)
             cursor += timedelta(days=1)
         missing_days = sorted(set(complete_days) - set(observed_days))
+        configured_cells = {
+            (scope, mapping.target.split(".", 1)[-1])
+            for mapping in pipeline.mappings
+            for scope in mapping_target_scopes(
+                mapping.target,
+                period_type=pipeline.period_type,
+                scope_field=pipeline.scope_field,
+                scope_values=pipeline.scope_values,
+                shift_names=tuple(shift.name for shift in pipeline.shifts),
+                observed_scopes=frozenset(observed_scopes[month]),
+            )
+        }
         day_documents: list[dict[str, Any]] = []
         for day in complete_days:
-            daily = _set(source_ref)
-            shifts = {scope: _set(source_ref) for scope in SCOPES if scope != "daily_total"}
+            daily: dict[str, dict[str, Any]] = {}
+            shifts: dict[str, dict[str, dict[str, Any]]] = {
+                scope: {} for scope in SCOPES if scope != "daily_total"
+            }
             for scope in SCOPES:
                 target_set = daily if scope == "daily_total" else shifts[scope]
                 for metric in METRICS:
                     value = reduced.get((day.isoformat(), scope, metric))
-                    target_set[metric] = _measurement(metric, value, source_ref)
+                    null_flag = (
+                        "not_applicable"
+                        if scope != "daily_total"
+                        and metric in OPTIONAL_SHIFT_METRICS
+                        and (scope, metric) not in configured_cells
+                        else "missing"
+                    )
+                    target_set[metric] = _measurement(
+                        metric,
+                        value,
+                        source_ref,
+                        null_flag=null_flag,
+                    )
             shift_documents: dict[str, Any] = {}
             for scope, code in (
                 ("zero_shift", "ZERO"),
@@ -427,7 +459,9 @@ def normalize_batches(
                 "source_declaration": source.truth_statement,
                 "normalization": (
                     "deterministic-ten-quantity-v3-mapping; no imputation; "
-                    "missing cells remain null; conflicting values require an explicit reducer; "
+                    "missing required/configured cells remain null+missing; "
+                    "unconfigured optional shift cells are null+not_applicable; "
+                    "conflicting values require an explicit reducer; "
                     "invoiced_quantity_t accepts nonnegative normal/blue-invoice tonnes only"
                 ),
             },

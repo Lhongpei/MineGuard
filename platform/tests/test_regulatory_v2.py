@@ -553,6 +553,85 @@ def test_temporal_drift_and_bic_change_point_are_retained() -> None:
     assert result.decision is DecisionStatus.RISK
 
 
+@pytest.mark.parametrize(
+    ("detonators", "explosives", "expected"),
+    [
+        (
+            12.0,
+            0.0,
+            {
+                "detonators_count": (
+                    "detonators_during_nonproduction_candidate",
+                    12.0,
+                    "12 枚",
+                )
+            },
+        ),
+        (
+            0.0,
+            48.0,
+            {
+                "explosives_kg": (
+                    "explosives_during_nonproduction_candidate",
+                    48.0,
+                    "48 千克",
+                )
+            },
+        ),
+        (
+            12.0,
+            48.0,
+            {
+                "detonators_count": (
+                    "detonators_during_nonproduction_candidate",
+                    12.0,
+                    "12 枚",
+                ),
+                "explosives_kg": (
+                    "explosives_during_nonproduction_candidate",
+                    48.0,
+                    "48 千克",
+                ),
+            },
+        ),
+        (0.0, 0.0, {}),
+    ],
+)
+def test_nonproduction_fire_material_evidence_keeps_atomic_units_separate(
+    detonators: float,
+    explosives: float,
+    expected: dict[str, tuple[str, float, str]],
+) -> None:
+    submission = _submission()
+    day = submission.days[0]
+    submission.days[0] = day.model_copy(
+        update={
+            "production_t": _quantity(0.0),
+            "detonators_count": _quantity(detonators),
+            "explosives_kg": _quantity(explosives),
+        }
+    )
+
+    result = analyze_five_quantity(submission)
+
+    fire_signals = {
+        signal.metric: signal
+        for signal in result.temporal_signals
+        if signal.code
+        in {
+            "detonators_during_nonproduction_candidate",
+            "explosives_during_nonproduction_candidate",
+        }
+    }
+    assert set(fire_signals) == set(expected)
+    for metric, (code, observed, message_fragment) in expected.items():
+        signal = fire_signals[metric]
+        assert signal.code == code
+        assert signal.observed == observed
+        assert message_fragment in signal.message
+        assert "detonators_count,explosives_kg" not in (signal.metric or "")
+
+
 def test_established_past_only_temporal_detector_suite_is_inside_v2_engine() -> None:
     history = [
         HistoricalFiveQuantityDay(

@@ -95,7 +95,7 @@ jobs:
           # subprocess. Install only its third-party runtime libraries here;
           # the deployable Connector package still has no Agent code dependency.
           & $env:CONNECTOR_PYTHON -m pip install `
-            --constraint agent/constraints.txt openpyxl xlrd tzdata
+            --constraint agent/constraints.txt openpyxl xlrd tzdata cryptography
 
       - name: Verify independent 64-bit runtimes and Asia Shanghai timezone
         shell: pwsh
@@ -199,6 +199,13 @@ jobs:
         run: |
           node --check platform/src/mineguard/regulatory_web/app.js
           node --check agent/web/v2-app.js
+
+      - name: Verify signed provisioning pair across both products
+        shell: pwsh
+        run: |
+          & $env:AGENT_PYTHON scripts/verify_provisioning_pair.py `
+            --platform-python "$env:PLATFORM_PYTHON" `
+            --agent-python "$env:AGENT_PYTHON"
 
       - name: Start both products and verify Windows health endpoints
         shell: pwsh

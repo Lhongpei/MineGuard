@@ -66,7 +66,7 @@ _SKILL_PROPOSAL_ROUTE = re.compile(
 _SKILL_VERSION_ROUTE = re.compile(r"^/api/v1/agent/skill-versions/([^/]+)$")
 _CHAT_SESSION_ROUTE = re.compile(r"^/api/v1/chat/sessions/([^/]+)(?:/(messages))?$")
 _FQ_DRAFT_ROUTE = re.compile(
-    r"^/api/v2/drafts/([^/]+)(?:/(confirm|send-now|ingestions|machine-resume))?$"
+    r"^/api/v2/drafts/([^/]+)(?:/(confirm|send-now|ingestions|machine-resume|correction))?$"
 )
 _FQ_RISK_ROUTE = re.compile(r"^/api/v2/risks/([^/]+)(?:/(chat|response))?$")
 _FQ_RESPONSE_ROUTE = re.compile(r"^/api/v2/responses/([^/]+)(?:/(confirm))?$")
@@ -1845,6 +1845,34 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return True
+            if action == "correction" and method == "POST":
+                if not self._require(context, "write"):
+                    return True
+                body = self._body()
+                self._reject_unknown_fields(
+                    body,
+                    frozenset(
+                        {
+                            "expected_revision",
+                            "expected_submission_revision",
+                            "accepted",
+                        }
+                    ),
+                )
+                result = runtime.create_correction_draft(
+                    draft_id,
+                    expected_revision=body.get("expected_revision"),
+                    expected_submission_revision=body.get(
+                        "expected_submission_revision"
+                    ),
+                    accepted=body.get("accepted") is True,
+                    actor=actor,
+                )
+                self._json(
+                    HTTPStatus.CREATED if result["created"] else HTTPStatus.OK,
+                    result,
+                )
+                return True
             if action == "confirm" and method == "POST":
                 if not self._require(context, "confirm"):
                     return True
@@ -2107,6 +2135,29 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             news_definition = (
                 news_skill.public_definition() if news_skill is not None else {}
             )
+            raw_model_credential = getattr(
+                self.server.service,
+                "model_credential_status",
+                {"managed": False, "source": "not_configured"},
+            )
+            safe_model_credential = {
+                name: raw_model_credential.get(name)
+                for name in (
+                    "managed",
+                    "state",
+                    "source",
+                    "provider_id",
+                    "model",
+                    "capabilities",
+                    "version",
+                    "credential_version",
+                    "expires_at",
+                    "runtime_not_after",
+                    "secret_protection",
+                    "failure_code",
+                )
+                if name in raw_model_credential
+            }
             self._json(
                 (
                     HTTPStatus.OK
@@ -2125,6 +2176,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                     "llm_connection_status": (
                         "configured_unverified" if llm_configured else "not_configured"
                     ),
+                    "model_credential": safe_model_credential,
                     "news_search_available": news_available,
                     "news_search_status": (
                         str(

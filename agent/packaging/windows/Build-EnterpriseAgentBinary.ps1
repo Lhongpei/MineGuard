@@ -13,7 +13,10 @@ param(
     [string]$ExpectedSignToolSha256 = "",
     [string]$SigningCertificateThumbprint = "",
     [string]$TimestampUrl = "",
+    [string]$ModelIssuerTrustStore = "",
+    [string]$ExpectedModelIssuerTrustStoreSha256 = "",
     [switch]$RequireSignedBinary,
+    [switch]$InternalUnsignedRelease,
     [switch]$SkipSmokeTest,
     [switch]$Force
 )
@@ -194,6 +197,80 @@ if (-not $ArtifactsRoot) {
 }
 Assert-SafeLocalFixedPath -Name "ArtifactsRoot" -PathValue $ArtifactsRoot
 $ArtifactsRoot = [IO.Path]::GetFullPath($ArtifactsRoot)
+$FormalCandidate = $RequireSignedBinary -or $InternalUnsignedRelease
+if ($RequireSignedBinary -and $InternalUnsignedRelease) {
+    throw "RequireSignedBinary and InternalUnsignedRelease are mutually exclusive release classifications."
+}
+if ($FormalCandidate -and $SkipSmokeTest) {
+    throw "A formal release candidate cannot skip the frozen executable smoke test."
+}
+$UsingTestOnlyModelTrust = $false
+if ([string]::IsNullOrWhiteSpace($ModelIssuerTrustStore)) {
+    if ($FormalCandidate) {
+        throw (
+            "A formal release candidate requires ModelIssuerTrustStore and its " +
+            "independently supplied ExpectedModelIssuerTrustStoreSha256."
+        )
+    }
+    $ModelIssuerTrustStore = Join-Path $PSScriptRoot `
+        "model-credential-trust.TEST-ONLY.json"
+    $UsingTestOnlyModelTrust = $true
+    Write-Warning (
+        "Using the explicit TEST-ONLY model issuer trust store. " +
+        "This Agent build cannot be treated as a formal model-enabled release."
+    )
+}
+Assert-SafeLocalFixedPath -Name "ModelIssuerTrustStore" `
+    -PathValue $ModelIssuerTrustStore
+$ModelIssuerTrustStore = [IO.Path]::GetFullPath($ModelIssuerTrustStore)
+$UsingTestOnlyModelTrust = $UsingTestOnlyModelTrust -or
+    ([IO.Path]::GetFileName($ModelIssuerTrustStore) -match '(?i)TEST-ONLY')
+Assert-SafeLocalFixedPath -Name "ModelIssuerTrustStore" `
+    -PathValue $ModelIssuerTrustStore
+if (-not (Test-Path -LiteralPath $ModelIssuerTrustStore -PathType Leaf)) {
+    throw "ModelIssuerTrustStore does not exist: $ModelIssuerTrustStore"
+}
+$ModelTrustItem = Get-Item -LiteralPath $ModelIssuerTrustStore -Force
+if (($ModelTrustItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+    $ModelTrustItem.Length -le 0 -or $ModelTrustItem.Length -gt 1MB) {
+    throw "ModelIssuerTrustStore must be an ordinary JSON file no larger than 1 MiB."
+}
+$ExpectedModelIssuerTrustStoreSha256 = `
+    $ExpectedModelIssuerTrustStoreSha256.Trim().ToLowerInvariant()
+if ($ExpectedModelIssuerTrustStoreSha256 -and
+    $ExpectedModelIssuerTrustStoreSha256 -notmatch '^[a-f0-9]{64}$') {
+    throw "ExpectedModelIssuerTrustStoreSha256 must be exactly 64 hexadecimal digits."
+}
+if ($FormalCandidate -and
+    [string]::IsNullOrWhiteSpace($ExpectedModelIssuerTrustStoreSha256)) {
+    throw (
+        "A formal release candidate requires an independently supplied " +
+        "ExpectedModelIssuerTrustStoreSha256."
+    )
+}
+if ($FormalCandidate -and
+    [IO.Path]::GetFileName($ModelIssuerTrustStore) -match '(?i)TEST-ONLY') {
+    throw "A formal release candidate refuses the TEST-ONLY model issuer trust store."
+}
+$ActualModelIssuerTrustStoreSha256 = (Get-FileHash `
+    -LiteralPath $ModelIssuerTrustStore -Algorithm SHA256).Hash.ToLowerInvariant()
+$BundledTestOnlyModelTrustStore = Join-Path $PSScriptRoot `
+    "model-credential-trust.TEST-ONLY.json"
+if (-not (Test-Path -LiteralPath $BundledTestOnlyModelTrustStore -PathType Leaf)) {
+    throw "The explicit TEST-ONLY model issuer trust store is missing."
+}
+$BundledTestOnlyModelTrustStoreSha256 = (Get-FileHash `
+    -LiteralPath $BundledTestOnlyModelTrustStore -Algorithm SHA256).Hash.ToLowerInvariant()
+$UsingTestOnlyModelTrust = $UsingTestOnlyModelTrust -or
+    $ActualModelIssuerTrustStoreSha256 -eq $BundledTestOnlyModelTrustStoreSha256
+if ($FormalCandidate -and $UsingTestOnlyModelTrust) {
+    throw "A formal release candidate refuses the bundled TEST-ONLY model issuer key, even if the file was renamed."
+}
+if ($ExpectedModelIssuerTrustStoreSha256 -and
+    $ActualModelIssuerTrustStoreSha256 -ne
+        $ExpectedModelIssuerTrustStoreSha256) {
+    throw "ModelIssuerTrustStore does not match its protected expected SHA-256."
+}
 $ExplicitPythonExecutable = -not [string]::IsNullOrWhiteSpace($PythonExecutable)
 if ($ExplicitPythonExecutable) {
     if ($PSBoundParameters.ContainsKey("PythonCommand") -or
@@ -218,10 +295,10 @@ if ($ExpectedPythonExecutableSha256 -and
     $ExpectedPythonExecutableSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
     throw "ExpectedPythonExecutableSha256 must be exactly 64 hexadecimal digits."
 }
-if ($RequireSignedBinary -and
+if ($FormalCandidate -and
     (-not $ExplicitPythonExecutable -or -not $ExpectedPythonPatchVersion -or
         -not $ExpectedPythonExecutableSha256)) {
-    throw "A signed child build requires the resolved Python executable, exact patch and approved SHA-256."
+    throw "A formal child build requires the resolved Python executable, exact patch and approved SHA-256."
 }
 if ($ExpectedPythonExecutableSha256) {
     if (-not $ExplicitPythonExecutable) {
@@ -248,11 +325,11 @@ if ($SigningEnabled -and -not $RequireSignedBinary) {
 if ($RequireSignedBinary -and -not $SigningEnabled) {
     throw "RequireSignedBinary requires the complete Authenticode signing configuration."
 }
-if ($RequireSignedBinary -and $AllowNuitkaToolDownloads) {
-    throw "A signed formal binary cannot download Nuitka tools; pre-stage the approved cache."
+if ($FormalCandidate -and $AllowNuitkaToolDownloads) {
+    throw "A formal release candidate cannot download Nuitka tools; pre-stage the approved cache."
 }
-if ($RequireSignedBinary -and [string]::IsNullOrWhiteSpace($Wheelhouse)) {
-    throw "A signed formal binary requires an approved offline Wheelhouse."
+if ($FormalCandidate -and [string]::IsNullOrWhiteSpace($Wheelhouse)) {
+    throw "A formal release candidate requires an approved offline Wheelhouse."
 }
 if ($RequireSignedBinary -and [string]::IsNullOrWhiteSpace($ExpectedSignToolSha256)) {
     throw "A signed child build requires ExpectedSignToolSha256."
@@ -299,8 +376,8 @@ if ($null -ne $GitCommand) {
         $SourceRevision = $null
     }
 }
-if ($RequireSignedBinary -and ($null -eq $SourceRevision -or $SourceDirty -ne $false)) {
-    throw "A signed formal binary must be built from a clean Git revision."
+if ($FormalCandidate -and ($null -eq $SourceRevision -or $SourceDirty -ne $false)) {
+    throw "A formal release candidate must be built from a clean Git revision."
 }
 $ProjectFile = Join-Path $SourceRoot "pyproject.toml"
 $ConstraintsFile = Join-Path $SourceRoot "constraints.txt"
@@ -408,6 +485,9 @@ try {
         "--include-package=enterprise_agent",
         "--include-package=openpyxl",
         "--include-package=xlrd",
+        "--include-package=cryptography",
+        "--include-package=cffi",
+        "--include-module=_cffi_backend",
         "--include-package=tzdata",
         "--include-package-data=tzdata",
         "--include-data-dir=$WebRoot=web",
@@ -471,7 +551,85 @@ try {
             $null -ne $StagedSignature.TimeStamperCertificate) {
             throw "Unsigned build mode requires an actually unsigned Agent executable."
         }
-        Write-Warning "Creating an unsigned internal-test binary. Formal releases must use -RequireSignedBinary and the controlled certificate store."
+        if ($InternalUnsignedRelease) {
+            Write-Warning (
+                "Creating an unsigned internal formal release. It has no " +
+                "publisher identity and must be accepted only with an " +
+                "independently delivered child release-manifest SHA-256."
+            )
+        }
+        else {
+            Write-Warning "Creating an unsigned internal-test binary. Formal releases must use -RequireSignedBinary or the explicit -InternalUnsignedRelease classification."
+        }
+    }
+
+    $SelfCheckText = & $StagedExecutable "self-check"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Frozen Agent executable provisioning crypto self-check failed."
+    }
+    try {
+        $SelfCheck = $SelfCheckText | Out-String | ConvertFrom-Json
+    }
+    catch {
+        throw "Frozen Agent executable self-check did not return valid JSON."
+    }
+    if ([string]$SelfCheck.status -ne "ok" -or
+        [string]$SelfCheck.provisioning_crypto -ne
+            "ed25519+aes-256-gcm+scrypt") {
+        throw "Frozen Agent executable self-check did not verify Ed25519, AES-256-GCM and scrypt."
+    }
+
+    $ModelTrustCheckText = & $StagedExecutable `
+        "model-trust-check" "--trust-store" $ModelIssuerTrustStore
+    if ($LASTEXITCODE -ne 0) {
+        throw "Frozen Agent executable rejected the model issuer trust store."
+    }
+    try {
+        $ModelTrustCheck = $ModelTrustCheckText | Out-String | ConvertFrom-Json
+    }
+    catch {
+        throw "Frozen Agent model-trust-check did not return valid JSON."
+    }
+    $ValidatedIssuerKeys = @($ModelTrustCheck.issuer_keys)
+    if (-not [bool]$ModelTrustCheck.valid -or
+        [string]$ModelTrustCheck.format -ne
+            "mineguard-model-issuer-trust-store-v1" -or
+        [int]$ModelTrustCheck.issuer_count -lt 1 -or
+        $ValidatedIssuerKeys.Count -ne [int]$ModelTrustCheck.issuer_count -or
+        -not ([string]$ModelTrustCheck.sha256).Equals(
+            $ActualModelIssuerTrustStoreSha256,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Frozen Agent did not validate at least one model credential issuer."
+    }
+    $KnownTestOnlyIssuerId = "mineguard-test-only"
+    $KnownTestOnlyIssuerKeyId = "test-only-no-private-key-2026"
+    $KnownTestOnlyPublicKeySha256 = `
+        "e3df516dc9ce7cce905597484d794625a6ac4e6ac2a11dfc07dbc8e2f15fb413"
+    foreach ($IssuerKey in $ValidatedIssuerKeys) {
+        if ([string]$IssuerKey.issuer_id -eq $KnownTestOnlyIssuerId -or
+            [string]$IssuerKey.issuer_key_id -eq $KnownTestOnlyIssuerKeyId -or
+            ([string]$IssuerKey.public_key_sha256).ToLowerInvariant() -eq
+                $KnownTestOnlyPublicKeySha256) {
+            $UsingTestOnlyModelTrust = $true
+        }
+    }
+    if ($FormalCandidate -and $UsingTestOnlyModelTrust) {
+        throw (
+            "A formal release candidate refuses the known TEST-ONLY model " +
+            "issuer identity or public key, regardless of filename or JSON formatting."
+        )
+    }
+
+    $StagedModelTrustStore = Join-Path $StageRoot `
+        "model-credential-trust.json"
+    [IO.File]::Copy(
+        $ModelIssuerTrustStore, $StagedModelTrustStore, $false
+    )
+    $StagedModelTrustSha256 = (Get-FileHash `
+        -LiteralPath $StagedModelTrustStore -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($StagedModelTrustSha256 -ne $ActualModelIssuerTrustStoreSha256) {
+        throw "Staged model issuer trust store changed during the release build."
     }
 
     $DeployStage = Join-Path $StageRoot "deploy\windows"
@@ -484,11 +642,19 @@ try {
         ($Version + [Environment]::NewLine),
         (New-Object System.Text.UTF8Encoding($false))
     )
+    $ReleaseClassification = if ($RequireSignedBinary) {
+        "signed-production-candidate"
+    } elseif ($InternalUnsignedRelease) {
+        "unsigned-internal-release"
+    } else {
+        "unsigned-test-only"
+    }
     $BuildMetadata = [ordered]@{
         format = "mineguard-enterprise-agent-build-metadata-v1"
         product = "MineGuard Enterprise Agent"
         version = $Version
         architecture = "x64"
+        release_classification = $ReleaseClassification
         python = $PythonPatchVersion
         nuitka = (& $BuildPython -m nuitka --version | Select-Object -First 1).Trim()
         build_dependencies = [ordered]@{
@@ -501,6 +667,9 @@ try {
             openpyxl = $(Get-DistributionVersion -PythonExecutable $BuildPython -DistributionName "openpyxl")
             et_xmlfile = $(Get-DistributionVersion -PythonExecutable $BuildPython -DistributionName "et-xmlfile")
             xlrd = $(Get-DistributionVersion -PythonExecutable $BuildPython -DistributionName "xlrd")
+            cryptography = $(Get-DistributionVersion -PythonExecutable $BuildPython -DistributionName "cryptography")
+            cffi = $(Get-DistributionVersion -PythonExecutable $BuildPython -DistributionName "cffi")
+            pycparser = $(Get-DistributionVersion -PythonExecutable $BuildPython -DistributionName "pycparser")
             tzdata = $(Get-DistributionVersion -PythonExecutable $BuildPython -DistributionName "tzdata")
         }
         authenticode_signed = $SigningVerified
@@ -513,6 +682,13 @@ try {
         source_revision = $SourceRevision
         source_dirty = $SourceDirty
         nuitka_tool_downloads_allowed = $AllowNuitkaToolDownloads.IsPresent
+        model_credential_trust_sha256 = $ActualModelIssuerTrustStoreSha256
+        model_credential_trust_external_anchor_verified = [bool](
+            $ExpectedModelIssuerTrustStoreSha256 -and
+            $ActualModelIssuerTrustStoreSha256 -eq
+                $ExpectedModelIssuerTrustStoreSha256
+        )
+        model_credential_trust_test_only = $UsingTestOnlyModelTrust
     }
     [IO.File]::WriteAllText(
         (Join-Path $StageRoot "build-metadata.json"),
@@ -553,6 +729,7 @@ try {
         product = "MineGuard Enterprise Agent"
         version = $Version
         architecture = "x64"
+        release_classification = $ReleaseClassification
         entrypoint = "runtime/MineGuardEnterpriseAgent.exe"
         authenticode_signed = $SigningVerified
         signing_certificate_thumbprint = if ($SigningVerified) {

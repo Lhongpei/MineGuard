@@ -504,6 +504,7 @@ class EnterpriseAgentService:
         five_quantity_runtime: FiveQuantityRuntime | None = None,
         four_eyes_required: bool = False,
         production_mode: bool = False,
+        model_credential_status: dict[str, Any] | None = None,
     ):
         self.repository = repository
         self.platform_client = platform_client
@@ -527,6 +528,13 @@ class EnterpriseAgentService:
         self._five_quantity = five_quantity_runtime
         self.four_eyes_required = bool(four_eyes_required)
         self.production_mode = bool(production_mode)
+        # This contains only public credential metadata (never the API key,
+        # activation code, ciphertext or Authorization value).
+        self.model_credential_status = deep_copy_json(
+            model_credential_status
+            if model_credential_status is not None
+            else {"managed": False, "source": "not_configured"}
+        )
 
     def _full_integrity_status(self) -> dict[str, Any]:
         """Run the authoritative, linear-history startup verification."""

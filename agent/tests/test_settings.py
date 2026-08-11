@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
+from enterprise_agent import settings as settings_module
 from enterprise_agent.auth import hash_password
+from enterprise_agent.cli import main
 from enterprise_agent.settings import Settings
 
 _PLATFORM_ENV = (
@@ -13,11 +18,155 @@ _PLATFORM_ENV = (
     "PLATFORM_SUBMISSION_PATH",
     "PLATFORM_CAPABILITIES_PATH",
 )
+_MODEL_ENV = (
+    "MINEGUARD_AGENT_API_KEY",
+    "MINEGUARD_AGENT_BASE_URL",
+    "MINEGUARD_AGENT_MODEL",
+    "MINEGUARD_AGENT_TIMEOUT_SECONDS",
+    "MINEGUARD_AGENT_MAX_RETRIES",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_MODEL",
+    "DEEPSEEK_TIMEOUT_SECONDS",
+    "DEEPSEEK_MAX_RETRIES",
+)
 
 
 def _clear_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in _PLATFORM_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+def _clear_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _MODEL_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_provider_neutral_model_configuration_is_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_model(monkeypatch)
+    monkeypatch.setenv("MINEGUARD_AGENT_API_KEY", "gateway-enterprise-key")
+    monkeypatch.setenv("MINEGUARD_AGENT_BASE_URL", "https://llm.internal.example")
+    monkeypatch.setenv("MINEGUARD_AGENT_MODEL", "approved-coal-model")
+    monkeypatch.setenv("MINEGUARD_AGENT_TIMEOUT_SECONDS", "17.5")
+    monkeypatch.setenv("MINEGUARD_AGENT_MAX_RETRIES", "4")
+
+    llm = Settings.from_environment().llm
+
+    assert llm is not None
+    assert llm.api_key == "gateway-enterprise-key"
+    assert llm.base_url == "https://llm.internal.example"
+    assert llm.model == "approved-coal-model"
+    assert llm.timeout_seconds == 17.5
+    assert llm.max_retries == 4
+
+
+def test_legacy_deepseek_model_configuration_remains_a_migration_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_model(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "legacy-enterprise-key")
+
+    llm = Settings.from_environment().llm
+
+    assert llm is not None
+    assert llm.api_key == "legacy-enterprise-key"
+    assert llm.base_url == "https://api.deepseek.com"
+    assert llm.model == "deepseek-v4-flash"
+
+
+def test_model_configuration_rejects_mixed_new_and_legacy_namespaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_model(monkeypatch)
+    monkeypatch.setenv("MINEGUARD_AGENT_API_KEY", "new-key")
+    monkeypatch.setenv("MINEGUARD_AGENT_BASE_URL", "https://llm.internal.example")
+    monkeypatch.setenv("MINEGUARD_AGENT_MODEL", "approved-model")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "legacy-model")
+
+    with pytest.raises(ValueError, match="不能与已弃用的 DEEPSEEK"):
+        Settings.from_environment()
+
+
+def test_model_configuration_conflict_does_not_disclose_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_model(monkeypatch)
+    current_secret = "current-model-secret-must-not-leak"
+    legacy_secret = "legacy-model-secret-must-not-leak"
+    monkeypatch.setenv("MINEGUARD_AGENT_API_KEY", current_secret)
+    monkeypatch.setenv("MINEGUARD_AGENT_BASE_URL", "https://llm.internal.example")
+    monkeypatch.setenv("MINEGUARD_AGENT_MODEL", "approved-model")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", legacy_secret)
+
+    with pytest.raises(ValueError) as captured:
+        Settings.from_environment()
+
+    message = str(captured.value)
+    assert current_secret not in message
+    assert legacy_secret not in message
+    assert "MINEGUARD_AGENT" in message
+    assert "DEEPSEEK" in message
+
+
+def test_unavailable_managed_model_disables_egress_without_blocking_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_model(monkeypatch)
+    monkeypatch.setenv(
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
+        "/var/lib/enterprise-agent/model.lock.json",
+    )
+    monkeypatch.setenv(
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
+        "/var/lib/enterprise-agent/model.secret.json",
+    )
+
+    def fail_closed(**_kwargs):
+        raise settings_module.ModelCredentialError("expired secret must not leak")
+
+    monkeypatch.setattr(
+        settings_module,
+        "load_model_credential_from_environment",
+        fail_closed,
+    )
+    llm, status = settings_module._managed_model_config(
+        provisioning_status=SimpleNamespace(
+            managed=True,
+            pair_id="11111111-1111-4111-8111-111111111111",
+        ),
+        identity=SimpleNamespace(
+            mine_id="MINE-QY-001",
+            system_id="agent-mine-qy-001",
+            operator_id="operator-qy-001",
+        ),
+    )
+
+    assert llm is None
+    assert status.managed is True
+    assert status.state == "unavailable"
+    assert status.failure_code == "credential_invalid_or_unavailable"
+    assert status.source == "managed-model-credential-unavailable"
+    assert "expired secret" not in str(status.as_dict())
+
+
+@pytest.mark.parametrize(
+    "missing_name",
+    ["MINEGUARD_AGENT_BASE_URL", "MINEGUARD_AGENT_MODEL"],
+)
+def test_provider_neutral_key_requires_explicit_destination_and_model(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_name: str,
+) -> None:
+    _clear_model(monkeypatch)
+    monkeypatch.setenv("MINEGUARD_AGENT_API_KEY", "new-key")
+    monkeypatch.setenv("MINEGUARD_AGENT_BASE_URL", "https://llm.internal.example")
+    monkeypatch.setenv("MINEGUARD_AGENT_MODEL", "approved-model")
+    monkeypatch.delenv(missing_name)
+
+    with pytest.raises(ValueError, match=missing_name):
+        Settings.from_environment()
 
 
 def test_no_platform_configuration_keeps_offline_mode(
@@ -165,6 +314,130 @@ def test_v3_platform_environment_selects_ten_quantity_routes(
     assert settings.five_quantity_platform.next_report_path == (
         "/v3/analysis-reports/next"
     )
+
+
+def test_historical_enterprise_signing_keyring_is_strictly_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON",
+        json.dumps(
+            [
+                {
+                    "key_id": "enterprise-key-2026-06",
+                    "secret": (
+                        "enterprise-retired-secret-2026-06-abcdefghijklmnopqrstuvwxyz"
+                    ),
+                },
+                {
+                    "key_id": "enterprise-key-2026-07",
+                    "secret": (
+                        "enterprise-retired-secret-2026-07-abcdefghijklmnopqrstuvwxyz"
+                    ),
+                },
+            ]
+        ),
+    )
+
+    identity = Settings.from_environment().five_quantity_identity
+
+    assert [item.key_id for item in identity.historical_enterprise_signing_keys] == [
+        "enterprise-key-2026-06",
+        "enterprise-key-2026-07",
+    ]
+    assert identity.key_id not in {
+        item.key_id for item in identity.historical_enterprise_signing_keys
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "{}",
+        '[{"key_id":"enterprise-key-old","secret":"too-short"}]',
+        (
+            '[{"key_id":"enterprise-key-old",'
+            '"secret":"retired-enterprise-secret-abcdefghijklmnopqrstuvwxyz",'
+            '"enabled":true}]'
+        ),
+        (
+            '[{"key_id":"enterprise-key-old",'
+            '"secret":"retired-enterprise-secret-one-abcdefghijklmnopqrstuvwxyz"},'
+            '{"key_id":"enterprise-key-old",'
+            '"secret":"retired-enterprise-secret-two-abcdefghijklmnopqrstuvwxyz"}]'
+        ),
+    ],
+    ids=("not-array", "short-secret", "extra-field", "duplicate-key-id"),
+)
+def test_invalid_historical_enterprise_signing_keyring_fails_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON", value)
+
+    with pytest.raises(ValueError, match="历史|HISTORICAL"):
+        Settings.from_environment()
+
+
+def test_historical_enterprise_keyring_rejects_current_key_or_secret_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_key_id = "enterprise-key-current-2026-08"
+    current_secret = "enterprise-current-secret-2026-08-abcdefghijklmnopqrstuvwxyz"
+    monkeypatch.setenv("ENTERPRISE_EXCHANGE_KEY_ID", current_key_id)
+    monkeypatch.setenv("ENTERPRISE_EXCHANGE_HMAC_SECRET", current_secret)
+    monkeypatch.setenv(
+        "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON",
+        json.dumps([{"key_id": current_key_id, "secret": current_secret}]),
+    )
+
+    with pytest.raises(ValueError, match="历史.*不得"):
+        Settings.from_environment()
+
+
+def test_config_check_lists_enterprise_key_ids_without_exposing_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    historical_secret = (
+        "enterprise-retired-secret-for-config-check-abcdefghijklmnopqrstuvwxyz"
+    )
+    monkeypatch.setenv(
+        "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON",
+        json.dumps(
+            [
+                {
+                    "key_id": "enterprise-key-retired-config-check",
+                    "secret": historical_secret,
+                }
+            ]
+        ),
+    )
+
+    assert main(["config-check"]) == 0
+    output = capsys.readouterr().out
+    document = json.loads(output)
+    assert document["enterprise_signing_key_id"] == "demo-exchange-key"
+    assert document["historical_enterprise_verification_key_ids"] == [
+        "enterprise-key-retired-config-check"
+    ]
+    assert historical_secret not in output
+
+
+def test_config_check_warns_about_legacy_model_names_without_exposing_key(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _clear_model(monkeypatch)
+    legacy_secret = "legacy-model-key-must-not-leak"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", legacy_secret)
+
+    assert main(["config-check"]) == 0
+
+    output = capsys.readouterr().out
+    document = json.loads(output)
+    assert any("DEEPSEEK_*" in warning for warning in document["warnings"])
+    assert legacy_secret not in output
 
 
 def test_public_origin_is_strictly_validated(

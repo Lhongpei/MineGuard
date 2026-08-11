@@ -1,13 +1,29 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$InstallRoot,
-    [switch]$InternalInnoUninstall
+    [switch]$InternalInnoUninstall,
+    [string]$TrustedScriptPath = '',
+    [string]$TrustedScriptSha256 = '',
+    [long]$TrustedScriptBytes = -1
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
-$script:UninstallScriptPath = [IO.Path]::GetFullPath($PSCommandPath)
+$script:TrustedInMemoryInvocation = [string]::IsNullOrWhiteSpace($PSCommandPath)
+$script:UninstallScriptPath = if (-not $script:TrustedInMemoryInvocation) {
+    [IO.Path]::GetFullPath($PSCommandPath)
+} elseif ($InternalInnoUninstall -and
+    -not [string]::IsNullOrWhiteSpace($TrustedScriptPath) -and
+    $TrustedScriptSha256 -cmatch '^[a-f0-9]{64}$' -and
+    $TrustedScriptBytes -ge 0) {
+    # These values describe the exact raw bytes used to create this ScriptBlock.
+    $script:TrustedInMemorySha256 = $TrustedScriptSha256
+    $script:TrustedInMemoryBytes = $TrustedScriptBytes
+    [IO.Path]::GetFullPath($TrustedScriptPath)
+} else {
+    throw 'The trusted in-memory uninstall transaction identity is unavailable.'
+}
 
 if ($env:OS -ne "Windows_NT") {
     throw "MineGuard Enterprise Agent runtime removal is supported only on Windows."
@@ -176,12 +192,19 @@ function Assert-AgentReleaseIdentity {
         [string]$_.path -eq
             "deploy/windows/Uninstall-EnterpriseAgentRuntime.ps1"
     })
-    $ScriptItem = Get-Item -LiteralPath $script:UninstallScriptPath -Force
+    if ($script:TrustedInMemoryInvocation) {
+        $ScriptBytes = [long]$script:TrustedInMemoryBytes
+        $ScriptSha256 = [string]$script:TrustedInMemorySha256
+    } else {
+        $ScriptItem = Get-Item -LiteralPath $script:UninstallScriptPath -Force
+        $ScriptBytes = [long]$ScriptItem.Length
+        $ScriptSha256 = (Get-FileHash `
+            -LiteralPath $script:UninstallScriptPath -Algorithm SHA256).Hash
+    }
     if ($ScriptEntries.Count -ne 1 -or
         [string]$ScriptEntries[0].sha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
-        [long]$ScriptEntries[0].bytes -ne [long]$ScriptItem.Length -or
-        -not (Get-FileHash -LiteralPath $script:UninstallScriptPath `
-            -Algorithm SHA256).Hash.Equals(
+        [long]$ScriptEntries[0].bytes -ne $ScriptBytes -or
+        -not $ScriptSha256.Equals(
                 [string]$ScriptEntries[0].sha256,
                 [StringComparison]::OrdinalIgnoreCase
             )) {
@@ -337,7 +360,7 @@ foreach ($TargetName in $TargetNames) {
 
 if ($Targets.Count -eq 0) {
     Write-Host "MineGuard Enterprise Agent immutable runtime is already absent."
-    exit 0
+return
 }
 Assert-AgentReleaseIdentity -RootPath $InstallRoot
 Assert-AgentQuiescent -ProtectedRoots @($Targets | ForEach-Object { $_.Source })

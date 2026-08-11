@@ -6,13 +6,15 @@ import json
 import threading
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from enterprise_agent.auth import AuthManager, UserAccount, hash_password
-from enterprise_agent.five_quantity_exchange import MineIdentity
+from enterprise_agent.five_quantity_exchange import MineIdentity, sign_message
 from enterprise_agent.five_quantity_runtime import FiveQuantityRuntime
 from enterprise_agent.http_api import EnterpriseAgentHTTPServer
 from enterprise_agent.service import EnterpriseAgentService
 from enterprise_agent.storage import Repository
+from enterprise_agent.util import utc_text
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,6 +32,56 @@ def identity() -> MineIdentity:
         regulator_key_id="regulator-key-v2",
         message_hmac_secret="http-message-secret-abcdefghijklmnopqrstuvwxyz",
     )
+
+
+def signed_intake_receipt(submission: dict[str, Any]) -> dict[str, Any]:
+    mine = identity()
+    timestamp = utc_text()
+    receipt = {
+        "contract_version": "intake-receipt-v2",
+        "message_type": "intake_receipt",
+        "message_id": str(uuid4()),
+        "correlation_id": submission["correlation_id"],
+        "causation_id": submission["message_id"],
+        "idempotency_key": f"intake.{submission['message_id']}",
+        "revision": 1,
+        "predecessor": None,
+        "created_at": timestamp,
+        "sender": {
+            "system_id": mine.regulator_system_id,
+            "party_id": mine.regulator_party_id,
+            "role": "regulatory_platform",
+        },
+        "recipient": {
+            "system_id": mine.system_id,
+            "party_id": mine.operator_id,
+            "role": "enterprise_agent",
+        },
+        "mine_id": mine.mine_id,
+        "payload": {
+            "receipt_id": str(uuid4()),
+            "submission_message_id": submission["message_id"],
+            "submission_revision": submission["revision"],
+            "received_payload_sha256": submission["signature_envelope"][
+                "payload_sha256"
+            ],
+            "received_at": timestamp,
+            "intake_status": "accepted",
+            "analysis_state": "queued",
+            "regulatory_outcome": "not_determined_at_intake",
+            "analysis_run_id": str(uuid4()),
+        },
+        "signature_envelope": {
+            "algorithm": "hmac-sha256-v2",
+            "canonicalization": "rfc8785-jcs",
+            "key_id": mine.regulator_key_id,
+            "signed_at": timestamp,
+            "nonce": uuid4().hex,
+            "payload_sha256": "0" * 64,
+            "signature": "0" * 64,
+        },
+    }
+    return sign_message(receipt, secret=mine.message_hmac_secret)
 
 
 def request_json(
@@ -131,6 +183,45 @@ def test_enterprise_v2_http_import_review_confirm_and_audit(tmp_path: Path) -> N
             "five_quantity_imported",
             "five_quantity_confirmed_and_queued",
         ]
+
+        outbound = runtime.store.due_outbox()[0]
+        runtime.store.outbox_succeeded(
+            outbound["message_id"],
+            receipt=signed_intake_receipt(outbound["body"]),
+        )
+        submitted = runtime.store.get_draft(draft_id)
+        status, correction_result = request_json(
+            connection,
+            "POST",
+            f"/api/v2/drafts/{draft_id}/correction",
+            {
+                "expected_revision": submitted["revision"],
+                "expected_submission_revision": submitted[
+                    "submission_revision"
+                ],
+                "accepted": True,
+            },
+        )
+        assert status == 201
+        assert correction_result["draft"]["submission_revision"] == 2
+        assert correction_result["draft"]["predecessor"]["message_id"] == (
+            outbound["message_id"]
+        )
+        status, correction_replay = request_json(
+            connection,
+            "POST",
+            f"/api/v2/drafts/{draft_id}/correction",
+            {
+                "expected_revision": submitted["revision"],
+                "expected_submission_revision": 1,
+                "accepted": True,
+            },
+        )
+        assert status == 200
+        assert correction_replay["duplicate"] is True
+        assert correction_replay["draft"]["draft_id"] == correction_result[
+            "draft"
+        ]["draft_id"]
 
         second_csv = csv.replace(b"2026-07-01", b"2026-07-02")
         status, second_import = request_json(
@@ -453,6 +544,36 @@ def test_enterprise_v2_discard_requires_write_permission(tmp_path: Path) -> None
         assert status == 403
         assert error["error"]["code"] == "permission_denied"
         assert runtime.store.get_draft(draft["draft_id"])["status"] == ("ready_review")
+
+        status, error = request_json(
+            connection,
+            "POST",
+            f"/api/v2/drafts/{draft['draft_id']}/correction",
+            {
+                "expected_revision": draft["revision"],
+                "expected_submission_revision": 1,
+                "accepted": True,
+            },
+            headers={"Cookie": cookie},
+        )
+        assert status == 403
+        assert error["error"]["code"] == "csrf_token_invalid"
+        status, error = request_json(
+            connection,
+            "POST",
+            f"/api/v2/drafts/{draft['draft_id']}/correction",
+            {
+                "expected_revision": draft["revision"],
+                "expected_submission_revision": 1,
+                "accepted": True,
+            },
+            headers={
+                "Cookie": cookie,
+                "X-CSRF-Token": login_payload["csrf_token"],
+            },
+        )
+        assert status == 403
+        assert error["error"]["code"] == "permission_denied"
     finally:
         connection.close()
         server.shutdown()
@@ -479,6 +600,10 @@ def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
     assert "/api/v2/audit" in script
     assert "include_discarded=true" in script
     assert "放弃草稿" in script
+    assert "创建更正草稿" in script
+    assert "/correction" in script
+    assert "系统没有创建分叉" in script
+    assert "直接前序消息" in script
     assert "人工导入和直采均进入同一复核与报送流程" in script
     assert "上传 CSV，自动生成填报草稿" in html
     assert 'id="fqDownloadCsvTemplate"' in html
@@ -508,7 +633,14 @@ def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
         assert label in script
     assert "旧版 V2 五量数据：已到 5/10" in script
     assert "班次高级明细" in script
-    assert "销售量、开票量不强制填班次" in script
+    assert "销售量、运输量、洗煤量和开票量不强制填班次" in script
+    assert '{ code: "transport", label: "运输量", shiftRequired: false' in script
+    assert (
+        '{ code: "washing", label: "洗煤量（入洗原煤）", shiftRequired: false'
+        in script
+    )
+    assert '["transport_t", "运输量", "t", true]' in script
+    assert '["wash_feed_t", "洗煤量（入洗原煤）", "t", true]' in script
     assert "逐日核对六项" not in html
     assert '["labor_persons", "用工量"' not in script
 
@@ -546,3 +678,19 @@ def test_frontend_v2_csv_upload_behavior_in_jsdom() -> None:
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "JSDOM five-quantity CSV upload checks passed" in completed.stdout
+
+
+def test_frontend_ten_quantity_correction_behavior_in_jsdom() -> None:
+    import subprocess
+
+    script = ROOT / "tests" / "frontend_ten_quantity_correction_dom.test.js"
+    completed = subprocess.run(
+        ["node", str(script)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "JSDOM ten-quantity correction flow checks passed" in completed.stdout

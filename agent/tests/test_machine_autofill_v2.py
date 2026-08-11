@@ -292,7 +292,7 @@ def _close(server: EnterpriseAgentHTTPServer, thread: threading.Thread) -> None:
 def test_signed_connector_enters_visible_v2_inbox_and_replays_by_event(
     tmp_path: Path,
 ) -> None:
-    server, thread, _runtime = _server(tmp_path / "agent.db")
+    server, thread, runtime = _server(tmp_path / "agent.db")
     port = int(server.server_address[1])
     body = _payload(
         event_id="evt-july-001",
@@ -314,6 +314,7 @@ def test_signed_connector_enters_visible_v2_inbox_and_replays_by_event(
         )
         assert result["workflow"]["preflight"]["bound_revision"] == 1
         assert result["workflow"]["preflight"]["missing_count"] > 0
+        assert result["import"]["mode"] == "ten_quantity_v3_direct_collection"
         coverage = result["workflow"]["preflight"]["calendar_coverage"]
         assert coverage["kind"] == "partial_window"
         assert coverage["leading_days_outside_window"] == 0
@@ -353,6 +354,27 @@ def test_signed_connector_enters_visible_v2_inbox_and_replays_by_event(
         status, error = _machine_request(port, body, request_id="attempt-002")
         assert status == 409
         assert error["error"]["code"] == "conflict"
+
+        # Historical rows retain their original diagnostic label. Reading
+        # them never rewrites signed/source history into the new V3 wording.
+        ingestion_id = result["ingestion_id"]
+        with runtime.store.repository._transaction() as db:
+            row = db.execute(
+                "SELECT import_summary_json FROM connector_ingestions "
+                "WHERE ingestion_id=?",
+                (ingestion_id,),
+            ).fetchone()
+            legacy_summary = json.loads(row[0])
+            legacy_summary["mode"] = "five_quantity_v2_direct_collection"
+            db.execute(
+                "UPDATE connector_ingestions SET import_summary_json=? "
+                "WHERE ingestion_id=?",
+                (json.dumps(legacy_summary), ingestion_id),
+            )
+        legacy = runtime.store.repository.get_connector_ingestion(ingestion_id)
+        assert legacy["import_summary"]["mode"] == (
+            "five_quantity_v2_direct_collection"
+        )
     finally:
         _close(server, thread)
 
@@ -433,7 +455,27 @@ def test_latest_source_snapshots_update_remove_and_reject_cross_source_conflict(
         )
         assert rejected["status"] == "rejected"
         assert rejected["rejection"]["code"] == "connector_source_conflict"
-        assert "102" not in json.dumps(rejected)
+        assert rejected["draft_revision"] is None
+        assert rejected["preflight"] is None
+        assert not {
+            "content",
+            "content_b64",
+            "payload",
+            "autofill_preview",
+        }.intersection(rejected)
+        with runtime.store.repository._read() as db:
+            rejected_projection = db.execute(
+                "SELECT import_summary_json,draft_payload_sha256,"
+                "workflow_result_json,result_json "
+                "FROM connector_ingestions WHERE event_id='evt-b-0'"
+            ).fetchone()
+            rejected_contribution = db.execute(
+                "SELECT 1 FROM fq_machine_source_contributions "
+                "WHERE source_id='source-b'"
+            ).fetchone()
+        assert rejected_projection is not None
+        assert tuple(rejected_projection) == (None, None, None, None)
+        assert rejected_contribution is None
 
         status, replayed_error = _machine_request(
             port, conflicting, request_id="req-b-replay"

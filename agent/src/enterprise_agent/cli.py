@@ -37,6 +37,25 @@ from .http_api import serve
 from .instance_lock import lock_for_database
 from .llm import OpenAICompatibleProvider
 from .maintenance import backup_database, restore_database
+from .model_credentials import (
+    ModelCredentialError,
+    install_model_credential_bundle,
+    model_credential_state_path,
+    plaintext_model_environment_names,
+    release_model_trust_store_path,
+    validate_model_trust_store,
+    verify_model_credential_from_environment,
+)
+from .model_credentials import (
+    read_activation_code_file as read_model_activation_code_file,
+)
+from .model_lock_trust import validate_model_lock_against_trust_store
+from .provisioning import (
+    install_provisioning_bundle,
+    normalize_activation_code,
+    read_activation_code_file,
+    verify_provisioning_lock_from_environment,
+)
 from .service import EnterpriseAgentService
 from .settings import Settings
 from .skills import build_skill_registry
@@ -160,14 +179,37 @@ def _service(settings: Settings) -> EnterpriseAgentService:
         and not account.temporary_demo
         and not account.must_change_password
     )
+    llm_configuration_guard = _model_credential_guard(settings)
+    effective_capabilities = (
+        frozenset(settings.model_credential_status.capabilities)
+        if settings.model_credential_status.managed
+        else frozenset({"chat", "extraction", "coal-news-search"})
+    )
     llm_provider = (
-        OpenAICompatibleProvider(settings.llm) if settings.llm is not None else None
+        OpenAICompatibleProvider(
+            settings.llm,
+            configuration_guard=llm_configuration_guard,
+            allowed_capabilities=effective_capabilities,
+        )
+        if settings.llm is not None
+        and bool(
+            effective_capabilities
+            & {"chat", "extraction", "coal-news-search"}
+        )
+        else None
     )
     five_quantity_runtime = FiveQuantityRuntime(
         repository,
         identity=settings.five_quantity_identity,
         platform_client=(
-            FiveQuantityPlatformClient(settings.five_quantity_platform)
+            FiveQuantityPlatformClient(
+                settings.five_quantity_platform,
+                configuration_guard=(
+                    verify_provisioning_lock_from_environment
+                    if settings.provisioning_status.managed
+                    else None
+                ),
+            )
             if settings.five_quantity_platform is not None
             else None
         ),
@@ -176,9 +218,7 @@ def _service(settings: Settings) -> EnterpriseAgentService:
         poll_seconds=settings.five_quantity_poll_seconds,
         stable_seconds=settings.five_quantity_stable_seconds,
         llm_provider=llm_provider,
-        four_eyes_required=(
-            settings.four_eyes_required or settings.production_mode
-        ),
+        four_eyes_required=(settings.four_eyes_required or settings.production_mode),
         human_preparer_actor_ids=human_preparer_actor_ids,
     )
     return EnterpriseAgentService(
@@ -189,15 +229,62 @@ def _service(settings: Settings) -> EnterpriseAgentService:
         llm_provider=llm_provider,
         skill_registry=build_skill_registry(
             settings.coal_news,
-            llm_config=settings.llm,
+            llm_config=(
+                settings.llm
+                if "coal-news-search" in effective_capabilities
+                else None
+            ),
+            llm_configuration_guard=llm_configuration_guard,
         ),
         agent_v2_config=settings.agent_v2,
         five_quantity_runtime=five_quantity_runtime,
-        four_eyes_required=(
-            settings.four_eyes_required or settings.production_mode
-        ),
+        four_eyes_required=(settings.four_eyes_required or settings.production_mode),
         production_mode=settings.production_mode,
+        model_credential_status=settings.model_credential_status.as_dict(),
     )
+
+
+def _model_credential_guard(settings: Settings):
+    status = settings.model_credential_status
+    if not status.managed:
+        return None
+    lock_path = os.environ.get(
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE", ""
+    ).strip()
+    store_path = os.environ.get(
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE", ""
+    ).strip()
+    subject = {
+        "mine_id": settings.five_quantity_identity.mine_id,
+        "system_id": settings.five_quantity_identity.system_id,
+        "party_id": settings.five_quantity_identity.operator_id,
+        "pair_id": settings.provisioning_status.pair_id or "",
+    }
+
+    def verify() -> object:
+        # Rotation is published with the service stopped.  An in-process path
+        # change must fail until the process restarts, before any API request.
+        if not lock_path or not store_path:
+            raise ModelCredentialError("模型凭据运行指针缺失")
+        if not subject["pair_id"]:
+            raise ModelCredentialError("模型凭据运行身份缺少 provisioning pair_id")
+        if (
+            os.environ.get(
+                "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE", ""
+            ).strip()
+            != lock_path
+            or os.environ.get(
+                "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE", ""
+            ).strip()
+            != store_path
+        ):
+            raise ModelCredentialError("模型凭据运行指针发生变化，请重启服务")
+        return verify_model_credential_from_environment(
+            expected_subject=subject,
+            expected_status=status,
+        )
+
+    return verify
 
 
 def _default_web_root() -> Path:
@@ -300,6 +387,16 @@ def _startup_banner(
         )
         + f"\n固定目录：{watched_status}"
         + f"\n异常隔离：{settings.five_quantity_quarantine_directory}"
+        + "\n智能模型："
+        + (
+            "供应商签名凭据已启用"
+            if settings.model_credential_status.state == "managed"
+            else "受管凭据不可用；模型出站已关闭，报送主线不受影响"
+            if settings.model_credential_status.managed
+            else "开发配置（非正式）"
+            if settings.llm is not None
+            else "未配置；本地确定性能力仍可使用"
+        )
         + "\n业务前端：收件箱 → 规范化复核报送 → 风险解读回复 → 留痕设置"
         + "\n保持此终端运行；按 Ctrl+C 可安全停止。\n",
         flush=True,
@@ -310,10 +407,25 @@ def _startup_banner(
             "必须配置 ENTERPRISE_EXCHANGE_HMAC_SECRET。",
             file=sys.stderr,
         )
+    if settings.llm is not None and _uses_legacy_model_environment():
+        print(
+            "警告：当前实例仍使用已弃用的 DEEPSEEK_* 通用模型配置；"
+            "请成组迁移到 MINEGUARD_AGENT_*，不要混用两组名称。",
+            file=sys.stderr,
+        )
 
 
 def _print(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
+
+
+def _uses_legacy_model_environment() -> bool:
+    return bool(os.environ.get("DEEPSEEK_API_KEY", "").strip())
+
+
+def _plaintext_model_environment_names() -> tuple[str, ...]:
+    """Return configured plaintext model settings without reading out values."""
+    return plaintext_model_environment_names()
 
 
 def _configuration_errors(
@@ -349,15 +461,31 @@ def _configuration_errors(
     if not production:
         return tuple(errors)
 
+    plaintext_model_names = _plaintext_model_environment_names()
+    if plaintext_model_names:
+        errors.append(
+            "正式服务禁止通过环境变量配置模型 Key、API 地址、模型或重试参数；"
+            "请导入供应商签名的 .mgllm 模型凭据包。发现："
+            + ", ".join(plaintext_model_names)
+        )
+    if os.environ.get("MINEGUARD_AGENT_MODEL_TRUST_STORE", "").strip():
+        errors.append(
+            "正式服务禁止通过环境变量替换模型签发信任根；"
+            "必须使用签名发行版 release-metadata 中固定的 trust store"
+        )
+    if settings.llm is not None and not settings.model_credential_status.managed:
+        errors.append(
+            "正式服务启用模型时必须使用供应商签名的 .mgllm 受管凭据；"
+            "开发环境变量只能用于非正式调试"
+        )
+
     if not settings.production_mode:
         errors.append(
             "正式服务必须设置 ENTERPRISE_AGENT_PRODUCTION_MODE=true；"
             "仅不用 demo 账号不等于正式模式"
         )
     if not settings.four_eyes_required:
-        errors.append(
-            "正式服务必须设置 ENTERPRISE_AGENT_FOUR_EYES_REQUIRED=true"
-        )
+        errors.append("正式服务必须设置 ENTERPRISE_AGENT_FOUR_EYES_REQUIRED=true")
     if not settings.users:
         errors.append("正式服务必须配置逐用户 ENTERPRISE_AGENT_USERS_JSON")
     else:
@@ -398,8 +526,7 @@ def _configuration_errors(
                 reviewers.append(account)
         if not preparers:
             errors.append(
-                "正式服务至少需要一个仅经办账号：包含 read/write，"
-                "但不含 confirm/submit"
+                "正式服务至少需要一个仅经办账号：包含 read/write，但不含 confirm/submit"
             )
         if not reviewers:
             errors.append(
@@ -425,9 +552,7 @@ def _configuration_errors(
     elif not settings.five_quantity_platform.base_url.startswith("https://"):
         errors.append("正式服务连接政府 V2 平台必须使用 HTTPS")
     elif _placeholder_production_url(settings.five_quantity_platform.base_url):
-        errors.append(
-            "正式服务政府 V2 地址不能使用保留、示例、回环或不可路由特殊地址"
-        )
+        errors.append("正式服务政府 V2 地址不能使用保留、示例、回环或不可路由特殊地址")
     if settings.five_quantity_demo_secret:
         errors.append("正式服务不得使用演示应用消息密钥")
     identity = settings.five_quantity_identity
@@ -460,6 +585,10 @@ def _configuration_errors(
         ("企业当前应用签名 key ID", identity.key_id),
         ("政府当前应用验签 key ID", identity.regulator_key_id),
     ]
+    key_ids.extend(
+        (f"企业历史应用验签 key ID（{item.key_id}）", item.key_id)
+        for item in identity.historical_enterprise_signing_keys
+    )
     if identity.previous_regulator_key_id is not None:
         key_ids.append(
             ("政府上一把应用验签 key ID", identity.previous_regulator_key_id)
@@ -470,11 +599,27 @@ def _configuration_errors(
     for index, (left_label, left_value) in enumerate(key_ids):
         for right_label, right_value in key_ids[index + 1 :]:
             if hmac.compare_digest(left_value.encode(), right_value.encode()):
+                same_regulator_rotation_slot = {
+                    left_label,
+                    right_label,
+                } == {
+                    "政府当前应用验签 key ID",
+                    "政府上一把应用验签 key ID",
+                }
+                if same_regulator_rotation_slot:
+                    # The Platform application key ID is a stable global slot.
+                    # During one bounded rotation window that slot verifies
+                    # first with the current secret, then the previous secret.
+                    continue
                 errors.append(f"{left_label} 与 {right_label} 不得复用")
 
     secrets_to_check: list[tuple[str, str]] = [
         ("十量应用消息密钥", identity.message_hmac_secret),
     ]
+    secrets_to_check.extend(
+        (f"企业历史应用验签密钥（{item.key_id}）", item.secret)
+        for item in identity.historical_enterprise_signing_keys
+    )
     if identity.previous_message_hmac_secret is not None:
         secrets_to_check.append(
             ("政府上一把应用验签密钥", identity.previous_message_hmac_secret)
@@ -501,6 +646,22 @@ def _configuration_errors(
     for index, (left_label, left_value) in enumerate(secrets_to_check):
         for right_label, right_value in secrets_to_check[index + 1 :]:
             if hmac.compare_digest(left_value.encode(), right_value.encode()):
+                # Platform application HMAC is bilateral.  After a coordinated
+                # rotation, the same retired material is therefore registered
+                # in two direction-specific verification namespaces: one for
+                # enterprise-authored predecessors and one for regulator-
+                # authored receipts.  Selection still uses each envelope's
+                # exact, direction-specific key ID; neither namespace may
+                # substitute for the other.
+                historical_regulator_overlap = (
+                    left_label.startswith("企业历史应用验签密钥（")
+                    and right_label == "政府上一把应用验签密钥"
+                ) or (
+                    right_label.startswith("企业历史应用验签密钥（")
+                    and left_label == "政府上一把应用验签密钥"
+                )
+                if historical_regulator_overlap:
+                    continue
                 errors.append(f"{left_label} 与 {right_label} 不得复用")
     for field, value in identity.comparison_context.items():
         if value.casefold() == "unclassified":
@@ -532,8 +693,7 @@ def _parser() -> argparse.ArgumentParser:
         "--authoritative-env-file",
         action="store_true",
         help=(
-            "Windows 受管服务专用：清除 Agent 配置命名空间后以显式绝对 "
-            "--env-file 为准"
+            "Windows 受管服务专用：清除 Agent 配置命名空间后以显式绝对 --env-file 为准"
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -652,7 +812,198 @@ def _parser() -> argparse.ArgumentParser:
     )
     config_check = sub.add_parser("config-check", help="检查启动或正式服务配置")
     config_check.add_argument("--production", action="store_true")
+    sub.add_parser(
+        "self-check",
+        help="离线检查冻结运行时的配置包密码组件（不读取实例配置）",
+    )
+
+    provision_import = sub.add_parser(
+        "provision-import",
+        help="验签、解密并生成一矿一包的受管企业实例配置",
+    )
+    provision_import.add_argument("--bundle", type=Path, required=True)
+    activation = provision_import.add_mutually_exclusive_group(required=True)
+    activation.add_argument(
+        "--activation-code-file",
+        type=Path,
+        help="UTF-8 激活码文件；内容不进入命令行、日志或配置锁",
+    )
+    activation.add_argument(
+        "--activation-code-stdin",
+        action="store_true",
+        help="从标准输入读取激活码；仅供不落盘的一键向导管道",
+    )
+    provision_import.add_argument(
+        "--issuer-public-key",
+        type=Path,
+        required=True,
+        help="监管签发 Ed25519 公钥 PEM 文件",
+    )
+    provision_import.add_argument(
+        "--expected-public-key-sha256",
+        help="介质外审批的 Ed25519 SPKI DER 公钥 SHA-256（正式导入必填）",
+    )
+    provision_import.add_argument(
+        "--expected-issuer-key-id",
+        help="介质外审批的签发 key_id（正式导入必填）",
+    )
+    provision_import.add_argument(
+        "--allow-unanchored-test-key",
+        action="store_true",
+        help="仅生成不可启动正式模式的未锚定测试配置",
+    )
+    provision_import.add_argument(
+        "--ca-source",
+        type=Path,
+        required=True,
+        help="待部署的政府 CA PEM 文件；正式目标路径由签名接入包锁定",
+    )
+    provision_import.add_argument(
+        "--expected-ca-sha256",
+        required=True,
+        help="介质外审批的政府 CA 文件 SHA-256",
+    )
+    provision_import.add_argument(
+        "--base-env",
+        type=Path,
+        required=True,
+        help="向导预先生成的完整本机环境文件（账号、DB、端口等）",
+    )
+    provision_import.add_argument(
+        "--output-env",
+        type=Path,
+        required=True,
+        help="CreateNew 写入的受管 agent.env staging 文件",
+    )
+    provision_import.add_argument(
+        "--lock-output",
+        type=Path,
+        required=True,
+        help="CreateNew 写入的 provisioning lock staging 文件",
+    )
+    provision_import.add_argument(
+        "--lock-env-path",
+        type=Path,
+        required=True,
+        help="发布后 agent.env 引用的 provisioning lock 最终绝对路径",
+    )
+    provision_import.add_argument(
+        "--secret-store",
+        type=Path,
+        required=True,
+        help="CreateNew 写入的 secret store staging 文件",
+    )
+    provision_import.add_argument(
+        "--secret-store-env-path",
+        type=Path,
+        required=True,
+        help="发布后 agent.env 引用的 secret store 最终绝对路径",
+    )
+    provision_import.add_argument(
+        "--secret-protection",
+        choices=("auto", "dpapi-local-machine", "posix-0600"),
+        default="auto",
+        help="默认 Windows=机器级 DPAPI，Linux=属主 0600 安全文件",
+    )
+    provision_import.add_argument(
+        "--expected-mine-id",
+        help="额外固定预期 mine_id，防止现场选错矿包",
+    )
+    provision_import.add_argument(
+        "--expected-system-id",
+        help="额外固定预期 Agent system_id，防止现场选错矿包",
+    )
+    provision_import.add_argument(
+        "--current-lock",
+        type=Path,
+        help="升级时提供现有 lock；仅接受同身份且更高 profile_version",
+    )
+
+    model_import = sub.add_parser(
+        "model-credential-import",
+        help="导入供应商签名的企业专属 .mgllm 模型凭据",
+    )
+    model_import.add_argument("--bundle", type=Path, required=True)
+    model_import.add_argument(
+        "--activation-code-file",
+        type=Path,
+        required=True,
+        help="独立渠道交付的激活码文件；内容不进入命令行或日志",
+    )
+    model_import.add_argument(
+        "--trust-store",
+        type=Path,
+        required=True,
+        help="发行安装时固定的模型签发方信任库",
+    )
+    model_import.add_argument("--lock-output", type=Path, required=True)
+    model_import.add_argument("--lock-env-path", type=Path, required=True)
+    model_import.add_argument("--secret-store", type=Path, required=True)
+    model_import.add_argument(
+        "--secret-store-env-path", type=Path, required=True
+    )
+    model_import.add_argument(
+        "--secret-protection",
+        choices=("auto", "dpapi-local-machine", "posix-0600"),
+        default="auto",
+    )
+    model_import.add_argument("--expected-mine-id")
+    model_import.add_argument("--expected-system-id")
+    model_import.add_argument("--expected-party-id")
+    model_import.add_argument("--current-lock", type=Path)
+    sub.add_parser(
+        "model-credential-status",
+        help="显示不含 API Key 的受管模型凭据状态",
+    )
+    model_trust = sub.add_parser(
+        "model-trust-check",
+        help="离线验证发行版模型签发信任库（不读取企业实例）",
+    )
+    model_trust.add_argument("--trust-store", type=Path, required=True)
+    model_lock_trust = sub.add_parser(
+        "model-credential-lock-trust-check",
+        help="只读验证现有模型 lock 是否受候选发行信任库认可",
+    )
+    model_lock_trust.add_argument("--lock", type=Path, required=True)
+    model_lock_trust.add_argument("--trust-store", type=Path, required=True)
     return parser
+
+
+def _self_check() -> dict[str, object]:
+    """Exercise provisioning crypto without loading Settings or instance state."""
+
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+        )
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+        probe = b"enterprise-agent-frozen-runtime-self-check-v1"
+        signing_key = Ed25519PrivateKey.generate()
+        signature = signing_key.sign(probe)
+        signing_key.public_key().verify(signature, probe)
+
+        derived_key = Scrypt(
+            salt=b"AgentSelfCheck1",
+            length=32,
+            n=1024,
+            r=8,
+            p=1,
+        ).derive(b"offline-self-check-only")
+        nonce = b"EASelfCheck1"
+        aad = b"enterprise-agent-self-check-aad"
+        ciphertext = AESGCM(derived_key).encrypt(nonce, probe, aad)
+        if AESGCM(derived_key).decrypt(nonce, ciphertext, aad) != probe:
+            raise ValueError("AES-GCM round trip mismatch")
+    except (ImportError, RuntimeError, ValueError) as error:
+        raise AgentError(
+            "冻结运行时缺少可用的 Ed25519/AES-GCM/scrypt 配置包密码组件"
+        ) from error
+    return {
+        "status": "ok",
+        "provisioning_crypto": "ed25519+aes-256-gcm+scrypt",
+    }
 
 
 def _assert_authoritative_restore_not_blocked(
@@ -666,35 +1017,48 @@ def _assert_authoritative_restore_not_blocked(
     marker = instance_root / "restore-recovery-block.json"
     if not marker.exists():
         return
-    if command != "database-restore":
-        raise ValueError(
-            "实例存在未完成恢复阻断标记，禁止启动或执行命令："
-            f"{marker}；请保持服务停止并按标记中的精确路径人工恢复"
-        )
-    transaction_id = os.environ.get(
-        "MINEGUARD_INTERNAL_RESTORE_TRANSACTION_ID",
-        "",
-    )
     if (
-        len(transaction_id) != 32
-        or any(character not in "0123456789abcdef" for character in transaction_id)
-        or marker.is_symlink()
+        marker.is_symlink()
         or not marker.is_file()
         or marker.stat().st_size > 1024 * 1024
     ):
-        raise ValueError(f"恢复阻断标记无效或当前事务未获授权：{marker}")
+        raise ValueError(f"恢复/配置更新阻断标记无效：{marker}")
     try:
         document = json.loads(marker.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ValueError(f"恢复阻断标记无法安全读取：{marker}") from error
+    if not isinstance(document, dict) or not isinstance(
+        document.get("transaction_id"), str
+    ):
+        raise ValueError(f"恢复/配置更新阻断标记结构无效：{marker}")
+    marker_format = document.get("format")
+    if marker_format == "mineguard-enterprise-agent-restore-recovery-block-v1":
+        allowed_command = "database-restore"
+        environment_name = "MINEGUARD_INTERNAL_RESTORE_TRANSACTION_ID"
+        blocked_message = (
+            "实例存在未完成恢复阻断标记，禁止启动或执行命令："
+            f"{marker}；请保持服务停止并按标记中的精确路径人工恢复"
+        )
+        mismatch_message = f"恢复阻断标记不属于当前离线恢复事务：{marker}"
+    elif marker_format == ("mineguard-enterprise-agent-provisioning-update-block-v1"):
+        allowed_command = "config-check"
+        environment_name = "MINEGUARD_INTERNAL_PROVISIONING_UPDATE_TRANSACTION_ID"
+        blocked_message = (
+            "实例存在未完成接入配置更新阻断标记，禁止启动或执行命令："
+            f"{marker}；请保持服务停止并执行更新回滚或人工恢复"
+        )
+        mismatch_message = f"配置更新阻断标记不属于当前更新事务：{marker}"
+    else:
+        raise ValueError(f"恢复/配置更新阻断标记 format 无效：{marker}")
+    if command != allowed_command:
+        raise ValueError(blocked_message)
+    transaction_id = os.environ.get(environment_name, "")
     if (
-        not isinstance(document, dict)
-        or document.get("format")
-        != "mineguard-enterprise-agent-restore-recovery-block-v1"
-        or not isinstance(document.get("transaction_id"), str)
+        len(transaction_id) != 32
+        or any(character not in "0123456789abcdef" for character in transaction_id)
         or not hmac.compare_digest(document["transaction_id"], transaction_id)
     ):
-        raise ValueError(f"恢复阻断标记不属于当前离线恢复事务：{marker}")
+        raise ValueError(mismatch_message)
 
 
 def _serve_agent(
@@ -725,8 +1089,7 @@ def _serve_agent(
         production_errors = _configuration_errors(settings, production=True)
         if production_errors:
             parser.error(
-                "正式模式配置检查未通过：\n- "
-                + "\n- ".join(production_errors)
+                "正式模式配置检查未通过：\n- " + "\n- ".join(production_errors)
             )
     if (
         settings.public_origin is not None
@@ -795,16 +1158,33 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
+        if args.command in {
+            "self-check",
+            "model-trust-check",
+            "model-credential-lock-trust-check",
+        }:
+            if args.env_file or args.authoritative_env_file:
+                parser.error(
+                    "离线发行/信任检查不接受实例 --env-file 参数"
+                )
+            if args.command == "self-check":
+                _print(_self_check())
+            elif args.command == "model-trust-check":
+                _print(validate_model_trust_store(args.trust_store))
+            else:
+                _print(
+                    validate_model_lock_against_trust_store(
+                        lock_path=args.lock,
+                        trust_store_path=args.trust_store,
+                    )
+                )
+            return 0
         if args.authoritative_env_file:
             if not args.env_file:
-                parser.error(
-                    "--authoritative-env-file 必须与显式 --env-file 一起使用"
-                )
+                parser.error("--authoritative-env-file 必须与显式 --env-file 一起使用")
             authoritative_path = Path(args.env_file).expanduser()
             if not authoritative_path.is_absolute():
-                parser.error(
-                    "--authoritative-env-file 要求 --env-file 使用绝对路径"
-                )
+                parser.error("--authoritative-env-file 要求 --env-file 使用绝对路径")
             load_authoritative_environment_file(authoritative_path)
             _assert_authoritative_restore_not_blocked(
                 authoritative_path,
@@ -844,7 +1224,156 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(encoded_password)
             return 0
-        settings = Settings.from_environment()
+        if args.command == "provision-import":
+            if args.activation_code_file is not None:
+                activation_code = read_activation_code_file(args.activation_code_file)
+            else:
+                activation_code = normalize_activation_code(sys.stdin.buffer.read(128))
+            _print(
+                install_provisioning_bundle(
+                    bundle_path=args.bundle,
+                    activation_code=activation_code,
+                    issuer_public_key_path=args.issuer_public_key,
+                    expected_public_key_sha256=(args.expected_public_key_sha256),
+                    expected_issuer_key_id=args.expected_issuer_key_id,
+                    allow_unanchored_test_key=(args.allow_unanchored_test_key),
+                    base_environment_path=args.base_env,
+                    output_environment_path=args.output_env,
+                    lock_output_path=args.lock_output,
+                    lock_environment_path=args.lock_env_path,
+                    secret_store_output_path=args.secret_store,
+                    secret_store_environment_path=(args.secret_store_env_path),
+                    ca_source_path=args.ca_source,
+                    expected_ca_sha256=args.expected_ca_sha256,
+                    secret_protection=args.secret_protection,
+                    expected_mine_id=args.expected_mine_id,
+                    expected_system_id=args.expected_system_id,
+                    current_lock_path=args.current_lock,
+                ).summary
+            )
+            return 0
+        active_model_pointers: dict[str, str] = {}
+        if args.command == "model-credential-import":
+            plaintext_names = plaintext_model_environment_names()
+            if plaintext_names:
+                parser.error(
+                    "导入受管模型凭据前必须删除全部明文模型配置："
+                    + ", ".join(plaintext_names)
+                )
+            if os.environ.get("MINEGUARD_AGENT_MODEL_TRUST_STORE", "").strip():
+                parser.error(
+                    "模型凭据导入不接受环境变量 trust store；请使用已批准的显式文件"
+                )
+            pointer_names = (
+                "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
+                "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
+            )
+            saved_pointers = {
+                name: os.environ[name] for name in pointer_names if name in os.environ
+            }
+            active_model_pointers = {
+                name: os.environ.get(name, "").strip() for name in pointer_names
+            }
+            # Import must remain possible after the current authorization has
+            # expired.  Provisioning identity is still verified by Settings;
+            # the predecessor model lock is authenticated separately below.
+            for name in pointer_names:
+                os.environ.pop(name, None)
+            try:
+                settings = Settings.from_environment()
+            finally:
+                os.environ.update(saved_pointers)
+        else:
+            settings = Settings.from_environment()
+        if args.command == "model-credential-import":
+            if not settings.provisioning_status.managed:
+                parser.error("模型凭据只能导入到已验签的企业实例")
+            identity = settings.five_quantity_identity
+            expected_cli = {
+                "mine_id": args.expected_mine_id,
+                "system_id": args.expected_system_id,
+                "party_id": args.expected_party_id,
+            }
+            actual = {
+                "mine_id": identity.mine_id,
+                "system_id": identity.system_id,
+                "party_id": identity.operator_id,
+                "pair_id": settings.provisioning_status.pair_id or "",
+            }
+            if not actual["pair_id"]:
+                parser.error("已验签企业实例缺少 pair_id，不能导入模型凭据")
+            for field, supplied in expected_cli.items():
+                if supplied is not None and supplied != actual[field]:
+                    parser.error(f"模型凭据导入的预期 {field} 与已验签实例不一致")
+            if settings.production_mode and (
+                args.trust_store.resolve()
+                != release_model_trust_store_path().resolve()
+            ):
+                parser.error(
+                    "正式安装只能使用发行版固定的模型签发 trust store"
+                )
+            # The Windows transactional importer deliberately removes the old
+            # model pointers while preparing a rotation.  That permits an
+            # expired (but still cryptographically intact) credential to be
+            # replaced without first loading it as the active runtime
+            # credential.  Linux may publish a replacement
+            # to new, versioned final paths.  In either layout the installer
+            # authenticates the explicitly supplied predecessor.
+            final_lock_exists = args.lock_env_path.exists()
+            final_store_exists = args.secret_store_env_path.exists()
+            final_state_exists = model_credential_state_path(
+                args.lock_env_path
+            ).exists()
+            if len(
+                {final_lock_exists, final_store_exists, final_state_exists}
+            ) != 1:
+                parser.error(
+                    "模型凭据最终 lock、secret store 与防回退状态不一致"
+                )
+            active_lock = active_model_pointers.get(
+                "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE", ""
+            )
+            active_store = active_model_pointers.get(
+                "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE", ""
+            )
+            if bool(active_lock) != bool(active_store):
+                parser.error("当前模型凭据 lock/store 指针必须成对配置")
+            if args.current_lock is None:
+                if final_lock_exists or active_lock:
+                    parser.error("已存在模型凭据时必须显式提供 --current-lock")
+            else:
+                if not args.current_lock.is_file():
+                    parser.error("--current-lock 必须是现有模型凭据 lock 文件")
+                if active_lock and (
+                    args.current_lock.resolve() != Path(active_lock).resolve()
+                ):
+                    parser.error("--current-lock 不是当前服务配置的活动模型 lock")
+                if final_lock_exists and (
+                    args.current_lock.resolve() != args.lock_env_path.resolve()
+                ):
+                    parser.error(
+                        "固定路径更新时 --current-lock 必须是本实例当前最终 lock"
+                    )
+            activation_code = read_model_activation_code_file(
+                args.activation_code_file
+            )
+            result = install_model_credential_bundle(
+                bundle_path=args.bundle,
+                activation_code=activation_code,
+                trust_store_path=args.trust_store,
+                lock_output_path=args.lock_output,
+                lock_environment_path=args.lock_env_path,
+                secret_store_output_path=args.secret_store,
+                secret_store_environment_path=args.secret_store_env_path,
+                secret_protection=args.secret_protection,
+                expected_subject=actual,
+                current_lock_path=args.current_lock,
+            )
+            _print(result.summary)
+            return 0
+        if args.command == "model-credential-status":
+            _print(settings.model_credential_status.as_dict())
+            return 0
         if args.db:
             overridden_state = (
                 Path("./data").resolve()
@@ -874,6 +1403,24 @@ def main(argv: list[str] | None = None) -> int:
                 settings,
                 production=args.production,
             )
+            configuration_warnings: list[str] = []
+            if not settings.provisioning_status.managed:
+                configuration_warnings.append(
+                    "当前实例未使用监管签名 provisioning lock；保留兼容的手工配置模式"
+                )
+            if settings.llm is not None and _uses_legacy_model_environment():
+                configuration_warnings.append(
+                    "当前实例仍使用已弃用的 DEEPSEEK_* 通用模型配置；"
+                    "请成组迁移到 MINEGUARD_AGENT_*"
+                )
+            if (
+                settings.model_credential_status.managed
+                and settings.model_credential_status.state != "managed"
+            ):
+                configuration_warnings.append(
+                    "受管模型凭据当前不可用；模型出站已关闭，"
+                    "CSV 复核、签名和报送主线仍可运行"
+                )
             _print(
                 {
                     "valid": not configuration_errors,
@@ -883,8 +1430,20 @@ def main(argv: list[str] | None = None) -> int:
                     "errors": list(configuration_errors),
                     "mine_id": settings.five_quantity_identity.mine_id,
                     "system_id": settings.five_quantity_identity.system_id,
+                    "enterprise_signing_key_id": (
+                        settings.five_quantity_identity.key_id
+                    ),
+                    "historical_enterprise_verification_key_ids": [
+                        item.key_id
+                        for item in (
+                            settings.five_quantity_identity.historical_enterprise_signing_keys
+                        )
+                    ],
                     "database_path": str(Path(settings.database_path).resolve()),
                     "port": settings.port,
+                    "provisioning": settings.provisioning_status.as_dict(),
+                    "model_credential": settings.model_credential_status.as_dict(),
+                    "warnings": configuration_warnings,
                 }
             )
             return 0 if not configuration_errors else 2

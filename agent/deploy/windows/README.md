@@ -21,7 +21,11 @@ EXE；必须完整保留 `runtime` 目录中的 DLL、时区数据和 `web` 前�
 不能依靠同一台机器上的目录区分来代替企业之间的安全边界。若同机部署多个测试实例，
 仍必须为每个实例分配不同 `InstanceName`、端口、系统身份、状态库和逐矿密钥。
 
-## 2. 正式安装：只运行预先验真的签名 Setup
+## 2. 正式安装：只运行预先验真的 Setup
+
+正式介质有两种互斥类型：带 Authenticode 和时间戳的签名版，或文件名包含
+`INTERNAL-UNSIGNED`、按介质外 SHA-256 管控的无证书内网正式版。以下第一段先说明签名
+版；本节末尾说明无证书版。文件名含 `UNSIGNED-TEST-ONLY` 的包不属于任何正式类型。
 
 正式交付文件名类似：
 
@@ -95,7 +99,61 @@ cd C:\src\coral\agent\deploy\windows
 `/APPROVED_SIGNER_THUMBPRINT=<线下批准指纹>` 或测试专用
 `/ALLOW_UNSIGNED_TEST_MEDIA=1`，两种模式不可混用。
 
-## 3. 创建逐矿实例
+单位明确不采用 Authenticode、但仍要在受控内网执行完整生产策略时，只能使用单独构建并
+明确分类为 `unsigned-internal-release` 的发行介质。先从介质外审批记录核对 Setup
+SHA-256，再由 Setup 显式选择 `AllowUnsignedInternalRelease`；它不能与
+`AllowUnsignedTestMedia` 混用，也不会接受普通 `unsigned-test-only` 包。该模式没有 Windows
+发布者身份，SHA-256 只在核验值经独立渠道交付时才能作为完整性信任锚。
+
+## 3. 推荐入口：导入一矿一包并自动配置
+
+正式新部署不再要求现场人员手写 `agent.env`。安装完成后，从开始菜单打开
+`MineGuard 企业接入配置向导`，点击“加载企业交付目录”，选择监管端为本矿生成的完整目录。
+向导会读取 `enterprise-install-manifest.json`，自动定位 `.mgprov`、签发公钥和政府 HTTPS
+CA，带入实例名、issuer key ID 与两个摘要；现场人员不再逐项抄路径和 64 位摘要。随后另选
+不在该目录内的激活码，并输入监管方通过介质外渠道告知的 12 位独立核验码。
+
+现场需提前从相互独立的渠道准备：
+
+- 本矿企业交付目录（含 `.mgprov`、签发公钥、政府 HTTPS CA、交接清单；不含秘密）；
+- 通过第二条渠道单独交付的激活码文件；
+- 通过电话、审批单等企业交付介质之外渠道取得的 **12 位独立核验码**；
+- 首次创建时的未占用端口，以及经办人和复核人的登录名、姓名、不同的正式密码。
+
+12 位码由 `pair_id`、issuer key ID、公钥 SPKI 摘要和 CA 摘要共同派生。向导会对清单中的
+材料重新验真，并以固定时间比较核验码；把交付目录和核验码放在同一 U 盘不算独立核验。
+密码只在内存中传给正式摘要命令，激活码只由受控文件读取；它们不会进入命令行、日志、
+`agent.env` 或开始菜单快捷方式。两把逐矿 HMAC 只保存在机器级 DPAPI 密文中，受该实例
+专用服务 SID 的 ACL 保护。首次创建必须建立两名具名账号：经办人只能填报，复核人才能
+确认和提交；两人的正式密码必须不同。
+
+签名 profile 中的 `PLATFORM_V3_CA_BUNDLE` 必须预先锁定为该实例最终路径，例如：
+
+```text
+C:\ProgramData\MineGuard\EnterpriseAgent\instances\mine-001\config\platform-ca.pem
+```
+
+向导会精确核对该路径。包选错矿、激活码错误、签名/独立核验错误、CA 被替换、端口或身份
+冲突、正式配置不完整都会在发布前失败。首次创建模式绝不覆盖既有实例；日常逐矿密钥轮换
+必须选择“安全更新现有实例”，使用同一 `pair_id` 的更高 `profile_version` 签名包。更新
+模式不接收账号、密码或端口，不重建 SQLite 数据库，也不改业务数据；它在恢复标记保护下
+完成事务切换、正式预检，失败自动回滚，并恢复操作前的服务运行状态。政府接口地址、CA、
+签发机构或 Platform 身份属于监管固定策略，当前 Windows 向导不允许在逐矿更新中修改；
+这类变更必须先停止签发，并按单位批准的整体迁移方案处理。成功后再按第 7 节安装/检查
+Windows 服务。矿井、经营主体、同类矿分组和 key ID 仍由签名包锁定，不能手工编辑。
+
+向导左下角的“安装并启动正式服务…”与首次导入相互独立：配置完成后可立即使用，也可关闭
+并从开始菜单重新打开向导，填写已有实例名后使用。它不会下载或捆绑 WinSW，也不会从所选
+文件自动计算并信任摘要；操作员仍须选择已复制到本机固定 NTFS 目录的批准 WinSW，手工
+输入介质外审批记录中的 WinSW SHA-256；签名版再输入 Agent runtime 签名者 SHA-1 指纹，
+`INTERNAL-UNSIGNED` 版则输入 Agent 子发行清单 SHA-256。向导会按已安装发行分类自动切换字段，
+复用正式服务安装事务，只有安装、启动、实例绑定健康检查全部通过才报告成功，核验值不写日志。
+
+PowerShell 自动化也可直接调用
+`Import-EnterpriseAgentAccessPackage.ps1`，但密码参数必须使用 `SecureString` 对象，禁止把
+明文写在命令行或脚本历史中。普通现场部署应始终使用图形向导。
+
+## 4. 高级兼容入口：手工创建逐矿实例
 
 ```powershell
 cd 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
@@ -153,7 +211,7 @@ Authenticated Users、BUILTIN\Users、LocalService、NetworkService、ALL SERVIC
 失败会清理未发布实例并尽力恢复本次变更的外部监听目录 ACL。
 备份目录只允许 SYSTEM 和 Administrators 写入，Agent 服务账号不能修改自身备份。
 
-## 4. 配置账号、政府接口和模型 API
+## 5. 配置账号、政府接口和模型 API
 
 编辑本实例的 `config\agent.env`。它是严格 UTF-8 `KEY=VALUE` 数据文件，不是
 PowerShell 脚本，不支持变量展开或命令替换，也不要 dot-source。进程只在启动时读取，
@@ -187,17 +245,77 @@ ENTERPRISE_EXCHANGE_HMAC_SECRET=<由密钥系统注入的应用消息密钥>
 PLATFORM_V3_TRANSPORT_HMAC_SECRET=<不同的运输密钥>
 ```
 
+企业应用 key 轮换后，在受 ACL 保护的同一 `agent.env` 中加入单行历史验签密钥环，
+然后执行 `config-check --production` 并重启服务：
+
+```text
+ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON=[{"key_id":"enterprise-key-retired","secret":"<退役应用消息密钥>"}]
+```
+
+历史 key 仅验证换钥前已送达 V3 前序；新消息仍只使用当前
+`ENTERPRISE_EXCHANGE_KEY_ID/ENTERPRISE_EXCHANGE_HMAC_SECRET`。不要把政府入站的
+`REGULATORY_PREVIOUS_*` key ID 写入此企业密钥环。协调换钥时同一双向共享的退役
+secret 需要在两个方向分别登记，程序仍按各自 envelope key ID 精确选择。
+
 程序暂时接受 `PLATFORM_V2_*` 作为迁移别名，但新实例必须写 V3 名称。标准 CSV、11 个
 原子字段和开票非负口径见
 [十量 V3 部署与运行](../../../docs/十量V3部署与运行.md)。五量 V2 只读保留，不能补造
 新字段后重新报送。
 
-两把 HMAC 密钥必须不同且至少 32 字节。模型只影响可选对话/新闻功能：
+两把 HMAC 密钥必须不同且至少 32 字节。模型只影响可选对话/新闻功能。正式 Windows
+实例不要在 `agent.env` 中填写 API Key、接口地址或模型；从开始菜单打开
+`MineGuard 模型授权导入向导`，只选择：
+
+- 已完成企业接入配置的实例；
+- 由 MineGuard 签发的本矿 `.mgllm` 模型授权包；
+- 通过另一渠道交付的激活码文件。
+
+向导不提供 API Key、`BASE_URL`、模型或签发公钥编辑框。签发信任库固定为已签名安装目录
+`release-metadata\model-credential-trust.json`，现场不能另选公钥。导入器先验证包签名、激活
+解密和 mine/system/party/pair 四项身份（其中 `pair_id` 必须与本机 `.mgprov` 接入锁
+一致），再将凭据转换为机器级 DPAPI 密文。实例文件只保留两个
+非秘密固定指针；信任库由运行时从已验签安装目录固定解析，不写入实例配置：
 
 ```text
-DEEPSEEK_API_KEY=<由密钥系统注入>
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=<单位批准的模型>
+MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE=C:\ProgramData\MineGuard\EnterpriseAgent\instances\mine-001\config\model-credential-lock.json
+MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE=C:\ProgramData\MineGuard\EnterpriseAgent\instances\mine-001\config\model-credentials.dpapi
+```
+
+`model-credentials.dpapi` 只能在导入它的 Windows 机器上解密，并由实例 ACL 限制为 SYSTEM、
+Administrators 和该实例专用服务 SID；Key 不进入 `agent.env`、WinSW XML、命令行或导入
+结果。程序还从 lock 固定派生同目录的 `model-credential-lock.state.json`，以 HMAC 绑定已
+接受的最高 credential version、bundle 和 issuer key epoch，防止只恢复旧 lock/store 后
+继续外呼；它不是第三个 env 指针，现场不得单独编辑、删除或回退。
+
+首次导入和后续换钥使用同一向导：它与企业接入包更新共用逐实例事务锁，先在同卷受保护
+目录准备新文件，再停止所选服务、写恢复阻断标记，把 DPAPI store、防回退 state、lock 和
+`agent.env` 四个文件纳入同一备份/发布/回滚事务并执行正式配置检查。三份凭据文件缺少任意
+一份或 staging 返回的 state 路径不等于 lock 固定派生路径，都会在发布前失败。成功后恢复
+操作前的运行/停止状态；失败自动回滚，回滚不完整时保持服务停止并保留标记，禁止带半套
+凭据启动。
+
+以下五个供应商无关变量及旧 `DEEPSEEK_*` 别名只允许源码开发/临时迁移使用；`.mgllm`
+导入会把它们全部从实例环境文件删除，正式服务如果发现可编辑明文模型配置应闭锁拒绝：
+
+```text
+MINEGUARD_AGENT_API_KEY=
+MINEGUARD_AGENT_BASE_URL=
+MINEGUARD_AGENT_MODEL=
+MINEGUARD_AGENT_TIMEOUT_SECONDS=
+MINEGUARD_AGENT_MAX_RETRIES=
+```
+
+DeepSeek 原生新闻搜索的 `COAL_NEWS_DEEPSEEK_*` 开关属于厂商专有能力，不是通用模型
+凭据。DPAPI 密文不适合迁移到新机器；灾备换机时应重新签发/导入新版本 `.mgllm`，并在
+模型供应商侧吊销旧企业 Key、设置该企业独立额度和告警。
+
+管理员高级自动化入口如下；激活码文件路径可以进入参数，激活码内容不会进入命令行：
+
+```powershell
+.\Import-EnterpriseAgentModelCredential.ps1 `
+  -InstanceName mine-001 `
+  -BundlePath 'E:\Delivery\mine-001-v1.mgllm' `
+  -ActivationCodeFile 'F:\SeparateChannel\mine-001-v1.activation'
 ```
 
 多个监听目录在 Windows 使用分号，例如：
@@ -206,7 +324,7 @@ DEEPSEEK_MODEL=<单位批准的模型>
 ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS=D:\FiveQuantity\Inbox;E:\ApprovedExport
 ```
 
-## 5. 前台验证
+## 6. 前台验证
 
 ```powershell
 cd 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
@@ -227,13 +345,22 @@ cd 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
 浏览器打开 `http://127.0.0.1:8090/`。正式环境仍只让 Agent 监听回环地址，由单位批准的
 IIS/Caddy/Nginx 反向代理统一提供 HTTPS；不要把 8090 直接开放到办公网或公网。
 
-## 6. 安装为 Windows 服务
+## 7. 安装为 Windows 服务
 
 本项目不下载、不捆绑 WinSW。先从批准渠道准备 WinSW x64 可执行文件并核对其官方
-SHA-256，然后执行：
+SHA-256。普通现场部署直接点击接入配置向导左下角“安装并启动正式服务…”，选择已有实例，
+再按窗口提示手工输入介质外 WinSW SHA-256 和 Agent runtime 签名者 SHA-1 指纹。该入口
+可以独立重开，不需要重复导入接入包。
+
+若已安装介质分类为 `unsigned-internal-release`，同一个向导会显示醒目的无发布者签名
+警告，并把“签名者 SHA-1”输入框自动改为“Agent 发行清单 SHA-256”。该 64 位值必须来自
+安装介质之外的审批记录，不能把窗口现场计算值或包内 manifest 当作独立批准值。向导仍会
+强制立即启动、绑定实例健康检查、生产模式、四眼复核和 provisioning-managed 策略。
+
+以下 PowerShell 仅作为管理员高级自动化入口：
 
 ```powershell
-$WinSW = 'D:\approved-tools\WinSW-x64.exe'
+$WinSW = 'C:\ApprovedTools\WinSW-x64.exe'
 $ExpectedHash = '<从已批准发布清单抄录的64位SHA-256>'
 $ApprovedSignerThumbprint = Read-Host '再次抄录线下审批材料中的 Agent 签名证书指纹'
 
@@ -244,6 +371,25 @@ $ApprovedSignerThumbprint = Read-Host '再次抄录线下审批材料中的 Agen
   -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
   -Start
 ```
+
+无 Authenticode 的受控内网候选版使用另一组互斥参数：
+
+```powershell
+$ReleaseManifestSha256 = Read-Host '抄录介质外审批记录中的 Agent 子发行清单 SHA-256'
+
+.\Install-EnterpriseAgentService.ps1 `
+  -InstanceName qinyuan-001 `
+  -WinSWPath $WinSW `
+  -WinSWExpectedSha256 $ExpectedHash `
+  -AllowUnsignedInternalRelease `
+  -ExpectedReleaseManifestSha256 $ReleaseManifestSha256 `
+  -Start
+```
+
+该命令只接受 metadata 明确分类为 `unsigned-internal-release` 且实际
+Authenticode 状态为 `NotSigned` 的主程序，并在配置预检后、写入服务状态前再次核对
+完整 standalone 目录与受信子发行清单。摘要不匹配、目录存在新增/缺失/篡改文件、带
+无效/未知签名、普通测试包或缺少生产配置都会 fail-close。
 
 生产变更单中应填写预先从可信渠道获得的散列值，不应把对当前未知文件现场计算的值当成
 供应链校验。服务名为 `MineGuardEnterpriseAgent-qinyuan-001`，使用唯一虚拟服务账号
@@ -259,9 +405,12 @@ NTFS ADS、链接、目录联接和挂载点；安装时会严格核对状态根
 与 XML 先在实例 `service` 目录中完整落盘后原子发布；注册或启动失败会撤销本次服务注册
 并清理本次文件，不留下可继续误用的半安装状态。
 
-服务脚本不会因为 runtime 已经安装就默认信任它；它会重新检查已安装 metadata 的
-signed/unsigned 分类、主 EXE 的实际 Authenticode `Valid` 状态和时间戳，并再次要求实际
-签名者匹配线下批准指纹。服务安装默认强制生产模式与四眼复核，并执行
+服务脚本不会因为 runtime 已经安装就默认信任它；它会重新检查已安装 metadata 的发行
+分类。签名版要求主 EXE 的 Authenticode 状态为 `Valid`、具有时间戳并匹配线下批准指纹；
+`INTERNAL-UNSIGNED` 版要求状态严格为 `NotSigned`，并以线下批准的子发行清单 SHA-256
+校验完整 runtime、部署脚本和
+发行元数据文件集合，而不是只信任主 EXE。
+服务安装默认强制生产模式与四眼复核，并执行
 `config-check --production`：必须有两个
 权限分离的具名正式账号、可信凭据来源、HTTPS 浏览器 origin、
 Secure Cookie、HTTPS 政府 V3 地址、两把不同 HMAC 密钥、正式 key ID 和完整同类矿分组。
@@ -275,10 +424,11 @@ false。任一演示/测试开关都不能用于生产验收。
 
 WinSW 始终使用 `--authoritative-env-file`：Agent 在读取实例文件前清空继承的
 `ENTERPRISE_`、`PLATFORM_`、`REGULATORY_`、`AGENT_V2_`、`DEEPSEEK_`、`COAL_NEWS_`
-配置以及 `ENTERPRISE_AGENT_ENV_FILE`，因此机器级或管理员 shell 变量不能把另一矿的
-mine/system/database/HMAC 覆盖进来。随后只允许 XML 中两个非秘密且严格为 `true/false` 的
-`MINEGUARD_SERVICE_*` 策略覆盖生产/四眼开关；HMAC、密码摘要和模型密钥仍只在 ACL 受控
-env 文件中。安装前 `config-check` 会临时隔离管理员进程中的同名变量，并走与实际 serve
+以及精确允许的 `MINEGUARD_AGENT_*` 模型配置和 `ENTERPRISE_AGENT_ENV_FILE`，因此
+机器级或管理员 shell 变量不能把另一矿的
+mine/system/database/HMAC 覆盖进来。随后只允许 XML 中三个非秘密且严格为 `true/false` 的
+`MINEGUARD_SERVICE_*` 策略覆盖生产、四眼复核和受管配置要求；HMAC 和密码摘要保存在 ACL 受控
+env 文件，模型密钥只保存在机器级 DPAPI 密文中。安装前 `config-check` 会临时隔离管理员进程中的同名变量，并走与实际 serve
 完全相同的权威加载路径，检查结束后再原样恢复 shell 环境。正式服务必须带 `-Start`，且
 只有 SCM 达到 Running、服务身份再次匹配并通过绑定当前实例的 `/api/v1/health` 后才返回成功；
 失败会撤销本次注册和 wrapper。
@@ -317,7 +467,7 @@ Stop-Service MineGuardEnterpriseAgent-qinyuan-001
 遗留开关只接受账号翻译结果精确为 `S-1-5-19` 且 wrapper 路径仍绑定本实例的服务；其他
 未知账号仍拒绝。迁移完成并通过健康检查前，不得恢复生产采集。
 
-## 7. 业务状态备份与恢复
+## 8. 业务状态备份与恢复
 
 完整业务状态不只有 SQLite，还包含 `five-quantity-quarantine` 中的原始隔离证据。
 备份脚本会短暂停止已安装服务，使用 SQLite backup API 生成一致数据库，同时复制隔离
@@ -389,11 +539,21 @@ quarantine。若磁盘/ACL 故障导致物理回滚不完整，标记会保留�
 fail-close；标记列出 live 路径、两个候选事务材料目录和精确的人工恢复文件名，管理员完成
 核验前不得手工删除。
 
-## 8. 更新与排障
+## 9. 更新与排障
 
 更新前先做状态快照并停止全部实例服务；按第 2 节先用线下 Setup SHA-256/签名者指纹核验
 新的签名 Setup，再运行向导并提供独立批准的 Agent runtime signer 指纹，最后逐个启动和
 健康检查。正式升级不能改为直接执行展开 staging 中的 `Install-EnterpriseAgent.ps1`。
+候选发行清单、签名和程序版本通过后，安装器会在创建目录、改 ACL 或切换
+runtime/deploy/release-metadata 之前，只读遍历 StateRoot 中每个实例。旧版本实例没有活动
+模型 lock/store 两指针时直接兼容；已启用受管模型的实例必须继续指向本实例 `config` 下的
+固定文件，候选程序会用候选 `model-credential-trust.json` 验证 lock 的 Ed25519 签名、issuer
+ID、key ID、key epoch 和公钥摘要。该预检不打开 DPAPI secret store、不解密 API Key、
+不校验运行到期时间；因此过期凭据仍可随 runtime 升级后再轮换。任何活动 lock 的旧签发
+key 被候选 trust 移除，升级都会在上述文件或实例尚未改动时 fail-close，原安装保持不变。
+签发 key 轮换必须先发布同时含新旧公钥的重叠 trust 发行版，完成全部企业凭据轮换和观察
+期后，下一版发行物才能删除旧公钥。
+
 升级会拒绝仍用 LocalService、未启用 unrestricted service SID 或 `-SkipAcl` 的实例，并为
 所有已加固实例重建逐实例 ACL；外部监听目录若仍含 LocalService ACE 或缺少逐实例 SID
 读取权限也会失败。共享运行时更新期间所有实例必须
@@ -411,7 +571,7 @@ fail-close；标记列出 live 路径、两个候选事务材料目录和精确�
 Windows 或 Linux。企业 Agent 与政府 Platform 只通过 V3 HTTP/JSON 合同通信，不共享
 代码、数据库或服务账号。
 
-## 9. 内部构建二进制发行目录
+## 10. 内部构建二进制发行目录
 
 本节仅供研发构建机使用，不随用户交付。构建机需要 Windows 10/11 或 Windows Server
 x64、CPython 3.12 x64，以及 Visual Studio 2022 Build Tools 的“使用 C++ 的桌面开发”

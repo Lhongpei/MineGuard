@@ -486,12 +486,21 @@ function Get-EAInstanceContext {
     $Values = Read-EAEnvironmentFile -Path $ConfigPath
     foreach ($RequiredKey in @(
         "ENTERPRISE_AGENT_DB", "ENTERPRISE_AGENT_HOST", "ENTERPRISE_AGENT_PORT",
-        "ENTERPRISE_MINE_ID", "ENTERPRISE_SYSTEM_ID", "PLATFORM_V2_SENDER_ID",
+        "ENTERPRISE_MINE_ID", "ENTERPRISE_SYSTEM_ID",
         "ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS"
     )) {
         if (-not $Values.ContainsKey($RequiredKey)) {
             throw "Instance configuration is missing $RequiredKey."
         }
+    }
+    $SenderKey = if ($Values.ContainsKey("PLATFORM_V3_SENDER_ID")) {
+        "PLATFORM_V3_SENDER_ID"
+    }
+    elseif ($Values.ContainsKey("PLATFORM_V2_SENDER_ID")) {
+        "PLATFORM_V2_SENDER_ID"
+    }
+    else {
+        throw "Instance configuration is missing PLATFORM_V3_SENDER_ID."
     }
     $ConfigPort = 0
     if (-not ([string]$Values["ENTERPRISE_AGENT_DB"]).Equals(
@@ -501,7 +510,7 @@ function Get-EAInstanceContext {
         $ConfigPort -ne $Port -or
         [string]$Values["ENTERPRISE_MINE_ID"] -ne [string]$Metadata.mine_id -or
         [string]$Values["ENTERPRISE_SYSTEM_ID"] -ne [string]$Metadata.system_id -or
-        [string]$Values["PLATFORM_V2_SENDER_ID"] -ne [string]$Metadata.system_id) {
+        [string]$Values[$SenderKey] -ne [string]$Metadata.system_id) {
         throw "Instance configuration identity does not match instance.json."
     }
     $WatchPaths = @(([string]$Values["ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS"]) -split ';')
@@ -791,6 +800,9 @@ function Assert-EAInstanceGlobalIsolation {
     param([Parameter(Mandatory = $true)][object]$Context)
     foreach ($Directory in Get-ChildItem -LiteralPath $Context.StateRoot `
         -Directory -Force) {
+        if ($Directory.Name -match '^\.instance-staging-[A-Fa-f0-9]{32}$') {
+            continue
+        }
         if ($Directory.Name.Equals(
                 $Context.InstanceName, [StringComparison]::Ordinal
             )) {

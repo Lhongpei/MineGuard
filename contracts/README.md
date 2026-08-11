@@ -5,6 +5,51 @@
 物理关系、历史证据和时序证据，并独立作出监管判断。两边不得互相 import 代码，
 也不得共享数据库模型。
 
+## 独立部署边界：成对部署包 V1
+
+正式接入不再要求现场人员手写 Agent 环境变量和 Platform `clients.json`。中立契约新增
+`mineguard-provisioning-bundle-v1`：签发工具为每座矿、每个单调递增配置版本同时生成
+企业 `.mgprov` 与 Platform `.mgreg` 两份包。二者共享唯一 `pair_id`，但各有独立
+`bundle_id`、salt、nonce 和建议独立交接的包外激活码。
+
+顶层信封固定为 `{protected,ciphertext,signature}`。payload 使用 AES-256-GCM，密钥由
+包外高熵激活码经固定 scrypt 参数派生；AAD 是规范化 `protected`。Ed25519 签名覆盖
+规范化 `{protected,ciphertext}`。密钥不进入 EXE，不为每矿维护代码分支；代码签名和
+部署包签名是两套独立信任链。
+
+企业 payload 只允许政府交换、固定企业身份/同类矿分组和生产策略 allowlist，全部键
+都进入运行时锁。模型 API、用户密码/摘要、数据库、命令和自动监听目录禁止进入包。
+Platform payload 是一条严格客户端登记项和 Platform 身份，并用签名摘要锁住 registry。
+过期时间只约束首次导入/更新，不能让已导入配置日后自动停服；错矿、降级、版本冲突和
+同 bundle ID 不同内容全部 fail-closed。
+
+完整算法、安全边界、导入顺序和示例限制见
+[`specs/provisioning-bundle-v1.md`](specs/provisioning-bundle-v1.md)。四个示例中的信封
+密文/签名是不可解密、不可验签的结构占位符，不能作为生产材料。
+
+## 企业专属模型授权包 `.mgllm`
+
+模型 API 不进入企业/政府成对部署包，而由独立的
+`mineguard-model-credential-bundle-v1` 投递。商业签发方用非敏感 profile 和另行读取的
+供应商 API key，为每个企业生成独立 `.mgllm`；企业 Agent 验证预置 Ed25519 信任锚、
+企业主体及 `.mgprov pair_id`、递增版本、有效窗口和配置摘要后才能使用。供应商身份、
+API 地址、模型、`chat|extraction|coal-news-search` 能力、超时和重试策略与 key 一并受
+签名保护，正式模式不得用普通环境变量或前端覆盖。
+
+监管 Platform 完全不参与这条链路：不生成、导入、解密、保存或转发 `.mgllm`、API key
+和激活码，也没有接收它们的接口。每个企业必须使用供应商侧独立 key、硬限额、告警、
+账单标签和吊销范围，不能由政府持有一个共享 key。
+
+Windows 导入后使用 DPAPI `LocalMachine`，它提供跨机器不可移植性，但同机隔离仍主要
+依赖专用服务身份和文件 ACL；Linux V1 的 `0600` 是明文文件权限隔离，不是静态加密或
+硬件绑定。拥有本机管理员/root 和可修改正式程序能力的人不在此包的绝对防护范围内。
+
+完整格式、密码学顺序、配置闭包、逐次调用检查、存储边界和轮换/吊销规则见
+[`specs/model-credential-bundle-v1.md`](specs/model-credential-bundle-v1.md)。profile、
+payload、bundle 和发行方 trust store 四个示例只使用保留的 `example.invalid` 地址、明确
+的 `EXAMPLE_ONLY` 非生产 key 哨兵及不可解密、不可验签的信封占位符。发行版信任库格式
+固定为 `mineguard-model-issuer-trust-store-v1`。
+
 ## 当前目标契约：十量交换 V3
 
 V3 在不改写 V2 的前提下，把监管业务组扩展为风量、电量、火工品量、入井人员量、
@@ -83,6 +128,13 @@ V2 的完整跨字段、签名、幂等、修订、求解器/时序模块和风�
 ```text
 contracts/
 ├── schemas/
+│   ├── provisioning-bundle-v1.schema.json
+│   ├── enterprise-agent-provisioning-payload-v1.schema.json
+│   ├── platform-client-registration-payload-v1.schema.json
+│   ├── model-credential-bundle-v1.schema.json
+│   ├── model-credential-profile-v1.schema.json
+│   ├── model-credential-payload-v1.schema.json
+│   ├── model-issuer-trust-store-v1.schema.json
 │   ├── exchange-common-v3.schema.json
 │   ├── ten-quantity-submission-v3.schema.json
 │   ├── analysis-report-v3.schema.json
@@ -108,6 +160,8 @@ contracts/
 │   ├── enterprise-submission-v1.openapi.json
 │   └── edge-telemetry-v1.openapi.json
 ├── specs/
+│   ├── provisioning-bundle-v1.md
+│   ├── model-credential-bundle-v1.md
 │   ├── ten-quantity-exchange-v3.md
 │   ├── five-quantity-exchange-v2.md
 │   ├── enterprise-autofill-hmac-v1.md

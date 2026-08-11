@@ -35,3 +35,13 @@ agent/data/
 .env
 .env.*
 !.env.example
+
+# Per-mine onboarding media and signing material are deployment secrets even
+# when their payload is encrypted.  Contract examples use ordinary .json
+# fixtures instead of these production extensions.
+*.mgprov
+*.mgreg
+*.mgkey
+*.activation
+*-private.pem
+provisioning-output/

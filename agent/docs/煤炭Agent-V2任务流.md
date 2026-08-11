@@ -21,7 +21,7 @@ Agent V2 把一次煤炭核验从“聊天问一句、进程内算一次”提�
 daily_coal_health / 2.0
 ```
 
-它不依赖大模型和外网。即使未配置 `DEEPSEEK_API_KEY`，仍会使用本地确定性工具
+它不依赖大模型和外网。即使未配置 `MINEGUARD_AGENT_API_KEY`，仍会使用本地确定性工具
 完成核验。模型提取、煤炭对话、新闻搜索和旧版 Harness 任务是相邻能力，不是这个
 工作流的执行依赖。
 
@@ -480,11 +480,16 @@ curl -sS \
 
 | 变量 | 默认值/范围 | 说明 |
 | --- | --- | --- |
-| `DEEPSEEK_API_KEY` | 未设置 | 缺省为规则模式；不得写入仓库或浏览器 |
-| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible API 根地址 |
-| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | 管理员批准的模型名 |
-| `DEEPSEEK_TIMEOUT_SECONDS` | `20`，1–120 | 模型请求超时 |
-| `DEEPSEEK_MAX_RETRIES` | `2`，0–5 | 模型请求重试次数 |
+| `MINEGUARD_AGENT_API_KEY` | 未设置 | 上游模型或 LLM Gateway 凭据；缺省为规则模式，不得写入仓库或浏览器 |
+| `MINEGUARD_AGENT_BASE_URL` | 使用新 Key 时必须显式设置 | OpenAI-compatible API 或 LLM Gateway 根地址 |
+| `MINEGUARD_AGENT_MODEL` | 使用新 Key 时必须显式设置 | 管理员批准的模型名 |
+| `MINEGUARD_AGENT_TIMEOUT_SECONDS` | `20`，1–120 | 模型请求超时 |
+| `MINEGUARD_AGENT_MAX_RETRIES` | `2`，0–5 | 模型请求重试次数 |
+
+旧 `DEEPSEEK_API_KEY/BASE_URL/MODEL/TIMEOUT_SECONDS/MAX_RETRIES` 仅作为一次升级
+迁移别名；新旧命名空间不能混用。`COAL_NEWS_DEEPSEEK_*` 仍表示 DeepSeek 原生
+联网搜索能力，使用其他模型供应商或通用网关时应关闭该后备搜索，百度检索和通用
+模型总结不受影响。
 
 V2 每日体检不调用该模型。CSV 智能映射在本矿已批准配置和本地规则仍无法识别表头时，
 可调用该模型生成只读建议；请求只含表头与脱敏类型计数，不含 CSV 原始业务数值。

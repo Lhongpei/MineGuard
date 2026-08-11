@@ -3462,6 +3462,323 @@ def verify_v2(
             if response_summary.get("delivered", 0) < 1:
                 raise VerificationError("监管平台未确认分析报告送达回执")
 
+            # Exercise the public correction API against the real independent
+            # Platform process.  This is not a locally reconstructed HMAC
+            # check: the Platform must authenticate revision 2, resolve the
+            # stored direct predecessor and accept the immutable lineage.
+            correction_value, _ = _expect(
+                _request(
+                    agent_port,
+                    "POST",
+                    f"/api/v2/drafts/{draft_id}/correction",
+                    payload={
+                        "expected_revision": submitted.get("revision"),
+                        "expected_submission_revision": submission_revision,
+                        "accepted": True,
+                    },
+                    headers=_agent_headers(preparer_cookie, preparer_csrf),
+                ),
+                201,
+                "从政府已回执版本创建唯一更正草稿",
+            )
+            correction_result = _object_payload(
+                correction_value, "创建十量 V3 更正草稿"
+            )
+            correction = _object_payload(
+                correction_result.get("draft"), "十量 V3 更正草稿"
+            )
+            correction_draft_id = correction.get("draft_id")
+            correction_revision = correction.get("revision")
+            correction_submission_revision = correction.get(
+                "submission_revision"
+            )
+            predecessor = correction.get("predecessor")
+            correction_payload = correction.get("payload")
+            if (
+                correction_result.get("created") is not True
+                or not isinstance(correction_draft_id, str)
+                or not correction_draft_id
+                or isinstance(correction_revision, bool)
+                or not isinstance(correction_revision, int)
+                or correction_submission_revision != submission_revision + 1
+                or correction.get("correlation_id") != submission_message_id
+                or not isinstance(predecessor, dict)
+                or predecessor.get("message_id") != submission_message_id
+                or not isinstance(predecessor.get("payload_sha256"), str)
+                or len(predecessor["payload_sha256"]) != 64
+                or not isinstance(correction_payload, dict)
+                or "human_confirmation" in correction_payload
+            ):
+                raise VerificationError("更正草稿没有直接延续政府已回执的 V3 首报")
+
+            correction_replay_value, _ = _expect(
+                _request(
+                    agent_port,
+                    "POST",
+                    f"/api/v2/drafts/{draft_id}/correction",
+                    payload={
+                        "expected_revision": submitted.get("revision"),
+                        "expected_submission_revision": submission_revision,
+                        "accepted": True,
+                    },
+                    headers=_agent_headers(preparer_cookie, preparer_csrf),
+                ),
+                200,
+                "幂等重放更正建稿请求",
+            )
+            correction_replay = _object_payload(
+                correction_replay_value, "更正建稿幂等响应"
+            )
+            replay_draft = _object_payload(
+                correction_replay.get("draft"), "更正建稿幂等草稿"
+            )
+            if (
+                correction_replay.get("duplicate") is not True
+                or replay_draft.get("draft_id") != correction_draft_id
+            ):
+                raise VerificationError("更正建稿重放产生了分叉或新草稿")
+
+            correction_days = correction_payload.get("days")
+            if not isinstance(correction_days, list) or not correction_days:
+                raise VerificationError("更正草稿缺少可编辑的十量日报")
+            first_correction_day = _object_payload(
+                correction_days[0], "更正草稿首日"
+            )
+            reported_quantity = _object_payload(
+                first_correction_day.get("reported_quantity"),
+                "更正草稿首日报送量",
+            )
+            daily_total = _object_payload(
+                reported_quantity.get("daily_total"),
+                "更正草稿首日日合计",
+            )
+            revised_sales = _object_payload(
+                daily_total.get("sales_t"), "更正草稿销售量"
+            )
+            previous_sales = revised_sales.get("value")
+            if (
+                isinstance(previous_sales, bool)
+                or not isinstance(previous_sales, (int, float))
+            ):
+                raise VerificationError("更正草稿销售量不是可修订数值")
+            revised_sales["value"] = previous_sales + 1
+            revised_sales["quality_flags"] = ["reported", "corrected"]
+
+            saved_correction_value, _ = _expect(
+                _request(
+                    agent_port,
+                    "PATCH",
+                    f"/api/v2/drafts/{correction_draft_id}",
+                    payload={
+                        "expected_revision": correction_revision,
+                        "payload": correction_payload,
+                    },
+                    headers=_agent_headers(preparer_cookie, preparer_csrf),
+                ),
+                200,
+                "经办账号保存第 2 版更正内容",
+            )
+            saved_correction = _object_payload(
+                saved_correction_value, "保存第 2 版更正草稿"
+            )
+            saved_correction_revision = saved_correction.get("revision")
+            if saved_correction_revision != correction_revision + 1:
+                raise VerificationError("更正草稿保存未递增本地编辑修订号")
+
+            confirmed_correction_value, _ = _expect(
+                _request(
+                    agent_port,
+                    "POST",
+                    f"/api/v2/drafts/{correction_draft_id}/confirm",
+                    payload={
+                        "expected_revision": saved_correction_revision,
+                        "confirmer_name": "验收更正复核员",
+                        "confirmer_role": "企业复核负责人",
+                        "attestation": "本人已独立核对第 2 版更正内容及直接前序。",
+                        "accepted": True,
+                    },
+                    headers=_agent_headers(reviewer_cookie, reviewer_csrf),
+                ),
+                202,
+                "异人复核确认第 2 版更正",
+            )
+            confirmed_correction = _object_payload(
+                confirmed_correction_value, "确认第 2 版更正"
+            )
+            correction_message_id = confirmed_correction.get(
+                "submission_message_id"
+            )
+            if (
+                confirmed_correction.get("status") != "queued"
+                or not isinstance(correction_message_id, str)
+                or not correction_message_id
+                or confirmed_correction.get("submission_revision")
+                != submission_revision + 1
+                or confirmed_correction.get("correlation_id")
+                != submission_message_id
+                or confirmed_correction.get("predecessor") != predecessor
+            ):
+                raise VerificationError("更正消息入队时丢失连续 V3 血缘")
+
+            correction_submitted: dict[str, Any] | None = None
+            correction_report_record: dict[str, Any] | None = None
+            correction_mine_detail: dict[str, Any] | None = None
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                exchange_attempts += 1
+                _expect(
+                    _request(
+                        agent_port,
+                        "POST",
+                        "/api/v2/exchange/run",
+                        payload={},
+                        headers=_agent_headers(reviewer_cookie, reviewer_csrf),
+                    ),
+                    200,
+                    "驱动第 2 版更正进入真实监管平台",
+                )
+                correction_submitted_value, _ = _expect(
+                    _request(
+                        agent_port,
+                        "GET",
+                        f"/api/v2/drafts/{correction_draft_id}",
+                        headers={"Cookie": reviewer_cookie},
+                    ),
+                    200,
+                    "读取送达后的第 2 版更正",
+                )
+                correction_submitted = _object_payload(
+                    correction_submitted_value, "读取第 2 版更正"
+                )
+                correction_risks_value, _ = _expect(
+                    _request(
+                        agent_port,
+                        "GET",
+                        "/api/v2/risks",
+                        headers={"Cookie": reviewer_cookie},
+                    ),
+                    200,
+                    "读取更正后的企业风险收件箱",
+                )
+                correction_risks = _object_payload(
+                    correction_risks_value, "读取更正风险收件箱"
+                )
+                correction_report_record = _matching_analysis_report(
+                    correction_risks, correction_message_id
+                )
+                correction_detail_status, correction_detail_value, _ = _request(
+                    platform_port,
+                    "GET",
+                    f"/v2/regulatory/mines/{mine_id}",
+                    headers={"Cookie": platform_cookie},
+                )
+                if correction_detail_status == 200:
+                    correction_mine_detail = _object_payload(
+                        correction_detail_value,
+                        "读取更正后的监管矿井详情",
+                    )
+                latest_correction = (
+                    correction_mine_detail.get("latest_submission")
+                    if isinstance(correction_mine_detail, dict)
+                    else None
+                )
+                correction_summary = (
+                    correction_mine_detail.get("response_summary")
+                    if isinstance(correction_mine_detail, dict)
+                    else None
+                )
+                if (
+                    correction_submitted.get("status") == "submitted"
+                    and isinstance(correction_submitted.get("receipt"), dict)
+                    and correction_report_record is not None
+                    and isinstance(latest_correction, dict)
+                    and latest_correction.get("submission_id")
+                    == correction_message_id
+                    and latest_correction.get("revision")
+                    == submission_revision + 1
+                    and isinstance(correction_summary, dict)
+                    and correction_summary.get("delivered", 0) >= 2
+                ):
+                    break
+                time.sleep(0.2)
+            else:
+                raise VerificationError(
+                    "真实监管平台未在时限内验签、接续并分析第 2 版更正"
+                )
+
+            if (
+                correction_submitted is None
+                or correction_report_record is None
+                or correction_mine_detail is None
+            ):
+                raise VerificationError("更正闭环最终状态不完整")
+            correction_receipt = _object_payload(
+                correction_submitted.get("receipt"), "第 2 版更正回执"
+            )
+            correction_receipt_payload = _object_payload(
+                correction_receipt.get("payload"), "第 2 版更正回执 payload"
+            )
+            correction_report = _object_payload(
+                correction_report_record.get("report"), "第 2 版更正分析报告"
+            )
+            correction_report_payload = _object_payload(
+                correction_report.get("payload"),
+                "第 2 版更正分析报告 payload",
+            )
+            latest_submission = _object_payload(
+                correction_mine_detail.get("latest_submission"),
+                "更正后监管最新报送",
+            )
+            latest_analysis = _object_payload(
+                correction_mine_detail.get("latest_analysis"),
+                "更正后监管最新分析",
+            )
+            response_summary = _object_payload(
+                correction_mine_detail.get("response_summary"),
+                "更正后监管回执汇总",
+            )
+            if {
+                correction_message_id,
+                correction_submitted.get("submission_message_id"),
+                correction_receipt_payload.get("submission_message_id"),
+                latest_submission.get("submission_id"),
+                correction_report_payload.get("submission_message_id"),
+            } != {correction_message_id}:
+                raise VerificationError("第 2 版更正的消息身份没有贯穿真实闭环")
+            if {
+                submission_revision + 1,
+                correction_submitted.get("submission_revision"),
+                correction_receipt_payload.get("submission_revision"),
+                latest_submission.get("revision"),
+                correction_report_payload.get("submission_revision"),
+            } != {submission_revision + 1}:
+                raise VerificationError("真实监管平台未连续接收 revision 2")
+
+            historical_value, _ = _expect(
+                _request(
+                    agent_port,
+                    "GET",
+                    f"/api/v2/drafts/{draft_id}",
+                    headers={"Cookie": reviewer_cookie},
+                ),
+                200,
+                "复核首报历史仍可读取",
+            )
+            historical = _object_payload(historical_value, "首报历史草稿")
+            if (
+                historical.get("submission_message_id")
+                != submission_message_id
+                or historical.get("submission_revision") != submission_revision
+                or historical.get("status") != "submitted"
+            ):
+                raise VerificationError("创建更正后首报历史身份或状态被覆盖")
+
+            submission_message_id = correction_message_id
+            submission_revision += 1
+            report_payload = correction_report_payload
+            mine_detail = correction_mine_detail
+            algorithm_version = latest_analysis.get("algorithm_version")
+
             overview_value, _ = _expect(
                 _request(
                     platform_port,
@@ -3519,6 +3836,7 @@ def verify_v2(
                 "five_quantity_confirmed_and_queued",
                 "five_quantity_outbox_delivered",
                 "analysis_report_stored",
+                "ten_quantity_correction_draft_created",
             }
             if audit.get("valid") is not True or not required_events <= event_types:
                 raise VerificationError("企业端留痕链未完整覆盖导入、复核、送达和收件")
@@ -3534,7 +3852,7 @@ def verify_v2(
 
             result = {
                 "result": "passed",
-                "mode": "ten-quantity-v3-full",
+                "mode": "ten-quantity-v3-full-with-correction",
                 "processes": {
                     "platform": "independent subprocess",
                     "agent": "independent subprocess",
@@ -3557,6 +3875,10 @@ def verify_v2(
                     "independent_reviewer_confirmed_and_queued",
                     "durable_outbox_delivered",
                     "platform_received_and_analyzed",
+                    "correction_creation_idempotent_without_branch",
+                    "platform_accepted_direct_revision_2_lineage",
+                    "platform_reanalyzed_revision_2",
+                    "revision_1_history_remained_immutable",
                     "analysis_report_stored_and_acknowledged",
                     "message_mine_revision_consistent",
                     "enterprise_audit_chain_valid",

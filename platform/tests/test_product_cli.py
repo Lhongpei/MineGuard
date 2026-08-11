@@ -32,6 +32,7 @@ def test_product_cli_exposes_only_v2_runtime_and_operations() -> None:
         "restore-backup",
         "config-check",
         "self-check",
+        "provision",
         "user",
     }
     user_parser = subparsers.choices["user"]
@@ -66,6 +67,7 @@ def test_product_cli_self_check_covers_both_frontends_timezone_and_solver(
     assert result["timezone"] == "Asia/Shanghai"
     assert result["solver"] == "scipy.optimize.linprog/highs"
     assert result["solver_objective"] == pytest.approx(1.0)
+    assert result["provisioning_crypto"] == "ed25519+aes-256-gcm+scrypt"
     assert {
         "regulatory_web/index.html",
         "regulatory_web/app.js",

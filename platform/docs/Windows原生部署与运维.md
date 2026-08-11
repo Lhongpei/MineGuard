@@ -107,11 +107,14 @@ MineGuard 所有权标记。状态目录也不能等于安装根或成为安装�
 
 ## 2. 正式二进制安装
 
-对外只交付经 Authenticode 签名的 `MineGuard-Platform-Setup-x64-<version>.exe`、
-SHA-256 和使用手册，不交付 Python 源码、测试、Git 历史或开发虚拟环境。安装器会把
-临时展开的发布目录交给同一套受保护安装逻辑；客户机不访问 PyPI，也不需要 Python。
-正式安装的唯一信任入口是 signed Setup：必须在执行它之前，先使用介质之外的审批记录核对
-Setup 的 SHA-256、有效且带时间戳的 Authenticode 状态及签名者指纹。
+对外交付两类互斥的正式 Setup：经 Authenticode 签名的版本，或明确带
+`INTERNAL-UNSIGNED` 标识的无证书受控内网版本；同时交付 SHA-256 和使用手册，不交付
+Python 源码、测试、Git 历史或开发虚拟环境。安装器会把临时展开的发布目录交给同一套
+受保护安装逻辑；客户机不访问 PyPI，也不需要 Python。正式安装的信任入口是 Setup 介质
+本身：signed Setup 必须核对介质外 SHA-256、有效且带时间戳的 Authenticode 状态及签名者
+指纹；`INTERNAL-UNSIGNED` Setup 必须在安装器页面输入介质外独立批准的本文件 SHA-256，
+且安装正式服务时再次输入介质外批准的 Platform 子发行清单 SHA-256。默认
+`UNSIGNED-TEST-ONLY` 不能作为正式介质。
 
 仅在受控构建、故障注入或兼容性测试中，需要直接核验尚未封装为 Setup.exe 的二进制
 staging 时，才可在“以管理员身份

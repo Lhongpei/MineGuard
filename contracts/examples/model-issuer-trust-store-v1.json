@@ -1,0 +1,12 @@
+{
+  "format": "mineguard-model-issuer-trust-store-v1",
+  "issuers": [
+    {
+      "issuer_id": "example-model-credential-authority",
+      "issuer_key_id": "example-model-ed25519-2026q3",
+      "issuer_key_epoch": 1,
+      "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n-----END PUBLIC KEY-----\n",
+      "public_key_sha256": "9408457aefd071cec127c1f98539930861ad1ba94c940db975c972c09fc68b68"
+    }
+  ]
+}

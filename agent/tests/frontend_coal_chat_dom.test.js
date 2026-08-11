@@ -96,7 +96,7 @@ const sessions = new Map([
             model_generated: true,
             summary: {
               status: "succeeded",
-              provider: "deepseek-chat-completions",
+              provider: "openai-compatible-chat-completions",
               grounding: "search_title_and_snippet",
               source_count: 1,
             },

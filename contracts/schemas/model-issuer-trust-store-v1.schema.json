@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mineguard:contract:model-issuer-trust-store:v1",
+  "title": "MineGuard Model Issuer Trust Store V1",
+  "description": "Release-fixed Ed25519 trust anchors accepted for enterprise .mgllm bundles. This file is installed with the signed Agent release and is not supplied by an enterprise or by a bundle.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "issuers"
+  ],
+  "properties": {
+    "format": {
+      "const": "mineguard-model-issuer-trust-store-v1"
+    },
+    "issuers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/issuer"
+      }
+    }
+  },
+  "$defs": {
+    "safeIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "issuer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issuer_id",
+        "issuer_key_id",
+        "issuer_key_epoch",
+        "public_key_pem",
+        "public_key_sha256"
+      ],
+      "properties": {
+        "issuer_id": {
+          "$ref": "#/$defs/safeIdentifier"
+        },
+        "issuer_key_id": {
+          "$ref": "#/$defs/safeIdentifier"
+        },
+        "issuer_key_epoch": {
+          "description": "Strictly positive generation of this issuer signing key. An issuer cannot assign the same epoch to different keys, and rotations cannot decrease it.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "public_key_pem": {
+          "description": "Canonical SubjectPublicKeyInfo PEM containing one Ed25519 public key and ending in LF.",
+          "type": "string",
+          "minLength": 100,
+          "maxLength": 16384,
+          "pattern": "^-----BEGIN PUBLIC KEY-----\\n[A-Za-z0-9+/]+={0,2}\\n-----END PUBLIC KEY-----\\n$"
+        },
+        "public_key_sha256": {
+          "description": "Lowercase SHA-256 of the decoded SubjectPublicKeyInfo DER.",
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

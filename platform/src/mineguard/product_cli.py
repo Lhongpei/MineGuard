@@ -257,6 +257,89 @@ def _parser() -> argparse.ArgumentParser:
         help="验证前端资源、时区、数值求解器和版本元数据是否完整",
     )
 
+    provisioning = commands.add_parser(
+        "provision",
+        help="签发每矿配置包并把配对的注册包导入 clients.json",
+    )
+    provisioning_commands = provisioning.add_subparsers(
+        dest="provision_command", required=True
+    )
+    issuer_init = provisioning_commands.add_parser(
+        "issuer-init", help="生成口令加密的 Ed25519 配置签发密钥"
+    )
+    issuer_init.add_argument("--private-key", required=True)
+    issuer_init.add_argument("--public-key", required=True)
+    issuer_init.add_argument(
+        "--passphrase-file",
+        help="仅限受保护的本机文件；省略时从交互终端无回显输入两次",
+    )
+
+    create_pair = provisioning_commands.add_parser(
+        "create-pair", help="从审批 profile 生成 Agent/Platform 配对配置包"
+    )
+    create_pair.add_argument("--profile", required=True)
+    create_pair.add_argument("--issuer-private-key", required=True)
+    create_pair.add_argument(
+        "--issuer-passphrase-file",
+        help="仅限受保护的本机文件；省略时从交互终端无回显输入",
+    )
+    create_pair.add_argument(
+        "--enterprise-bundle-directory",
+        help="企业交付区：仅写入 .mgprov、签发公钥和企业交接清单",
+    )
+    create_pair.add_argument(
+        "--platform-registration-directory",
+        help="政府留存区：仅写入 .mgreg 和完整签发清单",
+    )
+    create_pair.add_argument(
+        "--enterprise-activation-directory",
+        help="企业激活码区；必须与其余三个输出目录树完全隔离",
+    )
+    create_pair.add_argument(
+        "--platform-activation-directory",
+        help="政府注册激活码区；必须与其余三个输出目录树完全隔离",
+    )
+    create_pair.add_argument(
+        "--output-directory",
+        help="兼容旧自动化的共享包目录；不得与四区参数混用",
+    )
+    create_pair.add_argument(
+        "--activation-directory",
+        help="兼容旧自动化的共享激活码目录；不得与四区参数混用",
+    )
+    create_pair.add_argument(
+        "--previous-registration-bundle",
+        help="更新时必填：上一版本 .mgreg；初始 version 1 不填写",
+    )
+    create_pair.add_argument(
+        "--previous-registration-activation-code-file",
+        help="更新时必填：上一版本 Platform 激活码受保护文件",
+    )
+
+    import_registration = provisioning_commands.add_parser(
+        "import-registration",
+        help="验签、解密并原子合并一个 .mgreg 到 clients.json",
+    )
+    import_registration.add_argument("--bundle", required=True)
+    import_registration.add_argument("--activation-code-file", required=True)
+    import_registration.add_argument("--issuer-public-key", required=True)
+    import_registration.add_argument(
+        "--expected-public-key-sha256",
+        required=True,
+        help="通过独立审批渠道取得的 Ed25519 SPKI-DER SHA-256（64位小写hex）",
+    )
+    import_registration.add_argument(
+        "--expected-issuer-key-id",
+        required=True,
+        help="通过独立审批渠道取得的 provisioning issuer key ID",
+    )
+    import_registration.add_argument("--clients-file", required=True)
+    import_registration.add_argument(
+        "--allow-update",
+        action="store_true",
+        help="仅允许同矿同系统的更高 profile_version 更新",
+    )
+
     users = commands.add_parser(
         "user",
         help="管理政府领导端登录账号（独立运维命令，不改变业务数据）",
@@ -1594,26 +1677,64 @@ def _config_check(args: argparse.Namespace) -> dict[str, object]:
         if not clients:
             raise ProductConfigurationError("客户端注册表至少需要一座煤矿")
         result["client_count"] = len(clients)
+        from .provisioning import registry_lock_status_file
+
+        lock_status = registry_lock_status_file(args.clients_file)
+        result["client_registry_managed"] = bool(lock_status["managed"])
+        result["client_registry_locked_client_count"] = int(
+            lock_status["locked_client_count"]
+        )
+        if not bool(lock_status["managed"]):
+            result["client_registry_warning"] = (
+                "兼容的手工 clients.json 未受 provisioning_lock 保护；"
+                "建议逐矿改用签名注册包导入"
+            )
+        elif args.production and not bool(
+            lock_status.get("managed_required_external", False)
+        ):
+            raise ProductConfigurationError(
+                "受管 clients.json 正式运行必须在服务配置中设置 "
+                "MINEGUARD_PROVISIONING_MANAGED_REQUIRED=true，"
+                "防止删除注册锁后静默降级"
+            )
         if args.production:
             validate_production_exchange_clients(clients)
-            validate_production_platform_identity(
+            platform_system_id = (
                 args.platform_system_id
                 if args.platform_system_id is not None
                 else os.environ.get(
                     "MINEGUARD_V2_PLATFORM_SYSTEM_ID", "mineguard-qinyuan"
-                ),
+                )
+            )
+            platform_party_id = (
                 args.platform_party_id
                 if args.platform_party_id is not None
                 else os.environ.get(
                     "MINEGUARD_V2_PLATFORM_PARTY_ID", "regulator-qinyuan"
-                ),
+                )
+            )
+            platform_key_id = (
                 args.platform_key_id
                 if args.platform_key_id is not None
                 else os.environ.get(
                     "MINEGUARD_V2_PLATFORM_KEY_ID", "regulator-key-v2"
-                ),
+                )
+            )
+            validate_production_platform_identity(
+                platform_system_id,
+                platform_party_id,
+                platform_key_id,
                 clients=clients,
             )
+            locked_platform_identity = lock_status.get("platform_identity")
+            if locked_platform_identity is not None and locked_platform_identity != {
+                "key_id": platform_key_id,
+                "party_id": platform_party_id,
+                "system_id": platform_system_id,
+            }:
+                raise ProductConfigurationError(
+                    "正式运行 Platform 身份与 provisioning_lock 签发身份不一致"
+                )
             result["client_registry_production_ready"] = True
     if args.auth_database:
         database = Path(args.auth_database).expanduser().resolve()
@@ -1703,6 +1824,34 @@ def _self_check() -> dict[str, object]:
         ) from error
     if not solver.success or solver.x is None or abs(float(solver.x[0]) - 1.0) > 1e-8:
         raise ProductConfigurationError("SciPy/HiGHS 数值求解器自检失败")
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+        )
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+        signing_key = Ed25519PrivateKey.generate()
+        crypto_probe = b"mineguard-provisioning-frozen-runtime-self-check-v1"
+        signature = signing_key.sign(crypto_probe)
+        signing_key.public_key().verify(signature, crypto_probe)
+        derived_key = Scrypt(
+            salt=b"MineGuardSelfChk", length=32, n=1024, r=8, p=1
+        ).derive(b"offline-self-check-only")
+        encrypted = AESGCM(derived_key).encrypt(
+            b"MGSelfCheck1", crypto_probe, b"mineguard-self-check-aad"
+        )
+        if (
+            AESGCM(derived_key).decrypt(
+                b"MGSelfCheck1", encrypted, b"mineguard-self-check-aad"
+            )
+            != crypto_probe
+        ):
+            raise ValueError("AES-GCM round trip mismatch")
+    except (ImportError, RuntimeError, ValueError) as error:
+        raise ProductConfigurationError(
+            "冻结运行时缺少可用的 Ed25519/AES-GCM/scrypt 配置包密码组件"
+        ) from error
     manifest = build_runtime_manifest()
     missing = [
         name
@@ -1724,6 +1873,7 @@ def _self_check() -> dict[str, object]:
         "timezone": timezone,
         "solver": "scipy.optimize.linprog/highs",
         "solver_objective": float(solver.fun),
+        "provisioning_crypto": "ed25519+aes-256-gcm+scrypt",
         "assets": assets,
         "runtime": manifest,
     }
@@ -1739,6 +1889,80 @@ def _seed_demo(args: argparse.Namespace) -> dict[str, object]:
         through_month=args.through_month,
     )
     return result.model_dump(mode="json")
+
+
+def _provisioning_secret(
+    path_value: str | None, *, label: str, confirm: bool = False
+) -> bytes:
+    """Read provisioning credentials without accepting command-line secrets."""
+
+    if path_value:
+        from .provisioning import read_secret_file
+
+        return read_secret_file(path_value, label=label)
+    if not sys.stdin.isatty():
+        raise ProductConfigurationError(
+            f"{label} 只能从受保护文件或本机交互终端读取"
+        )
+    try:
+        first = getpass.getpass(f"{label}（输入时不显示）：").encode("utf-8")
+        if confirm:
+            second = getpass.getpass(f"再次输入{label}：").encode("utf-8")
+            if not secrets.compare_digest(first, second):
+                raise ProductConfigurationError("两次输入的签发密钥口令不一致")
+    except (EOFError, KeyboardInterrupt) as error:
+        raise ProductConfigurationError(f"无法安全读取{label}") from error
+    if not first:
+        raise ProductConfigurationError(f"{label}不能为空")
+    return first
+
+
+def _provision(args: argparse.Namespace) -> dict[str, object]:
+    from .provisioning import create_pair, import_registration, issuer_init
+
+    if args.provision_command == "issuer-init":
+        return issuer_init(
+            private_key_path=args.private_key,
+            public_key_path=args.public_key,
+            passphrase=_provisioning_secret(
+                args.passphrase_file,
+                label="签发私钥口令",
+                confirm=args.passphrase_file is None,
+            ),
+        )
+    if args.provision_command == "create-pair":
+        return create_pair(
+            profile_path=args.profile,
+            issuer_private_key_path=args.issuer_private_key,
+            issuer_passphrase=_provisioning_secret(
+                args.issuer_passphrase_file, label="签发私钥口令"
+            ),
+            output_directory=args.output_directory,
+            activation_directory=args.activation_directory,
+            enterprise_bundle_directory=args.enterprise_bundle_directory,
+            platform_registration_directory=(
+                args.platform_registration_directory
+            ),
+            enterprise_activation_directory=(
+                args.enterprise_activation_directory
+            ),
+            platform_activation_directory=args.platform_activation_directory,
+            previous_registration_bundle_path=(
+                args.previous_registration_bundle
+            ),
+            previous_registration_activation_code_path=(
+                args.previous_registration_activation_code_file
+            ),
+        )
+    return import_registration(
+        bundle_path=args.bundle,
+        activation_code_path=args.activation_code_file,
+        issuer_public_key_path=args.issuer_public_key,
+        expected_public_key_sha256=args.expected_public_key_sha256,
+        expected_issuer_key_id=args.expected_issuer_key_id,
+        clients_file_path=args.clients_file,
+        allow_update=args.allow_update,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1767,6 +1991,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print(_config_check(args))
         elif args.command == "self-check":
             _print(_self_check())
+        elif args.command == "provision":
+            _print(_provision(args))
         elif args.command == "user":
             _print(_user_operation(args))
         return 0

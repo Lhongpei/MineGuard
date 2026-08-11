@@ -13,6 +13,7 @@ import json
 import re
 import secrets
 import ssl
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -121,6 +122,24 @@ def _secret(value: str, label: str) -> bytes:
 
 
 @dataclass(frozen=True)
+class EnterpriseSigningVerificationKey:
+    """One retired enterprise application key retained for local verification.
+
+    Retired enterprise keys are deliberately modelled separately from the
+    regulator inbound verification fields.  They may verify immutable local
+    V3 predecessors after a sender key rotation, but are never selected for a
+    newly created message.
+    """
+
+    key_id: str
+    secret: str
+
+    def __post_init__(self) -> None:
+        _identifier(self.key_id, "historical enterprise key_id")
+        _secret(self.secret, "historical enterprise message secret")
+
+
+@dataclass(frozen=True)
 class MineIdentity:
     mine_id: str
     mine_name: str
@@ -132,6 +151,9 @@ class MineIdentity:
     key_id: str
     regulator_key_id: str
     message_hmac_secret: str
+    historical_enterprise_signing_keys: tuple[
+        EnterpriseSigningVerificationKey, ...
+    ] = ()
     previous_regulator_key_id: str | None = None
     previous_message_hmac_secret: str | None = None
     timezone: str = "Asia/Shanghai"
@@ -157,6 +179,19 @@ class MineIdentity:
             if not isinstance(value, str) or not value.strip() or len(value) > 256:
                 raise ValueError(f"{field} 必须是 1-256 字符")
         _secret(self.message_hmac_secret, "message_hmac_secret")
+        if not isinstance(self.historical_enterprise_signing_keys, tuple):
+            raise ValueError("企业历史应用验签密钥环必须是不可变序列")
+        seen_enterprise_key_ids = {self.key_id}
+        seen_enterprise_secrets = {self.message_hmac_secret}
+        for item in self.historical_enterprise_signing_keys:
+            if not isinstance(item, EnterpriseSigningVerificationKey):
+                raise ValueError("企业历史应用验签密钥环条目类型非法")
+            if item.key_id in seen_enterprise_key_ids:
+                raise ValueError("企业历史应用验签 key_id 不得与当前或其他历史项重复")
+            if item.secret in seen_enterprise_secrets:
+                raise ValueError("企业历史应用验签密钥不得与当前或其他历史项复用")
+            seen_enterprise_key_ids.add(item.key_id)
+            seen_enterprise_secrets.add(item.secret)
         if (self.previous_regulator_key_id is None) != (
             self.previous_message_hmac_secret is None
         ):
@@ -479,8 +514,15 @@ def http_transport_headers(
 
 
 class FiveQuantityPlatformClient:
-    def __init__(self, config: FiveQuantityPlatformConfig, *, opener=None):
+    def __init__(
+        self,
+        config: FiveQuantityPlatformConfig,
+        *,
+        opener=None,
+        configuration_guard: Callable[[], object] | None = None,
+    ):
         self.config = config
+        self._configuration_guard = configuration_guard
         if opener is None:
             context = ssl.create_default_context(cafile=config.ca_bundle_path)
             self._opener = build_opener(
@@ -505,6 +547,8 @@ class FiveQuantityPlatformClient:
         message: dict[str, Any] | None = None,
         query: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
+        if self._configuration_guard is not None:
+            self._configuration_guard()
         url = self._url(path, query)
         body = jcs_json(message).encode("utf-8") if message is not None else b""
         headers = {

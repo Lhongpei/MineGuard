@@ -172,7 +172,103 @@ reparse point；它先把完整 JSON 刷盘到同目录随机临时文件，再�
   -TestInstallerLifecycle
 ```
 
-## 4. 可选 Authenticode 正式候选签名
+## 4. 无代码签名证书的内网正式版（当前部署可选）
+
+不购买、不安装 Authenticode 代码签名证书时，使用独立的
+`INTERNAL-UNSIGNED` 正式发行路径。它不是 `UNSIGNED-TEST-ONLY` 的改名版：仍强制要求
+干净且可追溯的 Git 提交、审批过的离线 wheelhouse 及外部清单摘要、固定的 Python/Inno
+版本和摘要、生产模型签发信任库，以及两套安装器的真实安装、健康检查、升级和卸载测试。
+区别只在于 Windows 无法显示已验证的发布者身份，因此安装器真实性改由介质外独立交付的
+SHA-256 建立。
+
+这里的 `ModelTrust` 是 Agent 用来验证每矿 `.mgllm` 模型授权包的 Ed25519 **公钥**
+JSON，不是 Windows 证书，也不包含 LLM API Key；对应签发私钥仍只保留在交付方的离线
+签发环境。首次生成生产信任库时，按[企业模型凭据签发与轮换](企业模型凭据签发与轮换.md)
+的 issuer-init 和 trust-check 步骤执行。仓库自带的
+`model-credential-trust.TEST-ONLY.json` 会被严格构建拒绝。
+
+先在受控 Windows 构建机准备并审批以下输入。下面的路径只是示例，实际值必须来自本次
+构建机和审批记录：
+
+```powershell
+$Python = 'D:\approved-tools\Python312\python.exe'
+$Inno = 'D:\approved-tools\Inno Setup 6\ISCC.exe'
+$Wheelhouse = 'D:\approved-wheelhouse'
+$WheelhouseManifest = 'D:\approved-evidence\windows-wheelhouse-manifest.json'
+$ModelTrust = 'D:\approved-trust\model-credential-trust.json'
+
+# 下列预期值必须从已审批记录抄入，不能在本段里对待核验文件现算后自证。
+$ExpectedPythonVersion = '<审批的精确 3.12.x>'
+$ExpectedPythonSha256 = '<审批的 python.exe SHA-256>'
+$ExpectedInnoSha256 = '<审批的 ISCC.exe SHA-256>'
+$ExpectedWheelhouseManifestSha256 = '<审批的 wheelhouse manifest SHA-256>'
+$ExpectedModelTrustSha256 = '<审批的生产模型信任库 SHA-256>'
+
+.\scripts\Build-WindowsBinaryRelease.ps1 `
+  -OutputDirectory 'D:\release\mineguard-internal-unsigned' `
+  -Wheelhouse $Wheelhouse `
+  -WheelhouseManifest $WheelhouseManifest `
+  -ExpectedWheelhouseManifestSha256 $ExpectedWheelhouseManifestSha256 `
+  -PythonExecutable $Python `
+  -ExpectedPythonPatchVersion $ExpectedPythonVersion `
+  -ExpectedPythonExecutableSha256 $ExpectedPythonSha256 `
+  -ModelIssuerTrustStore $ModelTrust `
+  -ExpectedModelIssuerTrustStoreSha256 $ExpectedModelTrustSha256 `
+  -InnoCompiler $Inno `
+  -ExpectedInnoCompilerSha256 $ExpectedInnoSha256 `
+  -InternalUnsignedRelease `
+  -TestInstallerFailurePropagation `
+  -TestInstallerLifecycle
+```
+
+正式构建禁止 `-AllowDirtySource`、`-AllowNuitkaToolDownloads` 和测试模型信任库；Nuitka/MSVC
+辅助缓存必须提前预置。成功目录只含两份名称以 `INTERNAL-UNSIGNED.exe` 结尾的 Setup、
+`release-manifest.json` 和 `SHA256SUMS.txt`。根清单分类为
+`unsigned-internal-release`，`production_approved=true`，真实性方式为
+`out-of-band-sha256`；两份 Setup 的 Authenticode 状态必须确实是 `NotSigned`。根清单的
+`installers[].child_release_manifest_sha256` 分别覆盖对应产品完整 runtime、部署脚本和发行
+元数据文件集合。
+
+构建负责人应把两份 Setup 各自的 SHA-256 以及各自的
+`child_release_manifest_sha256` 写入审批单，通过电话、纸质交接单或独立审批
+系统交给现场人员。不要只把 Setup、`SHA256SUMS.txt` 和摘要放在同一个 U 盘里。图形安装器
+会要求粘贴介质外摘要并勾选确认，现场无需证书，也无需输入任何构建参数。静默安装必须显式
+提供同样的外部摘要，例如：
+
+```powershell
+$ExpectedSetupSha256 = '<从介质外审批记录取得的 64 位 SHA-256>'
+& '.\MineGuard-Platform-0.6.0-windows-x64-INTERNAL-UNSIGNED.exe' `
+  /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- `
+  /ALLOWUNSIGNEDINTERNALRELEASE=1 `
+  /EXPECTEDINSTALLERSHA256=$ExpectedSetupSha256
+```
+
+Platform 和 Agent 是两份不同文件，必须分别使用各自的外部摘要。安装后的正式服务向导还会
+分别要求介质外批准的 Platform/Agent 子发行清单 SHA-256 和 WinSW SHA-256，不能从本机待安装
+文件自动计算后当作预期值。Windows 可能显示“未知发布者”，这是无 Authenticode 证书路径
+的预期现象；摘要不匹配时不得继续。
+
+如果使用仓库的自托管构建工作流，分支选择器必须选 `main`，并选择
+`release_mode=internal-unsigned`。runner 需同时具有 `self-hosted`、`windows`、`x64`、
+`mineguard-release` 四个独立标签，受保护环境为
+`windows-internal-unsigned-release`。runner 服务账号必须在隔离构建机上以管理员权限
+运行，否则安装生命周期门禁会立即拒绝。没有 GitHub Actions 额度时，直接在受控
+Windows 构建机执行上面的命令即可；两种方式的发行分类、输入门禁和四文件布局相同，
+不承诺跨构建机逐字节一致。
+
+受保护环境需要配置 `WINDOWS_RELEASE_PYTHON_EXECUTABLE`、
+`WINDOWS_RELEASE_PYTHON_PATCH_VERSION`、`WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256`、
+`WINDOWS_RELEASE_WHEELHOUSE`、`WINDOWS_RELEASE_WHEELHOUSE_MANIFEST`、
+`WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256`、`WINDOWS_MODEL_ISSUER_TRUST_STORE`、
+`WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256`、`WINDOWS_INNO_COMPILER` 和
+`WINDOWS_INNO_COMPILER_SHA256`。这些值全部指向自托管构建机上的受控本机文件；无签名
+任务不读取 SignTool、代码签名证书或时间戳变量。
+
+这里免除的是 **Windows 程序代码签名证书**。跨机器正式访问仍应通过单位 HTTPS 反向代理
+使用其 TLS 证书；企业接入包和模型授权包使用的 Ed25519 签发密钥也是另一套业务信任机制，
+不能一并删除。
+
+### 4.1 可选 Authenticode 正式候选签名
 
 签名证书必须预装在执行账号的 `CurrentUser\My` 或本机 `LocalMachine\My` 证书库，两个
 库合计必须只命中一张指定 thumbprint。根脚本会识别证书库；机器证书自动让 SignTool
@@ -187,6 +283,8 @@ reparse point；它先把完整 JSON 刷盘到同目录随机临时文件，再�
   -PythonExecutable 'D:\approved-tools\Python312\python.exe' `
   -ExpectedPythonPatchVersion '3.12.10' `
   -ExpectedPythonExecutableSha256 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' `
+  -ModelIssuerTrustStore 'D:\approved-trust\model-credential-trust.json' `
+  -ExpectedModelIssuerTrustStoreSha256 'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD' `
   -InnoCompiler 'D:\approved-tools\Inno Setup 6\ISCC.exe' `
   -ExpectedInnoCompilerSha256 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' `
   -SignToolPath 'C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe' `
@@ -200,20 +298,25 @@ reparse point；它先把完整 JSON 刷盘到同目录随机临时文件，再�
 
 上面的时间戳地址及所有示例 SHA-256 均为格式占位符，不能原样使用。产品 EXE 在子项目
 生成 manifest 之前签名；Inno 再签 Setup 和 uninstaller，随后统一复核签名状态、签名证书
-和时间戳。只有此路径才去掉文件名中的 `UNSIGNED-TEST-ONLY`，清单分类为
-`signed-production-candidate`。签名表示来源和完整性，不等于自动批准上线。
+和时间戳。此路径的文件名不带未签名后缀，清单分类为
+`signed-production-candidate`；无证书正式路径则明确带 `INTERNAL-UNSIGNED` 后缀。签名表示
+来源和完整性，不等于自动批准上线。
 正式签名模式还会强制拒绝 `-AllowNuitkaToolDownloads`；Nuitka 所需辅助缓存必须提前从
 审批介质预置，不能在签名构建时临时联网取得。正式自托管 runner 也不运行
 `actions/setup-python`：必须由受保护变量指定预装的 `python.exe`、精确 3.12 patch 及其
-批准 SHA-256。根构建在使用前实际核对 Python、ISCC 和 SignTool，并把同一个已解析的
+批准 SHA-256。正式 Agent 安装器还必须嵌入由独立审批输入提供的生产模型签发信任库，
+并在构建前核对其外部 SHA-256；仓库中的 `TEST-ONLY` 信任库即使改名也会被拒绝。
+根构建在使用前实际核对 Python、ISCC、SignTool 和模型信任库，并把同一个已解析的
 `python.exe` 显式传给 Platform 与 Agent 子构建；任何实际散列、Python patch 或子清单
 记录不一致都会失败。Output、wheelhouse 和 wheelhouse manifest 之间也不得相等或互相
 包含，避免构建输出污染受审批输入。
 
 ## 5. 交付核验与安装
 
-正式安装的唯一信任入口是 signed Setup。先从介质之外的独立可信渠道取得预期
-SHA-256 和 signer thumbprint，并在执行 Setup 之前检查介质：
+正式安装的信任入口有两种互斥方式：带时间戳的 signed Setup，或明确标记为
+`INTERNAL-UNSIGNED` 且通过介质外 SHA-256 核验的 Setup。前者需取得预期 SHA-256 和 signer
+thumbprint；后者只使用每份 Setup 独立的外部 SHA-256，不接受包内清单自证。执行前检查
+介质：
 
 ```powershell
 Get-AuthenticodeSignature .\MineGuard-Platform-*-windows-x64.exe |
@@ -222,8 +325,24 @@ Get-FileHash .\MineGuard-Platform-*-windows-x64.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
-不要把与安装器放在同一可写目录里的散列文件单独当成真实性证明。图形安装可双击；静默
-安装示例。Setup 同时内置简体中文和英文安装界面，并按 Windows 界面语言自动选择：
+不要把与安装器放在同一可写目录里的散列文件单独当成真实性证明。无签名 Setup 内置的
+摘要输入页会再次核对自身，但它不能替代“执行前、用目标机已受信任系统工具”的核验；
+被针对性篡改的未签名程序本身不能充当自己的信任根。先对每份无签名 Setup 做显式比较：
+
+```powershell
+$Setup = '.\MineGuard-Platform-0.6.0-windows-x64-INTERNAL-UNSIGNED.exe'
+$ApprovedSha256 = Read-Host '输入介质外批准的 Platform Setup SHA-256'
+$ActualSha256 = (Get-FileHash -LiteralPath $Setup -Algorithm SHA256).Hash
+if (-not $ActualSha256.Equals(
+    $ApprovedSha256, [StringComparison]::OrdinalIgnoreCase)) {
+  throw '安装包 SHA-256 不一致，禁止执行。'
+}
+& $Setup
+```
+
+Platform 和 Agent 分别执行一次，且必须使用各自摘要。核验一致后图形安装可双击；Setup
+同时内置简体中文和英文安装界面，并按 Windows 界面语言自动选择。下面是签名版静默安装
+示例；`INTERNAL-UNSIGNED` 静默参数见上一节：
 
 ```powershell
 $PlatformVersion = '<platform-version>' # 必须与 Platform release-manifest.json 一致
@@ -296,8 +415,10 @@ Set-Location 'C:\ProgramData\MineGuard\Platform\service'
 ### 6.3 企业 Agent 与正式 Windows 服务
 
 企业 Agent 程序默认在 `C:\Program Files\MineGuard\EnterpriseAgent`，实例状态在
-`C:\ProgramData\MineGuard\EnterpriseAgent\instances`。一矿一智能体，从开始菜单选择
-“Create an enterprise mine instance”，或执行：
+`C:\ProgramData\MineGuard\EnterpriseAgent\instances`。一矿一智能体。正式新部署从开始
+菜单打开 **MineGuard 企业接入配置向导**，加载监管端交付的企业目录，另行选择激活码，
+核对独立审批摘要，再建立经办/复核两个具名账号。向导验签、解密并原子发布实例配置，
+现场人员不手写矿井身份、政府地址或两把 HMAC。下面的手工命令仅是高级兼容入口：
 
 ```powershell
 Set-Location 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
@@ -307,8 +428,11 @@ Set-Location 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
   -OperatorName '本企业名称' -SystemId agent-qy-001 -Port 8090
 ```
 
-然后在实例的 ACL 受控配置文件中设置账号摘要、政府接口、两把不同的交换密钥以及可选的
-模型 API。演示登录只限回环隔离测试，不能用于确认、报送或生产服务。
+演示登录只限回环隔离测试，不能用于确认、报送或生产服务。模型能力必须在企业接入实例
+完成后，从开始菜单打开 **MineGuard 模型授权导入向导**，分别选择本矿 `.mgllm` 和经另一
+渠道交付的激活码。正式实例禁止在 `agent.env` 中写入 API Key、模型地址或可替换的信任库；
+密钥由向导转换为本机 DPAPI 保护的秘密库，政府 Platform 不接收这些内容。未导入模型授权
+不影响 CSV 导入、确定性校验、报送和监管算法。
 
 安装器不下载也不捆绑 WinSW。Platform 或 Agent 需要长期常驻 Windows 服务时，继续使用
 两个产品随包提供的服务安装脚本，并从单位批准的软件源单独取得 WinSW、核验预先批准的
@@ -343,16 +467,22 @@ traceable and repeatable build，不承诺不同机器产物 byte-for-byte ident
 commercial-use terms、全部打包依赖许可证，以及本单位采购、密码和供应链制度。版本记录是
 审计证据，不替代法律/采购审查，也不能笼统声称所有工具都可无条件免费商用。
 
-GitHub Actions 的 [windows-release.yml](../.github/workflows/windows-release.yml) 有两条互不
-混淆的路径：`windows-2022` 只产出明确标记的 unsigned test artifacts；正式签名仅能在带
-`windows/x64/signing` 标签、预装证书/SignTool/Inno/离线 wheelhouse 的受控自托管 runner
-上显式触发，并且必须先等同一 workflow 的 unsigned 构建、完整 Windows PowerShell 5.1
-解析和生命周期测试成功。该 runner 必须是隔离构建机，不能同时承载真实 MineGuard 服务；生命周期门禁
-会创建并精确清理临时服务，且遇到同名既有服务会拒绝运行。流水线只上传工件，不自动创建
-公开 Release。受保护环境还必须提供
+GitHub Actions 的 [windows-release.yml](../.github/workflows/windows-release.yml) 有三条互不
+混淆的路径：`windows-2022` 只产出明确标记的 unsigned test artifacts；
+`release_mode=internal-unsigned` 仅在 `main` 分支上运行，并在同时带
+`self-hosted`、`windows`、`x64`、`mineguard-release` 四个标签的受控自托管
+runner 上生成无代码签名证书的内网正式版；签名正式候选仅能在同时带
+`self-hosted`、`windows`、`x64`、`signing` 四个标签、预装
+证书/SignTool 的受控自托管 runner 上生成。两条正式路径都必须使用固定 Python/Inno、离线
+wheelhouse、生产模型信任库及外部摘要，并执行完整 Windows PowerShell 5.1 解析和安装生命
+周期测试；无证书路径不会读取 SignTool 或证书配置。runner 必须是隔离构建机，不能同时承载
+真实 MineGuard 服务；生命周期门禁会创建并精确清理临时服务，且遇到同名既有服务会拒绝
+运行。runner 服务账号必须以管理员权限运行。流水线只上传工件，不自动创建公开
+Release。受保护环境还必须提供
 `WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256`，其值来自清单之外的审批记录。
 此外必须配置 `WINDOWS_RELEASE_PYTHON_EXECUTABLE`、
 `WINDOWS_RELEASE_PYTHON_PATCH_VERSION`、`WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256`、
-`WINDOWS_INNO_COMPILER_SHA256` 和 `WINDOWS_SIGNTOOL_SHA256`；这些值应来自受保护审批记录，
-不能在 job 中对现场文件即时计算后再反向当作预期值。发布清单只记录版本、实际/预期散列
-和外部锚核验结果，不记录构建机上的受控工具绝对路径。
+`WINDOWS_MODEL_ISSUER_TRUST_STORE`、`WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256` 和
+`WINDOWS_INNO_COMPILER_SHA256`；签名路径另需 `WINDOWS_SIGNTOOL_SHA256`。这些值应来自
+受保护审批记录，不能在 job 中对现场文件即时计算后再反向当作预期值。发布清单只记录版本、
+实际/预期散列和外部锚核验结果，不记录构建机上的受控工具绝对路径。

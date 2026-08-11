@@ -135,6 +135,115 @@ function Assert-NoReparseTree {
     }
 }
 
+function Assert-InternalUnsignedPlatformReleaseTree {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Root,
+        [Parameter(Mandatory = $true)] [object] $Manifest,
+        [Parameter(Mandatory = $true)] [string] $ExpectedManifestSha256
+    )
+    $metadataRoot = Join-Path $Root 'release-metadata'
+    $runtimeRoot = Join-Path $Root 'runtime'
+    $serviceRoot = Join-Path $Root 'service'
+    $manifestPath = Join-Path $metadataRoot 'release-manifest.json'
+    foreach ($tree in @($metadataRoot, $runtimeRoot, $serviceRoot)) {
+        Assert-NoReparseTree -Path $tree -Label 'INTERNAL-UNSIGNED 发行目录'
+    }
+    $actualManifestSha256 = (Get-FileHash -LiteralPath $manifestPath `
+        -Algorithm SHA256).Hash
+    if (-not $actualManifestSha256.Equals(
+            $ExpectedManifestSha256,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'INTERNAL-UNSIGNED 发行清单与安装时持久化的信任锚不一致。'
+    }
+    $expected = @{}
+    foreach ($entry in @($Manifest.files)) {
+        $relative = [string]$entry.path
+        $parts = $relative.Split('/')
+        if ([string]::IsNullOrWhiteSpace($relative) -or
+            [IO.Path]::IsPathRooted($relative) -or $relative.Contains(':') -or
+            $relative.Contains('\') -or $parts -contains '' -or
+            $parts -contains '.' -or $parts -contains '..' -or
+            $expected.ContainsKey($relative) -or
+            [string]$entry.sha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+            [long]$entry.bytes -lt 0) {
+            throw "INTERNAL-UNSIGNED 发行清单文件证据无效：$relative"
+        }
+        $installedPath = if ($relative.StartsWith(
+                'runtime/', [StringComparison]::Ordinal
+            )) {
+            Join-Path $runtimeRoot $relative.Substring('runtime/'.Length).Replace('/', '\')
+        }
+        elseif ($relative.StartsWith(
+                'deploy/windows/', [StringComparison]::Ordinal
+            )) {
+            Join-Path $serviceRoot $relative.Substring('deploy/windows/'.Length).Replace('/', '\')
+        }
+        elseif ($relative -in @('VERSION.txt', 'build-metadata.json')) {
+            Join-Path $metadataRoot $relative
+        }
+        else {
+            throw "INTERNAL-UNSIGNED 发行清单包含无法映射的文件：$relative"
+        }
+        if (-not (Test-Path -LiteralPath $installedPath -PathType Leaf)) {
+            throw "INTERNAL-UNSIGNED 发行文件缺失：$relative"
+        }
+        $item = Get-Item -LiteralPath $installedPath -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            [long]$item.Length -ne [long]$entry.bytes -or
+            -not (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash.Equals(
+                [string]$entry.sha256, [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "INTERNAL-UNSIGNED 发行文件与受信清单不一致：$relative"
+        }
+        $expected[$relative] = $true
+    }
+    if (-not $expected.ContainsKey('runtime/MineGuardPlatform.exe')) {
+        throw 'INTERNAL-UNSIGNED 发行清单缺少 Platform 主程序。'
+    }
+
+    $actual = @{}
+    foreach ($file in Get-ChildItem -LiteralPath $runtimeRoot -File -Recurse -Force) {
+        $relative = 'runtime/' + $file.FullName.Substring(
+            $runtimeRoot.Length
+        ).TrimStart('\').Replace('\', '/')
+        $actual[$relative] = $true
+    }
+    foreach ($file in Get-ChildItem -LiteralPath $serviceRoot -File -Recurse -Force) {
+        $serviceRelative = $file.FullName.Substring(
+            $serviceRoot.Length
+        ).TrimStart('\').Replace('\', '/')
+        if ($serviceRelative -in @(
+                'MineGuard.Platform.exe', 'MineGuard.Platform.exe.config',
+                'winsw-integrity.json'
+            )) {
+            continue
+        }
+        $actual['deploy/windows/' + $serviceRelative] = $true
+    }
+    foreach ($file in Get-ChildItem -LiteralPath $metadataRoot -File -Recurse -Force) {
+        $relative = $file.FullName.Substring($metadataRoot.Length).TrimStart('\').Replace('\', '/')
+        if ($relative -in @(
+                'release-manifest.json', 'SHA256SUMS.txt',
+                'release-trust-anchor.json'
+            )) {
+            continue
+        }
+        if ($relative -notin @('VERSION.txt', 'build-metadata.json')) {
+            throw "INTERNAL-UNSIGNED release-metadata 包含清单外文件：$relative"
+        }
+        $actual[$relative] = $true
+    }
+    if ($actual.Count -ne $expected.Count) {
+        throw 'INTERNAL-UNSIGNED 实际文件集合与受信发行清单不一致。'
+    }
+    foreach ($relative in $actual.Keys) {
+        if (-not $expected.ContainsKey($relative)) {
+            throw "INTERNAL-UNSIGNED 运行树包含清单外文件：$relative"
+        }
+    }
+}
+
 function Assert-NoResidualConfigurationTransaction {
     param([Parameter(Mandatory = $true)] [string] $ConfigurationDirectory)
     $inspected = 0
@@ -251,6 +360,73 @@ $stateDirectory = Get-SafeFixedNtfsPath `
     -Label '状态目录'
 Assert-StateBoundary -Candidate $stateDirectory -Root $InstallRoot
 $clientsFile = [string](Get-RequiredProperty -Object $settings -Name 'clientsFile')
+$isFormalConfiguration = -not [string]::IsNullOrWhiteSpace($clientsFile)
+if ($isFormalConfiguration) {
+    $releaseMetadataRoot = Get-SafeFixedNtfsPath `
+        -Value (Join-Path $InstallRoot 'release-metadata') `
+        -Label 'Platform 发行元数据目录'
+    Assert-NoReparseTree -Path $releaseMetadataRoot -Label 'Platform 发行元数据目录'
+    $releaseManifestPath = Join-Path $releaseMetadataRoot 'release-manifest.json'
+    $buildMetadataPath = Join-Path $releaseMetadataRoot 'build-metadata.json'
+    foreach ($releaseMetadataPath in @($releaseManifestPath, $buildMetadataPath)) {
+        if (-not (Test-Path -LiteralPath $releaseMetadataPath -PathType Leaf)) {
+            throw '正式配置只允许从完整二进制正式发行版启动；当前缺少发行分类元数据。'
+        }
+    }
+    try {
+        $releaseManifest = Get-Content -LiteralPath $releaseManifestPath `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+        $buildMetadata = Get-Content -LiteralPath $buildMetadataPath `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        throw '正式配置的发行分类元数据不是有效 JSON；已拒绝启动。'
+    }
+    $releaseClassification = [string]$releaseManifest.releaseClassification
+    if ([string]$releaseManifest.product -ne 'MineGuard Platform' -or
+        [string]$buildMetadata.product -ne 'MineGuard Platform' -or
+        $releaseManifest.codeSigned -isnot [bool] -or
+        $buildMetadata.codeSigned -isnot [bool] -or
+        [bool]$releaseManifest.codeSigned -ne [bool]$buildMetadata.codeSigned -or
+        [string]$buildMetadata.releaseClassification -ne $releaseClassification -or
+        $releaseClassification -notin @(
+            'signed-production-candidate', 'unsigned-internal-release'
+        ) -or
+        ([bool]$releaseManifest.codeSigned) -ne
+            ($releaseClassification -eq 'signed-production-candidate')) {
+        throw 'UNSIGNED-TEST-ONLY、开发版或分类异常的 Platform 禁止启动正式配置。'
+    }
+    if ($releaseClassification -eq 'unsigned-internal-release') {
+        $releaseTrustAnchorPath = Join-Path $releaseMetadataRoot `
+            'release-trust-anchor.json'
+        if (-not (Test-Path -LiteralPath $releaseTrustAnchorPath -PathType Leaf)) {
+            throw 'INTERNAL-UNSIGNED 正式启动缺少安装事务持久化的发行信任锚。'
+        }
+        try {
+            $releaseTrustAnchor = Get-Content -LiteralPath $releaseTrustAnchorPath `
+                -Raw -Encoding UTF8 | ConvertFrom-Json
+        } catch {
+            throw 'INTERNAL-UNSIGNED 持久化发行信任锚不是有效 JSON。'
+        }
+        $anchorProperties = @(
+            $releaseTrustAnchor.PSObject.Properties | ForEach-Object { $_.Name }
+        )
+        $approvedManifestSha256 = [string](
+            $releaseTrustAnchor.childReleaseManifestSha256
+        )
+        if ($anchorProperties.Count -ne 4 -or
+            [int]$releaseTrustAnchor.schemaVersion -ne 1 -or
+            [string]$releaseTrustAnchor.product -ne
+                'MineGuard Platform release trust anchor' -or
+            [string]$releaseTrustAnchor.releaseClassification -ne
+                'unsigned-internal-release' -or
+            $approvedManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+            throw 'INTERNAL-UNSIGNED 持久化发行信任锚格式或身份无效。'
+        }
+        Assert-InternalUnsignedPlatformReleaseTree -Root $InstallRoot `
+            -Manifest $releaseManifest `
+            -ExpectedManifestSha256 $approvedManifestSha256
+    }
+}
 $adminUsername = [string](Get-RequiredProperty -Object $settings -Name 'adminUsername')
 if ([string]::IsNullOrWhiteSpace($adminUsername)) {
     throw '管理员用户名不能为空。'
@@ -258,6 +434,31 @@ if ([string]::IsNullOrWhiteSpace($adminUsername)) {
 $secureCookieValue = Get-RequiredProperty -Object $settings -Name 'secureCookie'
 if ($secureCookieValue -isnot [bool]) {
     throw 'settings.json 的 secureCookie 必须是 JSON 布尔值。'
+}
+$managedProvisioningRequired = $false
+$managedProperty = $settings.PSObject.Properties['managedProvisioningRequired']
+if ($null -ne $managedProperty) {
+    if ($managedProperty.Value -isnot [bool]) {
+        throw 'settings.json 的 managedProvisioningRequired 必须是 JSON 布尔值。'
+    }
+    $managedProvisioningRequired = [bool]$managedProperty.Value
+}
+$provisioningTrustedPublicKeyFile = ''
+$provisioningExpectedPublicKeySha256 = ''
+$provisioningExpectedIssuerKeyId = ''
+if ($managedProvisioningRequired) {
+    $provisioningTrustedPublicKeyFile = [string](
+        Get-RequiredProperty -Object $settings `
+            -Name 'provisioningTrustedPublicKeyFile'
+    )
+    $provisioningExpectedPublicKeySha256 = [string](
+        Get-RequiredProperty -Object $settings `
+            -Name 'provisioningExpectedPublicKeySha256'
+    )
+    $provisioningExpectedIssuerKeyId = [string](
+        Get-RequiredProperty -Object $settings `
+            -Name 'provisioningExpectedIssuerKeyId'
+    )
 }
 
 $resolverPath = Get-SafeFixedNtfsPath `
@@ -305,6 +506,59 @@ if (-not [string]::IsNullOrWhiteSpace($clientsFile)) {
     if (-not (Test-Path -LiteralPath $clientsFile -PathType Leaf)) {
         throw "煤矿客户端注册表不存在：$clientsFile"
     }
+    $clientItem = Get-Item -LiteralPath $clientsFile -Force
+    if (($clientItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $clientItem.Length -le 0 -or $clientItem.Length -gt 4194304) {
+        throw '煤矿客户端注册表必须是 1-4 MiB 范围内的普通文件。'
+    }
+    $registryProbeArguments = Join-MineGuardPlatformArguments `
+        -Runtime $runtime -Arguments @(
+            'config-check', '--clients-file', $clientsFile
+        )
+    $registryProbeText = & $runtime.filePath @registryProbeArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw '煤矿客户端注册表无法通过短生命周期只读核验。'
+    }
+    try {
+        $registryProbe = $registryProbeText | Out-String | ConvertFrom-Json
+    } catch { throw '客户端注册表只读核验未返回有效 JSON。' }
+    $registryProbeText = $null
+    $hasManagedRegistryLock = [bool]$registryProbe.client_registry_managed
+    $registryProbe = $null
+    if ($hasManagedRegistryLock -and -not $managedProvisioningRequired) {
+        throw 'clients.json 已包含受管注册锁，但 settings.json 未启用强制受管校验；拒绝降级启动。'
+    }
+}
+
+if ($managedProvisioningRequired) {
+    $provisioningTrustedPublicKeyFile = Get-SafeFixedNtfsPath `
+        -Value $provisioningTrustedPublicKeyFile -Label '签发信任公钥'
+    $expectedTrustPath = Get-SafeFixedNtfsPath `
+        -Value (Join-Path $configDirectory 'provisioning-issuer-public.pem') `
+        -Label '固定签发信任公钥路径'
+    if (-not $provisioningTrustedPublicKeyFile.Equals(
+            $expectedTrustPath, [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $provisioningTrustedPublicKeyFile `
+            -PathType Leaf)) {
+        throw '受管签发公钥必须是 config\provisioning-issuer-public.pem 普通文件。'
+    }
+    $trustItem = Get-Item -LiteralPath $provisioningTrustedPublicKeyFile -Force
+    if (($trustItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $trustItem.Length -le 0 -or $trustItem.Length -gt 65536) {
+        throw '受管签发公钥大小或文件类型无效。'
+    }
+    if ($provisioningExpectedPublicKeySha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $provisioningExpectedIssuerKeyId -notmatch `
+            '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$') {
+        throw '受管签发公钥 SPKI SHA-256 或 issuer key ID 格式无效。'
+    }
+    $env:MINEGUARD_PROVISIONING_MANAGED_REQUIRED = 'true'
+    $env:MINEGUARD_PROVISIONING_TRUSTED_PUBLIC_KEY_FILE = `
+        $provisioningTrustedPublicKeyFile
+    $env:MINEGUARD_PROVISIONING_EXPECTED_PUBLIC_KEY_SHA256 = `
+        $provisioningExpectedPublicKeySha256
+    $env:MINEGUARD_PROVISIONING_EXPECTED_ISSUER_KEY_ID = `
+        $provisioningExpectedIssuerKeyId
 }
 
 $env:MINEGUARD_V2_PLATFORM_SYSTEM_ID = [string](

@@ -563,6 +563,36 @@ def test_baidu_challenge_falls_back_to_deepseek_web_search() -> None:
     assert dated["date_confidence"] == "title"
 
 
+def test_deepseek_news_revalidates_managed_credential_before_network() -> None:
+    calls = {"guard": 0, "opener": 0}
+
+    def guard() -> None:
+        calls["guard"] += 1
+        raise ValueError("模型凭据锁校验失败")
+
+    def opener(_request: Any, _timeout: float) -> NetworkResponse:
+        calls["opener"] += 1
+        raise AssertionError("credential guard must run before x-api-key transport")
+
+    skill = CoalNewsSearchSkill(
+        CoalNewsConfig(
+            baidu_enabled=False,
+            deepseek_web_search_enabled=True,
+            bing_fallback_enabled=False,
+        ),
+        llm_config=_llm_config(),
+        configuration_guard=guard,
+        opener=opener,
+        clock=lambda: NOW,
+    )
+
+    result = skill.invoke({"question": "最近煤炭新闻"})
+
+    assert calls == {"guard": 1, "opener": 0}
+    assert result["status"] == "failed"
+    assert result["provider_attempts"][0]["failure_code"] == "provider_error"
+
+
 def test_baidu_provider_timeout_does_not_block_deepseek_fallback() -> None:
     release = threading.Event()
     baidu_started = threading.Event()

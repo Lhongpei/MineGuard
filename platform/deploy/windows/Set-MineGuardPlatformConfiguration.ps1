@@ -13,6 +13,12 @@ param(
     [string] $PlatformKeyId = 'regulator-key-v2',
     [string] $AdminUsername = 'admin',
     [Security.SecureString] $AdminPassword,
+    [switch] $ManagedProvisioningRequired,
+    [string] $ProvisioningTrustedPublicKeySource,
+    [ValidatePattern('^[0-9a-f]{64}$')]
+    [string] $ProvisioningExpectedPublicKeySha256,
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')]
+    [string] $ProvisioningExpectedIssuerKeyId,
     [switch] $AllowDemoDefaultPassword,
     [switch] $HttpOnlyDemo,
     [switch] $NonInteractive,
@@ -287,6 +293,19 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 $configurationMutex = New-Object -TypeName System.Threading.Mutex `
     -ArgumentList @($false, 'Global\MineGuardPlatform.Configuration')
 $configurationMutexHeld = $false
+$savedProvisioningEnvironment = @{}
+foreach ($environmentName in @(
+        'MINEGUARD_PROVISIONING_MANAGED_REQUIRED',
+        'MINEGUARD_PROVISIONING_TRUSTED_PUBLIC_KEY_FILE',
+        'MINEGUARD_PROVISIONING_EXPECTED_PUBLIC_KEY_SHA256',
+        'MINEGUARD_PROVISIONING_EXPECTED_ISSUER_KEY_ID'
+    )) {
+    $existingEnvironment = Get-Item -LiteralPath ('Env:' + $environmentName) `
+        -ErrorAction SilentlyContinue
+    $savedProvisioningEnvironment[$environmentName] = if (
+        $null -eq $existingEnvironment
+    ) { $null } else { [string]$existingEnvironment.Value }
+}
 try {
     try {
         $configurationMutexHeld = $configurationMutex.WaitOne(
@@ -305,6 +324,8 @@ $configDirectory = Join-Path $InstallRoot 'config'
 $settingsPath = Join-Path $configDirectory 'settings.json'
 $bootstrapPath = Join-Path $configDirectory 'bootstrap-admin-password.txt'
 $targetClientsPath = Join-Path $configDirectory 'clients.json'
+$targetProvisioningPublicKeyPath = Join-Path $configDirectory `
+    'provisioning-issuer-public.pem'
 $configurationBlockMarker = Join-Path $configDirectory `
     '.mineguard-configuration-blocked.json'
 $resolverPath = Join-Path $PSScriptRoot 'Resolve-MineGuardPlatformExecutable.ps1'
@@ -326,6 +347,99 @@ if (Test-Path -LiteralPath $configurationBlockMarker) {
 }
 . $resolverPath
 $runtime = Resolve-MineGuardPlatformExecutable -InstallRoot $InstallRoot
+
+$managedProvisioning = [bool]$ManagedProvisioningRequired
+$trustedPublicKeySource = $null
+$trustedPublicKeyPath = ''
+$trustedPublicKeySha256 = ''
+$trustedIssuerKeyId = ''
+$existingSettings = $null
+if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+    try {
+        $existingSettings = Get-Content -LiteralPath $settingsPath -Raw `
+            -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        throw "现有 settings.json 无法解析；拒绝改写签发信任：$($_.Exception.Message)"
+    }
+    $existingManagedProperty = $existingSettings.PSObject.Properties[
+        'managedProvisioningRequired'
+    ]
+    if ($null -ne $existingManagedProperty) {
+        if ($existingManagedProperty.Value -isnot [bool]) {
+            throw 'settings.json 的 managedProvisioningRequired 必须是 JSON 布尔值。'
+        }
+        if ([bool]$existingManagedProperty.Value) {
+            # Once a managed registry is installed this script may preserve or
+            # rotate its trust anchor, but it must never silently downgrade it.
+            $managedProvisioning = $true
+            if (-not $ManagedProvisioningRequired) {
+                foreach ($requiredName in @(
+                        'provisioningTrustedPublicKeyFile',
+                        'provisioningExpectedPublicKeySha256',
+                        'provisioningExpectedIssuerKeyId'
+                    )) {
+                    if ($null -eq $existingSettings.PSObject.Properties[$requiredName]) {
+                        throw "受管配置缺少 $requiredName；拒绝降级覆盖。"
+                    }
+                }
+                $trustedPublicKeyPath = [string](
+                    $existingSettings.provisioningTrustedPublicKeyFile
+                )
+                $trustedPublicKeySha256 = [string](
+                    $existingSettings.provisioningExpectedPublicKeySha256
+                )
+                $trustedIssuerKeyId = [string](
+                    $existingSettings.provisioningExpectedIssuerKeyId
+                )
+            }
+        }
+    }
+}
+if ($ManagedProvisioningRequired) {
+    if ([string]::IsNullOrWhiteSpace($ProvisioningTrustedPublicKeySource) -or
+        [string]::IsNullOrWhiteSpace($ProvisioningExpectedPublicKeySha256) -or
+        [string]::IsNullOrWhiteSpace($ProvisioningExpectedIssuerKeyId)) {
+        throw '启用受管接入必须同时提供签发公钥、介质外 SPKI SHA-256 和 issuer key ID。'
+    }
+    $trustedPublicKeySource = Get-SafeLocalPath `
+        -Path $ProvisioningTrustedPublicKeySource -Label '签发公钥来源'
+    if (-not (Test-Path -LiteralPath $trustedPublicKeySource -PathType Leaf)) {
+        throw "签发公钥来源不存在：$trustedPublicKeySource"
+    }
+    $trustedPublicKeyItem = Get-Item -LiteralPath $trustedPublicKeySource -Force
+    if (($trustedPublicKeyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $trustedPublicKeyItem.Length -le 0 -or $trustedPublicKeyItem.Length -gt 65536) {
+        throw '签发公钥来源必须是 1-65536 字节的普通 PEM 文件。'
+    }
+    $trustedPublicKeyPath = $targetProvisioningPublicKeyPath
+    $trustedPublicKeySha256 = $ProvisioningExpectedPublicKeySha256
+    $trustedIssuerKeyId = $ProvisioningExpectedIssuerKeyId
+}
+if ($managedProvisioning) {
+    $trustedPublicKeyPath = Get-SafeLocalPath -Path $trustedPublicKeyPath `
+        -Label '受信签发公钥路径' -RequireFixedNtfs
+    if (-not $trustedPublicKeyPath.Equals(
+            $targetProvisioningPublicKeyPath,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw '受信签发公钥必须固定为 config\provisioning-issuer-public.pem。'
+    }
+    if ($trustedPublicKeySha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $trustedIssuerKeyId -notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$') {
+        throw '受管签发公钥指纹或 issuer key ID 格式无效。'
+    }
+    $env:MINEGUARD_PROVISIONING_MANAGED_REQUIRED = 'true'
+    $env:MINEGUARD_PROVISIONING_TRUSTED_PUBLIC_KEY_FILE = if (
+        $null -ne $trustedPublicKeySource
+    ) { $trustedPublicKeySource } else { $trustedPublicKeyPath }
+    $env:MINEGUARD_PROVISIONING_EXPECTED_PUBLIC_KEY_SHA256 = `
+        $trustedPublicKeySha256
+    $env:MINEGUARD_PROVISIONING_EXPECTED_ISSUER_KEY_ID = $trustedIssuerKeyId
+} else {
+    foreach ($environmentName in $savedProvisioningEnvironment.Keys) {
+        Remove-Item -LiteralPath ('Env:' + $environmentName) `
+            -ErrorAction SilentlyContinue
+    }
+}
 
 if ($ClearBootstrapPassword) {
     if ($AuditFailAfterFirstMutation) {
@@ -404,6 +518,9 @@ if ($AuditFailAfterFirstMutation -and
 }
 if ($DemoWithoutClientRegistry -and -not [string]::IsNullOrWhiteSpace($ClientsFile)) {
     throw '-DemoWithoutClientRegistry 不能与 -ClientsFile 同时使用。'
+}
+if ($DemoWithoutClientRegistry -and $managedProvisioning) {
+    throw '已启用受管企业接入后禁止降级为无客户端注册表的演示配置。'
 }
 if (-not $DemoWithoutClientRegistry -and [string]::IsNullOrWhiteSpace($ClientsFile)) {
     throw '正式配置必须提供 -ClientsFile；仅合成演示可显式使用 -DemoWithoutClientRegistry。'
@@ -578,6 +695,10 @@ $settings = [ordered]@{
     platformSystemId = $PlatformSystemId
     platformPartyId = $PlatformPartyId
     platformKeyId = $PlatformKeyId
+    managedProvisioningRequired = [bool]$managedProvisioning
+    provisioningTrustedPublicKeyFile = $trustedPublicKeyPath
+    provisioningExpectedPublicKeySha256 = $trustedPublicKeySha256
+    provisioningExpectedIssuerKeyId = $trustedIssuerKeyId
 }
 
 $transactionRoot = Join-Path $configDirectory (
@@ -594,6 +715,22 @@ Write-ConfigurationBlockMarker -Path $configurationBlockMarker `
 try {
     New-Item -ItemType Directory -Path $stagedRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $rollbackRoot -Force | Out-Null
+
+    if ($null -ne $trustedPublicKeySource) {
+        $stagedProvisioningPublicKey = Join-Path $stagedRoot `
+            'provisioning-issuer-public.pem'
+        [System.IO.File]::WriteAllBytes(
+            $stagedProvisioningPublicKey,
+            [System.IO.File]::ReadAllBytes($trustedPublicKeySource)
+        )
+        $operations += [pscustomobject]@{
+            Name = 'provisioning-public-key'
+            Target = $targetProvisioningPublicKeyPath
+            Stage = $stagedProvisioningPublicKey
+            Backup = (Join-Path $rollbackRoot 'provisioning-issuer-public.pem')
+            Action = 'write'; Started = $false; HadOriginal = $false
+        }
+    }
 
     if ($DemoWithoutClientRegistry) {
         $operations += [pscustomobject]@{
@@ -731,6 +868,16 @@ if ($null -ne $AdminPassword) {
 }
 Write-Host '配置修改需重启 MineGuardPlatform 服务后生效。'
 } finally {
+    foreach ($environmentName in $savedProvisioningEnvironment.Keys) {
+        $savedValue = $savedProvisioningEnvironment[$environmentName]
+        if ($null -eq $savedValue) {
+            Remove-Item -LiteralPath ('Env:' + $environmentName) `
+                -ErrorAction SilentlyContinue
+        } else {
+            Set-Item -LiteralPath ('Env:' + $environmentName) `
+                -Value ([string]$savedValue)
+        }
+    }
     if ($configurationMutexHeld) {
         try { $configurationMutex.ReleaseMutex() }
         catch { }

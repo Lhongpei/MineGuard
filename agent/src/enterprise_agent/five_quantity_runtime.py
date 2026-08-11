@@ -59,7 +59,7 @@ from .quantity_catalog import (
 from .util import jcs_json, parse_aware_datetime, sha256_jcs, utc_now, utc_text
 
 ZERO_HASH = "0" * 64
-_FQ_SCHEMA_VERSION = 3
+_FQ_SCHEMA_VERSION = 4
 _FQ_SCHEMA_COMPONENT = "five_quantity_v2"
 LEGACY_SUBMISSION_CONTRACT = "five-quantity-submission-v2"
 CURRENT_SUBMISSION_CONTRACT = TEN_QUANTITY_SUBMISSION_CONTRACT
@@ -76,6 +76,14 @@ _DRAFT_PAYLOAD_KEYS = {
     "agent_processing",
 }
 _FINAL_PAYLOAD_KEYS = _DRAFT_PAYLOAD_KEYS | {"human_confirmation"}
+_CORRECTION_LOCKED_PAYLOAD_FIELDS = (
+    "mine",
+    "reporting_month",
+    "timezone",
+    "period_start",
+    "period_end",
+    "comparison_context",
+)
 _MEASUREMENT_KEYS = {
     "metric_code",
     "value",
@@ -725,6 +733,194 @@ def _column_mapping_sha256(value: Any) -> str:
     return sha256_jcs(mappings)
 
 
+def _verify_stored_v3_submission(
+    message: Any,
+    *,
+    identity: MineIdentity,
+) -> dict[str, Any]:
+    """Verify one locally persisted enterprise submission without re-signing it.
+
+    Correction drafts are rooted in the exact signed predecessor bytes kept in
+    the outbox.  Recomputing the V3 HMAC here prevents a damaged or externally
+    altered database row from becoming the parent of a new revision chain.
+    """
+
+    required = {
+        "contract_version",
+        "message_type",
+        "message_id",
+        "correlation_id",
+        "causation_id",
+        "idempotency_key",
+        "revision",
+        "predecessor",
+        "created_at",
+        "sender",
+        "recipient",
+        "mine_id",
+        "payload",
+        "signature_envelope",
+    }
+    if not isinstance(message, dict) or set(message) != required:
+        raise ConflictError("十量 V3 报文结构不完整")
+    if (
+        message.get("contract_version") != CURRENT_SUBMISSION_CONTRACT
+        or message.get("message_type") != TEN_QUANTITY_SUBMISSION_MESSAGE_TYPE
+        or message.get("mine_id") != identity.mine_id
+    ):
+        raise ConflictError("报文不是本矿十量 V3 报送")
+    sender = message.get("sender")
+    recipient = message.get("recipient")
+    if (
+        not isinstance(sender, dict)
+        or sender
+        != {
+            "system_id": identity.system_id,
+            "party_id": identity.operator_id,
+            "role": "enterprise_agent",
+        }
+        or not isinstance(recipient, dict)
+        or recipient
+        != {
+            "system_id": identity.regulator_system_id,
+            "party_id": identity.regulator_party_id,
+            "role": "regulatory_platform",
+        }
+    ):
+        raise ConflictError("十量 V3 报文参与方与本矿配置不一致")
+    envelope = message.get("signature_envelope")
+    if not isinstance(envelope, dict) or set(envelope) != {
+        "algorithm",
+        "canonicalization",
+        "key_id",
+        "signed_at",
+        "nonce",
+        "payload_sha256",
+        "signature",
+    }:
+        raise ConflictError("十量 V3 签名信封不完整")
+    declared_key_id = envelope.get("key_id")
+    if not isinstance(declared_key_id, str):
+        raise ConflictError("十量 V3 签名 key_id 非法")
+    verification_secret: str | None = None
+    if declared_key_id == identity.key_id:
+        verification_secret = identity.message_hmac_secret
+    else:
+        for historical_key in identity.historical_enterprise_signing_keys:
+            if declared_key_id == historical_key.key_id:
+                verification_secret = historical_key.secret
+                break
+    if verification_secret is None:
+        raise ConflictError("十量 V3 签名 key_id 未在企业应用验签密钥环登记")
+    try:
+        validate_five_quantity_payload(
+            message.get("payload"),
+            identity=identity,
+            confirmed=True,
+            contract_version=CURRENT_SUBMISSION_CONTRACT,
+        )
+        recomputed = json.loads(jcs_json(message))
+        supplied_payload_hash = str(envelope.get("payload_sha256", ""))
+        supplied_signature = str(envelope.get("signature", ""))
+        sign_message(recomputed, secret=verification_secret)
+    except (TypeError, ValueError) as error:
+        raise ConflictError("十量 V3 报文未通过本地完整性校验") from error
+    recomputed_envelope = recomputed["signature_envelope"]
+    if not hmac.compare_digest(
+        supplied_payload_hash,
+        str(recomputed_envelope["payload_sha256"]),
+    ) or not hmac.compare_digest(
+        supplied_signature,
+        str(recomputed_envelope["signature"]),
+    ):
+        raise ConflictError("十量 V3 报文签名或 payload 摘要不一致")
+    return json.loads(jcs_json(message))
+
+
+def _verify_stored_intake_receipt(
+    receipt: Any,
+    *,
+    submission: dict[str, Any],
+    identity: MineIdentity,
+) -> dict[str, Any]:
+    """Verify a persisted government receipt and its exact submission binding.
+
+    ``verify_message`` authenticates the government application signature and
+    both participants.  The intake contract's business bindings are checked
+    separately because a validly signed receipt for another revision, message,
+    or payload must never authorize a correction chain.
+    """
+
+    try:
+        verify_message(
+            receipt,
+            secret=identity.message_hmac_secret,
+            identity=identity,
+            expected_contract="intake-receipt-v2",
+            expected_type="intake_receipt",
+        )
+        assert isinstance(receipt, dict)
+        _uuid_text(receipt.get("message_id"), "回执 message_id")
+        _uuid_text(receipt.get("correlation_id"), "回执 correlation_id")
+        _uuid_text(receipt.get("causation_id"), "回执 causation_id")
+        _identifier_text(receipt.get("idempotency_key"), "回执 idempotency_key")
+        receipt_created_at = parse_aware_datetime(
+            receipt.get("created_at"), "回执 created_at"
+        )
+        if receipt.get("revision") != 1 or receipt.get("predecessor") is not None:
+            raise ValueError("回执版本或前序字段非法")
+        payload = _object(receipt.get("payload"), "回执 payload")
+        if set(payload) != {
+            "receipt_id",
+            "submission_message_id",
+            "submission_revision",
+            "received_payload_sha256",
+            "received_at",
+            "intake_status",
+            "analysis_state",
+            "regulatory_outcome",
+            "analysis_run_id",
+        }:
+            raise ValueError("回执 payload 字段不完整或包含未知字段")
+        _uuid_text(payload.get("receipt_id"), "回执 receipt_id")
+        _uuid_text(payload.get("submission_message_id"), "回执报送 message_id")
+        _uuid_text(payload.get("analysis_run_id"), "回执 analysis_run_id")
+        received_at = parse_aware_datetime(
+            payload.get("received_at"), "回执 received_at"
+        )
+        submission_created_at = parse_aware_datetime(
+            submission.get("created_at"), "报送 created_at"
+        )
+        if received_at < submission_created_at or receipt_created_at < received_at:
+            raise ValueError("回执时间早于报送或政府接收时间")
+        submission_revision = payload.get("submission_revision")
+        if (
+            isinstance(submission_revision, bool)
+            or not isinstance(submission_revision, int)
+            or submission_revision < 1
+        ):
+            raise ValueError("回执 submission_revision 非法")
+        if payload.get("intake_status") not in {"accepted", "duplicate"}:
+            raise ValueError("回执 intake_status 非法")
+        if payload.get("analysis_state") != "queued":
+            raise ValueError("回执 analysis_state 非法")
+        if payload.get("regulatory_outcome") != "not_determined_at_intake":
+            raise ValueError("回执不得声称接收阶段已形成监管结论")
+    except (PlatformError, TypeError, ValueError) as error:
+        raise ConflictError("政府接收回执未通过应用签名与契约校验") from error
+
+    envelope = submission["signature_envelope"]
+    if (
+        receipt["correlation_id"] != submission["correlation_id"]
+        or receipt["causation_id"] != submission["message_id"]
+        or payload["submission_message_id"] != submission["message_id"]
+        or payload["submission_revision"] != submission["revision"]
+        or payload["received_payload_sha256"] != envelope["payload_sha256"]
+    ):
+        raise ConflictError("政府接收回执与报送消息、版本或 payload 摘要不绑定")
+    return json.loads(jcs_json(receipt))
+
+
 class FiveQuantityStore:
     """V2 tables isolated from legacy draft tables in the same local database."""
 
@@ -732,10 +928,12 @@ class FiveQuantityStore:
         self,
         repository: Any,
         *,
+        identity: MineIdentity,
         four_eyes_required: bool = False,
         human_preparer_actor_ids: frozenset[str] = frozenset(),
     ):
         self.repository = repository
+        self.identity = identity
         self.four_eyes_required = bool(four_eyes_required)
         self.human_preparer_actor_ids = frozenset(human_preparer_actor_ids)
         self._initialize()
@@ -861,7 +1059,7 @@ class FiveQuantityStore:
         append validates and advances the singleton tail anchor transactionally.
         """
 
-        if not self._audit_triggers_intact(db):
+        if not self._audit_triggers_intact(db) or not self._archive_guards_intact(db):
             return False
         version = db.execute(
             "SELECT version FROM fq_schema_versions WHERE component=?",
@@ -1041,6 +1239,9 @@ class FiveQuantityStore:
             )""",
             """CREATE INDEX IF NOT EXISTS idx_fq_outbox_due
                 ON fq_outbox(status, next_attempt_at)""",
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_fq_draft_predecessor_unique
+                ON fq_drafts(predecessor_message_id)
+                WHERE predecessor_message_id IS NOT NULL""",
             """CREATE TABLE IF NOT EXISTS fq_inbox (
                 message_id TEXT PRIMARY KEY,
                 report_id TEXT NOT NULL UNIQUE,
@@ -1204,6 +1405,18 @@ class FiveQuantityStore:
                         "'five-quantity-submission-v2',"
                         "'ten-quantity-submission-v3'))"
                     )
+            archive_trigger_rows = db.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND tbl_name IN ('fq_outbox','fq_drafts')"
+            ).fetchall()
+            if (
+                (schema_version >= 4 or archive_trigger_rows)
+                and not self._archive_guards_intact(db)
+            ):
+                raise ValueError(
+                    "十量签名归档保护索引或触发器缺失、被替换或存在额外对象；"
+                    "正式流程已拒绝启动"
+                )
             # Backfill actor attribution from the existing append-only V2
             # audit log. Invalid legacy detail JSON is left NULL and will be
             # rejected by the formal four-eyes gate instead of being guessed.
@@ -1372,12 +1585,22 @@ class FiveQuantityStore:
                 SELECT client_id,draft_key,source_id,content_sha256,import_id,
                     ingestion_id,created_at
                 FROM fq_machine_source_contributions
-                """
+            """
             )
+            if not archive_trigger_rows:
+                self._install_archive_guards(db)
+            if not self._archive_guards_intact(db):
+                raise ValueError("十量签名归档保护安装失败；正式流程已拒绝启动")
             db.execute(
                 "UPDATE fq_outbox SET status='failed', "
                 "last_error='recovered_after_restart' WHERE status='sending'"
             )
+            projection = self._verify_submission_archive_projection(db)
+            if not projection["valid"]:
+                raise ValueError(
+                    "十量报送审计与本地签名归档投影不一致；拒绝启动"
+                    f"（{projection['failure']}）"
+                )
             if schema_version < _FQ_SCHEMA_VERSION:
                 db.execute(
                     "INSERT INTO fq_schema_versions(component,version,updated_at) "
@@ -1388,6 +1611,268 @@ class FiveQuantityStore:
             final_integrity = self._verify_audit_in_transaction(db)
             if not final_integrity["valid"]:
                 raise ValueError("报送审计链或审计锚点不完整；拒绝启动")
+
+    @staticmethod
+    def _archive_guard_definitions() -> tuple[dict[str, str], dict[str, str]]:
+        def normalise(value: str) -> str:
+            return " ".join(value.split())
+
+        triggers = {
+            "fq_outbox_archive_no_update": normalise(
+                """CREATE TRIGGER fq_outbox_archive_no_update
+                BEFORE UPDATE ON fq_outbox
+                WHEN NEW.message_id IS NOT OLD.message_id
+                    OR NEW.message_kind IS NOT OLD.message_kind
+                    OR NEW.aggregate_id IS NOT OLD.aggregate_id
+                    OR NEW.idempotency_key IS NOT OLD.idempotency_key
+                    OR NEW.body_json IS NOT OLD.body_json
+                    OR NEW.body_sha256 IS NOT OLD.body_sha256
+                    OR NEW.created_at IS NOT OLD.created_at
+                    OR (
+                        NEW.receipt_json IS NOT OLD.receipt_json
+                        AND NOT (
+                            OLD.receipt_json IS NULL
+                            AND NEW.receipt_json IS NOT NULL
+                            AND NEW.status='succeeded'
+                        )
+                    )
+                    OR (
+                        (OLD.status='succeeded' OR OLD.receipt_json IS NOT NULL)
+                        AND NEW.status IS NOT OLD.status
+                    )
+                BEGIN
+                    SELECT RAISE(ABORT, 'fq_outbox signed archive is immutable');
+                END"""
+            ),
+            "fq_outbox_archive_no_delete": normalise(
+                """CREATE TRIGGER fq_outbox_archive_no_delete
+                BEFORE DELETE ON fq_outbox
+                BEGIN
+                    SELECT RAISE(ABORT, 'fq_outbox signed archive is immutable');
+                END"""
+            ),
+            "fq_draft_submission_archive_no_update": normalise(
+                """CREATE TRIGGER fq_draft_submission_archive_no_update
+                BEFORE UPDATE ON fq_drafts
+                WHEN OLD.submission_message_id IS NOT NULL
+                    AND (
+                        NEW.revision IS NOT OLD.revision
+                        OR NEW.submission_revision IS NOT OLD.submission_revision
+                        OR NEW.correlation_id IS NOT OLD.correlation_id
+                        OR NEW.predecessor_message_id IS NOT OLD.predecessor_message_id
+                        OR NEW.predecessor_payload_sha256
+                            IS NOT OLD.predecessor_payload_sha256
+                        OR NEW.contract_version IS NOT OLD.contract_version
+                        OR NEW.payload_json IS NOT OLD.payload_json
+                        OR NEW.confirmation_json IS NOT OLD.confirmation_json
+                        OR NEW.submission_message_id IS NOT OLD.submission_message_id
+                        OR (
+                            NEW.status IS NOT OLD.status
+                            AND NOT (
+                                OLD.status='queued'
+                                AND NEW.status='submitted'
+                                AND OLD.receipt_json IS NULL
+                                AND NEW.receipt_json IS NOT NULL
+                            )
+                        )
+                        OR (
+                            NEW.receipt_json IS NOT OLD.receipt_json
+                            AND NOT (
+                                OLD.receipt_json IS NULL
+                                AND NEW.receipt_json IS NOT NULL
+                                AND OLD.status='queued'
+                                AND NEW.status='submitted'
+                            )
+                        )
+                    )
+                BEGIN
+                    SELECT RAISE(ABORT, 'fq_draft submission projection is immutable');
+                END"""
+            ),
+            "fq_draft_submission_archive_no_delete": normalise(
+                """CREATE TRIGGER fq_draft_submission_archive_no_delete
+                BEFORE DELETE ON fq_drafts
+                WHEN OLD.submission_message_id IS NOT NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'fq_draft submission projection is immutable');
+                END"""
+            ),
+        }
+        indexes = {
+            "idx_fq_draft_predecessor_unique": normalise(
+                """CREATE UNIQUE INDEX idx_fq_draft_predecessor_unique
+                ON fq_drafts(predecessor_message_id)
+                WHERE predecessor_message_id IS NOT NULL"""
+            )
+        }
+        return triggers, indexes
+
+    @classmethod
+    def _archive_guards_intact(cls, db: Any) -> bool:
+        expected_triggers, expected_indexes = cls._archive_guard_definitions()
+        trigger_rows = db.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
+            "AND tbl_name IN ('fq_outbox','fq_drafts')"
+        ).fetchall()
+        actual_triggers: dict[str, str] = {}
+        for row in trigger_rows:
+            name = str(row["name"])
+            sql = row["sql"]
+            if name not in expected_triggers or not isinstance(sql, str):
+                return False
+            actual_triggers[name] = " ".join(sql.split())
+        if actual_triggers != expected_triggers:
+            return False
+        index_rows = db.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='index' "
+            "AND name='idx_fq_draft_predecessor_unique'"
+        ).fetchall()
+        actual_indexes = {
+            str(row["name"]): " ".join(str(row["sql"]).split())
+            for row in index_rows
+            if isinstance(row["sql"], str)
+        }
+        return actual_indexes == expected_indexes
+
+    @classmethod
+    def _install_archive_guards(cls, db: Any) -> None:
+        trigger_definitions, _ = cls._archive_guard_definitions()
+        for sql in trigger_definitions.values():
+            db.execute(
+                sql.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1)
+            )
+
+    def _verify_submission_archive_projection(self, db: Any) -> dict[str, Any]:
+        """Cross-check append-only audit facts against submission projections."""
+
+        confirmed: dict[str, tuple[str, str | None]] = {}
+        delivered: set[str] = set()
+
+        def failure(reason: str, message_id: str | None = None) -> dict[str, Any]:
+            return {
+                "valid": False,
+                "failure": reason,
+                "message_id": message_id,
+            }
+
+        for row in db.execute(
+            "SELECT event_type,details_json FROM fq_audit ORDER BY sequence"
+        ).fetchall():
+            try:
+                details = json.loads(str(row["details_json"]))
+            except (TypeError, json.JSONDecodeError):
+                return failure("audit_details_invalid")
+            if not isinstance(details, dict):
+                return failure("audit_details_invalid")
+            event_type = str(row["event_type"])
+            if event_type == "five_quantity_confirmed_and_queued":
+                message_id = details.get("message_id")
+                draft_id = details.get("draft_id")
+                payload_sha256 = details.get("payload_sha256")
+                if not isinstance(message_id, str) or not isinstance(draft_id, str):
+                    return failure("confirmed_audit_binding_invalid")
+                previous = confirmed.get(message_id)
+                current = (
+                    draft_id,
+                    payload_sha256 if isinstance(payload_sha256, str) else None,
+                )
+                if previous is not None and previous != current:
+                    return failure("confirmed_audit_binding_conflict", message_id)
+                confirmed[message_id] = current
+            elif event_type == "five_quantity_outbox_delivered":
+                message_id = details.get("message_id")
+                if details.get("kind") == "submission":
+                    if not isinstance(message_id, str):
+                        return failure("delivered_audit_binding_invalid")
+                    delivered.add(message_id)
+
+        for message_id, (draft_id, audited_payload_hash) in confirmed.items():
+            draft = db.execute(
+                "SELECT * FROM fq_drafts WHERE draft_id=?", (draft_id,)
+            ).fetchone()
+            outbox = db.execute(
+                "SELECT * FROM fq_outbox WHERE message_id=? "
+                "AND aggregate_id=? AND message_kind='submission'",
+                (message_id, draft_id),
+            ).fetchone()
+            if draft is None:
+                return failure("confirmed_draft_missing", message_id)
+            if outbox is None:
+                return failure("confirmed_outbox_missing", message_id)
+            body_json = str(outbox["body_json"])
+            if not hmac.compare_digest(
+                hashlib.sha256(body_json.encode()).hexdigest(),
+                str(outbox["body_sha256"]),
+            ):
+                return failure("confirmed_outbox_body_hash_mismatch", message_id)
+            try:
+                body = json.loads(body_json)
+            except json.JSONDecodeError:
+                return failure("confirmed_outbox_body_invalid", message_id)
+            if not isinstance(body, dict) or body.get("message_id") != message_id:
+                return failure("confirmed_outbox_message_mismatch", message_id)
+            if body.get("contract_version") == CURRENT_SUBMISSION_CONTRACT:
+                try:
+                    _verify_stored_v3_submission(body, identity=self.identity)
+                except ConflictError:
+                    return failure("confirmed_v3_signature_invalid", message_id)
+            envelope = body.get("signature_envelope")
+            declared_payload_hash = (
+                envelope.get("payload_sha256") if isinstance(envelope, dict) else None
+            )
+            if (
+                audited_payload_hash is not None
+                and declared_payload_hash != audited_payload_hash
+            ):
+                return failure("confirmed_audit_payload_hash_mismatch", message_id)
+
+        for message_id in delivered:
+            binding = confirmed.get(message_id)
+            if binding is None:
+                return failure("delivered_without_confirmed_audit", message_id)
+            draft_id, _ = binding
+            source = db.execute(
+                "SELECT * FROM fq_drafts WHERE draft_id=?", (draft_id,)
+            ).fetchone()
+            outbox = db.execute(
+                "SELECT * FROM fq_outbox WHERE message_id=? "
+                "AND aggregate_id=? AND message_kind='submission'",
+                (message_id, draft_id),
+            ).fetchone()
+            if source is None or outbox is None:
+                return failure("delivered_projection_missing", message_id)
+            if (
+                outbox["status"] != "succeeded"
+                or outbox["receipt_json"] is None
+                or source["status"] not in {"submitted", "acknowledged"}
+                or source["submission_message_id"] != message_id
+                or source["receipt_json"] is None
+            ):
+                return failure("delivered_projection_incomplete", message_id)
+            if not hmac.compare_digest(
+                str(outbox["receipt_json"]), str(source["receipt_json"])
+            ):
+                return failure("delivered_receipt_projection_mismatch", message_id)
+            if source["contract_version"] == CURRENT_SUBMISSION_CONTRACT:
+                try:
+                    self._verify_archived_submission(db, source)
+                except ConflictError:
+                    return failure("delivered_v3_archive_invalid", message_id)
+
+        succeeded_rows = db.execute(
+            "SELECT message_id FROM fq_outbox "
+            "WHERE message_kind='submission' AND status='succeeded'"
+        ).fetchall()
+        for row in succeeded_rows:
+            message_id = str(row["message_id"])
+            if message_id not in delivered:
+                return failure("succeeded_without_delivered_audit", message_id)
+        return {
+            "valid": True,
+            "failure": None,
+            "confirmed_count": len(confirmed),
+            "delivered_count": len(delivered),
+        }
 
     @staticmethod
     def _loads(value: str | None) -> Any:
@@ -1978,7 +2463,10 @@ class FiveQuantityStore:
             )
             contribution_count = len(contribution_rows) + 1
             import_summary = {
-                "mode": "five_quantity_v2_direct_collection",
+                # Persist the contract that actually produced this new record.
+                # Existing rows keep their legacy V2 label unchanged and remain
+                # readable; no migration rewrites historical ingestion bytes.
+                "mode": "ten_quantity_v3_direct_collection",
                 "import_id": import_id,
                 "duplicate_content": duplicate_content,
                 "merge": {
@@ -2117,11 +2605,22 @@ class FiveQuantityStore:
 
     def _draft(self, row: Any) -> dict[str, Any]:
         contract_version = str(row["contract_version"])
+        predecessor = (
+            {
+                "message_id": row["predecessor_message_id"],
+                "payload_sha256": row["predecessor_payload_sha256"],
+            }
+            if row["predecessor_message_id"] is not None
+            and row["predecessor_payload_sha256"] is not None
+            else None
+        )
         return {
             "draft_id": row["draft_id"],
             "import_id": row["import_id"],
             "revision": row["revision"],
             "submission_revision": row["submission_revision"],
+            "correlation_id": row["correlation_id"],
+            "predecessor": predecessor,
             "contract_version": contract_version,
             "read_only": contract_version == LEGACY_SUBMISSION_CONTRACT,
             "status": row["status"],
@@ -2445,6 +2944,294 @@ class FiveQuantityStore:
             ).fetchall()
         return [self._draft(row) for row in rows]
 
+    def _verify_archived_submission(
+        self,
+        db: Any,
+        source: Any,
+        *,
+        identity: MineIdentity | None = None,
+    ) -> dict[str, Any]:
+        """Return a fully verified immutable V3 submission archive.
+
+        This is deliberately transaction-local so correction creation and any
+        later pre-send lineage gate can validate the same database snapshot.
+        The two receipt copies are required to be byte-identical canonical JSON;
+        neither copy is accepted merely because the other one verifies.
+        """
+
+        active_identity = identity or self.identity
+        if source["contract_version"] != CURRENT_SUBMISSION_CONTRACT:
+            raise ConflictError("五量 V2 历史报文不属于十量 V3 签名归档")
+        source_message_id = source["submission_message_id"]
+        if not isinstance(source_message_id, str) or not source_message_id:
+            raise ConflictError("前序报送缺少不可变消息 ID")
+        outbox = db.execute(
+            """
+            SELECT * FROM fq_outbox
+            WHERE message_id=? AND aggregate_id=? AND message_kind='submission'
+            """,
+            (source_message_id, source["draft_id"]),
+        ).fetchone()
+        if (
+            outbox is None
+            or outbox["status"] != "succeeded"
+            or outbox["receipt_json"] is None
+            or source["receipt_json"] is None
+        ):
+            raise ConflictError("前序十量 V3 尚未形成完整送达回执")
+
+        source_body_json = str(outbox["body_json"])
+        actual_body_sha256 = hashlib.sha256(
+            source_body_json.encode("utf-8")
+        ).hexdigest()
+        if not hmac.compare_digest(actual_body_sha256, str(outbox["body_sha256"])):
+            raise ConflictError("前序十量 V3 outbox 原文摘要不一致")
+        try:
+            source_message = _verify_stored_v3_submission(
+                json.loads(source_body_json),
+                identity=active_identity,
+            )
+        except json.JSONDecodeError as error:
+            raise ConflictError("前序十量 V3 outbox 原文不是合法 JSON") from error
+        source_submission_revision = int(source["submission_revision"])
+        if (
+            source_message["message_id"] != source_message_id
+            or source_message["revision"] != source_submission_revision
+            or source_message["correlation_id"] != source["correlation_id"]
+        ):
+            raise ConflictError("前序草稿与已签名十量 V3 消息血缘不一致")
+
+        outbox_receipt_json = str(outbox["receipt_json"])
+        source_receipt_json = str(source["receipt_json"])
+        if not hmac.compare_digest(outbox_receipt_json, source_receipt_json):
+            raise ConflictError("前序草稿与 outbox 保存的政府回执不一致")
+        try:
+            receipt = _verify_stored_intake_receipt(
+                json.loads(outbox_receipt_json),
+                submission=source_message,
+                identity=active_identity,
+            )
+        except json.JSONDecodeError as error:
+            raise ConflictError("前序政府接收回执不是合法 JSON") from error
+
+        try:
+            draft_payload = json.loads(str(source["payload_json"]))
+        except json.JSONDecodeError as error:
+            raise ConflictError("前序草稿内容不是合法 JSON") from error
+        signed_business_payload = json.loads(jcs_json(source_message["payload"]))
+        signed_business_payload.pop("human_confirmation", None)
+        if not hmac.compare_digest(
+            sha256_jcs(signed_business_payload),
+            sha256_jcs(draft_payload),
+        ):
+            raise ConflictError("前序草稿内容与已签名送达内容不一致")
+        return {
+            "message": source_message,
+            "receipt": receipt,
+            "outbox": dict(outbox),
+            "business_payload": signed_business_payload,
+        }
+
+    def create_correction_draft(
+        self,
+        source_draft_id: str,
+        *,
+        expected_revision: int,
+        expected_submission_revision: int,
+        actor: str,
+        identity: MineIdentity,
+    ) -> dict[str, Any]:
+        """Create the unique editable successor of an acknowledged V3 message.
+
+        The predecessor is read from the immutable signed outbox body rather
+        than reconstructed from the mutable review model. Replaying the same
+        request returns the already-created direct child and never forks the
+        lineage.
+        """
+
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 1
+        ):
+            raise ValueError("expected_revision 必须是正整数")
+        if (
+            isinstance(expected_submission_revision, bool)
+            or not isinstance(expected_submission_revision, int)
+            or expected_submission_revision < 1
+        ):
+            raise ValueError("expected_submission_revision 必须是正整数")
+        self._assert_human_preparer(actor)
+        now = utc_text()
+        with self.repository._transaction() as db:
+            integrity = self._verify_audit_in_transaction(db)
+            if not integrity["valid"]:
+                raise ConflictError(
+                    "报送审计链或审计锚点异常；已拒绝创建更正草稿"
+                )
+            source = db.execute(
+                "SELECT * FROM fq_drafts WHERE draft_id=?",
+                (source_draft_id,),
+            ).fetchone()
+            if source is None:
+                raise NotFoundError("前序报送草稿不存在")
+            if source["contract_version"] != CURRENT_SUBMISSION_CONTRACT:
+                raise ConflictError("五量 V2 历史报文不能升级或发起十量 V3 更正")
+            if int(source["revision"]) != expected_revision:
+                raise ConflictError("前序草稿状态已变化，请刷新后重试")
+            source_submission_revision = int(source["submission_revision"])
+            if source_submission_revision != expected_submission_revision:
+                raise ConflictError("前序报送版本已变化，请刷新后重试")
+            if source["status"] not in {"submitted", "acknowledged"}:
+                raise ConflictError("仅已送达并取得政府回执的十量 V3 版本可以更正")
+            archive = self._verify_archived_submission(
+                db,
+                source,
+                identity=identity,
+            )
+            source_message = archive["message"]
+            source_message_id = source_message["message_id"]
+            predecessor_hash = source_message["signature_envelope"][
+                "payload_sha256"
+            ]
+            signed_business_payload = archive["business_payload"]
+
+            children = db.execute(
+                """
+                SELECT * FROM fq_drafts
+                WHERE predecessor_message_id=?
+                ORDER BY created_at,draft_id
+                """,
+                (source_message_id,),
+            ).fetchall()
+            if children:
+                if len(children) != 1:
+                    raise ConflictError("十量 V3 更正链存在多个直接后继，已拒绝继续")
+                child = children[0]
+                if (
+                    child["contract_version"] != CURRENT_SUBMISSION_CONTRACT
+                    or child["correlation_id"] != source_message["correlation_id"]
+                    or int(child["submission_revision"])
+                    != source_submission_revision + 1
+                    or child["predecessor_payload_sha256"] != predecessor_hash
+                ):
+                    raise ConflictError("已存在的十量 V3 后继草稿血缘异常")
+                return {
+                    "draft": self._draft(child),
+                    "created": False,
+                    "duplicate": True,
+                    "source_draft_id": source_draft_id,
+                }
+
+            later = db.execute(
+                """
+                SELECT draft_id,submission_revision FROM fq_drafts
+                WHERE contract_version=? AND correlation_id=?
+                    AND submission_revision>?
+                ORDER BY submission_revision DESC LIMIT 1
+                """,
+                (
+                    CURRENT_SUBMISSION_CONTRACT,
+                    source_message["correlation_id"],
+                    source_submission_revision,
+                ),
+            ).fetchone()
+            if later is not None:
+                raise ConflictError(
+                    "所选版本不是当前十量 V3 修订链末版，禁止从历史版本分叉"
+                )
+
+            correction_payload = signed_business_payload
+            validate_five_quantity_payload(
+                correction_payload,
+                identity=identity,
+                confirmed=False,
+                contract_version=CURRENT_SUBMISSION_CONTRACT,
+            )
+            submission_revision = source_submission_revision + 1
+            draft_id = str(uuid.uuid4())
+            import_id = str(uuid.uuid4())
+            correction_artifact_sha256 = hashlib.sha256(
+                (
+                    "ten-quantity-correction-draft-v1\n"
+                    f"{source_message_id}\n{submission_revision}"
+                ).encode()
+            ).hexdigest()
+            filename = (
+                f"correction-{correction_payload['reporting_month']}"
+                f"-r{submission_revision}.json"
+            )
+            db.execute(
+                """
+                INSERT INTO fq_imports(
+                    import_id,content_sha256,filename,acquisition_mode,source_path,
+                    status,error_message,draft_id,suggestions_json,created_at
+                ) VALUES (?,?,?,'manual_import',?,'ready_review',NULL,?,'[]',?)
+                """,
+                (
+                    import_id,
+                    correction_artifact_sha256,
+                    filename,
+                    f"correction:{source_message_id}",
+                    draft_id,
+                    now,
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO fq_drafts(
+                    draft_id,import_id,revision,submission_revision,
+                    correlation_id,predecessor_message_id,
+                    predecessor_payload_sha256,contract_version,status,
+                    payload_json,confirmation_json,submission_message_id,
+                    receipt_json,created_by,last_content_actor,
+                    human_preparer_actor,human_prepared_revision,
+                    created_at,updated_at
+                ) VALUES (?,?,1,?,?,?,?,?,'ready_review',?,NULL,NULL,NULL,?,?,?,1,?,?)
+                """,
+                (
+                    draft_id,
+                    import_id,
+                    submission_revision,
+                    source_message["correlation_id"],
+                    source_message_id,
+                    predecessor_hash,
+                    CURRENT_SUBMISSION_CONTRACT,
+                    jcs_json(correction_payload),
+                    actor,
+                    actor,
+                    actor,
+                    now,
+                    now,
+                ),
+            )
+            self._append_audit(
+                db,
+                "ten_quantity_correction_draft_created",
+                actor,
+                {
+                    "source_draft_id": source_draft_id,
+                    "source_message_id": source_message_id,
+                    "source_payload_sha256": predecessor_hash,
+                    "draft_id": draft_id,
+                    "import_id": import_id,
+                    "correlation_id": source_message["correlation_id"],
+                    "submission_revision": submission_revision,
+                    "draft_payload_sha256": sha256_jcs(correction_payload),
+                },
+            )
+            created = db.execute(
+                "SELECT * FROM fq_drafts WHERE draft_id=?",
+                (draft_id,),
+            ).fetchone()
+            assert created is not None
+            return {
+                "draft": self._draft(created),
+                "created": True,
+                "duplicate": False,
+                "source_draft_id": source_draft_id,
+            }
+
     def discard_draft(
         self,
         draft_id: str,
@@ -2467,6 +3254,11 @@ class FiveQuantityStore:
                 raise ConflictError("草稿修订号已变化，请刷新后重试")
             if row["status"] == "discarded":
                 return self._draft(row)
+            if row["predecessor_message_id"] is not None:
+                raise ConflictError(
+                    "正式更正草稿是已送达报送链的唯一后继，不能放弃或删除；"
+                    "如暂不更正可保留草稿，后续继续编辑并复核"
+                )
             outbox = db.execute(
                 "SELECT 1 FROM fq_outbox WHERE aggregate_id=? "
                 "AND message_kind='submission' LIMIT 1",
@@ -2509,6 +3301,7 @@ class FiveQuantityStore:
         expected_revision: int,
         payload: dict[str, Any],
         actor: str,
+        identity: MineIdentity,
     ) -> dict[str, Any]:
         now = utc_text()
         self._assert_human_preparer(actor)
@@ -2522,8 +3315,45 @@ class FiveQuantityStore:
                 raise ConflictError("五量 V2 草稿仅供读取，不能保存为 V3 或改写审计")
             if int(row["revision"]) != expected_revision:
                 raise ConflictError("草稿已被其他操作修改，请刷新后重试")
-            if row["status"] in {"queued", "submitted", "discarded"}:
+            if row["status"] in {
+                "queued",
+                "submitted",
+                "acknowledged",
+                "discarded",
+            }:
                 raise ConflictError("已报送或已放弃草稿不可覆盖，请创建新版本")
+            if row["predecessor_message_id"] is not None:
+                predecessor_source = db.execute(
+                    "SELECT * FROM fq_drafts WHERE submission_message_id=?",
+                    (row["predecessor_message_id"],),
+                ).fetchone()
+                if predecessor_source is None:
+                    raise ConflictError("正式更正草稿缺少已送达的直接前序")
+                predecessor_message = self._verify_archived_submission(
+                    db,
+                    predecessor_source,
+                    identity=identity,
+                )["message"]
+                if (
+                    predecessor_message["message_id"]
+                    != row["predecessor_message_id"]
+                    or predecessor_message["correlation_id"]
+                    != row["correlation_id"]
+                    or predecessor_message["signature_envelope"]["payload_sha256"]
+                    != row["predecessor_payload_sha256"]
+                ):
+                    raise ConflictError("正式更正草稿与直接前序血缘不一致")
+                predecessor_payload = predecessor_message["payload"]
+                changed_fields = [
+                    field
+                    for field in _CORRECTION_LOCKED_PAYLOAD_FIELDS
+                    if payload.get(field) != predecessor_payload.get(field)
+                ]
+                if changed_fields:
+                    raise ConflictError(
+                        "更正版本必须沿用直接前序的矿井、统计期间、时区和同类矿口径；"
+                        "若需申报其他期间，请新建首报"
+                    )
             revision = expected_revision + 1
             db.execute(
                 """UPDATE fq_drafts SET revision=?,status='ready_review',
@@ -2555,6 +3385,7 @@ class FiveQuantityStore:
         actor: str,
         machine_source_policies: tuple[dict[str, Any], ...],
         health_now_epoch: float,
+        identity: MineIdentity,
     ) -> dict[str, Any]:
         now = utc_text()
         if (
@@ -2563,6 +3394,7 @@ class FiveQuantityStore:
             or message.get("message_type") != TEN_QUANTITY_SUBMISSION_MESSAGE_TYPE
         ):
             raise ValueError("十量 V3 草稿只能进入十量 V3 报送队列")
+        _verify_stored_v3_submission(message, identity=identity)
         message_json = jcs_json(message)
         with self.repository._transaction() as db:
             integrity = self._verify_audit_in_transaction(db)
@@ -2579,6 +3411,65 @@ class FiveQuantityStore:
                 raise ConflictError("五量 V2 草稿仅供读取，不能重新确认或入发送队列")
             if int(row["revision"]) != expected_revision:
                 raise ConflictError("草稿修订号已变化")
+            submission_revision = int(row["submission_revision"])
+            if message.get("revision") != submission_revision:
+                raise ConflictError("待发送消息与草稿报送版本不一致")
+            if submission_revision == 1:
+                if (
+                    row["predecessor_message_id"] is not None
+                    or row["predecessor_payload_sha256"] is not None
+                    or message.get("predecessor") is not None
+                    or message.get("causation_id") is not None
+                    or message.get("correlation_id") != message.get("message_id")
+                ):
+                    raise ConflictError("十量 V3 首报血缘字段非法")
+            else:
+                expected_predecessor = {
+                    "message_id": row["predecessor_message_id"],
+                    "payload_sha256": row["predecessor_payload_sha256"],
+                }
+                if (
+                    row["correlation_id"] is None
+                    or None in expected_predecessor.values()
+                    or message.get("correlation_id") != row["correlation_id"]
+                    or message.get("predecessor") != expected_predecessor
+                    or message.get("causation_id")
+                    != row["predecessor_message_id"]
+                ):
+                    raise ConflictError("十量 V3 更正消息与草稿前序血缘不一致")
+                predecessor_source = db.execute(
+                    "SELECT * FROM fq_drafts WHERE submission_message_id=?",
+                    (row["predecessor_message_id"],),
+                ).fetchone()
+                if predecessor_source is None:
+                    raise ConflictError("十量 V3 更正的直接前序尚未成功送达")
+                predecessor_message = self._verify_archived_submission(
+                    db,
+                    predecessor_source,
+                    identity=identity,
+                )["message"]
+                if (
+                    predecessor_message["revision"] + 1
+                    != submission_revision
+                    or predecessor_message["correlation_id"]
+                    != row["correlation_id"]
+                    or predecessor_message["signature_envelope"][
+                        "payload_sha256"
+                    ]
+                    != row["predecessor_payload_sha256"]
+                ):
+                    raise ConflictError("十量 V3 更正未直接延续上一报送版本")
+                changed_fields = [
+                    field
+                    for field in _CORRECTION_LOCKED_PAYLOAD_FIELDS
+                    if message["payload"].get(field)
+                    != predecessor_message["payload"].get(field)
+                ]
+                if changed_fields:
+                    raise ConflictError(
+                        "更正消息改变了直接前序的矿井、统计期间、时区或"
+                        "同类矿口径，已拒绝进入发送队列"
+                    )
             self._assert_independent_actor(
                 row,
                 actor,
@@ -2587,7 +3478,7 @@ class FiveQuantityStore:
             )
             if row["status"] == "discarded":
                 raise ConflictError("已放弃草稿不能确认或报送")
-            if row["status"] in {"queued", "submitted"}:
+            if row["status"] in {"queued", "submitted", "acknowledged"}:
                 existing = db.execute(
                     "SELECT * FROM fq_outbox WHERE aggregate_id=? "
                     "AND message_kind='submission'",
@@ -2596,6 +3487,45 @@ class FiveQuantityStore:
                 if existing is None:
                     raise ConflictError("草稿状态与 outbox 不一致")
                 return dict(existing)
+            row_payload = json.loads(str(row["payload_json"]))
+            signed_payload = message.get("payload")
+            if not isinstance(signed_payload, dict):
+                raise ConflictError("待发送十量 V3 消息缺少签名 payload")
+            signed_business_payload = json.loads(jcs_json(signed_payload))
+            payload_confirmation = signed_business_payload.pop(
+                "human_confirmation", None
+            )
+            expected_confirmation_keys = {
+                "actor_id",
+                "confirmer_name",
+                "role",
+                "attestation",
+                "confirmed_at",
+                "draft_revision",
+                "payload_sha256",
+            }
+            if (
+                sha256_jcs(signed_business_payload) != sha256_jcs(row_payload)
+                or not isinstance(confirmation, dict)
+                or set(confirmation) != expected_confirmation_keys
+                or not isinstance(payload_confirmation, dict)
+                or confirmation.get("actor_id") != actor
+                or confirmation.get("draft_revision") != int(row["revision"])
+                or confirmation.get("payload_sha256") != sha256_jcs(row_payload)
+                or payload_confirmation.get("confirmed") is not True
+                or payload_confirmation.get("confirmer_id")
+                != confirmation.get("actor_id")
+                or payload_confirmation.get("confirmer_name")
+                != confirmation.get("confirmer_name")
+                or payload_confirmation.get("role") != confirmation.get("role")
+                or payload_confirmation.get("confirmed_at")
+                != confirmation.get("confirmed_at")
+                or payload_confirmation.get("content_sha256")
+                != sha256_jcs(confirmation)
+            ):
+                raise ConflictError(
+                    "待发送消息、当前草稿与人工确认记录未精确绑定"
+                )
             same_business_submission = db.execute(
                 "SELECT aggregate_id FROM fq_outbox "
                 "WHERE idempotency_key=? AND message_kind='submission' LIMIT 1",
@@ -2773,19 +3703,54 @@ class FiveQuantityStore:
             ).fetchone()
             if row is None:
                 raise NotFoundError("outbox 消息不存在")
+            kind = str(row["message_kind"])
+            archived_v3_message: dict[str, Any] | None = None
+            receipt_json = jcs_json(receipt) if receipt is not None else None
+            if kind == "submission":
+                body_json = str(row["body_json"])
+                actual_body_sha256 = hashlib.sha256(body_json.encode()).hexdigest()
+                if not hmac.compare_digest(
+                    actual_body_sha256,
+                    str(row["body_sha256"]),
+                ):
+                    raise ConflictError("待归档报送正文摘要不一致")
+                try:
+                    body = json.loads(body_json)
+                except json.JSONDecodeError as error:
+                    raise ConflictError("待归档报送正文不是合法 JSON") from error
+                if body.get("contract_version") == CURRENT_SUBMISSION_CONTRACT:
+                    archived_v3_message = _verify_stored_v3_submission(
+                        body,
+                        identity=self.identity,
+                    )
+                    if receipt is None:
+                        raise ConflictError("十量 V3 成功送达必须保存政府签名接收回执")
+                    verified_receipt = _verify_stored_intake_receipt(
+                        receipt,
+                        submission=archived_v3_message,
+                        identity=self.identity,
+                    )
+                    receipt_json = jcs_json(verified_receipt)
             db.execute(
                 """UPDATE fq_outbox SET status='succeeded',receipt_json=?,
                     last_error=NULL,updated_at=? WHERE message_id=?""",
-                (jcs_json(receipt) if receipt is not None else None, now, message_id),
+                (receipt_json, now, message_id),
             )
-            kind = row["message_kind"]
             if kind == "submission":
                 db.execute(
                     "UPDATE fq_drafts SET status='submitted',"
                     "receipt_json=?,updated_at=? "
                     "WHERE draft_id=?",
-                    (jcs_json(receipt), now, row["aggregate_id"]),
+                    (receipt_json, now, row["aggregate_id"]),
                 )
+                if archived_v3_message is not None:
+                    source = db.execute(
+                        "SELECT * FROM fq_drafts WHERE draft_id=?",
+                        (row["aggregate_id"],),
+                    ).fetchone()
+                    if source is None:
+                        raise ConflictError("十量 V3 归档对应草稿不存在")
+                    self._verify_archived_submission(db, source)
             elif kind == "delivery_ack":
                 inbox = db.execute(
                     "SELECT delivery_cursor FROM fq_inbox WHERE report_id=?",
@@ -3393,6 +4358,7 @@ class FiveQuantityRuntime:
         self.four_eyes_required = bool(four_eyes_required)
         self.store = FiveQuantityStore(
             repository,
+            identity=identity,
             four_eyes_required=self.four_eyes_required,
             human_preparer_actor_ids=human_preparer_actor_ids,
         )
@@ -4040,6 +5006,7 @@ class FiveQuantityRuntime:
             expected_revision=expected_revision,
             payload=payload,
             actor=actor,
+            identity=self.identity,
         )
 
     def machine_sync_state(self, draft_id: str) -> dict[str, Any] | None:
@@ -4081,6 +5048,27 @@ class FiveQuantityRuntime:
             expected_revision=expected_revision,
             actor=actor,
             reason=reason,
+        )
+
+    def create_correction_draft(
+        self,
+        source_draft_id: str,
+        *,
+        expected_revision: int,
+        expected_submission_revision: int,
+        accepted: bool,
+        actor: str,
+    ) -> dict[str, Any]:
+        if accepted is not True:
+            raise ValidationBlockedError(
+                "必须明确确认以已送达版本为基线创建下一版更正草稿"
+            )
+        return self.store.create_correction_draft(
+            source_draft_id,
+            expected_revision=expected_revision,
+            expected_submission_revision=expected_submission_revision,
+            actor=actor,
+            identity=self.identity,
         )
 
     def _base_message(
@@ -4211,14 +5199,31 @@ class FiveQuantityRuntime:
             f"tq3.{self.identity.mine_id}."
             f"{payload['reporting_month']}.r{draft['submission_revision']}"
         )
+        submission_revision = int(draft["submission_revision"])
+        if submission_revision == 1:
+            correlation_id = str(uuid.uuid4())
+            causation_id = None
+            predecessor = None
+        else:
+            correlation_id = draft.get("correlation_id")
+            predecessor = draft.get("predecessor")
+            if (
+                not isinstance(correlation_id, str)
+                or not correlation_id
+                or not isinstance(predecessor, dict)
+                or not isinstance(predecessor.get("message_id"), str)
+                or not isinstance(predecessor.get("payload_sha256"), str)
+            ):
+                raise ConflictError("十量 V3 更正草稿缺少完整的前序签名血缘")
+            causation_id = predecessor["message_id"]
         message = self._base_message(
             contract_version=CURRENT_SUBMISSION_CONTRACT,
             message_type=TEN_QUANTITY_SUBMISSION_MESSAGE_TYPE,
             payload=payload,
-            correlation_id=str(uuid.uuid4()),
-            causation_id=None,
-            revision=draft["submission_revision"],
-            predecessor=None,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+            revision=submission_revision,
+            predecessor=predecessor,
             idempotency_key=idempotency,
         )
         self.store.confirm_and_enqueue(
@@ -4229,6 +5234,7 @@ class FiveQuantityRuntime:
             actor=actor_id,
             machine_source_policies=self._machine_source_policies,
             health_now_epoch=time.time(),
+            identity=self.identity,
         )
         return self.store.get_draft(draft_id)
 

@@ -29,7 +29,7 @@
 
   <section class="card warn">
     <h2>先确认交付可信度</h2>
-    <p>文件名含 <strong>UNSIGNED-TEST-ONLY</strong> 的安装包仅供隔离验收，不得作为正式可信发布。正式候选包必须同时核验单位批准的 Authenticode 签名、时间戳以及随交付清单提供的 SHA-256。</p>
+    <p>文件名含 <strong>UNSIGNED-TEST-ONLY</strong> 的安装包仅供隔离验收，不得作为正式可信发布。正式交付有两种互斥方式：带时间戳的 Authenticode 签名版，或文件名明确带 <strong>INTERNAL-UNSIGNED</strong> 的无 Windows 代码签名证书内网正式版。后者安装时必须粘贴通过电话、纸质交接单或独立审批系统取得的本 Setup SHA-256；不能用同一 U 盘里的清单自证，摘要不一致时不得继续。这只免除 Authenticode 证书，不免除跨机访问的 HTTPS/TLS 证书，也不免除验证企业接入包和模型授权包所需的 Ed25519 公钥信任材料。</p>
   </section>
 
   <section class="card warn">
@@ -53,7 +53,7 @@
       时，控制中心会显示地址和提示，而不会用 IE 打开空白页面。</p>
     <h3>配置正式内网环境</h3>
     <p>选择“正式内网配置”，依次选择经批准的 <code>clients.json</code>、专用状态数据目录和
-      本机端口，填写管理员账号及两遍密码；单位 HTTPS 反向代理已就绪时，再填写领导端 HTTPS
+      本机端口，填写管理员账号及两遍密码；<strong>INTERNAL-UNSIGNED</strong> 安装正式服务时，还要准备介质外取得的 Platform 子发行清单 SHA-256 和 WinSW SHA-256。单位 HTTPS 反向代理已就绪时，再填写领导端 HTTPS
       地址；地址必须以 <code>https://</code> 开头，且不能包含账号口令、查询参数或片段。
       该地址只用于本次安全打开浏览器，不会替管理员配置反向代理，也不会持久保存。
       正式密码不能使用 <code>123123123</code>。控制中心不会把密码写进命令行或运行日志；
@@ -76,11 +76,13 @@
   <section class="card">
     <h2>企业侧 Agent（一矿一智能体）</h2>
     <ol>
-      <li>从开始菜单打开“Create an enterprise mine instance”。</li>
-      <li>为本矿填写独立实例名、煤矿编号、企业编号、系统身份和本机端口。</li>
-      <li>在生成的 ProgramData 实例目录内配置账号摘要、政府接口、两把不同的交换密钥以及可选模型 API；不要把明文密码或密钥写入命令行。</li>
-      <li>用 <code>Start-EnterpriseAgent.ps1</code> 前台启动，用 <code>Test-EnterpriseAgentHealth.ps1</code> 验收，再按 <code>deploy\windows\README.md</code> 安装本矿服务。</li>
+      <li>从开始菜单打开“MineGuard 企业接入配置向导”，加载监管端为本矿生成的完整企业交付目录。</li>
+      <li>从另一受控渠道选择激活码，核对独立审批摘要，填写实例名、空闲端口及经办/复核两个具名账号。</li>
+      <li>向导验签、解密并原子发布矿井身份、政府地址和两把不同的交换密钥；现场人员不手写这些值。</li>
+      <li>配置通过后，在同一向导中选择已批准的 WinSW。签名版输入介质外取得的 Agent 签名者指纹；<strong>INTERNAL-UNSIGNED</strong> 版输入介质外取得的 Agent 子发行清单 SHA-256。两种模式都必须输入 WinSW SHA-256，向导会自动显示正确字段。</li>
+      <li>需要模型能力时，另开“MineGuard 模型授权导入向导”，分别选择本矿 <code>.mgllm</code> 和另一渠道交付的激活码。正式实例禁止在 <code>agent.env</code> 中填写 API Key、模型地址或信任库；未导入模型授权不影响核心报送与监管算法。</li>
     </ol>
+    <p>以下命令只作为高级兼容入口；普通现场部署应使用上述图形向导：</p>
     <pre>Set-Location 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
 .\New-EnterpriseAgentInstance.ps1 `
   -InstanceName qinyuan-001 -MineId MINE-QY-001 `

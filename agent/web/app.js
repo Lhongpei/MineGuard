@@ -1264,6 +1264,11 @@
     }
 
     const llmConfigured = Boolean(connected && health.llm_mode === "configured");
+    const managedModelCredential = Boolean(
+      connected &&
+        health.model_credential &&
+        health.model_credential.managed === true,
+    );
     const newsStatus = connected
       ? String(health.news_search_status || "configured_unverified").toLowerCase()
       : "";
@@ -1278,12 +1283,20 @@
       ? health ? "状态不可用" : "正在检查"
       : llmConfigured
         ? newsStatus === "reachable"
-          ? "模型与新闻检索可用"
+          ? managedModelCredential
+            ? "企业专属模型与新闻检索可用"
+            : "模型与新闻检索可用"
           : newsDegraded
-            ? "模型已配置；新闻检索降级"
+            ? managedModelCredential
+              ? "企业专属模型已启用；新闻检索降级"
+              : "模型已配置；新闻检索降级"
             : newsProblem
-              ? "模型已配置；新闻检索异常"
-              : "模型已配置（调用时验证）"
+              ? managedModelCredential
+                ? "企业专属模型已启用；新闻检索异常"
+                : "模型已配置；新闻检索异常"
+              : managedModelCredential
+                ? "企业专属受管模型已启用"
+                : "模型已配置（调用时验证）"
         : newsStatus === "reachable"
           ? "本地规则；百度新闻可用"
           : newsProblem

@@ -164,6 +164,9 @@ workflow_name = "daily_coal_health"
 
 [pipelines.scope_values]
 daily = "daily_total"
+zero_shift = "zero_shift"
+eight_shift = "eight_shift"
+four_shift = "four_shift"
 
 [pipelines.mapping]
 production_t = {{ source = "production", type = "number" }}

@@ -7,11 +7,11 @@ import math
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .errors import ProviderError
 from .security import MAX_SAFE_INTEGER
@@ -168,11 +168,18 @@ def _validate_suggestion_value(path: str, value: Any) -> None:
 
 @dataclass(frozen=True)
 class LLMConfig:
-    api_key: str
+    api_key: str = field(repr=False)
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-v4-flash"
     timeout_seconds: float = 20.0
     max_retries: int = 2
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    """Never replay a credential-bearing model request after a redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
 
 
 class OpenAICompatibleProvider:
@@ -180,8 +187,10 @@ class OpenAICompatibleProvider:
         self,
         config: LLMConfig,
         *,
-        opener: Callable[..., Any] = urlopen,
+        opener: Callable[..., Any] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
+        configuration_guard: Callable[[], object] | None = None,
+        allowed_capabilities: frozenset[str] | None = None,
     ):
         if not config.api_key:
             raise ValueError("LLM api_key must not be empty")
@@ -207,8 +216,20 @@ class OpenAICompatibleProvider:
         if config.max_retries < 0 or config.max_retries > 5:
             raise ValueError("LLM max_retries must be between 0 and 5")
         self.config = config
-        self._opener = opener
+        self._opener = (
+            build_opener(_RejectRedirects()).open if opener is None else opener
+        )
         self._sleeper = sleeper
+        self._configuration_guard = configuration_guard
+        self._allowed_capabilities = (
+            frozenset({"chat", "extraction"})
+            if allowed_capabilities is None
+            else frozenset(allowed_capabilities)
+        )
+
+    def _require_capability(self, capability: str) -> None:
+        if capability not in self._allowed_capabilities:
+            raise ProviderError("当前受管模型凭据未授权此项能力")
 
     def suggest_fields(
         self,
@@ -217,6 +238,7 @@ class OpenAICompatibleProvider:
         format_name: str,
         current_document: dict[str, Any],
     ) -> dict[str, Any]:
+        self._require_capability("extraction")
         if len(content.encode("utf-8")) > 256 * 1024:
             raise ProviderError("智能抽取内容不能超过 256 KiB")
         prompt = {
@@ -305,6 +327,8 @@ class OpenAICompatibleProvider:
         provider-side ``strict`` mode.
         """
 
+        self._require_capability("chat")
+
         if not messages or len(messages) > 64:
             raise ProviderError("模型消息数量必须在 1 到 64 之间")
         if not tools or len(tools) > 64:
@@ -389,6 +413,8 @@ class OpenAICompatibleProvider:
         The narrow signature is intentional: callers cannot accidentally pass
         a draft, conversation history, tool output or regulatory evidence.
         """
+
+        self._require_capability("chat")
 
         if (
             not isinstance(question, str)
@@ -480,6 +506,11 @@ class OpenAICompatibleProvider:
         search metadata only. Article URLs, drafts, chat history and the raw
         user question are deliberately outside this interface.
         """
+
+        # News retrieval and evidence summarization are one separately sold
+        # capability.  A chat-only credential must never be reused for this
+        # path, even though the upstream wire call is a chat completion.
+        self._require_capability("coal-news-search")
 
         if (
             not isinstance(topic, str)
@@ -714,6 +745,12 @@ class OpenAICompatibleProvider:
             raise ProviderError("模型调用超时或重试配置非法")
         last_error: Exception | None = None
         for attempt in range(selected_retries + 1):
+            # Revalidate the managed credential immediately before every
+            # outbound attempt.  Guard failures deliberately propagate and
+            # must happen before the opener can observe an Authorization
+            # header.
+            if self._configuration_guard is not None:
+                self._configuration_guard()
             try:
                 with self._opener(
                     request, timeout=selected_timeout

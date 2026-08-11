@@ -293,6 +293,90 @@ def test_missing_values_are_null_not_imputed(tmp_path: Path, source_db: Path) ->
     assert measurements["electricity_kwh"]["quality_flags"] == ["missing"]
 
 
+def test_unconfigured_optional_shift_metrics_are_not_applicable(
+    tmp_path: Path, source_db: Path
+) -> None:
+    config = load_config(write_config(tmp_path / "connector.toml", source_db))
+    pipeline = config.pipelines[0]
+    base = pipeline.sources[0]
+    source = replace(
+        base,
+        scope_field="bucket",
+        scope_values={"DAY": "daily_total"},
+        mappings=(
+            FieldMapping(target="production_t", source="production"),
+            FieldMapping(target="sales_t", source="sales"),
+        ),
+    )
+    batch = RawBatch(
+        source_id=source.id,
+        original_filename="daily-business.json",
+        records=(
+            {
+                "observed_at": "2026-07-29T23:59:00+08:00",
+                "bucket": "DAY",
+                "production": 350,
+                "sales": 300,
+            },
+        ),
+    )
+    content = json.loads(
+        normalize_batches(pipeline, source, (batch,))[0].payload["source"]["content"]
+    )
+    day = next(item for item in content["days"] if item["date"] == "2026-07-29")
+    assert day["reported_quantity"]["daily_total"]["sales_t"]["value"] == 300.0
+    for shift in day["reported_quantity"]["shifts"].values():
+        measurements = shift["measurements"]
+        assert measurements["production_t"]["quality_flags"] == ["missing"]
+        assert measurements["sales_t"]["value"] is None
+        assert measurements["sales_t"]["quality_flags"] == ["not_applicable"]
+
+
+@pytest.mark.parametrize("explicit_scope", [False, True])
+def test_configured_optional_shift_metric_without_value_remains_missing(
+    tmp_path: Path,
+    source_db: Path,
+    explicit_scope: bool,
+) -> None:
+    config = load_config(write_config(tmp_path / "connector.toml", source_db))
+    pipeline = config.pipelines[0]
+    base = pipeline.sources[0]
+    prefix = "zero_shift." if explicit_scope else ""
+    source = replace(
+        base,
+        scope_field="bucket",
+        scope_values={"Z": "zero_shift"},
+        mappings=(
+            FieldMapping(target=f"{prefix}production_t", source="production"),
+            FieldMapping(target=f"{prefix}sales_t", source="sales"),
+        ),
+    )
+    batch = RawBatch(
+        source_id=source.id,
+        original_filename="shift-business.json",
+        records=(
+            {
+                "observed_at": "2026-07-29T00:00:00+08:00",
+                "bucket": "Z",
+                "production": 100,
+            },
+        ),
+    )
+    content = json.loads(
+        normalize_batches(pipeline, source, (batch,))[0].payload["source"]["content"]
+    )
+    day = next(item for item in content["days"] if item["date"] == "2026-07-29")
+    shifts = day["reported_quantity"]["shifts"]
+    assert shifts["zero_shift"]["measurements"]["sales_t"]["value"] is None
+    assert shifts["zero_shift"]["measurements"]["sales_t"]["quality_flags"] == [
+        "missing"
+    ]
+    for scope in ("eight_shift", "four_shift"):
+        assert shifts[scope]["measurements"]["sales_t"]["quality_flags"] == [
+            "not_applicable"
+        ]
+
+
 def test_legacy_six_field_source_becomes_v3_with_new_fields_explicitly_missing(
     tmp_path: Path, source_db: Path
 ) -> None:

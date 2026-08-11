@@ -65,25 +65,40 @@ def test_platform_nuitka_build_surface_has_a_pinned_traceable_contract() -> None
         "--msvc=latest",
         "--output-filename=MineGuardPlatform.exe",
         "mineguard/demo_samples",
+        "--include-package=cryptography",
+        "--include-package=cffi",
+        "--include-module=_cffi_backend",
         "--include-package-data=tzdata",
         "--include-distribution-metadata=numpy",
         "--include-distribution-metadata=scipy",
         "--include-distribution-metadata=tzdata",
+        "--include-distribution-metadata=cryptography",
+        "--include-distribution-metadata=cffi",
         "MineGuardPlatform-{0}-windows-x64",
         "release-manifest.json",
         "build-metadata.json",
         "SHA256SUMS.txt",
+        "Open-MineGuardPlatformControlCenter.ps1",
+        "$desktopLauncherSource",
+        "$desktopLauncherReleasePath",
+        "manifest-covered original bytes",
         "'runtime'",
         "'deploy\\windows'",
         "'self-check'",
         "scipy.optimize.linprog/highs",
+        "ed25519+aes-256-gcm+scrypt",
         "sourceLeaks",
         "SignToolPath",
         "SigningCertificateThumbprint",
         "RequireSignedBinary",
+        "InternalUnsignedRelease",
+        "unsigned-internal-release",
+        "$productionCandidateBuild = $RequireSignedBinary -or $InternalUnsignedRelease",
+        "RequireSignedBinary 与 InternalUnsignedRelease 不得同时使用",
+        "INTERNAL-UNSIGNED",
         "$signingEnabled -and -not $RequireSignedBinary",
-        "$RequireSignedBinary -and $AllowNuitkaToolDownloads",
-        "$RequireSignedBinary -and [string]::IsNullOrWhiteSpace($Wheelhouse)",
+        "$productionCandidateBuild -and $AllowNuitkaToolDownloads",
+        "$productionCandidateBuild -and [string]::IsNullOrWhiteSpace($Wheelhouse)",
         "Invoke-WindowsAuthenticodeSign.ps1",
         "sourceRevision",
         "builtUtc",
@@ -167,8 +182,9 @@ def test_windows_delivery_docs_keep_setup_as_the_formal_trust_root() -> None:
         ROOT.parent / "docs" / "Windows二进制发行与安装.md"
     ).read_text(encoding="utf-8")
     for document in (operations, deployed_readme, binary_guide):
-        assert "正式安装的唯一信任入口" in document
+        assert "正式安装的信任入口" in document
         assert "signed Setup" in document
+        assert "INTERNAL-UNSIGNED" in document
         assert "staging" in document
         assert "不能认证" in document
         assert "信任根" in document
@@ -285,6 +301,8 @@ def test_binary_install_validates_then_atomically_switches_runtime() -> None:
         "'.runtime.incoming.'",
         "'.runtime.previous.'",
         "'.service.incoming.'",
+        "'.launcher.incoming.'",
+        "'.launcher.previous.'",
         "'.release-metadata.incoming.'",
         "Move-MineGuardOwnedPathWithRetry",
         "-SourcePath $runtimeTarget -SourceParent $InstallRoot",
@@ -312,18 +330,71 @@ def test_binary_install_validates_then_atomically_switches_runtime() -> None:
         "'.example'",
         "release-metadata",
         "未签名内部测试版",
+        "deploy/windows/Open-MineGuardPlatformControlCenter.ps1",
+        "Platform 子发行清单必须唯一认证桌面 launcher 原字节",
+        "候选 launcher 未保持子发行清单认证的原字节",
+        "切换后的公开 launcher 不是子发行清单认证的唯一原字节文件",
+        "Assert-MineGuardNoReparseTree -Path $InstallRoot",
+        "makes any ACL failure a",
     ):
         assert required in install
     assert install.index("AuditFailAfterRuntimeSwitch) {") < install.index(
         "$transactionComplete = $true"
     )
     assert install.index("$transactionComplete = $true") < install.index(
-        "$runtimePrevious, $servicePrevious, $metadataPrevious"
+        "$runtimePrevious, $servicePrevious, $launcherPrevious,"
     )
     assert install.index("Set-MineGuardDirectoryAcl -Path $InstallRoot") < install.index(
         "-SourcePath $runtimeTarget -SourceParent $InstallRoot"
     )
+    assert install.index(
+        "Set-MineGuardDirectoryAcl -Path $InstallRoot `\n            -ServicePermission 'RX' -Recurse"
+    ) < install.index(
+        "-SourcePath $runtimeTarget -SourceParent $InstallRoot"
+    )
+    assert install.index(
+        "切换后的公开 launcher 不是子发行清单认证的唯一原字节文件"
+    ) < install.index("$transactionComplete = $true")
+    transaction_start = install.index("if ($binaryMode) {\n    $runtimeTarget")
+    transaction_end = install.index("\n} else {\n    $venvPython", transaction_start)
+    binary_transaction = install[transaction_start:transaction_end]
+    assert binary_transaction.count(
+        "Set-MineGuardDirectoryAcl -Path $InstallRoot `\n            -ServicePermission 'RX' -Recurse"
+    ) == 1
     assert "二进制发布包不接受 PythonExecutable 或 Wheelhouse" in install
+
+
+def test_unsigned_internal_platform_release_is_explicit_and_fail_closed() -> None:
+    build = (PACKAGING / "Build-MineGuardPlatform.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    install = (WINDOWS_DEPLOY / "Install-MineGuardPlatform.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    for required in (
+        "[switch] $InternalUnsignedRelease",
+        "$productionCandidateBuild -and $AllowNuitkaToolDownloads",
+        "$productionCandidateBuild -and [string]::IsNullOrWhiteSpace($Wheelhouse)",
+        "$productionCandidateBuild -and\n    ($sourceRevision -eq 'unknown'",
+        "elseif ($InternalUnsignedRelease)",
+        "'unsigned-internal-release'",
+    ):
+        assert required in build
+    assert build.count("'unsigned-internal-release'") >= 2
+    assert "$AllowDirtySource" not in build[
+        build.index("if ($productionCandidateBuild -and\n    ($sourceRevision") :
+        build.index("$projectText =", build.index("if ($productionCandidateBuild"))
+    ]
+
+    for required in (
+        "[switch] $AllowUnsignedInternalRelease",
+        "-not $AllowUnsignedInternalRelease",
+        "-AllowUnsignedInternalRelease",
+        "拒绝扩大未签名授权范围",
+        "后续安装正式服务必须再输入介质外独立批准的子发行清单 SHA-256",
+    ):
+        assert required in install
 
 
 def test_platform_configuration_enforces_a_dedicated_transactional_state() -> None:

@@ -3,6 +3,8 @@
 # The pinned upstream translation is byte-audited, including its one intentional
 # end-of-line space; keep LF and exempt that upstream byte from diff cleanup.
 /packaging/windows/inno/languages/ChineseSimplified.isl text eol=lf whitespace=-blank-at-eol
+# The release builder pins this reviewed bootstrap byte-for-byte.
+/packaging/windows/assets/Invoke-MineGuardTrustedProductInstall.ps1 text eol=lf
 # These are byte-audited WPS demo workbooks.  Never apply text conversions.
 "/local _test/*.et" binary
 /platform/src/mineguard/demo_samples/*.et binary

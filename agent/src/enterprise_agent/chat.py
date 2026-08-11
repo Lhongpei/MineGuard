@@ -404,8 +404,7 @@ def _validated_news_summary_answer(value: Any) -> str:
         or "**AI 新闻摘要**" not in value
         or re.search(r"来源：S(?:[1-9]|10)(?:、S(?:[1-9]|10))*", value) is None
         or any(
-            ord(character) < 32 and character not in {"\n", "\t"}
-            for character in value
+            ord(character) < 32 and character not in {"\n", "\t"} for character in value
         )
         or has_secret_material(value)
     ):
@@ -1869,9 +1868,7 @@ class CoalChatRuntime:
                         news.get("provider_attempts")
                     )
                     if status == "partial" and attempt_summary:
-                        answer += (
-                            f"\n检索覆盖说明：{attempt_summary}；结果可能不完整。"
-                        )
+                        answer += f"\n检索覆盖说明：{attempt_summary}；结果可能不完整。"
                 else:
                     reason = {
                         "not_configured": "未配置可用的总结模型",
@@ -1911,7 +1908,7 @@ class CoalChatRuntime:
                 if attempt_summary:
                     answer += f"\n已尝试：{attempt_summary}。"
                 answer += (
-                    "\n请检查服务器 DNS/代理与 DeepSeek API 配置后重试；"
+                    "\n请检查服务器 DNS/代理与模型、联网搜索服务配置后重试；"
                     "本次没有用离线知识冒充最新新闻，也没有读取或发送企业草稿。"
                 )
             provider_attempts = (
@@ -1941,24 +1938,20 @@ class CoalChatRuntime:
                         deepseek_search_called or summary_provider_called
                     ),
                     "model_generated": model_generated,
-                    "public_search_evidence_sent_to_model": (
-                        summary_provider_called
-                    ),
+                    "public_search_evidence_sent_to_model": (summary_provider_called),
                     "raw_user_question_sent_to_summary_model": False,
                     "enterprise_data_sent_to_provider": False,
                     "draft_data_sent_to_skill": False,
                     "summary": {
                         "status": summary_status,
                         "provider": (
-                            "deepseek-chat-completions"
+                            "openai-compatible-chat-completions"
                             if summary_provider_called
                             else None
                         ),
                         "grounding": "search_title_and_snippet",
                         "source_count": (
-                            len(sources)
-                            if status in {"succeeded", "partial"}
-                            else 0
+                            len(sources) if status in {"succeeded", "partial"} else 0
                         ),
                         "failure_code": summary_failure_code,
                     },

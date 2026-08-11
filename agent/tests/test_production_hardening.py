@@ -17,6 +17,7 @@ from enterprise_agent.auth import (
 from enterprise_agent.cli import _configuration_errors, main
 from enterprise_agent.errors import ConflictError, ValidationBlockedError
 from enterprise_agent.five_quantity_exchange import (
+    EnterpriseSigningVerificationKey,
     FiveQuantityPlatformConfig,
     MineIdentity,
 )
@@ -71,6 +72,23 @@ def _csv() -> bytes:
         b"date,ventilation_m3_min,mine_entry_persons,electricity_kwh,"
         b"detonators_count,explosives_kg,production_t\n"
         b"2026-08-01,4800,320,96000,120,240,2600\n"
+    )
+
+
+def _mark_as_real_v1_fq_schema(db: sqlite3.Connection) -> None:
+    """Remove objects that did not exist in v1 before changing its marker."""
+
+    for trigger in (
+        "fq_outbox_archive_no_update",
+        "fq_outbox_archive_no_delete",
+        "fq_draft_submission_archive_no_update",
+        "fq_draft_submission_archive_no_delete",
+    ):
+        db.execute(f"DROP TRIGGER {trigger}")
+    db.execute("DROP INDEX idx_fq_draft_predecessor_unique")
+    db.execute(
+        "UPDATE fq_schema_versions SET version=1 "
+        "WHERE component='five_quantity_v2'"
     )
 
 
@@ -247,10 +265,7 @@ def test_existing_single_person_unsent_queue_is_reopened_on_upgrade(
         accepted=True,
     )
     with sqlite3.connect(database) as db:
-        db.execute(
-            "UPDATE fq_schema_versions SET version=1 "
-            "WHERE component='five_quantity_v2'"
-        )
+        _mark_as_real_v1_fq_schema(db)
 
     hardened = FiveQuantityRuntime(
         Repository(database),
@@ -307,10 +322,7 @@ def test_legacy_connector_draft_with_different_reviewer_is_reopened(
     assert queued["last_content_actor"] == "connector-client-1"
     assert queued["human_preparer_actor"] is None
     with sqlite3.connect(database) as db:
-        db.execute(
-            "UPDATE fq_schema_versions SET version=1 "
-            "WHERE component='five_quantity_v2'"
-        )
+        _mark_as_real_v1_fq_schema(db)
 
     hardened = FiveQuantityRuntime(
         Repository(database),
@@ -911,3 +923,105 @@ def test_production_config_rejects_placeholder_and_reused_secrets(
         production=True,
     )
     assert any("示例、占位或测试值" in item for item in placeholder_errors)
+
+
+def test_production_config_validates_enterprise_historical_keyring_separately(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("ENTERPRISE_AGENT_DB", str(tmp_path / "agent.db"))
+    base = Settings.from_environment()
+    historical_secret = (
+        "Q7-enterprise-retired-signing-secret-2026-07-Zx9-abcdefghijklmnopqrstuvwxyz"
+    )
+    identity = replace(
+        _identity(),
+        historical_enterprise_signing_keys=(
+            EnterpriseSigningVerificationKey(
+                # Deliberately collides with the regulator namespace.  The
+                # CLI must report it rather than treating both keyrings alike.
+                key_id="regulator-prod-key",
+                secret=historical_secret,
+            ),
+        ),
+    )
+    configured = replace(
+        base,
+        production_mode=True,
+        four_eyes_required=True,
+        five_quantity_identity=identity,
+        five_quantity_platform=FiveQuantityPlatformConfig(
+            base_url="https://regulator.example.cn",
+            sender_id=identity.system_id,
+            transport_hmac_secret=historical_secret,
+        ),
+    )
+
+    errors = _configuration_errors(configured, production=True)
+
+    assert any(
+        "企业历史应用验签 key ID" in item
+        and "政府当前应用验签 key ID" in item
+        and "不得复用" in item
+        for item in errors
+    )
+    assert any(
+        "企业历史应用验签密钥" in item
+        and "十量运输密钥" in item
+        and "不得复用" in item
+        for item in errors
+    )
+
+
+def test_production_config_allows_bilateral_retired_application_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("ENTERPRISE_AGENT_DB", str(tmp_path / "agent.db"))
+    base = Settings.from_environment()
+    retired_secret = (
+        "Q7-bilateral-retired-application-secret-2026-07-Zx9-abcdefghijklmnopqrstuvwxyz"
+    )
+    identity = replace(
+        _identity(),
+        regulator_key_id="regulator-prod-key-2026-08",
+        historical_enterprise_signing_keys=(
+            EnterpriseSigningVerificationKey(
+                key_id="enterprise-prod-key-2026-07",
+                secret=retired_secret,
+            ),
+        ),
+        # The regulator key ID is a stable global verification slot; only its
+        # secret rotates during the bounded current/previous overlap.
+        previous_regulator_key_id="regulator-prod-key-2026-08",
+        previous_message_hmac_secret=retired_secret,
+    )
+    configured = replace(
+        base,
+        production_mode=True,
+        four_eyes_required=True,
+        five_quantity_identity=identity,
+        five_quantity_platform=FiveQuantityPlatformConfig(
+            base_url="https://regulator.example.cn",
+            sender_id=identity.system_id,
+            transport_hmac_secret=(
+                "T8-distinct-current-transport-secret-2026-08-"
+                "abcdefghijklmnopqrstuvwxyz"
+            ),
+        ),
+    )
+
+    errors = _configuration_errors(configured, production=True)
+
+    assert not any(
+        "企业历史应用验签密钥" in item
+        and "政府上一把应用验签密钥" in item
+        and "不得复用" in item
+        for item in errors
+    )
+    assert not any(
+        "政府当前应用验签 key ID" in item
+        and "政府上一把应用验签 key ID" in item
+        and "不得复用" in item
+        for item in errors
+    )

@@ -263,7 +263,11 @@ Agent 的 `--env-file` 只解析严格 UTF-8 `KEY=VALUE` 文件，不会把它�
   独立强口令，并禁用或更换演示账号。
 - 一座矿使用两把内容不同、至少 32 字节的高熵 HMAC 秘密：应用消息密钥和
   HTTP 运输密钥。不同煤矿不得复用。
-- DeepSeek、搜索服务和其他 API Key 只配在需要它的 Agent 服务端。不配置模型时，
+- 企业应用签名 key 轮换后，把退役 key 作为单行 JSON 配置在
+  `ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON`；它只验证历史 V3 前序，不能签发新消息，
+  也不能由政府 `REGULATORY_PREVIOUS_*` 入站验签配置代替。协调换钥时同一双向共享的
+  退役 secret 要分别登记，但两个方向仍按各自 key ID 精确选择。
+- 模型服务、联网搜索和其他 API Key 只配在需要它的 Agent 服务端。不配置模型时，
   导入、确定性校验、报送、政府算法、报告收件和人工回复仍能工作。
 - 不在命令行、WinSW XML、仓库、前端、截图、日志或工单中写口令、Cookie、
   HMAC 或 API Key。

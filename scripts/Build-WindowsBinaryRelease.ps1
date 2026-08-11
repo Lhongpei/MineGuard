@@ -17,7 +17,10 @@ param(
     [string]$ExpectedSignToolSha256 = "",
     [string]$SigningCertificateThumbprint = "",
     [uri]$TimestampUrl,
+    [string]$ModelIssuerTrustStore = "",
+    [string]$ExpectedModelIssuerTrustStoreSha256 = "",
     [switch]$RequireSigned,
+    [switch]$InternalUnsignedRelease,
     [switch]$TestInstallerFailurePropagation,
     [switch]$TestInstallerLifecycle,
     [switch]$LegacyWindowsServer2012R2CompatibilityTest
@@ -57,7 +60,7 @@ function Assert-CleanGitSnapshot {
     $ActualRevision = (& $GitPath -C $Root rev-parse HEAD |
         Select-Object -First 1).Trim()
     if ($LASTEXITCODE -ne 0 -or $ActualRevision -ne $ExpectedRevision) {
-        throw "The source revision changed during the signed release build."
+        throw "The source revision changed during the strict release build."
     }
     & $GitPath -C $Root diff --quiet
     $WorkingTreeDirty = $LASTEXITCODE -ne 0
@@ -66,7 +69,7 @@ function Assert-CleanGitSnapshot {
     $Untracked = @(& $GitPath -C $Root ls-files --others --exclude-standard)
     if ($LASTEXITCODE -ne 0 -or $WorkingTreeDirty -or $IndexDirty -or
         $Untracked.Count -ne 0) {
-        throw "The source tree changed during the signed release build."
+        throw "The source tree changed during the strict release build."
     }
 }
 
@@ -389,8 +392,17 @@ function Invoke-InnoCompile {
         [string]$ArtifactBaseName,
         [string]$MinimumWindowsVersion,
         [bool]$SigningEnabled,
+        [bool]$InternalUnsignedRelease,
+        [string]$ChildReleaseManifestSha256,
+        [string]$TrustedBootstrapSha256,
         [string]$SigningCommand
     )
+    if ($ChildReleaseManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+        throw "Inno compilation requires the audited child release-manifest SHA-256 for every classification."
+    }
+    if ($TrustedBootstrapSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+        throw "Inno compilation requires the reviewed trusted bootstrap SHA-256."
+    }
     $Arguments = @(
         "/Qp",
         "/DStageRoot=$StageRoot",
@@ -399,7 +411,9 @@ function Invoke-InnoCompile {
         "/DAppVersion=$Version",
         "/DNumericVersion=$Version.0",
         "/DArtifactFileName=$ArtifactBaseName",
-        "/DMinimumWindowsVersion=$MinimumWindowsVersion"
+        "/DMinimumWindowsVersion=$MinimumWindowsVersion",
+        "/DChildReleaseManifestSha256=$ChildReleaseManifestSha256",
+        "/DTrustedBootstrapSha256=$TrustedBootstrapSha256"
     )
     if ($SigningEnabled) {
         if ($script:ExpectedSignToolSha256) {
@@ -408,6 +422,9 @@ function Invoke-InnoCompile {
                 -ExpectedSha256 $script:ExpectedSignToolSha256)
         }
         $Arguments += @("/DEnableSigning=1", "/Srelease_signer=$SigningCommand")
+    }
+    elseif ($InternalUnsignedRelease) {
+        $Arguments += "/DInternalUnsignedRelease=1"
     }
     $Arguments += $ScriptPath
     if ($script:ExpectedInnoCompilerSha256) {
@@ -432,6 +449,7 @@ foreach ($Required in @(
     (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardEnterpriseAgent.iss"),
     (Join-Path $RepositoryRoot "packaging\windows\inno\languages\ChineseSimplified.isl"),
     (Join-Path $RepositoryRoot "packaging\windows\assets\Open-MineGuardPlatformControlCenter.ps1"),
+    (Join-Path $RepositoryRoot "packaging\windows\assets\Invoke-MineGuardTrustedProductInstall.ps1"),
     (Join-Path $RepositoryRoot "scripts\Test-WindowsBinaryRelease.ps1")
 )) {
     if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
@@ -446,6 +464,95 @@ $ActualInnoChineseLanguageSha256 = Assert-ApprovedFileSha256 `
     -Name 'Inno Simplified Chinese language input' `
     -PathValue $InnoChineseLanguagePath `
     -ExpectedSha256 $ExpectedInnoChineseLanguageSha256
+$TrustedBootstrapPath = Join-Path $RepositoryRoot `
+    "packaging\windows\assets\Invoke-MineGuardTrustedProductInstall.ps1"
+$ExpectedTrustedBootstrapSha256 = `
+    "50031ecdad57168aac0d2a3cef3863a3160ff04f45d8c930d5593ca90818bf1f"
+$ActualTrustedBootstrapSha256 = Assert-ApprovedFileSha256 `
+    -Name 'trusted product install bootstrap' `
+    -PathValue $TrustedBootstrapPath `
+    -ExpectedSha256 $ExpectedTrustedBootstrapSha256
+
+if ($RequireSigned -and $InternalUnsignedRelease) {
+    throw "RequireSigned and InternalUnsignedRelease are mutually exclusive release classifications."
+}
+
+$UsingTestOnlyModelTrust = $false
+if ([string]::IsNullOrWhiteSpace($ModelIssuerTrustStore)) {
+    if ($RequireSigned -or $InternalUnsignedRelease) {
+        throw (
+            "A formal release requires ModelIssuerTrustStore " +
+            "and ExpectedModelIssuerTrustStoreSha256 from protected release inputs."
+        )
+    }
+    $ModelIssuerTrustStore = Join-Path $RepositoryRoot `
+        "agent\packaging\windows\model-credential-trust.TEST-ONLY.json"
+    $UsingTestOnlyModelTrust = $true
+    Write-Warning (
+        "Using the explicit TEST-ONLY model issuer trust store for this " +
+        "unsigned release."
+    )
+}
+$ModelIssuerTrustStore = Get-SafeLocalNtfsPath `
+    -Name "ModelIssuerTrustStore" -PathValue $ModelIssuerTrustStore
+if (-not (Test-Path -LiteralPath $ModelIssuerTrustStore -PathType Leaf)) {
+    throw "ModelIssuerTrustStore does not exist: $ModelIssuerTrustStore"
+}
+$UsingTestOnlyModelTrust = $UsingTestOnlyModelTrust -or
+    ([IO.Path]::GetFileName($ModelIssuerTrustStore) -match '(?i)TEST-ONLY')
+$ExpectedModelIssuerTrustStoreSha256 = `
+    $ExpectedModelIssuerTrustStoreSha256.Trim().ToLowerInvariant()
+if ($ExpectedModelIssuerTrustStoreSha256) {
+    Assert-Sha256Text -Name "ExpectedModelIssuerTrustStoreSha256" `
+        -Value $ExpectedModelIssuerTrustStoreSha256
+}
+if (($RequireSigned -or $InternalUnsignedRelease) -and
+    [string]::IsNullOrWhiteSpace($ExpectedModelIssuerTrustStoreSha256)) {
+    throw (
+        "A formal release requires the independently supplied " +
+        "ExpectedModelIssuerTrustStoreSha256."
+    )
+}
+if (($RequireSigned -or $InternalUnsignedRelease) -and $UsingTestOnlyModelTrust) {
+    throw "A formal release refuses the TEST-ONLY model issuer trust store."
+}
+$ActualModelIssuerTrustStoreSha256 = Assert-ApprovedFileSha256 `
+    -Name "ModelIssuerTrustStore" -PathValue $ModelIssuerTrustStore `
+    -ExpectedSha256 $ExpectedModelIssuerTrustStoreSha256
+$KnownTestOnlyIssuerId = "mineguard-test-only"
+$KnownTestOnlyIssuerKeyId = "test-only-no-private-key-2026"
+$KnownTestOnlyPublicKeySha256 = `
+    "e3df516dc9ce7cce905597484d794625a6ac4e6ac2a11dfc07dbc8e2f15fb413"
+try {
+    $ModelTrustDocument = Get-Content -LiteralPath $ModelIssuerTrustStore `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+} catch {
+    throw "ModelIssuerTrustStore is not valid JSON: $($_.Exception.Message)"
+}
+foreach ($Issuer in @($ModelTrustDocument.issuers)) {
+    if ([string]$Issuer.issuer_id -eq $KnownTestOnlyIssuerId -or
+        [string]$Issuer.issuer_key_id -eq $KnownTestOnlyIssuerKeyId -or
+        ([string]$Issuer.public_key_sha256).ToLowerInvariant() -eq
+            $KnownTestOnlyPublicKeySha256) {
+        $UsingTestOnlyModelTrust = $true
+    }
+}
+$BundledTestOnlyModelTrustStore = Join-Path $RepositoryRoot `
+    "agent\packaging\windows\model-credential-trust.TEST-ONLY.json"
+if (-not (Test-Path -LiteralPath $BundledTestOnlyModelTrustStore -PathType Leaf)) {
+    throw "The explicit TEST-ONLY model issuer trust store is missing."
+}
+$BundledTestOnlyModelTrustStoreSha256 = Assert-ApprovedFileSha256 `
+    -Name "BundledTestOnlyModelTrustStore" `
+    -PathValue $BundledTestOnlyModelTrustStore -ExpectedSha256 ""
+$UsingTestOnlyModelTrust = $UsingTestOnlyModelTrust -or
+    $ActualModelIssuerTrustStoreSha256 -eq $BundledTestOnlyModelTrustStoreSha256
+if (($RequireSigned -or $InternalUnsignedRelease) -and $UsingTestOnlyModelTrust) {
+    throw (
+        "A formal release refuses the known TEST-ONLY model issuer identity " +
+        "or public key, regardless of filename or JSON formatting."
+    )
+}
 
 $Git = Get-Command "git.exe" -ErrorAction SilentlyContinue
 $SourceRevision = $null
@@ -483,29 +590,31 @@ if ($RequireSigned -and -not $SigningEnabled) {
     throw "RequireSigned requires the complete Authenticode signing configuration."
 }
 if ($LegacyWindowsServer2012R2CompatibilityTest -and
-    ($RequireSigned -or $SigningEnabled)) {
+    ($RequireSigned -or $SigningEnabled -or $InternalUnsignedRelease)) {
     throw "The Windows Server 2012 R2 compatibility profile is an unsigned, target-unvalidated legacy test and cannot be signed as a production candidate."
 }
 if ($LegacyWindowsServer2012R2CompatibilityTest) {
     $TestInstallerFailurePropagation = $true
     $TestInstallerLifecycle = $true
 }
-if ($RequireSigned) {
+if ($RequireSigned -or $InternalUnsignedRelease) {
     if ($AllowDirtySource -or $SourceDirty -ne $false -or [string]::IsNullOrWhiteSpace($SourceRevision)) {
-        throw "A signed production candidate requires a clean, revision-controlled source tree."
+        throw "A formal release requires a clean, revision-controlled source tree."
     }
     if ($AllowNuitkaToolDownloads) {
-        throw "A signed production candidate cannot allow Nuitka tool downloads; pre-stage the approved cache."
+        throw "A formal release cannot allow Nuitka tool downloads; pre-stage the approved cache."
     }
     if (-not $Wheelhouse -or -not $WheelhouseManifest -or
         -not $ExpectedWheelhouseManifestSha256) {
-        throw "A signed production candidate requires an approved offline Wheelhouse, WheelhouseManifest and its external expected SHA-256."
+        throw "A formal release requires an approved offline Wheelhouse, WheelhouseManifest and its external expected SHA-256."
     }
     if ([string]::IsNullOrWhiteSpace($ExpectedPythonPatchVersion) -or
         [string]::IsNullOrWhiteSpace($ExpectedPythonExecutableSha256) -or
-        [string]::IsNullOrWhiteSpace($ExpectedInnoCompilerSha256) -or
-        [string]::IsNullOrWhiteSpace($ExpectedSignToolSha256)) {
-        throw "A signed production candidate requires protected expected Python patch, Python executable SHA-256, Inno SHA-256 and SignTool SHA-256 values."
+        [string]::IsNullOrWhiteSpace($ExpectedInnoCompilerSha256)) {
+        throw "A formal release requires protected expected Python patch, Python executable SHA-256 and Inno SHA-256 values."
+    }
+    if ($RequireSigned -and [string]::IsNullOrWhiteSpace($ExpectedSignToolSha256)) {
+        throw "A signed production candidate also requires the protected expected SignTool SHA-256."
     }
     $TestInstallerFailurePropagation = $true
     $TestInstallerLifecycle = $true
@@ -595,8 +704,8 @@ if ($Wheelhouse) {
             -ManifestPath $WheelhouseManifest `
             -ExpectedManifestSha256 $ExpectedWheelhouseManifestSha256
     }
-    elseif ($RequireSigned) {
-        throw "WheelhouseManifest is mandatory for signed production candidates."
+    elseif ($RequireSigned -or $InternalUnsignedRelease) {
+        throw "WheelhouseManifest is mandatory for formal releases."
     }
     else {
         Write-Warning "Wheelhouse was not accompanied by a verified manifest; this is allowed only for unsigned test builds."
@@ -645,8 +754,8 @@ $SafeTempRoot = Get-SafeLocalNtfsPath -Name 'TemporaryDirectory' `
     -PathValue ([IO.Path]::GetTempPath().TrimEnd('\'))
 $ResolvedCompilerCacheReadyMarker = $null
 if ($UnsignedCompilerCacheReadyMarker) {
-    if ($SigningEnabled -or $RequireSigned) {
-        throw "UnsignedCompilerCacheReadyMarker is forbidden for signed production candidates."
+    if ($SigningEnabled -or $RequireSigned -or $InternalUnsignedRelease) {
+        throw "UnsignedCompilerCacheReadyMarker is forbidden for formal releases."
     }
     $ResolvedCompilerCacheReadyMarker = Get-SafeLocalNtfsPath `
         -Name 'UnsignedCompilerCacheReadyMarker' `
@@ -686,6 +795,9 @@ try {
     if ($Wheelhouse) { $PlatformArguments += @("-Wheelhouse", $Wheelhouse) }
     if ($AllowNuitkaToolDownloads) { $PlatformArguments += "-AllowNuitkaToolDownloads" }
     if ($AllowDirtySource) { $PlatformArguments += "-AllowDirtySource" }
+    if ($InternalUnsignedRelease) {
+        $PlatformArguments += "-InternalUnsignedRelease"
+    }
     if ($SigningEnabled) {
         $PlatformArguments += @(
             "-SignToolPath", $SignToolPath,
@@ -711,10 +823,20 @@ try {
         "-ArtifactsRoot", $AgentOutput,
         "-PythonExecutable", $ResolvedPythonExecutable,
         "-ExpectedPythonPatchVersion", $PythonIdentity.version,
-        "-ExpectedPythonExecutableSha256", $ActualPythonExecutableSha256
+        "-ExpectedPythonExecutableSha256", $ActualPythonExecutableSha256,
+        "-ModelIssuerTrustStore", $ModelIssuerTrustStore
     )
+    if ($ExpectedModelIssuerTrustStoreSha256) {
+        $AgentArguments += @(
+            "-ExpectedModelIssuerTrustStoreSha256",
+            $ExpectedModelIssuerTrustStoreSha256
+        )
+    }
     if ($Wheelhouse) { $AgentArguments += @("-Wheelhouse", $Wheelhouse) }
     if ($AllowNuitkaToolDownloads) { $AgentArguments += "-AllowNuitkaToolDownloads" }
+    if ($InternalUnsignedRelease) {
+        $AgentArguments += "-InternalUnsignedRelease"
+    }
     if ($SigningEnabled) {
         $AgentArguments += @(
             "-SignToolPath", $SignToolPath,
@@ -743,7 +865,7 @@ try {
             -ManifestPath $WheelhouseManifest `
             -ExpectedManifestSha256 $ExpectedWheelhouseManifestSha256
     }
-    if ($RequireSigned) {
+    if ($RequireSigned -or $InternalUnsignedRelease) {
         Assert-CleanGitSnapshot -GitPath $Git.Source -Root $RepositoryRoot `
             -ExpectedRevision $SourceRevision
     }
@@ -765,6 +887,9 @@ try {
         "-AgentStage", $AgentStage
     )
     if ($SigningEnabled) { $AuditArguments += "-RequireSigned" }
+    elseif ($InternalUnsignedRelease) {
+        $AuditArguments += "-ExpectInternalUnsignedRelease"
+    }
     else { $AuditArguments += "-ExpectUnsignedTestOnly" }
     Invoke-NativeChecked -FilePath "powershell.exe" -ArgumentList $AuditArguments -Label "Pre-installer binary audit"
 
@@ -794,6 +919,8 @@ try {
     }
     $ClassificationSuffix = if ($SigningEnabled) {
         ""
+    } elseif ($InternalUnsignedRelease) {
+        "-INTERNAL-UNSIGNED"
     } else {
         "$CompatibilitySuffix-UNSIGNED-TEST-ONLY"
     }
@@ -807,18 +934,32 @@ try {
             $TimestampUrl.AbsoluteUri + '$q /td SHA256 $f'
     }
     $AssetsRoot = Join-Path $RepositoryRoot "packaging\windows\assets"
+    $PlatformChildManifestSha256 = (Get-FileHash -LiteralPath (
+        Join-Path $PlatformStage "release-manifest.json"
+    ) -Algorithm SHA256).Hash
+    $AgentChildManifestSha256 = (Get-FileHash -LiteralPath (
+        Join-Path $AgentStage "release-manifest.json"
+    ) -Algorithm SHA256).Hash
     $PlatformInstaller = Invoke-InnoCompile `
         -ScriptPath (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardPlatform.iss") `
         -StageRoot $PlatformStage -AssetsRoot $AssetsRoot -ArtifactsRoot $ArtifactStage `
         -Version $PlatformVersion -ArtifactBaseName $PlatformArtifactBase `
         -MinimumWindowsVersion $MinimumWindowsVersion `
-        -SigningEnabled $SigningEnabled -SigningCommand $SignToolCommand
+        -SigningEnabled $SigningEnabled `
+        -InternalUnsignedRelease $InternalUnsignedRelease `
+        -ChildReleaseManifestSha256 $PlatformChildManifestSha256 `
+        -TrustedBootstrapSha256 $ActualTrustedBootstrapSha256 `
+        -SigningCommand $SignToolCommand
     $AgentInstaller = Invoke-InnoCompile `
         -ScriptPath (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardEnterpriseAgent.iss") `
         -StageRoot $AgentStage -AssetsRoot $AssetsRoot -ArtifactsRoot $ArtifactStage `
         -Version $AgentVersion -ArtifactBaseName $AgentArtifactBase `
         -MinimumWindowsVersion $MinimumWindowsVersion `
-        -SigningEnabled $SigningEnabled -SigningCommand $SignToolCommand
+        -SigningEnabled $SigningEnabled `
+        -InternalUnsignedRelease $InternalUnsignedRelease `
+        -ChildReleaseManifestSha256 $AgentChildManifestSha256 `
+        -TrustedBootstrapSha256 $ActualTrustedBootstrapSha256 `
+        -SigningCommand $SignToolCommand
 
     $PlatformMetadata = Get-Content -LiteralPath (Join-Path $PlatformStage "build-metadata.json") -Raw -Encoding UTF8 | ConvertFrom-Json
     $AgentMetadata = Get-Content -LiteralPath (Join-Path $AgentStage "build-metadata.json") -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -826,22 +967,56 @@ try {
         [string]$AgentMetadata.python -ne $PythonIdentity.version) {
         throw "Both child builders must use the same resolved root python.exe patch version."
     }
-    if ($RequireSigned) {
+    $ExpectedChildClassification = if ($SigningEnabled) {
+        "signed-production-candidate"
+    } elseif ($InternalUnsignedRelease) {
+        "unsigned-internal-release"
+    } else {
+        $null
+    }
+    if ($ExpectedChildClassification -and
+        ([string]$PlatformMetadata.releaseClassification -ne
+            $ExpectedChildClassification -or
+        [string]$AgentMetadata.release_classification -ne
+            $ExpectedChildClassification)) {
+        throw "Child binary release classifications do not match the root release mode."
+    }
+    if ($RequireSigned -or $InternalUnsignedRelease) {
         if ([string]$PlatformMetadata.python -ne $ExpectedPythonPatchVersion -or
             [string]$AgentMetadata.python -ne $ExpectedPythonPatchVersion) {
-            throw "Signed child metadata does not match ExpectedPythonPatchVersion."
+            throw "Strict child metadata does not match ExpectedPythonPatchVersion."
         }
         if ([string]$PlatformMetadata.sourceRevision -ne $SourceRevision -or
             $PlatformMetadata.sourceTreeDirty -ne $false -or
             [string]$AgentMetadata.source_revision -ne $SourceRevision -or
             $AgentMetadata.source_dirty -ne $false) {
-            throw "A signed child binary does not identify the clean root source revision."
+            throw "A strict child binary does not identify the clean root source revision."
+        }
+        if (-not [bool]$AgentMetadata.model_credential_trust_external_anchor_verified -or
+            [bool]$AgentMetadata.model_credential_trust_test_only -or
+            [string]$AgentMetadata.model_credential_trust_sha256 -ne
+                $ExpectedModelIssuerTrustStoreSha256) {
+            throw "The strict Agent child did not retain the approved model issuer trust anchor."
         }
     }
     $Installers = @()
     foreach ($InstallerDefinition in @(
-        [pscustomobject]@{ product = "MineGuard Platform"; id = "platform"; version = $PlatformVersion; path = $PlatformInstaller },
-        [pscustomobject]@{ product = "MineGuard Enterprise Agent"; id = "enterprise-agent"; version = $AgentVersion; path = $AgentInstaller }
+        [pscustomobject]@{
+            product = "MineGuard Platform"
+            id = "platform"
+            version = $PlatformVersion
+            path = $PlatformInstaller
+            runtime = (Join-Path $PlatformStage "runtime\MineGuardPlatform.exe")
+            child_manifest = (Join-Path $PlatformStage "release-manifest.json")
+        },
+        [pscustomobject]@{
+            product = "MineGuard Enterprise Agent"
+            id = "enterprise-agent"
+            version = $AgentVersion
+            path = $AgentInstaller
+            runtime = (Join-Path $AgentStage "runtime\MineGuardEnterpriseAgent.exe")
+            child_manifest = (Join-Path $AgentStage "release-manifest.json")
+        }
     )) {
         $Signature = Get-AuthenticodeSignature -LiteralPath $InstallerDefinition.path
         if ($SigningEnabled -and ($Signature.Status -ne "Valid" -or $null -eq $Signature.TimeStamperCertificate)) {
@@ -861,7 +1036,7 @@ try {
             throw "Installer signer thumbprint does not match the configured certificate: $($InstallerDefinition.path)"
         }
         if (-not $SigningEnabled -and $Signature.Status -ne "NotSigned") {
-            throw "Unsigned-test installer has unexpected Authenticode status: $($Signature.Status)"
+            throw "Unsigned installer has unexpected Authenticode status: $($Signature.Status)"
         }
         $Installers += [ordered]@{
             product = $InstallerDefinition.product
@@ -870,6 +1045,8 @@ try {
             file = [IO.Path]::GetFileName($InstallerDefinition.path)
             bytes = [long](Get-Item -LiteralPath $InstallerDefinition.path).Length
             sha256 = (Get-FileHash -LiteralPath $InstallerDefinition.path -Algorithm SHA256).Hash.ToLowerInvariant()
+            runtime_sha256 = (Get-FileHash -LiteralPath $InstallerDefinition.runtime -Algorithm SHA256).Hash.ToLowerInvariant()
+            child_release_manifest_sha256 = (Get-FileHash -LiteralPath $InstallerDefinition.child_manifest -Algorithm SHA256).Hash.ToLowerInvariant()
             authenticode_status = [string]$Signature.Status
             signer_thumbprint = $ActualSignerThumbprint
             timestamped = $null -ne $Signature.TimeStamperCertificate
@@ -877,7 +1054,22 @@ try {
     }
     $ReleaseManifest = [ordered]@{
         format = "mineguard-windows-installers-v1"
-        classification = if ($SigningEnabled) { "signed-production-candidate" } else { "unsigned-test-artifacts" }
+        classification = if ($SigningEnabled) {
+            "signed-production-candidate"
+        } elseif ($InternalUnsignedRelease) {
+            "unsigned-internal-release"
+        } else {
+            "unsigned-test-artifacts"
+        }
+        authenticity_mode = if ($SigningEnabled) {
+            "authenticode-timestamped"
+        } elseif ($InternalUnsignedRelease) {
+            "out-of-band-sha256"
+        } else {
+            "unsigned-test-only"
+        }
+        production_approved = [bool]($SigningEnabled -or $InternalUnsignedRelease)
+        installer_external_sha256_required = [bool]$InternalUnsignedRelease
         generated_utc = [DateTime]::UtcNow.ToString("o")
         source_revision = $SourceRevision
         source_dirty = $SourceDirty
@@ -911,7 +1103,16 @@ try {
         } else {
             [ordered]@{
                 id = "standard-windows-x64-v1"
-                production_approved = [bool]$SigningEnabled
+                production_approved = [bool]($SigningEnabled -or $InternalUnsignedRelease)
+                unsigned_internal_release = [bool]$InternalUnsignedRelease
+                authenticity_mode = if ($InternalUnsignedRelease) {
+                    "out-of-band-sha256"
+                } elseif ($SigningEnabled) {
+                    "authenticode-timestamped"
+                } else {
+                    "unsigned-test-only"
+                }
+                installer_external_sha256_required = [bool]$InternalUnsignedRelease
                 target_os_validation = if ($TestInstallerLifecycle) {
                     "release build-host lifecycle passed; minimum target OS was not independently attested"
                 } else {
@@ -926,6 +1127,7 @@ try {
             inno_setup = [string]$InnoVersion
             inno_setup_path_sha256 = $ActualInnoCompilerSha256
             inno_chinese_language_sha256 = $ActualInnoChineseLanguageSha256
+            trusted_product_install_bootstrap_sha256 = $ActualTrustedBootstrapSha256
             expected_inno_setup_path_sha256 = if ($ExpectedInnoCompilerSha256) {
                 $ExpectedInnoCompilerSha256.ToLowerInvariant()
             } else { $null }
@@ -951,6 +1153,16 @@ try {
             } else { $null }
             signtool_external_anchor_verified = [bool]($ExpectedSignToolSha256 -and
                 $ActualSignToolSha256 -eq $ExpectedSignToolSha256.ToLowerInvariant())
+            model_issuer_trust_sha256 = $ActualModelIssuerTrustStoreSha256
+            expected_model_issuer_trust_sha256 = if (
+                $ExpectedModelIssuerTrustStoreSha256
+            ) { $ExpectedModelIssuerTrustStoreSha256 } else { $null }
+            model_issuer_trust_external_anchor_verified = [bool](
+                $ExpectedModelIssuerTrustStoreSha256 -and
+                $ActualModelIssuerTrustStoreSha256 -eq
+                    $ExpectedModelIssuerTrustStoreSha256
+            )
+            model_issuer_trust_test_only = $UsingTestOnlyModelTrust
             platform_python = [string]$PlatformMetadata.python
             platform_nuitka = [string]$PlatformMetadata.nuitka
             platform_dependencies = $PlatformMetadata.dependencies
@@ -1012,6 +1224,9 @@ try {
             "-ApprovedAgentSignerThumbprint", $NormalizedThumbprint
         )
     }
+    elseif ($InternalUnsignedRelease) {
+        $FinalAuditArguments += "-ExpectInternalUnsignedRelease"
+    }
     else {
         $FinalAuditArguments += "-ExpectUnsignedTestOnly"
     }
@@ -1020,7 +1235,7 @@ try {
     }
     if ($TestInstallerLifecycle) { $FinalAuditArguments += "-TestInstallerLifecycle" }
     Invoke-NativeChecked -FilePath "powershell.exe" -ArgumentList $FinalAuditArguments -Label "Final installer audit"
-    if ($RequireSigned) {
+    if ($RequireSigned -or $InternalUnsignedRelease) {
         Assert-CleanGitSnapshot -GitPath $Git.Source -Root $RepositoryRoot `
             -ExpectedRevision $SourceRevision
     }
@@ -1063,6 +1278,9 @@ try {
         "-SkipRuntimeSmoke"
     )
     if ($SigningEnabled) { $PublishedAuditArguments += "-RequireSigned" }
+    elseif ($InternalUnsignedRelease) {
+        $PublishedAuditArguments += "-ExpectInternalUnsignedRelease"
+    }
     else { $PublishedAuditArguments += "-ExpectUnsignedTestOnly" }
     if ($LegacyWindowsServer2012R2CompatibilityTest) {
         $PublishedAuditArguments += "-ExpectLegacyServer2012R2CompatibilityTest"
@@ -1070,7 +1288,7 @@ try {
     Invoke-NativeChecked -FilePath "powershell.exe" `
         -ArgumentList $PublishedAuditArguments `
         -Label "Published artifact audit (pre-rename staging)"
-    if ($RequireSigned) {
+    if ($RequireSigned -or $InternalUnsignedRelease) {
         Assert-CleanGitSnapshot -GitPath $Git.Source -Root $RepositoryRoot `
             -ExpectedRevision $SourceRevision
     }
@@ -1080,7 +1298,14 @@ try {
     [IO.Directory]::Move($PublishStage, $OutputDirectory)
 
     Write-Host "MineGuard independent Windows installers created: $OutputDirectory"
-    if (-not $SigningEnabled) {
+    if ($InternalUnsignedRelease) {
+        Write-Warning (
+            "These are INTERNAL-UNSIGNED releases. Verify each installer " +
+            "against the independently delivered SHA-256 before installation; " +
+            "they do not provide Authenticode publisher identity."
+        )
+    }
+    elseif (-not $SigningEnabled) {
         Write-Warning "These are UNSIGNED-TEST-ONLY artifacts. They are not production-trusted release media."
     }
 }

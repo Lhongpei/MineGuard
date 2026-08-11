@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 license = "LicenseRef-Proprietary"
 authors = [{name = "Enterprise Reporting Agent"}]
 dependencies = [
+  "cryptography>=44,<47",
   "openpyxl>=3.1,<4",
   "xlrd>=2,<3",
   "tzdata>=2024.1; platform_system == 'Windows'",
@@ -21,6 +22,7 @@ dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 enterprise-agent = "enterprise_agent.cli:main"
+mineguard-model-issuer = "enterprise_agent.model_issuer_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -14,8 +14,10 @@
 - 异构字段映射：pipeline 提供默认值，每个 source 可分别覆盖 `timestamp_field`、`period_type`、`scope_field/scope_values`、`mapping` 和 `shifts`；不要假设 ERP、MES、火工品台账的列名和班次编码相同。
 - 月度 V3：每个来源按月形成完整 `days`、日报、零点班、八点班、四点班结构。日报
   明确携带全部 11 个原子字段；来源没有的字段保持 `null + missing`，不以 0、历史值
-  或模型结果补齐。
-- 日期覆盖：先按企业时区计算“本地今日减 `reporting_lag_days`”的应报截止日；截止日所在月从月初补到截止日，更早月份补到月末，跨月时不会提前声明未来覆盖。整日缺报也会形成 44 个明确缺失单元格。没有独立受控状态字段时，运行状态保持 `unknown`，不能仅凭产量推断停产。
+  或模型结果补齐。三个班次必须携带前 7 个生产运行原子项；销售、运输、入洗、开票
+  四项若该来源声明了对应班次映射但本期缺数则为 `null + missing`，未声明该班次口径则
+  保持稳定单元格并标记 `null + not_applicable`，不会制造虚假缺报。
+- 日期覆盖：先按企业时区计算“本地今日减 `reporting_lag_days`”的应报截止日；截止日所在月从月初补到截止日，更早月份补到月末，跨月时不会提前声明未来覆盖。整日缺报仍形成 44 个稳定单元格，并按上述班次适用性分别标记 `missing` 或 `not_applicable`。没有独立受控状态字段时，运行状态保持 `unknown`，不能仅凭产量推断停产。
 - 多来源：同一 `(client_id, draft_key, source_id)` 由 Agent 保存最新来源快照并重算；不同来源非空值冲突时 Agent 阻断，绝不后写覆盖。
 - 完整代次：所有 `required_sources` 的最新修订到齐后，最后一个事件才设置 `trigger_workflow=true`；来源修订后组合摘要变化可再次体检。
 - 采集健康：每个 source/月度草稿持久记录 `success_nonempty/success_empty/error/stability_wait`，按状态变化或有界心跳投递。必需来源空、错误、过期，或 health 未绑定 Agent 当前已完成 contribution 时，不触发就绪预检。
@@ -79,9 +81,14 @@ enterprise-connector status --config /etc/enterprise-connector/config.toml
 enterprise-connector check --config /etc/enterprise-connector/config.toml
 ```
 
-`validate` 会输出 `data_contract/atomic_metrics/mapping_coverage`。若仍是六字段旧来源，
-命令可以通过，但会在 `unmapped_metrics` 和 `warnings` 中列出五个缺口；运行时这些单元格
-只会是 `null + missing`。
+`validate` 会输出 `data_contract/atomic_metrics/mapping_coverage`。覆盖结果分别列出
+`daily_total` 的 11 项必填覆盖，以及每个班次前 7 项必填和后 4 项可选覆盖；显式
+`zero_shift.production_t` 不会被误算成日报覆盖。为兼容旧脚本，顶层 `mapped_metrics` /
+`unmapped_metrics` 继续保留，但其含义明确限定为日报覆盖。若仍是六字段旧来源，命令可以
+通过，但日报 `unmapped_metrics` 和 `warnings` 会列出五个缺口；运行时日报对应单元格只会
+是 `null + missing`，未配置的商业班次单元格是 `null + not_applicable`。机器读取方可用
+`mapping_coverage_version = 2` 识别这一 scope-aware 输出，并按
+`mapping_coverage_compatibility` 解释两个兼容字段。
 
 终端持续占用代表守护进程正在轮询，不是卡死。生产建议使用 [systemd 样例](deploy/systemd/enterprise-connector.service) 或 [Dockerfile](deploy/docker/Dockerfile)。
 
@@ -118,7 +125,7 @@ SQLite、销售/外运/入洗/普通发票 SQLite。它只创建 Agent 草稿，
 | `scope_field` | 原始日报/班次字段；通过 `scope_values` 对齐日报和三个班次 scope |
 | `sources.timestamp_field/scope_field/mapping/shifts` | 可选 source 级覆盖；未配时继承 pipeline 默认值 |
 | `reporting_lag_days` | 应报截止日相对企业本地当天的延迟天数；跨月时目标月份和快照窗口都随该截止日切换，快照记录参数和 as-of 日期 |
-| `mapping` | 目标只能是 11 个十量 V3 原子字段，或 `daily_total.production_t` 等显式单元格 |
+| `mapping` | 目标只能是 11 个十量 V3 原子字段，或 `daily_total.production_t` 等显式单元格；TOML 中带点的目标键需加引号 |
 | `required_sources` | 判断“完整来源代次”何时到齐并发出 workflow trigger；Agent 对每次成功机器导入都做修订/摘要绑定的只读体检，不能因本次未触发而漏检 |
 | `max_staleness_seconds` | 300-2592000 的整数，默认 3600；Agent allowlist 必须配同值 |
 | `max_files_per_poll/max_total_bytes/max_total_records` | file-drop 单轮总量上限，超限显式报错而不截断 |
@@ -145,6 +152,11 @@ SQLite、销售/外运/入洗/普通发票 SQLite。它只创建 Agent 草稿，
 映射错误处理并上报健康异常，不能生成“全是 null 却显示采集成功”的快照。应把该来源
 按业务约定必须出现的核心 mapping 显式配置为 `required = true`。配置文件各层均严格
 拒绝未知键，字段名拼错会在 `validate` 阶段失败，不会静默采用默认值。
+
+裸目标（如 `sales_t`）会跟随该行解析出的 scope；`current_shift.sales_t` 语义相同。
+`scope_field + scope_values` 应完整声明该来源实际提供的日报/班次口径。显式目标（如
+`"daily_total.sales_t"`）只覆盖指定 scope，适合仅有日报的销售、运输、入洗和开票台账；
+不要为了消除提示而把日报字段伪装成班次字段。
 
 如果一日内同一来源、同一班次、同一指标出现多个不同值，默认 `single` 会阻断。只有明确掌握来源口径后，才配置：
 

@@ -6,8 +6,11 @@ param(
     [string]$InstallRoot = (Join-Path $env:ProgramFiles "MineGuard\EnterpriseAgent"),
     [string]$StateRoot = (Join-Path $env:ProgramData "MineGuard\EnterpriseAgent\instances"),
     [string]$ApprovedSignerThumbprint = "",
+    [string]$ExpectedRuntimeSha256 = "",
+    [string]$ExpectedReleaseManifestSha256 = "",
     [switch]$AllowIncompleteDemo,
     [switch]$AllowUnsignedTestMedia,
+    [switch]$AllowUnsignedInternalRelease,
     [switch]$Start
 )
 
@@ -25,6 +28,10 @@ if ($PSVersionTable.PSVersion -lt [Version]"5.1") {
 $Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "This script must run in an elevated Administrator PowerShell."
+}
+if ($AllowUnsignedInternalRelease -and
+    ($AllowUnsignedTestMedia -or $AllowIncompleteDemo)) {
+    throw "-AllowUnsignedInternalRelease is a formal-only mode and cannot be combined with demo or unsigned-test switches."
 }
 $FormalServiceInstall = -not $AllowIncompleteDemo -and -not $AllowUnsignedTestMedia
 if ($FormalServiceInstall -and -not $Start) {
@@ -47,6 +54,36 @@ function Get-NormalizedApprovedSignerThumbprint {
     return $Normalized
 }
 
+function Get-NormalizedExpectedRuntimeSha256 {
+    param([string]$Value, [switch]$Required)
+    $Normalized = ($Value -replace '\s', '').ToUpperInvariant()
+    if ([string]::IsNullOrWhiteSpace($Normalized)) {
+        if ($Required) {
+            throw "INTERNAL-UNSIGNED service installation requires -ExpectedRuntimeSha256 from independently approved offline material."
+        }
+        return ""
+    }
+    if ($Normalized -cnotmatch '^[A-F0-9]{64}$') {
+        throw "ExpectedRuntimeSha256 must contain exactly 64 hexadecimal SHA-256 characters."
+    }
+    return $Normalized
+}
+
+function Get-NormalizedExpectedReleaseManifestSha256 {
+    param([string]$Value, [switch]$Required)
+    $Normalized = ($Value -replace '\s', '').ToUpperInvariant()
+    if ([string]::IsNullOrWhiteSpace($Normalized)) {
+        if ($Required) {
+            throw "INTERNAL-UNSIGNED service installation requires -ExpectedReleaseManifestSha256 from independently approved offline material."
+        }
+        return ""
+    }
+    if ($Normalized -cnotmatch '^[A-F0-9]{64}$') {
+        throw "ExpectedReleaseManifestSha256 must contain exactly 64 hexadecimal SHA-256 characters."
+    }
+    return $Normalized
+}
+
 function Assert-FormalAgentAuthenticode {
     param([string]$ExecutablePath, [string]$ApprovedThumbprint)
     $Signature = Get-AuthenticodeSignature -LiteralPath $ExecutablePath
@@ -60,6 +97,23 @@ function Assert-FormalAgentAuthenticode {
     ).ToUpperInvariant()
     if ($ActualThumbprint -ne $ApprovedThumbprint) {
         throw "The installed Agent signer does not match the independently approved signer thumbprint."
+    }
+}
+
+function Assert-InternalUnsignedRuntime {
+    param([string]$ExecutablePath, [string]$ExpectedSha256)
+    $Signature = Get-AuthenticodeSignature -LiteralPath $ExecutablePath
+    if ($Signature.Status.ToString() -ne "NotSigned" -or
+        $null -ne $Signature.SignerCertificate -or
+        $null -ne $Signature.TimeStamperCertificate) {
+        throw "An INTERNAL-UNSIGNED accepts only an actually unsigned executable; signed or invalid signatures require a different trust mode."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256)) {
+        $ActualSha256 = (Get-FileHash -LiteralPath $ExecutablePath `
+            -Algorithm SHA256).Hash.ToUpperInvariant()
+        if ($ActualSha256 -ne $ExpectedSha256) {
+            throw "Agent runtime SHA-256 does not match the independently approved value."
+        }
     }
 }
 
@@ -87,8 +141,12 @@ function Assert-InstalledAgentReleaseClassification {
         [string]$ApplicationRoot,
         [string]$ApprovedThumbprint,
         [switch]$ExpectUnsigned,
+        [switch]$ExpectInternalUnsignedRelease,
         [switch]$AllowMissingDevelopmentMetadata
     )
+    if ($ExpectUnsigned -and $ExpectInternalUnsignedRelease) {
+        throw "Unsigned test and INTERNAL-UNSIGNED classifications are mutually exclusive."
+    }
     $MetadataRoot = Join-Path $ApplicationRoot "release-metadata"
     $ManifestPath = Join-Path $MetadataRoot "release-manifest.json"
     $BuildMetadataPath = Join-Path $MetadataRoot "build-metadata.json"
@@ -137,6 +195,31 @@ function Assert-InstalledAgentReleaseClassification {
         -Name "timestamp_url" -Document "release-manifest.json"
     $BuildTimestampUrl = Get-RequiredReleaseNullableString -Object $BuildMetadata `
         -Name "timestamp_url" -Document "build-metadata.json"
+    $ManifestClassificationProperty = `
+        $Manifest.PSObject.Properties["release_classification"]
+    $BuildClassificationProperty = `
+        $BuildMetadata.PSObject.Properties["release_classification"]
+    $ManifestClassification = if ($null -eq $ManifestClassificationProperty) {
+        ""
+    } elseif ($ManifestClassificationProperty.Value -is [string]) {
+        [string]$ManifestClassificationProperty.Value
+    } else {
+        throw "release-manifest.json release_classification must be a JSON string."
+    }
+    $BuildClassification = if ($null -eq $BuildClassificationProperty) {
+        ""
+    } elseif ($BuildClassificationProperty.Value -is [string]) {
+        [string]$BuildClassificationProperty.Value
+    } else {
+        throw "build-metadata.json release_classification must be a JSON string."
+    }
+    if ($ManifestClassification -ne $BuildClassification -or
+        $ManifestClassification -notin @(
+            "", "signed-production-candidate",
+            "unsigned-internal-release", "unsigned-test-only"
+        )) {
+        throw "Installed Agent release classifications are missing, inconsistent or unsupported."
+    }
     $ManifestThumbprint = ($ManifestThumbprint -replace '\s', '').ToUpperInvariant()
     $BuildThumbprint = ($BuildThumbprint -replace '\s', '').ToUpperInvariant()
     if ($ManifestSigned -ne $BuildSigned -or
@@ -145,6 +228,10 @@ function Assert-InstalledAgentReleaseClassification {
         throw "Installed Agent signature classification booleans are inconsistent."
     }
     if ($ExpectUnsigned) {
+        if ($ManifestClassification -and
+            $ManifestClassification -ne "unsigned-test-only") {
+            throw "Unsigned test service requires unsigned-test-only metadata."
+        }
         if ($ManifestSigned -or
             -not [string]::IsNullOrWhiteSpace($ManifestThumbprint) -or
             -not [string]::IsNullOrWhiteSpace($BuildThumbprint) -or
@@ -153,6 +240,21 @@ function Assert-InstalledAgentReleaseClassification {
             throw "Unsigned test service requires metadata classified as unsigned with no signer or timestamp claim."
         }
         return
+    }
+    if ($ExpectInternalUnsignedRelease) {
+        if ($ManifestClassification -ne "unsigned-internal-release" -or
+            $ManifestSigned -or
+            -not [string]::IsNullOrWhiteSpace($ManifestThumbprint) -or
+            -not [string]::IsNullOrWhiteSpace($BuildThumbprint) -or
+            -not [string]::IsNullOrWhiteSpace($ManifestTimestampUrl) -or
+            -not [string]::IsNullOrWhiteSpace($BuildTimestampUrl)) {
+            throw "An INTERNAL-UNSIGNED service requires explicitly classified unsigned metadata with no signer or timestamp claim."
+        }
+        return
+    }
+    if ($ManifestClassification -and
+        $ManifestClassification -ne "signed-production-candidate") {
+        throw "Signed formal service requires signed-production-candidate metadata."
     }
     $TimestampUri = $null
     if (-not $ManifestSigned -or
@@ -164,6 +266,157 @@ function Assert-InstalledAgentReleaseClassification {
         [string]::IsNullOrWhiteSpace($TimestampUri.DnsSafeHost) -or
         -not [string]::IsNullOrWhiteSpace($TimestampUri.UserInfo)) {
         throw "Installed Agent metadata does not classify the binary under the independently approved signer and HTTPS timestamp contract."
+    }
+}
+
+function Assert-InstalledAgentReleaseTree {
+    param(
+        [string]$ApplicationRoot,
+        [string]$ExpectedManifestSha256
+    )
+    $MetadataRoot = Join-Path $ApplicationRoot "release-metadata"
+    $RuntimeRoot = Join-Path $ApplicationRoot "runtime"
+    $DeployRoot = Join-Path $ApplicationRoot "deploy\windows"
+    $ManifestPath = Join-Path $MetadataRoot "release-manifest.json"
+    $ChecksumsPath = Join-Path $MetadataRoot "SHA256SUMS.txt"
+    foreach ($Tree in @($RuntimeRoot, $DeployRoot, $MetadataRoot)) {
+        Assert-OrdinaryDirectoryTree -Name "Installed Agent release tree" -Root $Tree
+    }
+    Assert-OrdinaryFile -Name "Installed release manifest" `
+        -PathValue $ManifestPath -MaximumBytes 8388608
+    Assert-OrdinaryFile -Name "Installed release checksums" `
+        -PathValue $ChecksumsPath -MaximumBytes 16777216
+    $ActualManifestSha256 = (Get-FileHash -LiteralPath $ManifestPath `
+        -Algorithm SHA256).Hash.ToUpperInvariant()
+    if ($ActualManifestSha256 -ne $ExpectedManifestSha256) {
+        throw "Installed Agent release-manifest SHA-256 does not match the independently approved value."
+    }
+    try {
+        $Manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+    }
+    catch { throw "Installed Agent release manifest is invalid JSON." }
+    if ($Manifest.format -ne "mineguard-enterprise-agent-windows-binary-v1" -or
+        $Manifest.product -ne "MineGuard Enterprise Agent" -or
+        $Manifest.architecture -ne "x64" -or
+        $Manifest.entrypoint -ne "runtime/MineGuardEnterpriseAgent.exe") {
+        throw "Installed Agent release manifest has the wrong product identity."
+    }
+
+    $Expected = @{}
+    foreach ($Entry in @($Manifest.files)) {
+        $Relative = [string]$Entry.path
+        if ([string]::IsNullOrWhiteSpace($Relative) -or
+            [IO.Path]::IsPathRooted($Relative) -or $Relative.Contains(':') -or
+            $Relative.Contains('\') -or $Relative -ne $Relative.Trim() -or
+            ($Relative.Split('/') -contains '') -or
+            ($Relative.Split('/') -contains '.') -or
+            ($Relative.Split('/') -contains '..') -or
+            $Relative -in @("release-manifest.json", "SHA256SUMS.txt") -or
+            $Expected.ContainsKey($Relative)) {
+            throw "Installed Agent release manifest contains an unsafe or duplicate path: $Relative"
+        }
+        $DeclaredBytes = 0L
+        if (-not [long]::TryParse([string]$Entry.bytes, [ref]$DeclaredBytes) -or
+            $DeclaredBytes -lt 0 -or [string]$Entry.sha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+            throw "Installed Agent release manifest contains invalid file evidence: $Relative"
+        }
+        $InstalledPath = if ($Relative.StartsWith(
+                "runtime/", [StringComparison]::Ordinal
+            )) {
+            Join-Path $RuntimeRoot $Relative.Substring("runtime/".Length).Replace('/', '\')
+        }
+        elseif ($Relative.StartsWith(
+                "deploy/windows/", [StringComparison]::Ordinal
+            )) {
+            Join-Path $DeployRoot $Relative.Substring("deploy/windows/".Length).Replace('/', '\')
+        }
+        elseif ($Relative -in @(
+                "VERSION.txt", "build-metadata.json",
+                "model-credential-trust.json"
+            )) {
+            Join-Path $MetadataRoot $Relative
+        }
+        else {
+            throw "Installed Agent release manifest contains an unmappable path: $Relative"
+        }
+        Assert-OrdinaryFile -Name "Installed Agent release file $Relative" `
+            -PathValue $InstalledPath
+        $Item = Get-Item -LiteralPath $InstalledPath -Force
+        $Digest = (Get-FileHash -LiteralPath $InstalledPath -Algorithm SHA256).Hash
+        if ([long]$Item.Length -ne $DeclaredBytes -or
+            -not $Digest.Equals(
+                [string]$Entry.sha256, [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "Installed Agent release tree does not match the approved manifest: $Relative"
+        }
+        $Expected[$Relative] = $InstalledPath
+    }
+    if ($Expected.Count -eq 0 -or
+        -not $Expected.ContainsKey("runtime/MineGuardEnterpriseAgent.exe")) {
+        throw "Installed Agent release manifest has no executable file set."
+    }
+
+    $Actual = @{}
+    foreach ($File in Get-ChildItem -LiteralPath $RuntimeRoot -File -Recurse -Force) {
+        $Relative = "runtime/" + $File.FullName.Substring(
+            $RuntimeRoot.Length
+        ).TrimStart('\').Replace('\', '/')
+        $Actual[$Relative] = $File.FullName
+    }
+    foreach ($File in Get-ChildItem -LiteralPath $DeployRoot -File -Recurse -Force) {
+        $Relative = "deploy/windows/" + $File.FullName.Substring(
+            $DeployRoot.Length
+        ).TrimStart('\').Replace('\', '/')
+        if ($Actual.ContainsKey($Relative)) {
+            throw "Installed Agent release has a duplicate mapped path: $Relative"
+        }
+        $Actual[$Relative] = $File.FullName
+    }
+    foreach ($File in Get-ChildItem -LiteralPath $MetadataRoot -File -Recurse -Force) {
+        $Relative = $File.FullName.Substring($MetadataRoot.Length).TrimStart('\').Replace('\', '/')
+        if ($Relative -in @("release-manifest.json", "SHA256SUMS.txt")) {
+            continue
+        }
+        if ($Relative -notin @(
+                "VERSION.txt", "build-metadata.json",
+                "model-credential-trust.json"
+            ) -or $Actual.ContainsKey($Relative)) {
+            throw "Installed Agent release metadata has an unexpected path: $Relative"
+        }
+        $Actual[$Relative] = $File.FullName
+    }
+    if ($Actual.Count -ne $Expected.Count) {
+        throw "Installed Agent active file set differs from the approved release manifest."
+    }
+    foreach ($Relative in $Actual.Keys) {
+        if (-not $Expected.ContainsKey($Relative)) {
+            throw "Installed Agent release contains an unapproved file: $Relative"
+        }
+    }
+
+    $ChecksumClaims = @{}
+    foreach ($Line in Get-Content -LiteralPath $ChecksumsPath -Encoding UTF8) {
+        if ($Line -notmatch '^(?<hash>[A-Fa-f0-9]{64}) \*(?<path>[^\r\n]+)$') {
+            throw "Installed Agent SHA256SUMS.txt has an invalid line."
+        }
+        $Relative = [string]$Matches['path']
+        if ($ChecksumClaims.ContainsKey($Relative)) {
+            throw "Installed Agent SHA256SUMS.txt contains a duplicate path: $Relative"
+        }
+        $ChecksumClaims[$Relative] = ([string]$Matches['hash']).ToUpperInvariant()
+    }
+    if ($ChecksumClaims.Count -ne ($Expected.Count + 1) -or
+        -not $ChecksumClaims.ContainsKey("release-manifest.json") -or
+        $ChecksumClaims["release-manifest.json"] -ne $ActualManifestSha256) {
+        throw "Installed Agent SHA256SUMS.txt does not bind the approved release manifest."
+    }
+    foreach ($Entry in @($Manifest.files)) {
+        $Relative = [string]$Entry.path
+        if (-not $ChecksumClaims.ContainsKey($Relative) -or
+            $ChecksumClaims[$Relative] -ne ([string]$Entry.sha256).ToUpperInvariant()) {
+            throw "Installed Agent SHA256SUMS.txt disagrees with the approved manifest: $Relative"
+        }
     }
 }
 
@@ -407,6 +660,18 @@ function Invoke-NativeChecked {
 
 function Test-EAConfigurationEnvironmentName {
     param([string]$Name)
+    if ($Name -in @(
+        "MINEGUARD_AGENT_API_KEY",
+        "MINEGUARD_AGENT_BASE_URL",
+        "MINEGUARD_AGENT_MODEL",
+        "MINEGUARD_AGENT_TIMEOUT_SECONDS",
+        "MINEGUARD_AGENT_MAX_RETRIES",
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
+        "MINEGUARD_AGENT_MODEL_TRUST_STORE"
+    )) {
+        return $true
+    }
     foreach ($Prefix in @(
         "ENTERPRISE_", "PLATFORM_", "REGULATORY_", "AGENT_V2_",
         "DEEPSEEK_", "COAL_NEWS_", "MINEGUARD_SERVICE_"
@@ -423,7 +688,8 @@ function Invoke-IsolatedAgentConfigCheck {
         [string]$ExecutablePath,
         [string[]]$ArgumentList,
         [string]$ProductionMode,
-        [string]$FourEyesRequired
+        [string]$FourEyesRequired,
+        [string]$ProvisioningManagedRequired
     )
     $OriginalEnvironment = @{}
     foreach ($Entry in @(Get-ChildItem Env:)) {
@@ -443,6 +709,11 @@ function Invoke-IsolatedAgentConfigCheck {
         )
         [Environment]::SetEnvironmentVariable(
             "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED", $FourEyesRequired,
+            [EnvironmentVariableTarget]::Process
+        )
+        [Environment]::SetEnvironmentVariable(
+            "MINEGUARD_SERVICE_PROVISIONING_MANAGED_REQUIRED",
+            $ProvisioningManagedRequired,
             [EnvironmentVariableTarget]::Process
         )
         Invoke-NativeChecked -FilePath $ExecutablePath -ArgumentList $ArgumentList
@@ -612,7 +883,18 @@ Assert-OrdinaryFile -Name "Agent health script" -PathValue $HealthScriptPath -Ma
 Assert-OrdinaryFile -Name "Agent executable" -PathValue $AgentExecutable
 
 $ApprovedSignerThumbprint = Get-NormalizedApprovedSignerThumbprint `
-    -Value $ApprovedSignerThumbprint -AllowEmpty:$AllowUnsignedTestMedia
+    -Value $ApprovedSignerThumbprint `
+    -AllowEmpty:($AllowUnsignedTestMedia -or $AllowUnsignedInternalRelease)
+$ExpectedRuntimeSha256 = Get-NormalizedExpectedRuntimeSha256 `
+    -Value $ExpectedRuntimeSha256
+$ExpectedReleaseManifestSha256 = Get-NormalizedExpectedReleaseManifestSha256 `
+    -Value $ExpectedReleaseManifestSha256 `
+    -Required:$AllowUnsignedInternalRelease
+if (-not $AllowUnsignedInternalRelease -and
+    (-not [string]::IsNullOrWhiteSpace($ExpectedRuntimeSha256) -or
+        -not [string]::IsNullOrWhiteSpace($ExpectedReleaseManifestSha256))) {
+    throw "Runtime/release-manifest SHA-256 approvals are reserved for -AllowUnsignedInternalRelease."
+}
 if ($AllowUnsignedTestMedia) {
     if (-not $AllowIncompleteDemo) {
         throw "-AllowUnsignedTestMedia requires -AllowIncompleteDemo so an unsigned service can never enter production mode."
@@ -630,6 +912,22 @@ if ($AllowUnsignedTestMedia) {
         throw "-AllowUnsignedTestMedia accepts only an actually unsigned executable; signed or invalid signatures cannot bypass formal trust."
     }
     Write-Warning "UNSIGNED DEMO/TEST ONLY: this service is not production-ready."
+}
+elseif ($AllowUnsignedInternalRelease) {
+    if (-not [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint)) {
+        throw "-ApprovedSignerThumbprint cannot be combined with -AllowUnsignedInternalRelease."
+    }
+    Assert-InstalledAgentReleaseTree -ApplicationRoot $InstallRoot `
+        -ExpectedManifestSha256 $ExpectedReleaseManifestSha256
+    Assert-InstalledAgentReleaseClassification -ApplicationRoot $InstallRoot `
+        -ExpectInternalUnsignedRelease
+    Assert-InternalUnsignedRuntime -ExecutablePath $AgentExecutable `
+        -ExpectedSha256 $ExpectedRuntimeSha256
+    Write-Warning (
+        "INTERNAL-UNSIGNED: publisher identity is not available. The Agent " +
+        "complete standalone tree matched the independently approved release-manifest SHA-256; preserve that " +
+        "approval record for every install and upgrade."
+    )
 }
 else {
     if ($UsingDevelopmentExecutable) {
@@ -660,6 +958,9 @@ Assert-EAInstanceWatchAcls -Context $SharedContext
 
 $ServiceProductionMode = if ($AllowIncompleteDemo -or $AllowUnsignedTestMedia) { "false" } else { "true" }
 $ServiceFourEyesRequired = if ($AllowIncompleteDemo -or $AllowUnsignedTestMedia) { "false" } else { "true" }
+$ServiceProvisioningManagedRequired = if (
+    $AllowIncompleteDemo -or $AllowUnsignedTestMedia
+) { "false" } else { "true" }
 $CheckArguments = @(
     "--env-file", $ConfigPath, "--authoritative-env-file", "config-check"
 )
@@ -668,9 +969,20 @@ if (-not $AllowIncompleteDemo) {
 }
 Invoke-IsolatedAgentConfigCheck -ExecutablePath $AgentExecutable `
     -ArgumentList $CheckArguments -ProductionMode $ServiceProductionMode `
-    -FourEyesRequired $ServiceFourEyesRequired
+    -FourEyesRequired $ServiceFourEyesRequired `
+    -ProvisioningManagedRequired $ServiceProvisioningManagedRequired
 if ($AllowIncompleteDemo) {
     Write-Warning "Installing an explicitly marked incomplete loopback demo service. It is not production-ready."
+}
+
+if ($AllowUnsignedInternalRelease) {
+    # Re-check immediately before any service state is changed. This expected
+    # digest came from outside the unsigned media and is the trust anchor for
+    # this explicitly selected deployment mode.
+    Assert-InstalledAgentReleaseTree -ApplicationRoot $InstallRoot `
+        -ExpectedManifestSha256 $ExpectedReleaseManifestSha256
+    Assert-InternalUnsignedRuntime -ExecutablePath $AgentExecutable `
+        -ExpectedSha256 $ExpectedRuntimeSha256
 }
 
 if ($null -ne (Get-RegisteredService -ServiceId $ServiceId)) {
@@ -736,6 +1048,8 @@ try {
         "__SERVICE_ACCOUNT__" = (ConvertTo-XmlText $ServiceIdentity.AccountName)
         "__PRODUCTION_MODE__" = $ServiceProductionMode
         "__FOUR_EYES_REQUIRED__" = $ServiceFourEyesRequired
+        "__PROVISIONING_MANAGED_REQUIRED__" = `
+            $ServiceProvisioningManagedRequired
     }
     foreach ($Entry in $Replacements.GetEnumerator()) {
         $Xml = $Xml.Replace([string]$Entry.Key, [string]$Entry.Value)
@@ -907,6 +1221,10 @@ Write-Host "No user password or application secret was written to service XML or
 if ($AllowIncompleteDemo -or $AllowUnsignedTestMedia) {
     Write-Warning "DEMO/TEST ONLY service installed; remove it before formal deployment."
 }
+elseif ($AllowUnsignedInternalRelease) {
+    Write-Warning "Unsigned internal formal service installed with production, four-eyes and provisioning-managed policies enforced."
+    Write-Host "The complete Agent standalone tree matched the independently approved release-manifest SHA-256."
+}
 else {
-    Write-Host "Formal Agent signer matched independently approved thumbprint: $ApprovedSignerThumbprint"
+    Write-Host "Formal Agent signer matched the independently approved thumbprint."
 }

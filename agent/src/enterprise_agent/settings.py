@@ -7,6 +7,7 @@ serialised into drafts or logs.
 from __future__ import annotations
 
 import hmac
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,9 +15,23 @@ from urllib.parse import urlsplit
 
 from .auth import UserAccount, parse_users_json
 from .client import PlatformClientConfig
-from .five_quantity_exchange import FiveQuantityPlatformConfig, MineIdentity
+from .five_quantity_exchange import (
+    EnterpriseSigningVerificationKey,
+    FiveQuantityPlatformConfig,
+    MineIdentity,
+)
 from .llm import LLMConfig
 from .machine_ingestion import ConnectorClient, parse_connector_clients_json
+from .model_credentials import (
+    ModelCredentialError,
+    ModelCredentialStatus,
+    load_model_credential_from_environment,
+    plaintext_model_environment_names,
+)
+from .provisioning import (
+    ProvisioningStatus,
+    verify_provisioning_lock_from_environment,
+)
 from .skills import CoalNewsConfig
 
 
@@ -30,7 +45,16 @@ def split_path_list(raw: str, *, separator: str | None = None) -> tuple[str, ...
 
 
 def _integer(name: str, default: int, minimum: int, maximum: int) -> int:
-    raw = os.environ.get(name)
+    return _integer_value(name, os.environ.get(name), default, minimum, maximum)
+
+
+def _integer_value(
+    name: str,
+    raw: str | None,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
     if raw is None:
         return default
     try:
@@ -43,7 +67,16 @@ def _integer(name: str, default: int, minimum: int, maximum: int) -> int:
 
 
 def _float(name: str, default: float, minimum: float, maximum: float) -> float:
-    raw = os.environ.get(name)
+    return _float_value(name, os.environ.get(name), default, minimum, maximum)
+
+
+def _float_value(
+    name: str,
+    raw: str | None,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
     if raw is None:
         return default
     try:
@@ -65,6 +98,198 @@ def _boolean(name: str, default: bool) -> bool:
     if normalised in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be true or false")
+
+
+_MODEL_ENVIRONMENT = {
+    "api_key": "MINEGUARD_AGENT_API_KEY",
+    "base_url": "MINEGUARD_AGENT_BASE_URL",
+    "model": "MINEGUARD_AGENT_MODEL",
+    "timeout": "MINEGUARD_AGENT_TIMEOUT_SECONDS",
+    "max_retries": "MINEGUARD_AGENT_MAX_RETRIES",
+}
+_LEGACY_MODEL_ENVIRONMENT = {
+    "api_key": "DEEPSEEK_API_KEY",
+    "base_url": "DEEPSEEK_BASE_URL",
+    "model": "DEEPSEEK_MODEL",
+    "timeout": "DEEPSEEK_TIMEOUT_SECONDS",
+    "max_retries": "DEEPSEEK_MAX_RETRIES",
+}
+_MANAGED_MODEL_ENVIRONMENT = {
+    "lock": "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
+    "secret_store": "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
+}
+
+
+def _model_config_from_environment() -> LLMConfig | None:
+    """Read the provider-neutral model namespace with one-release aliases.
+
+    The legacy namespace is intentionally all-or-nothing.  Mixing it with the
+    canonical namespace could pair a credential with the wrong upstream URL,
+    so ambiguous processes fail before constructing an HTTP provider.
+    """
+
+    current = {
+        field: os.environ.get(name) for field, name in _MODEL_ENVIRONMENT.items()
+    }
+    legacy = {
+        field: os.environ.get(name) for field, name in _LEGACY_MODEL_ENVIRONMENT.items()
+    }
+    current_present = any(
+        value is not None and value.strip() for value in current.values()
+    )
+    legacy_present = any(
+        value is not None and value.strip() for value in legacy.values()
+    )
+    if current_present and legacy_present:
+        raise ValueError("MINEGUARD_AGENT_* 模型配置不能与已弃用的 DEEPSEEK_* 配置混用")
+
+    selected = current if current_present else legacy
+    names = _MODEL_ENVIRONMENT if current_present else _LEGACY_MODEL_ENVIRONMENT
+    api_key = (selected["api_key"] or "").strip()
+    if not api_key:
+        return None
+
+    if current_present:
+        missing = [
+            names[field]
+            for field in ("base_url", "model")
+            if not (selected[field] or "").strip()
+        ]
+        if missing:
+            raise ValueError(
+                "使用 MINEGUARD_AGENT_API_KEY 时必须显式配置 " + "、".join(missing)
+            )
+
+    return LLMConfig(
+        api_key=api_key,
+        base_url=(selected["base_url"] or "https://api.deepseek.com").strip(),
+        model=(selected["model"] or "deepseek-v4-flash").strip(),
+        timeout_seconds=_float_value(
+            names["timeout"],
+            selected["timeout"],
+            20.0,
+            1.0,
+            120.0,
+        ),
+        max_retries=_integer_value(
+            names["max_retries"],
+            selected["max_retries"],
+            2,
+            0,
+            5,
+        ),
+    )
+
+
+def _plaintext_model_environment_present() -> bool:
+    return bool(plaintext_model_environment_names())
+
+
+def _managed_model_config(
+    *,
+    provisioning_status: ProvisioningStatus,
+    identity: MineIdentity,
+) -> tuple[LLMConfig | None, ModelCredentialStatus]:
+    pointers = {
+        field: os.environ.get(name, "").strip()
+        for field, name in _MANAGED_MODEL_ENVIRONMENT.items()
+    }
+    present = {field for field, value in pointers.items() if value}
+    if present and present != set(_MANAGED_MODEL_ENVIRONMENT):
+        missing = [
+            name
+            for field, name in _MANAGED_MODEL_ENVIRONMENT.items()
+            if not pointers[field]
+        ]
+        raise ValueError("受管模型凭据路径必须成组配置，缺少：" + "、".join(missing))
+    if not present:
+        config = _model_config_from_environment()
+        return config, ModelCredentialStatus(
+            managed=False,
+            source=(
+                "development-environment"
+                if config is not None
+                else "not_configured"
+            ),
+        )
+    if _plaintext_model_environment_present():
+        raise ValueError("受管 .mgllm 凭据不能与任何明文模型环境变量混用")
+    if not provisioning_status.managed:
+        raise ValueError("受管模型凭据必须绑定已验签的企业 provisioning 身份")
+    if not provisioning_status.pair_id:
+        raise ValueError("已验签企业 provisioning 身份缺少 pair_id，不能启用模型凭据")
+    expected_subject = {
+        "mine_id": identity.mine_id,
+        "system_id": identity.system_id,
+        "party_id": identity.operator_id,
+        "pair_id": provisioning_status.pair_id,
+    }
+    try:
+        return load_model_credential_from_environment(
+            expected_subject=expected_subject
+        )
+    except (ModelCredentialError, OSError):
+        # A model authorization is optional to the reporting safety path.
+        # Expiry, local damage or a temporarily incompatible release trust
+        # disables all model egress, but must not take CSV review, signing or
+        # submission offline.  Never fall back to editable plaintext config.
+        return None, ModelCredentialStatus(
+            managed=True,
+            mine_id=identity.mine_id,
+            system_id=identity.system_id,
+            party_id=identity.operator_id,
+            pair_id=provisioning_status.pair_id,
+            source="managed-model-credential-unavailable",
+            state="unavailable",
+            failure_code="credential_invalid_or_unavailable",
+        )
+
+
+def _historical_enterprise_signing_keys(
+    raw: str | None,
+) -> tuple[EnterpriseSigningVerificationKey, ...]:
+    """Parse the bounded, explicit keyring used for immutable predecessors."""
+
+    if raw is None or not raw.strip():
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON must be valid JSON"
+        ) from error
+    if not isinstance(parsed, list):
+        raise ValueError(
+            "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON must be a JSON array"
+        )
+    if len(parsed) > 64:
+        raise ValueError(
+            "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON may contain at most 64 keys"
+        )
+    result: list[EnterpriseSigningVerificationKey] = []
+    for index, item in enumerate(parsed):
+        if not isinstance(item, dict) or set(item) != {"key_id", "secret"}:
+            raise ValueError(
+                "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON entry "
+                f"{index + 1} must contain exactly key_id and secret"
+            )
+        key_id = item.get("key_id")
+        secret = item.get("secret")
+        if not isinstance(key_id, str) or not isinstance(secret, str):
+            raise ValueError(
+                "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON entry "
+                f"{index + 1} key_id and secret must be strings"
+            )
+        try:
+            result.append(
+                EnterpriseSigningVerificationKey(key_id=key_id, secret=secret)
+            )
+        except ValueError as error:
+            raise ValueError(
+                "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON entry "
+                f"{index + 1} is invalid: {error}"
+            ) from error
+    return tuple(result)
 
 
 @dataclass(frozen=True)
@@ -105,6 +330,7 @@ class Settings:
     public_origin: str | None
     platform: PlatformClientConfig | None
     llm: LLMConfig | None
+    model_credential_status: ModelCredentialStatus
     coal_news: CoalNewsConfig
     agent_v2: AgentV2Config
     five_quantity_identity: MineIdentity
@@ -116,9 +342,14 @@ class Settings:
     five_quantity_demo_secret: bool
     connector_clients: tuple[ConnectorClient, ...]
     connector_max_clock_skew_seconds: int
+    provisioning_status: ProvisioningStatus
 
     @classmethod
     def from_environment(cls) -> Settings:
+        # A configured provisioning lock is an authority boundary, not an
+        # informational marker.  Verify it before interpreting any current
+        # environment value so an inherited/UI override fails closed.
+        provisioning_status = verify_provisioning_lock_from_environment()
         database_path = os.environ.get(
             "ENTERPRISE_AGENT_DB",
             "./data/enterprise-agent.db",
@@ -223,10 +454,9 @@ class Settings:
             or os.environ.get("PLATFORM_V2_SENDER_ID", "").strip()
             or os.environ.get("ENTERPRISE_SYSTEM_ID", "agent-demo-mine-001").strip()
         )
-        v2_transport_secret = (
-            os.environ.get("PLATFORM_V3_TRANSPORT_HMAC_SECRET", "")
-            or os.environ.get("PLATFORM_V2_TRANSPORT_HMAC_SECRET", "")
-        )
+        v2_transport_secret = os.environ.get(
+            "PLATFORM_V3_TRANSPORT_HMAC_SECRET", ""
+        ) or os.environ.get("PLATFORM_V2_TRANSPORT_HMAC_SECRET", "")
         explicit_message_secret = os.environ.get("ENTERPRISE_EXCHANGE_HMAC_SECRET", "")
         demo_message_secret = (
             "DEMO_ONLY_five_quantity_exchange_secret_change_before_production"
@@ -258,6 +488,11 @@ class Settings:
                 "REGULATORY_EXCHANGE_KEY_ID", "regulator-key-v2"
             ).strip(),
             message_hmac_secret=message_secret,
+            historical_enterprise_signing_keys=(
+                _historical_enterprise_signing_keys(
+                    os.environ.get("ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON")
+                )
+            ),
             previous_regulator_key_id=(
                 os.environ.get("REGULATORY_PREVIOUS_EXCHANGE_KEY_ID", "").strip()
                 or None
@@ -331,6 +566,10 @@ class Settings:
                     "PLATFORM_V2_SUBMISSION_PATH",
                     "/v2/five-quantity-submissions",
                 ).strip(),
+                analysis_path=os.environ.get(
+                    "PLATFORM_V3_ANALYSIS_PATH",
+                    "/v3/analysis-reports",
+                ).strip(),
                 ca_bundle_path=(
                     os.environ.get("PLATFORM_V3_CA_BUNDLE", "").strip()
                     or os.environ.get("PLATFORM_V2_CA_BUNDLE", "").strip()
@@ -348,18 +587,10 @@ class Settings:
             database_state_directory / "five-quantity-quarantine"
         )
 
-        api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-        llm = None
-        if api_key:
-            llm = LLMConfig(
-                api_key=api_key,
-                base_url=os.environ.get(
-                    "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
-                ).strip(),
-                model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash").strip(),
-                timeout_seconds=_float("DEEPSEEK_TIMEOUT_SECONDS", 20.0, 1.0, 120.0),
-                max_retries=_integer("DEEPSEEK_MAX_RETRIES", 2, 0, 5),
-            )
+        llm, model_credential_status = _managed_model_config(
+            provisioning_status=provisioning_status,
+            identity=five_quantity_identity,
+        )
         return cls(
             database_path=database_path,
             host=host,
@@ -387,6 +618,7 @@ class Settings:
             public_origin=public_origin,
             platform=platform,
             llm=llm,
+            model_credential_status=model_credential_status,
             coal_news=CoalNewsConfig(
                 enabled=_boolean("COAL_NEWS_SEARCH_ENABLED", True),
                 timeout_seconds=_float(
@@ -495,4 +727,5 @@ class Settings:
                 30,
                 900,
             ),
+            provisioning_status=provisioning_status,
         )

@@ -55,6 +55,9 @@
 - 人工上传与直采并列合法，`acquisition_mode` 只追溯来源，不产生可信度等级、权重或阈值差异；
 - 固定白名单目录监听、写入稳定等待、SHA-256 去重；异常文件复制到 Agent 状态目录隔离，原件不删除；
 - 字段映射只允许 11 个 V3 原子字段和日报/三班次白名单；模型只接收表头与脱敏类型统计，不能读取或修改业务数值；缺失保持 `null`，不估算、不插补、不用 0 冒充；
+- CSV 对裸表头、括号标注和独立单位行执行同一套失败关闭校验；`万kWh`、`MWh`、
+  `g`、`kt`、`万t` 和未知单位均不会被静默换算。应先在来源系统按 V3 固定单位重新
+  导出；火工品必须拆成雷管和炸药两列，不接收组合总栏；
 - 未确认草稿可带原因“放弃”；这是保留原文、修订号和审计事件的软放弃，不做物理删除；
 - 日报合计显式包含全部十量；零点、八点、四点三班至少包含前七个原子字段，商业四量班次可选；
 - 人工复核后才形成不可变消息；上传文件绝不自动确认或报送，SQLite outbox 支持重启恢复、指数退避和幂等重试；
@@ -71,10 +74,11 @@
 
 Windows 原生安装、逐矿实例、WinSW 服务、日志、完整业务状态备份和恢复见
 [Windows 部署说明](deploy/windows/README.md)。Windows 配置由受 ACL 保护的严格
-`KEY=VALUE` 文件在进程启动时读取，不执行 PowerShell 代码。正式 Windows runtime 和
-服务安装都必须从线下审批材料输入独立 Authenticode signer 指纹；签名 Setup 本身还必须在
-执行前按另一路线下 SHA-256/签名者值验真，runtime 指纹不能替代 Setup 的预执行信任。每个矿的服务使用
-自己派生的 `NT SERVICE\MineGuardEnterpriseAgent-<实例>` 身份，不再共享 LocalService。
+`KEY=VALUE` 文件在进程启动时读取，不执行 PowerShell 代码。签名正式版从线下审批材料输入
+独立 Authenticode signer 指纹；明确标记为 `INTERNAL-UNSIGNED` 的无证书内网正式版则输入
+介质外批准的 Agent 子发行清单 SHA-256。两种模式都必须在执行 Setup 前另行核验该 Setup 自己的
+介质外 SHA-256，子发行清单值不能替代 Setup 的预执行信任。每个矿的服务使用自己派生的
+`NT SERVICE\MineGuardEnterpriseAgent-<实例>` 身份，不再共享 LocalService。
 
 在仓库的 `agent/` 目录执行：
 
@@ -95,10 +99,17 @@ PYTHONPATH=src python -m enterprise_agent serve --host 127.0.0.1 --port 8090
 浏览器打开 <http://127.0.0.1:8090/>。按 `Ctrl+C` 可正常停止。
 
 CSV 智能映射不强制依赖模型 API：未配置时仍会使用标准模板、同矿已批准映射和本地
-规则。若希望 Agent 为陌生表头给出受约束建议，请在启动前配置
-`DEEPSEEK_API_KEY`（以及需要时的 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`）；
-运行中的进程不会读取新环境变量，修改后需重启服务。模型只接收表头和类型计数，
-不会收到 CSV 原始业务数值。
+规则。正式环境的模型能力必须通过供应商签名、企业身份绑定的 `.mgllm` 授权包启用；
+API Key、接口地址、模型和重试参数不能写入普通环境文件，政府 Platform 也不接收这些
+内容。Windows 使用“MineGuard 模型授权导入向导”，Linux 使用受控 CLI 导入；运行配置
+最终只保留 lock/store 两个绝对路径指针，签发信任库固定在签名发行版中。完整流程见
+[企业模型凭据签发与轮换](../docs/企业模型凭据签发与轮换.md)。
+
+源码开发环境仍兼容 `MINEGUARD_AGENT_API_KEY`、`MINEGUARD_AGENT_BASE_URL`、
+`MINEGUARD_AGENT_MODEL` 和迁移期 `DEEPSEEK_*` 别名，但这些明文变量会被
+`config-check --production` 拒绝，也不能与受管 `.mgllm` 指针混用。运行中的进程不会
+重新读取凭据；导入或轮换后必须重启。模型只接收获准能力所需的最小数据，例如 CSV
+映射只发送表头和类型计数，不发送原始业务数值。
 
 仅本机、未配置逐用户账号时会启用演示账号：
 
@@ -165,13 +176,61 @@ export PLATFORM_V3_CA_BUNDLE=/etc/enterprise-agent/regulatory-ca.pem
 
 客户端不跟随 301/302/307/308 等任何重定向，防止把带签名的请求重放到另一来源。
 应用消息密钥与运输密钥都必须显式配置且内容不同，并使用两个固定签名域；配置相同
-内容会在启动时失败。政府换钥的过渡期可同时
-配置上一把入站验签密钥：
+内容会在启动时失败。企业应用签名密钥轮换时，先把旧 key ID 和旧 secret 加入只验签
+历史密钥环，再切换当前两项并重启：
+
+```bash
+export ENTERPRISE_EXCHANGE_KEY_ID=enterprise-key-current
+export ENTERPRISE_EXCHANGE_HMAC_SECRET='replace-current-secret-at-least-32-bytes'
+export ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON='[{"key_id":"enterprise-key-retired","secret":"replace-retired-secret-at-least-32-bytes"}]'
+```
+
+历史密钥只按已存报文 `signature_envelope.key_id` 精确验签，用于在换钥后校验已送达 V3
+前序并创建下一版更正；新消息始终使用当前 key。未知 key ID、错误 secret、重复 ID、
+与当前 key/secret 复用都会拒绝。该密钥环与以下政府入站验签轮换完全分离，程序不会用
+政府的 `REGULATORY_PREVIOUS_*` 校验企业自己发出的历史报文。当前交换契约的应用 HMAC
+为双向共享；双方协调换钥后，同一把退役 secret 需要同时登记在企业历史项和政府上一把
+项中，但两个方向仍分别按各自 envelope key ID 精确选择，不能互相兜底。
+
+政府换钥的过渡期可同时配置上一把入站验签密钥：
 
 ```bash
 export REGULATORY_PREVIOUS_EXCHANGE_KEY_ID=regulator-key-previous
 export REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET='replace-previous-secret-at-least-32-bytes'
 ```
+
+## 企业专属模型授权
+
+正式环境实行“一企业一 Key、一实例一授权”：供应商在隔离签发机上用
+`mineguard-model-issuer` 生成身份绑定的 `.mgllm`，企业分别取得授权包和激活码，政府
+Platform 不参与签发、解密或存储。签发工具只从属主 `0600` 文件读取 API Key 和私钥
+口令，不接受命令行明文；现场正式配置也不得出现 API Key、模型地址或可替换的 trust
+store。每个企业还必须在模型供应商侧拥有独立硬配额、限速、账单标签、告警和吊销
+范围，不得多矿共用 Key。
+
+Windows 管理员从开始菜单运行“MineGuard 模型授权导入向导”。Linux 管理员使用
+`enterprise-agent model-credential-import`。Windows 向导只要求选择已完成企业接入的实例、
+`.mgllm` 和由另一通道交付的 activation 文件，不允许现场编辑 provider 或选择包旁
+公钥。导入后的正式服务环境中，模型相关项只有两个绝对路径指针：
+
+```text
+MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE=/var/lib/enterprise-agent/model-credential-v1.lock.json
+MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE=/var/lib/enterprise-agent/model-credential-v1.secret.json
+```
+
+两项必须成对存在。lock 旁还会自动生成不需要写入 env 的 `.state.json` 防回退状态，
+持久化已接受的最高版本和包摘要；三份文件必须一起发布和事务回滚。lock 只含签名身份、
+供应商配置和 secret store 指针；Windows secret store 使用机器级 DPAPI 并受实例 ACL
+保护。Linux V1 的 `0600` secret store 是含 Key 的兼容明文存储，只依赖服务账号和文件
+权限，不是静态加密或机器绑定，不能宣称与
+DPAPI 等效。发行版从
+`release-metadata/model-credential-trust.json` 固定读取签发公钥，正式模式拒绝环境变量
+替换。因此正式 `agent.env` 不得出现 `MINEGUARD_AGENT_MODEL_TRUST_STORE`、明文
+`MINEGUARD_AGENT_API_KEY`、`MINEGUARD_AGENT_BASE_URL`、`MINEGUARD_AGENT_MODEL`、
+`MINEGUARD_AGENT_TIMEOUT_SECONDS`、`MINEGUARD_AGENT_MAX_RETRIES` 或对应的明文
+`DEEPSEEK_*`。安装、轮换和状态检查的完整命令、双通道交付要求、配额/吊销策略及本机管理员
+安全边界见[企业模型凭据签发与轮换](../docs/企业模型凭据签发与轮换.md)。
+拥有本机管理员/root 或运行内存提取能力的攻击者不在这一凭据包的绝对防护目标内。
 
 ## 获取数据
 
@@ -194,6 +253,11 @@ export ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS=/srv/mine-readonly/five-quantity-inbo
 它也支持只读 SQLite 和稳定文件投递，完整配置见
 [企业数据自动采集连接器](../connector-service/README.md)。
 
+当前机器直采新记录的 `import_summary.mode` 固定为
+`ten_quantity_v3_direct_collection`。数据库中已有的
+`five_quantity_v2_direct_collection` 等旧模式标签保持原值，只用于历史读取与审计；
+系统不会批量改写旧记录，也不会以旧标签创建新的 V3 正式报送。
+
 ## 企业 HTTP API
 
 浏览器会话使用 `HttpOnly; SameSite=Strict` Cookie；修改请求必须携带
@@ -206,8 +270,9 @@ export ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS=/srv/mine-readonly/five-quantity-inbo
 | `POST` | `/api/v2/direct-ingest` | 受控设备/API 直采入口 |
 | `POST` | `/api/v2/watch/scan` | 立即扫描固定目录 |
 | `GET` | `/api/v2/drafts` | 月报复核稿列表；`include_discarded=true` 可追溯已放弃项 |
-| `GET/PATCH/DELETE` | `/api/v2/drafts/{id}` | 读取 / 保存 / 带修订号和原因软放弃未确认稿 |
+| `GET/PATCH/DELETE` | `/api/v2/drafts/{id}` | 读取 / 保存 / 带修订号和原因软放弃普通未确认稿；正式更正草稿不可放弃 |
 | `GET` | `/api/v2/drafts/{id}/ingestions` | 查看机器导入批次、来源、拒绝原因和数据就绪预检 |
+| `POST` | `/api/v2/drafts/{id}/correction` | 从已获政府回执的 V3 末版幂等创建唯一后继更正草稿；需 `write` 和 CSRF |
 | `POST` | `/api/v2/drafts/{id}/confirm` | 人工确认并可靠入队；同时需要 `confirm` 和 `submit` |
 | `POST` | `/api/v2/drafts/{id}/send-now` | 手工触发一次 outbox 重试 |
 | `GET` | `/api/v2/risks`、`/{id}` | 风险收件箱 / 已验签报告 |
@@ -218,6 +283,19 @@ export ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS=/srv/mine-readonly/five-quantity-inbo
 | `POST` | `/api/v2/responses/{id}/confirm` | 人工确认回复并可靠入队 |
 | `POST` | `/api/v2/exchange/run` | 立即执行一次发送与拉取 |
 | `GET` | `/api/v2/audit` | 校验并查看当前操作链 |
+
+更正不会覆盖首报：系统从已送达 outbox 的签名原文读取直接前序，固定沿用同一
+`correlation_id`，将 `submission_revision` 加一，并把前序 `message_id` 与
+`payload_sha256` 锁入新草稿。该写操作同时要求 `write` 权限和有效 CSRF；只有已经取得
+政府回执的 V3 修订链末版可作为前序。相同建稿请求只返回已有的唯一直接后继，不能
+形成分叉；五量 V2、未送达版本和非末版均不能产生新的 V3 更正草稿。
+
+更正门禁不会只检查“有一个 receipt 字段”：它会重新校验政府 `intake-receipt-v2`
+的应用签名、双方身份，并把回执的 correlation、causation、报送 message ID、
+`submission_revision` 和 `received_payload_sha256` 精确绑定到不可变前序；draft 与
+outbox 保存的两份回执也必须逐字节一致。FQ 本地 schema v4 从消息入队起锁定签名正文
+和投影，成功后再锁定状态与回执并禁止删除。启动时会把完整审计链反查到 draft/outbox；
+缺记录、替换签名、伪造回执或恢复后投影不一致都会拒绝启动，不能靠重建触发器掩盖。
 
 这里的 `/api/v2/*` 是浏览器与本机 Agent 之间保留稳定的内部路由名，不是企业向政府
 发送的合同版本。对政府的正式入口是 `/v3/ten-quantity-submissions` 及同组 V3 路径。
@@ -230,7 +308,9 @@ export ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS=/srv/mine-readonly/five-quantity-inbo
 
 角色名称只是展示文字，真正授权只取决于服务器端 permissions。各矿属于不同经营主体，
 应使用各自数据库、系统账号、HMAC 密钥和 Agent 实例，不能共用一个企业端实例切换矿井。
-软放弃也需要 `write`；仅 `ready_review` 且从未确认、从未进入 outbox 的草稿允许放弃。
+软放弃也需要 `write`；仅无前序、处于 `ready_review` 且从未确认、从未进入
+outbox 的普通首报草稿允许放弃。正式更正草稿是已送达链的唯一后继，创建后不能
+放弃或删除，可暂存并在后续继续编辑复核。
 已确认、排队、送达、风险报告、企业回复和回执均无删除接口。
 
 ## 测试

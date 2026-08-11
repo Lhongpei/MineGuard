@@ -462,7 +462,7 @@ def test_legacy_labor_header_is_accepted_but_output_is_canonical() -> None:
     )
 
 
-def test_generic_numeric_fire_material_is_missing_with_review_warning() -> None:
+def test_generic_fire_material_is_never_mapped_into_v3_atomic_fields() -> None:
     imported = import_five_quantity_bytes(
         filename="火工品总栏.csv",
         content=(
@@ -477,30 +477,24 @@ def test_generic_numeric_fire_material_is_missing_with_review_warning() -> None:
     assert values["detonators_count"]["value"] is None
     assert values["explosives_kg"]["value"] is None
     assert any(
-        item["kind"] == "ambiguous_fire_material_value"
-        and "无法判断" in item["reason"]
+        item["kind"] == "generic_fire_material_requires_atomic_columns"
+        and "必须拆" in item["reason"]
         for item in imported["suggestions"]
     )
 
 
-def test_generic_fire_material_with_explicit_children_is_parsed() -> None:
-    imported = import_five_quantity_bytes(
-        filename="火工品明细.csv",
-        content=(
-            "日期,火工品量\n"
-            '2026-07-01,"电子雷管:120发、乳化炸药:240kg"\n'
-        ).encode(),
-        acquisition_mode="manual_import",
-        identity=identity(),
-        captured_at="2026-08-01T00:00:00Z",
-    )
-    values = imported["payload"]["days"][0]["reported_quantity"]["daily_total"]
-    assert values["detonators_count"]["value"] == 120
-    assert values["explosives_kg"]["value"] == 240
-    assert not any(
-        item["kind"] == "ambiguous_fire_material_value"
-        for item in imported["suggestions"]
-    )
+def test_generic_fire_material_with_embedded_children_is_rejected() -> None:
+    with pytest.raises(ImportContentError, match="必须拆为雷管和炸药"):
+        import_five_quantity_bytes(
+            filename="火工品明细.csv",
+            content=(
+                "日期,火工品量\n"
+                '2026-07-01,"电子雷管:120发、乳化炸药:240kg"\n'
+            ).encode(),
+            acquisition_mode="manual_import",
+            identity=identity(),
+            captured_at="2026-08-01T00:00:00Z",
+        )
 
 
 def test_duplicate_fire_child_columns_do_not_overwrite_or_guess_total() -> None:

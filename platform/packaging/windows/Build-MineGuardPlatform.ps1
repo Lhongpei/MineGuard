@@ -12,6 +12,7 @@ param(
     [string] $SigningCertificateThumbprint,
     [uri] $TimestampUrl,
     [switch] $RequireSignedBinary,
+    [switch] $InternalUnsignedRelease,
     [switch] $AllowDirtySource,
     [switch] $Force
 )
@@ -257,8 +258,12 @@ $projectFile = Join-Path $SourceDirectory 'pyproject.toml'
 $constraintsFile = Join-Path $SourceDirectory 'constraints.txt'
 $entryPoint = Join-Path $PSScriptRoot 'MineGuardPlatform.py'
 $buildRequirements = Join-Path $PSScriptRoot 'requirements-build.txt'
+$desktopLauncherSource = [System.IO.Path]::GetFullPath((Join-Path `
+    (Split-Path -Parent $SourceDirectory) `
+    'packaging\windows\assets\Open-MineGuardPlatformControlCenter.ps1'))
 foreach ($requiredFile in @(
     $projectFile, $constraintsFile, $entryPoint, $buildRequirements,
+    $desktopLauncherSource,
     (Join-Path $SourceDirectory 'src\mineguard\regulatory_web\index.html'),
     (Join-Path $SourceDirectory 'src\mineguard\web\index.html'),
     (Join-Path $SourceDirectory 'src\mineguard\demo_samples\taiyue-2026-07.et'),
@@ -311,9 +316,10 @@ if ($ExpectedPythonPatchVersion -and
     $ExpectedPythonPatchVersion -notmatch '^3\.12\.\d+$') {
     throw 'ExpectedPythonPatchVersion 必须是精确 CPython 3.12 patch。'
 }
-if ($RequireSignedBinary -and
+$productionCandidateBuild = $RequireSignedBinary -or $InternalUnsignedRelease
+if ($productionCandidateBuild -and
     (-not $ExpectedPythonPatchVersion -or -not $ExpectedPythonExecutableSha256)) {
-    throw '正式签名子构建必须接收已核验 Python patch 和可执行文件 SHA-256。'
+    throw '生产候选子构建必须接收已核验 Python patch 和可执行文件 SHA-256。'
 }
 $probeCode = @'
 import json, platform, struct, sys
@@ -366,17 +372,25 @@ if ($signingValueCount -notin @(0, 3)) {
     throw 'SignToolPath、SigningCertificateThumbprint 和 TimestampUrl 必须同时提供。'
 }
 $signingEnabled = $signingValueCount -eq 3
+if ($RequireSignedBinary -and $InternalUnsignedRelease) {
+    throw 'RequireSignedBinary 与 InternalUnsignedRelease 不得同时使用。'
+}
+if ($InternalUnsignedRelease -and
+    ($signingEnabled -or
+        -not [string]::IsNullOrWhiteSpace($ExpectedSignToolSha256))) {
+    throw '内网无签名正式发行不得传入 SignTool、证书、时间戳或 SignTool 摘要参数。'
+}
 if ($signingEnabled -and -not $RequireSignedBinary) {
     throw '提供签名参数时必须同时使用 -RequireSignedBinary，禁止绕过正式发布门禁。'
 }
 if ($RequireSignedBinary -and -not $signingEnabled) {
     throw 'RequireSignedBinary 要求同时提供签名工具、证书指纹和可信时间戳 URL。'
 }
-if ($RequireSignedBinary -and $AllowNuitkaToolDownloads) {
-    throw '正式签名构建禁止下载 Nuitka 工具；必须预置并审批构建缓存。'
+if ($productionCandidateBuild -and $AllowNuitkaToolDownloads) {
+    throw '正式发行构建禁止下载 Nuitka 工具；必须预置并审批构建缓存。'
 }
-if ($RequireSignedBinary -and [string]::IsNullOrWhiteSpace($Wheelhouse)) {
-    throw '正式签名构建必须使用已审批的离线 wheelhouse。'
+if ($productionCandidateBuild -and [string]::IsNullOrWhiteSpace($Wheelhouse)) {
+    throw '正式发行构建必须使用已审批的离线 wheelhouse。'
 }
 if ($RequireSignedBinary -and [string]::IsNullOrWhiteSpace($ExpectedSignToolSha256)) {
     throw '正式签名子构建必须接收 SignTool 的预期 SHA-256。'
@@ -427,9 +441,9 @@ if ($null -ne $gitCommand) {
         }
     }
 }
-if ($RequireSignedBinary -and
+if ($productionCandidateBuild -and
     ($sourceRevision -eq 'unknown' -or $sourceTreeDirty -ne $false)) {
-    throw '正式签名构建必须来自可识别且干净的 Git revision。'
+    throw '正式发行构建必须来自可识别且干净的 Git revision。'
 }
 
 $projectText = Get-Content -LiteralPath $projectFile -Raw -Encoding UTF8
@@ -530,6 +544,12 @@ try {
             (Join-Path $SourceDirectory 'src\mineguard\demo_samples') +
             '=mineguard/demo_samples'),
         '--include-package=_yaml',
+        # cryptography discovers its CFFI/OpenSSL helpers dynamically.  Keep
+        # these explicit so the frozen provisioning commands work offline on
+        # a clean Windows 10/Server 2019 host, not only on the build machine.
+        '--include-package=cryptography',
+        '--include-package=cffi',
+        '--include-module=_cffi_backend',
         '--include-package=tzdata',
         '--include-package-data=tzdata',
         '--include-distribution-metadata=numpy',
@@ -539,6 +559,8 @@ try {
         '--include-distribution-metadata=tzdata',
         '--include-distribution-metadata=olefile',
         '--include-distribution-metadata=xlrd',
+        '--include-distribution-metadata=cryptography',
+        '--include-distribution-metadata=cffi',
         '--nofollow-import-to=scipy.integrate._lebedev',
         '--remove-output'
     )
@@ -577,7 +599,20 @@ try {
     if ($RequireSignedBinary -and -not $codeSigned) {
         throw 'Platform 主程序未通过 Authenticode 签名验证。'
     }
-    if (-not $codeSigned) {
+    if ($InternalUnsignedRelease) {
+        $unsignedReleaseSignature = Get-AuthenticodeSignature `
+            -LiteralPath $compiledExecutable
+        if ($unsignedReleaseSignature.Status -ne 'NotSigned') {
+            throw (
+                'InternalUnsignedRelease 要求 Platform 主程序的 Authenticode ' +
+                "状态严格为 NotSigned，实际为 $($unsignedReleaseSignature.Status)。"
+            )
+        }
+        Write-Warning (
+            '正在生成 INTERNAL-UNSIGNED 内网无签名正式发行版；该产物没有 ' +
+            'Windows 发布者身份，安装和服务启用必须使用介质外独立批准的 SHA-256。'
+        )
+    } elseif (-not $codeSigned) {
         Write-Warning '正在生成未签名内部测试版；该产物不是生产可信发布。'
     }
     $versionText = & $compiledExecutable '--version'
@@ -589,8 +624,10 @@ try {
     $selfCheck = $selfCheckText | Out-String | ConvertFrom-Json
     if ([string]$selfCheck.status -ne 'ok' -or
         [string]$selfCheck.timezone -ne 'Asia/Shanghai' -or
-        [string]$selfCheck.solver -ne 'scipy.optimize.linprog/highs') {
-        throw '冻结 EXE 自检结果缺少时区或 HiGHS 求解器。'
+        [string]$selfCheck.solver -ne 'scipy.optimize.linprog/highs' -or
+        [string]$selfCheck.provisioning_crypto -ne
+            'ed25519+aes-256-gcm+scrypt') {
+        throw '冻结 EXE 自检结果缺少时区、HiGHS 求解器或配置包密码组件。'
     }
     foreach ($asset in @(
         'regulatory_web/index.html', 'regulatory_web/app.js',
@@ -629,6 +666,17 @@ try {
         -LiteralPath (Join-Path $SourceDirectory 'deploy\windows') -File) {
         Copy-Item -LiteralPath $item.FullName -Destination $deployDirectory -Force
     }
+    $desktopLauncherReleasePath = Join-Path $deployDirectory `
+        'Open-MineGuardPlatformControlCenter.ps1'
+    if (Test-Path -LiteralPath $desktopLauncherReleasePath) {
+        throw 'Platform deploy/windows 与根发行 launcher 文件名冲突；拒绝隐式覆盖。'
+    }
+    # The public launcher is duplicated into the authenticated child release.
+    # Inno may place a convenience copy before the guarded product transaction,
+    # but only these manifest-covered original bytes are allowed to survive the
+    # atomic install switch.
+    Copy-Item -LiteralPath $desktopLauncherSource `
+        -Destination $desktopLauncherReleasePath
 
     $nuitkaVersionText = & $buildPython '-m' 'nuitka' '--version'
     if ($LASTEXITCODE -ne 0) { throw '无法读取 Nuitka 构建版本。' }
@@ -652,7 +700,13 @@ try {
         codeSigned = $codeSigned
         authenticodeVerified = $codeSigned
         releaseClassification = $(
-            if ($codeSigned) { 'signed-production-candidate' } else { 'unsigned-test-artifacts' }
+            if ($codeSigned) {
+                'signed-production-candidate'
+            } elseif ($InternalUnsignedRelease) {
+                'unsigned-internal-release'
+            } else {
+                'unsigned-test-artifacts'
+            }
         )
         signingCertificateThumbprint = $(
             if ($codeSigned) { $SigningCertificateThumbprint } else { $null }
@@ -692,7 +746,13 @@ try {
         codeSigned = $codeSigned
         authenticodeVerified = $codeSigned
         releaseClassification = $(
-            if ($codeSigned) { 'signed-production-candidate' } else { 'unsigned-test-artifacts' }
+            if ($codeSigned) {
+                'signed-production-candidate'
+            } elseif ($InternalUnsignedRelease) {
+                'unsigned-internal-release'
+            } else {
+                'unsigned-test-artifacts'
+            }
         )
         files = $manifestFiles
         selfCheck = $selfCheck

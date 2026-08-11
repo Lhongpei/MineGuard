@@ -66,6 +66,7 @@ def test_layout() -> None:
         "packaging/windows/inno/languages/INNO-SETUP-LICENSE.txt",
         "packaging/windows/inno/languages/README.md",
         "packaging/windows/assets/RELEASE-NOTICE.txt",
+        "packaging/windows/assets/Invoke-MineGuardTrustedProductInstall.ps1",
         "packaging/windows/assets/Open-MineGuardPlatformControlCenter.ps1",
         "packaging/windows/assets/Windows-binary-release-guide.html",
         "scripts/Build-WindowsBinaryRelease.ps1",
@@ -97,6 +98,7 @@ def test_powershell_text_encoding_is_safe_for_windows_powershell_51() -> None:
         ROOT / "platform/packaging/windows",
         ROOT / "agent/deploy/windows",
         ROOT / "agent/packaging/windows",
+        ROOT / "packaging/windows/assets",
         ROOT / "scripts",
     )
     failures: list[str] = []
@@ -325,6 +327,134 @@ def test_inno_scripts() -> None:
     assert "MineGuardEnterpriseAgent-*" in agent
     assert "Status -ne ''Stopped''" in platform
     assert "Status -ne ''Stopped''" in agent
+    for name, script in (("platform", platform), ("agent", agent)):
+        for token in (
+            "#ifdef InternalUnsignedRelease",
+            "EnableSigning and InternalUnsignedRelease are mutually exclusive",
+            "TryAuthorizeUnsignedInternalRelease",
+            "ALLOWUNSIGNEDINTERNALRELEASE",
+            "EXPECTEDINSTALLERSHA256",
+            "GetSHA256OfFile(ExpandConstant('{srcexe}'))",
+            "INTERNAL-UNSIGNED",
+            "来自当前安装介质之外的独立渠道",
+            "-AllowUnsignedInternalRelease",
+            "ChildReleaseManifestSha256",
+            "-ExpectedReleaseManifestSha256",
+        ):
+            assert token in script, (
+                f"{name} internal-unsigned release gate missing: {token}"
+            )
+        for token in (
+            "TrustedBootstrapSha256",
+            "Invoke-MineGuardTrustedProductInstall.ps1",
+            "GetTrustedBootstrapStage",
+            "{commonappdata}\\MineGuard\\InstallerBootstrap",
+            "Permissions: admins-full system-full",
+            "GetSHA256OfFile(BootstrapPath)",
+            "CleanupTrustedBootstrapStage",
+            "[IO.File]::ReadAllBytes($p)",
+            "$sha.ComputeHash($bytes)",
+            "[System.Text.UTF8Encoding]::new($false,$true)",
+            "[ScriptBlock]::Create($text)",
+            "Trusted bootstrap changed after Setup verification",
+            "TrustedScriptSha256",
+            "TrustedScriptBytes",
+            "ChildReleaseManifestSha256",
+        ):
+            assert token in script, f"{name} trusted bootstrap gate missing: {token}"
+        assert not re.search(
+            r'-File\s+"\{tmp\}\\MineGuard(?:Platform|EnterpriseAgent)Release'
+            r'\\deploy\\windows\\Install-[^"]+\.ps1"',
+            script,
+            re.IGNORECASE,
+        ), f"{name} must not directly execute a mutable {{tmp}} product installer"
+        preflight_name = (
+            "PreflightMineGuardPlatformInstallRoot"
+            if name == "platform"
+            else "PreflightEnterpriseAgentInstallRoot"
+        )
+        preflight_start = script.index(f"function {preflight_name}")
+        prepare_start = script.index("function PrepareToInstall", preflight_start)
+        preflight = script[preflight_start:prepare_start]
+        for token in (
+            "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command",
+            "Assert-Ancestors $target",
+            "Assert-AncestorSecurity $target",
+            "[IO.FileAttributes]::ReparsePoint",
+            "Assert-ExistingProduct $target",
+            "Assert-CanonicalRoot $target",
+            "Assert-CodeSecurity $target",
+            "release-metadata",
+            "Get-Sha256 $exe",
+            "[IO.Directory]::CreateDirectory($target,$acl)",
+            "$acl.SetAccessRuleProtection($true,$false)",
+            "DeleteSubdirectoriesAndFiles",
+            "Ordinary principal has write/delete control",
+            "unins*.exe",
+            "unins*.dat",
+        ):
+            assert token in preflight, (
+                f"{name} install-root preflight misses security token: {token}"
+            )
+        assert " -File " not in preflight, (
+            f"{name} install-root preflight must execute only embedded code"
+        )
+        assert "SetAccessControl($target,$acl)" not in preflight, (
+            f"{name} must reject an unsafe existing root instead of repairing it"
+        )
+        trusted_start = preflight.index("$trusted=@{")
+        trusted_end = preflight.index("$danger=", trusted_start)
+        trusted_write_exemptions = preflight[trusted_start:trusted_end]
+        assert "S-1-5-32-544" in trusted_write_exemptions
+        assert "S-1-5-18" in trusted_write_exemptions
+        assert (
+            "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+            in trusted_write_exemptions
+        ), f"{name} must accept Windows TrustedInstaller ownership"
+        for untrusted_service_sid in (
+            "S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346",
+            "S-1-5-80-0",
+        ):
+            assert untrusted_service_sid not in trusted_write_exemptions, (
+                f"{name} product service identities may have RX but never a "
+                "write/delete exemption"
+            )
+        assert "$trusted[$identity.User.Value]=$true" in trusted_write_exemptions
+        create_index = preflight.index(
+            "[IO.Directory]::CreateDirectory($target,$acl)"
+        )
+        assert preflight.find(
+            "Assert-AncestorSecurity $target", create_index
+        ) > create_index, (
+            f"{name} must revalidate every newly created/raced parent after atomic creation"
+        )
+        prepare_end = script.index("procedure InstallProductRuntime", prepare_start)
+        prepare = script[prepare_start:prepare_end]
+        authorization_index = min(
+            index
+            for token in (
+                "TryAuthorizeUnsignedInternalRelease",
+                "TryResolveApprovedSigner",
+                "IsUnsignedTestMediaAuthorized",
+            )
+            if (index := prepare.find(token)) >= 0
+        )
+        service_index = prepare.index("HasRunning")
+        process_index = prepare.index("HasActive")
+        preflight_call_index = prepare.index(preflight_name + "(PreflightError)")
+        assert authorization_index < service_index < process_index < preflight_call_index
+        assert prepare[:service_index].count("if Result <> '' then") >= 1
+        assert prepare[process_index:preflight_call_index].count(
+            "if Result <> '' then"
+        ) >= 1, (
+            f"{name} preflight must not mutate the target before all guards pass"
+        )
+        assert "-File \"' +\n    BootstrapPath" not in script
+        assert not re.search(
+            r'-File\s+"\{app\}\\uninstall-tools\\Uninstall-[^"]+\.ps1"',
+            script,
+            re.IGNORECASE,
+        ), f"{name} uninstaller must execute only manifest-authenticated bytes"
     for token in (
         "CreateInputOptionPage",
         "ALLOW_UNSIGNED_TEST_MEDIA",
@@ -373,6 +503,81 @@ def test_inno_scripts() -> None:
     assert "SignerFilePage.Values[0]" not in install_command
 
 
+def test_trusted_product_install_bootstrap() -> None:
+    relative = "packaging/windows/assets/Invoke-MineGuardTrustedProductInstall.ps1"
+    path = ROOT / relative
+    bootstrap = read(relative)
+    build = read("scripts/Build-WindowsBinaryRelease.ps1")
+
+    for token in (
+        "Set-StrictMode -Version 2.0",
+        "Windows PowerShell 5.1 or later is required",
+        "Assert-Administrator",
+        "Get-SafeLocalNtfsPath",
+        "DriveType -ne [IO.DriveType]::Fixed",
+        "DriveFormat.Equals('NTFS'",
+        "Assert-NoReparseTree",
+        "SetAccessRuleProtection($true, $false)",
+        "S-1-5-32-544",
+        "S-1-5-18",
+        "[Environment+SpecialFolder]::Windows",
+        "[IO.Directory]::CreateDirectory($candidate, $acl)",
+        "mineguard-platform-",
+        "Assert-ProtectedDirectoryAcl",
+        "Protected staging ACL is missing a required principal",
+        "[Guid]::NewGuid().ToString('N')",
+        "ExpectedReleaseManifestSha256",
+        "The staged child release-manifest does not match the trusted Setup anchor",
+        "release-manifest.json does not cover the exact staged file set",
+        "SHA256SUMS.txt does not cover the exact staged file set",
+        "Get-FileHash",
+        "Install-MineGuardPlatform.ps1",
+        "Install-EnterpriseAgent.ps1",
+        "Remove-ProtectedStagingDirectory",
+        "Trusted installer staging cleanup did not complete",
+        "finally",
+    ):
+        assert token in bootstrap, f"trusted bootstrap contract missing: {token}"
+
+    # PowerShell single-quoted strings do not escape backslashes. These exact
+    # forms are required for correct Windows relative-path calculation.
+    for token in (
+        ".TrimEnd('\\') + '\\'",
+        ".Replace('\\', '/')",
+        "$RelativePath.Contains('\\')",
+        "$installerRelative.Replace('/', '\\')",
+    ):
+        assert token in bootstrap, f"trusted bootstrap path separator bug: {token}"
+
+    assert "Get-ChildItem -LiteralPath $source -Force" in bootstrap
+    assert "Copy-Item -LiteralPath $item.FullName -Destination $stage.Path" in bootstrap
+    assert bootstrap.index("Assert-TrustedReleaseTree -Root $stage.Path") < (
+        bootstrap.index("& $stagedInstaller @arguments")
+    )
+    final_cleanup = bootstrap[bootstrap.rindex("finally {") :]
+    assert "try {" in final_cleanup and "catch {" in final_cleanup
+    assert "Write-Warning" in final_cleanup
+    assert "& (Join-Path $source" not in bootstrap
+
+    expected_match = re.search(
+        r'\$ExpectedTrustedBootstrapSha256\s*=\s*`\s*\n\s*"([a-f0-9]{64})"',
+        build,
+    )
+    assert expected_match, "root builder must pin the reviewed bootstrap SHA-256"
+    assert expected_match.group(1) == hashlib.sha256(path.read_bytes()).hexdigest(), (
+        "root builder trusted bootstrap pin does not match the reviewed bytes"
+    )
+    base_arguments = build.split("function Invoke-InnoCompile", 1)[1].split(
+        "if ($SigningEnabled)", 1
+    )[0]
+    for define in (
+        "/DChildReleaseManifestSha256=$ChildReleaseManifestSha256",
+        "/DTrustedBootstrapSha256=$TrustedBootstrapSha256",
+    ):
+        assert define in base_arguments, (
+            "all release classifications must embed the trusted tree anchor: "
+            f"{define}"
+        )
 def test_root_build_orchestration() -> None:
     build = read("scripts/Build-WindowsBinaryRelease.ps1")
     required = (
@@ -384,7 +589,9 @@ def test_root_build_orchestration() -> None:
         "Test-WindowsBinaryRelease.ps1",
         "Test-WindowsInstallerFailurePropagation.ps1",
         "UNSIGNED-TEST-ONLY",
+        "INTERNAL-UNSIGNED",
         "signed-production-candidate",
+        "unsigned-internal-release",
         "unsigned-test-artifacts",
         "LegacyWindowsServer2012R2CompatibilityTest",
         "legacy-windows-server-2012r2-test-v1",
@@ -399,16 +606,35 @@ def test_root_build_orchestration() -> None:
         "$InnoVersion.Major -ne 6",
         "ISCC.exe was not found",
         "-RequireSignedBinary",
+        "-InternalUnsignedRelease",
+        "RequireSigned and InternalUnsignedRelease are mutually exclusive",
+        "ExpectInternalUnsignedRelease",
+        'authenticity_mode = if ($SigningEnabled)',
+        "out-of-band-sha256",
+        "production_approved = [bool]($SigningEnabled -or $InternalUnsignedRelease)",
+        "installer_external_sha256_required = [bool]$InternalUnsignedRelease",
+        "unsigned_internal_release = [bool]$InternalUnsignedRelease",
         "-SigningCertificateThumbprint",
         "WheelhouseManifest",
         "ExpectedWheelhouseManifestSha256",
+        "ModelIssuerTrustStore",
+        "ExpectedModelIssuerTrustStoreSha256",
+        "model_issuer_trust_sha256",
+        "model_issuer_trust_external_anchor_verified",
+        "model_issuer_trust_test_only",
+        "A formal release refuses the TEST-ONLY model issuer trust store",
+        "BundledTestOnlyModelTrustStoreSha256",
+        "regardless of filename or JSON formatting",
+        "mineguard-test-only",
+        "test-only-no-private-key-2026",
+        "e3df516dc9ce7cce905597484d794625a6ac4e6ac2a11dfc07dbc8e2f15fb413",
         "ExpectedPythonPatchVersion",
         "ExpectedPythonExecutableSha256",
         "ExpectedInnoCompilerSha256",
         "ExpectedSignToolSha256",
         "Assert-ApprovedFileSha256",
         "UnsignedCompilerCacheReadyMarker",
-        "UnsignedCompilerCacheReadyMarker is forbidden for signed production candidates",
+        "UnsignedCompilerCacheReadyMarker is forbidden for formal releases",
         "UnsignedCompilerCacheReadyMarker must be located under the process temporary directory",
         "Both child compilers completed for source",
         "ExpectedInnoChineseLanguageSha256",
@@ -416,7 +642,7 @@ def test_root_build_orchestration() -> None:
         "inno_chinese_language_sha256",
         "7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278",
         "Both child builders must use the same resolved root python.exe",
-        "Signed child metadata does not match ExpectedPythonPatchVersion",
+        "Strict child metadata does not match ExpectedPythonPatchVersion",
         "mineguard-wheelhouse-manifest-v1",
         "external_trust_anchor_verified",
         "python_external_anchor_verified",
@@ -427,8 +653,8 @@ def test_root_build_orchestration() -> None:
         "FileAttributes]::ReparsePoint",
         "must use a local fixed NTFS disk",
         "Assert-CleanGitSnapshot",
-        "A signed child binary does not identify the clean root source revision",
-        "A signed production candidate cannot allow Nuitka tool downloads",
+        "A strict child binary does not identify the clean root source revision",
+        "A formal release cannot allow Nuitka tool downloads",
         "Assert-PathsDoNotOverlap",
         "must not equal, contain, or be contained by one another",
         "OutputDirectory must not exist before atomic publication",
@@ -437,6 +663,10 @@ def test_root_build_orchestration() -> None:
         "Copy-Item -LiteralPath $SourcePath",
         "Published artifact audit",
         '"-ApprovedAgentSignerThumbprint", $NormalizedThumbprint',
+        "ChildReleaseManifestSha256",
+        "PlatformChildManifestSha256",
+        "AgentChildManifestSha256",
+        "child_release_manifest_sha256",
     )
     for token in required:
         assert token in build, f"root build contract missing: {token}"
@@ -538,6 +768,12 @@ def test_audit_and_lifecycle() -> None:
         "/api/v1/health",
         "Get-AuthenticodeSignature",
         "UNSIGNED-TEST-ONLY",
+        "INTERNAL-UNSIGNED",
+        "ExpectInternalUnsignedRelease",
+        "out-of-band-sha256",
+        "unsigned_internal_release",
+        "/ALLOWUNSIGNEDINTERNALRELEASE=1",
+        "/EXPECTEDINSTALLERSHA256=$InstallerSha256",
         "ExpectLegacyServer2012R2CompatibilityTest",
         "legacy-windows-server-2012r2-test-v1",
         "Legacy Windows Server 2012 R2 release evidence is missing or inconsistent",
@@ -581,6 +817,13 @@ def test_audit_and_lifecycle() -> None:
         "/ALLOW_UNSIGNED_TEST_MEDIA=1",
         "$LifecycleAuditError = $null",
         "preserving the original lifecycle audit error",
+        "Start-EnterpriseAgentModelCredentialWizard.ps1",
+        "release-metadata\\model-credential-trust.json",
+        "enterprise-agent-model-credential-wizard",
+        "trust_store_present",
+        "trust_store_editable",
+        "api_configuration_editable",
+        "Agent model credential wizard headless self-test failed",
         "-----BEGIN",
         "sk-",
     ):
@@ -606,9 +849,22 @@ def test_audit_and_lifecycle() -> None:
             'if ($PSCmdlet.ParameterSetName -eq "SecretAudit")'
         )
     ]
-    assert lifecycle.count("Invoke-WindowsGuiProcessAndWait") == 6, (
+    assert lifecycle.count("Invoke-WindowsGuiProcessAndWait") == 7, (
         "all installer, upgrade and uninstaller lifecycle launches must wait for "
         "the GUI process and read its actual exit code"
+    )
+    for negative_gate in (
+        "missing authorization and digest",
+        "incorrect externally approved digest",
+        "INTERNAL-UNSIGNED negative probe mutated product state",
+        '"/EXPECTEDINSTALLERSHA256=$WrongInstallerSha256"',
+    ):
+        assert negative_gate in lifecycle
+    assert lifecycle.index("$InstallExitCode = Invoke-WindowsGuiProcessAndWait") < (
+        lifecycle.index("$ProbeService = New-ServiceStateProbe")
+    ), (
+        "the clean product install must complete before the deliberately "
+        "identity-mismatched lifecycle probe service is registered"
     )
     assert not re.search(r"(?m)^\s*&\s*\$Installer\b", lifecycle)
     assert not re.search(r"(?m)^\s*&\s*\$Uninstallers\[", lifecycle)
@@ -633,16 +889,28 @@ def test_audit_and_lifecycle() -> None:
         "$ExitCode -ne 37",
         "$Stopwatch.ElapsedMilliseconds -lt 900",
         "completed marker.txt",
-        "MineGuardPlatform.iss",
-        '"/DApplicationId=$FixtureAppId"',
+        "fixture-gui-wait.iss",
+        "MineGuard GUI wait probe fixture",
+        '"/DFixturePayload=$ProbeExecutable"',
+        '"/DFixtureAppId=$FixtureAppId"',
         '"/DIR=$FixtureInstallRoot"',
+        '"/FIXTUREFAIL=1"',
         "$FailureExitCode -ne 1001",
         "afterinstall-root.txt",
-        "Real Platform Inno /DIR, AfterInstall, exit-code and uninstall",
+        "Dedicated Inno /DIR, AfterInstall, exit-code and uninstall",
         'Get-ChildItem -LiteralPath $FixtureInstallRoot `\n        -Filter "unins*.exe"',
     ):
         assert token in wait_probe, f"fast GUI wait probe contract missing: {token}"
-    assert wait_probe.count('"/ALLOW_UNSIGNED_TEST_MEDIA=1"') == 2
+    for production_token in (
+        "MineGuardPlatform.iss",
+        "ChildReleaseManifestSha256",
+        "TrustedBootstrapSha256",
+        "ALLOW_UNSIGNED_TEST_MEDIA",
+    ):
+        assert production_token not in wait_probe, (
+            "the GUI wait probe must remain independent from the production "
+            f"installer contract: {production_token}"
+        )
     final_uninstall = lifecycle.rindex(
         "$FinalUninstallExitCode = Invoke-WindowsGuiProcessAndWait"
     )
@@ -735,6 +1003,17 @@ def test_audit_and_lifecycle() -> None:
     assert "deliberately-tampered" in failure_probe
     assert "ProbeExitCode -eq 0" in failure_probe
     assert "ProbeExitCode -ne 1001" in failure_probe
+    for token in (
+        "function Write-FailureProbeReleaseIntegrity",
+        '"model-credential-trust.json"',
+        '"/DChildReleaseManifestSha256=$ChildReleaseManifestSha256"',
+        '"/DTrustedBootstrapSha256=$TrustedBootstrapSha256"',
+        "ConvertTo-Json -Depth 50",
+        'if ($Product -eq "agent") { " *" } else { "  " }',
+    ):
+        assert token in failure_probe, (
+            f"native failure fixture misses trusted bootstrap input: {token}"
+        )
     assert (
         'foreach ($ImmutableDirectory in @('
         '"runtime", "release-metadata", "deploy", "service"))'
@@ -755,6 +1034,11 @@ def test_audit_and_lifecycle() -> None:
         "Agent post-switch rollback",
         "Agent missing-metadata rejection",
         "ExpectedOutputPattern",
+        'switch ($ReleaseClassification)',
+        '"-ApprovedSignerThumbprint", $ApprovedSignerThumbprint',
+        '"-ExpectedReleaseManifestSha256", $ReleaseManifestSha256',
+        '$Arguments += "-AllowUnsignedTestMedia"',
+        '"SHA256SUMS.txt", "model-credential-trust.json"',
         "MINEGUARD_RELEASE_AUDIT_MARKER=$Product-post-switch",
         ".prior-install-identity",
         'Join-Path ([IO.Path]::GetTempPath()) "mgfp"',
@@ -833,15 +1117,66 @@ def test_audit_and_lifecycle() -> None:
         "MineGuard canonical NTFS ACL grant semantics passed",
     ):
         assert token in acl_probe, f"Windows ACL regression probe misses: {token}"
-    for name, installer, helper in (
-        ("platform", platform_installer, "Set-MineGuardDirectoryAcl"),
-        ("agent", agent_installer, "Set-EACanonicalProductTreeAcl"),
+    platform_acl_start = platform_installer.index(
+        "function Set-MineGuardDirectoryAcl"
+    )
+    platform_acl_end = platform_installer.index(
+        "function Test-MineGuardPlatformRuntimeProcess", platform_acl_start
+    )
+    platform_acl = platform_installer[platform_acl_start:platform_acl_end]
+    for token in (
+        "DirectorySecurity",
+        "FileSecurity",
+        "SetAccessRuleProtection($true, $false)",
+        "[IO.Directory]::SetAccessControl",
+        "[IO.File]::SetAccessControl",
+        "S-1-5-18",
+        "S-1-5-32-544",
+        "S-1-5-32-545",
+        "$ServiceSid",
     ):
-        assert f"function {helper}" in installer
-        assert "/reset" in installer and "/T" in installer and "/C" in installer
-        assert installer.count("'/grant:r'") >= 3 or installer.count('"/grant:r"') >= 3, (
-            f"{name} ACL helper must give every trustee an explicit grant switch"
-        )
+        assert token in platform_acl, f"Platform atomic ACL helper misses: {token}"
+    assert "icacls" not in platform_acl.lower()
+    assert "'/reset'" not in platform_acl and '"/reset"' not in platform_acl
+
+    agent_acl_start = agent_installer.index(
+        "function Set-EACanonicalProductTreeAcl"
+    )
+    agent_acl_end = agent_installer.index(
+        "function Get-EADerivedServiceIdentity", agent_acl_start
+    )
+    agent_acl = agent_installer[agent_acl_start:agent_acl_end]
+    for token in (
+        "DirectorySecurity",
+        "FileSecurity",
+        "SetAccessRuleProtection($true, $false)",
+        "[IO.Directory]::SetAccessControl",
+        "[IO.File]::SetAccessControl",
+        "S-1-5-18",
+        "S-1-5-32-544",
+        "S-1-5-80-0",
+        "S-1-5-32-545",
+    ):
+        assert token in agent_acl, f"Agent atomic ACL helper misses: {token}"
+    assert '"/reset"' not in agent_acl
+    first_runtime_switch = agent_installer.index(
+        "-SourcePath $StagedRuntime -SourceParent $InstallRoot"
+    )
+    whole_tree_acl = agent_installer.index(
+        "Set-EACanonicalProductTreeAcl -Path $InstallRoot -Recurse"
+    )
+    assert whole_tree_acl < first_runtime_switch
+    assert agent_installer.index(
+        "Set-EACanonicalProductTreeAcl -Path $StagedDeploy"
+    ) < first_runtime_switch
+    post_commit_start = agent_installer.rindex("if (-not $BuildFromSource) {")
+    post_commit_end = agent_installer.index(
+        "if ($BuildFromSource) {", post_commit_start
+    )
+    post_commit = agent_installer[post_commit_start:post_commit_end]
+    assert "Set-EACanonicalProductTreeAcl" not in post_commit
+    assert "Post-commit ACL verification" in post_commit
+    assert "Write-Warning" in post_commit
 
 
 def test_authenticode_interface() -> None:
@@ -1050,6 +1385,12 @@ def test_workflow() -> None:
     assert "Verify elevated NTFS ACL grant semantics" in native_workflow
     assert ".\\scripts\\Test-WindowsAclGrantSemantics.ps1" in native_workflow
 
+    actionlint_config = read(".github/actionlint.yaml")
+    for runner_label in ("signing", "mineguard-release"):
+        assert f"    - {runner_label}" in actionlint_config, (
+            f"actionlint must recognize the protected self-hosted label: {runner_label}"
+        )
+
     workflow = read(".github/workflows/windows-release.yml")
     for token in (
         "windows-2022",
@@ -1057,6 +1398,12 @@ def test_workflow() -> None:
         "TestInstallerFailurePropagation",
         "TestInstallerLifecycle",
         "UNSIGNED-TEST-ONLY",
+        "release_mode",
+        "internal-unsigned",
+        "INTERNAL-UNSIGNED",
+        "self-hosted, windows, x64, mineguard-release",
+        "windows-internal-unsigned-release",
+        "-InternalUnsignedRelease",
         "WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT",
         "WINDOWS_RELEASE_WHEELHOUSE",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
@@ -1065,6 +1412,11 @@ def test_workflow() -> None:
         "WINDOWS_RELEASE_WHEELHOUSE_MANIFEST",
         "WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256",
         "ExpectedWheelhouseManifestSha256",
+        "WINDOWS_MODEL_ISSUER_TRUST_STORE",
+        "WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256",
+        "ModelIssuerTrustStore",
+        "ExpectedModelIssuerTrustStoreSha256",
+        "The approved model issuer trust store is unavailable",
         "needs: unsigned-test",
         "WINDOWS_RELEASE_PYTHON_EXECUTABLE",
         "WINDOWS_RELEASE_PYTHON_PATCH_VERSION",
@@ -1108,9 +1460,14 @@ def test_workflow() -> None:
     assert "choco " not in lowered and "winget " not in lowered
     assert "curl " not in lowered and "invoke-webrequest" not in lowered
     assert "gh release" not in lowered and "softprops/action-gh-release" not in lowered
-    unsigned_job = workflow.split("signed-production-candidate:", 1)[0]
+    unsigned_job = workflow.split("internal-unsigned-release:", 1)[0]
     build_block, _, _ = named_step_block(
         unsigned_job, "Build, audit, compile, install, health-check and uninstall"
+    )
+    assert "'${{ inputs.release_mode }}' -eq 'signed'" in build_block
+    assert "'${{ inputs.sign_artifacts }}' -eq 'true' -or" in build_block
+    assert "'${{ inputs.legacy_server_2012r2_compatibility_test }}' -eq 'true'" in (
+        build_block
     )
     assert "$releaseParameters = @{" in build_block
     assert "@releaseParameters" in build_block
@@ -1142,6 +1499,39 @@ def test_workflow() -> None:
     )[1].split("Restore unsigned Nuitka compiler cache", 1)[0], (
         "the cache key must use GITHUB_SHA at runtime, not an unavailable expression context"
     )
+    internal_job = workflow.split("internal-unsigned-release:", 1)[1].split(
+        "signed-production-candidate:", 1
+    )[0]
+    assert "github.ref == 'refs/heads/main'" in internal_job, (
+        "the elevated private release runner must not execute arbitrary branch refs"
+    )
+    for token in (
+        "Validate controlled offline release inputs",
+        "Parse release PowerShell with Windows PowerShell 5.1",
+        "Preflight release text safety scanner",
+        "-InternalUnsignedRelease",
+        "MineGuard-Platform-*-INTERNAL-UNSIGNED.exe",
+        "MineGuard-EnterpriseAgent-*-INTERNAL-UNSIGNED.exe",
+        "release-manifest.json",
+        "SHA256SUMS.txt",
+        "if-no-files-found: error",
+    ):
+        assert token in internal_job, (
+            f"internal-unsigned workflow gate missing: {token}"
+        )
+    for forbidden in (
+        "WINDOWS_SIGNTOOL_PATH",
+        "WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT",
+        "-RequireSigned",
+        "actions/setup-python",
+        "AllowNuitkaToolDownloads",
+    ):
+        assert forbidden not in internal_job, (
+            f"internal-unsigned workflow must not depend on signing/network mode: {forbidden}"
+        )
+    assert internal_job.index("scripts/test_windows_packaging.py") < (
+        internal_job.index("Build audit lifecycle-test and publish four files")
+    )
     signed_job = workflow.split("signed-production-candidate:", 1)[1]
     assert "actions/setup-python" not in signed_job, (
         "the controlled signing runner must use its approved preinstalled python.exe"
@@ -1155,6 +1545,14 @@ def test_workflow() -> None:
     assert "actions/cache/" not in signed_job
     assert "NUITKA_CACHE_DIR_CLCACHE" not in signed_job
     assert "UnsignedCompilerCacheReadyMarker" not in signed_job
+    assert (
+        "-ModelIssuerTrustStore $env:WINDOWS_MODEL_ISSUER_TRUST_STORE"
+        in signed_job
+    )
+    assert (
+        "-ExpectedModelIssuerTrustStoreSha256 "
+        "$env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256" in signed_job
+    )
 
 
 def test_workflow_context_availability() -> None:
@@ -1282,6 +1680,7 @@ def main() -> int:
         test_contract_transport_vectors_keep_lf_bytes,
         test_child_toolchain_pins,
         test_inno_scripts,
+        test_trusted_product_install_bootstrap,
         test_root_build_orchestration,
         test_audit_and_lifecycle,
         test_authenticode_interface,

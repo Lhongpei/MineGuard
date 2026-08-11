@@ -24,13 +24,36 @@ development with C++）的 Windows Server 2022 构建机上运行：
   -AllowNuitkaToolDownloads
 ```
 
-正式交付应追加 `-SignToolPath`、`-SigningCertificateThumbprint`、
+若选择 Authenticode 签名正式交付路径，应追加 `-SignToolPath`、`-SigningCertificateThumbprint`、
 `-TimestampUrl` 和 `-RequireSignedBinary`，使主程序在生成发布清单之前完成
 Authenticode 签名。证书私钥只存在于可信构建机的证书存储，不进入参数或仓库。
 脚本默认拒绝有未提交改动的工作树；只有不对外交付的本地调试才可显式使用
 `-AllowDirtySource`，并且该开关不能绕过 `-RequireSignedBinary` 的干净 revision 要求。
 正式签名模式还强制要求 `-Wheelhouse`，并拒绝 `-AllowNuitkaToolDownloads`；根发行构建器
 会进一步用外部审批散列认证 wheelhouse 清单，只有根链路才能把最终安装器标成正式候选。
+
+不使用代码签名证书的受控内网，可以显式生成
+`unsigned-internal-release`：
+
+```powershell
+& .\platform\packaging\windows\Build-MineGuardPlatform.ps1 `
+  -OutputDirectory 'C:\MineGuardBuild\Platform' `
+  -PythonExecutable 'C:\ApprovedPython\python.exe' `
+  -ExpectedPythonPatchVersion '<approved-3.12.x>' `
+  -ExpectedPythonExecutableSha256 '<approved-python-sha256>' `
+  -Wheelhouse 'C:\MineGuardBuild\wheelhouse' `
+  -InternalUnsignedRelease
+```
+
+该模式与签名候选版一样要求干净且可识别的 Git revision、固定 Python patch
+及可执行文件 SHA-256、已审批的离线 wheelhouse，并禁止构建期下载 Nuitka
+工具。它不是默认未签名测试版，也不能与 `-RequireSignedBinary` 或任何签名
+参数同时使用。最终 Setup 必须明确标识 `INTERNAL-UNSIGNED`，在执行前按介质外记录
+核对 Setup SHA-256；安装正式服务时还要单独核对整个子发行清单 SHA-256。Windows 不会
+显示可验证的发布者，因此只适用于受控交付和受控内网。该子构建命令只产生 standalone
+暂存树；正式 Setup 必须统一由仓库根目录的
+`scripts\Build-WindowsBinaryRelease.ps1 -InternalUnsignedRelease` 生成，根构建器会把子发行
+清单摘要固化进已核验的 Setup，并写入最终根发行清单。
 
 构建脚本要求 Windows PowerShell 5.1 或更高版本；源码、工具、wheelhouse、临时目录和
 发布目录都必须在本机固定 NTFS 上，并拒绝 UNC、盘符相对路径以及位于符号链接、junction
@@ -52,5 +75,6 @@ SHA-256 完整覆盖自检，再以同盘目录改名一次发布。默认拒绝
 
 `platform/deploy/windows` 中的启动、配置、服务、备份和恢复脚本会优先调用该
 EXE；源码/venv 开发安装才回退到 `runtime\Scripts\python.exe -m mineguard`。
-安装脚本把四个发布元数据文件保留在 `{app}\release-metadata`，便于运维核验，
+安装脚本把四个发布元数据文件保留在 `{app}\release-metadata`；无签名正式版还事务生成
+`release-trust-anchor.json`，供每次正式启动复核整棵 standalone 树，便于运维核验，
 且不会在升级或卸载运行时的过程中触碰 `config`、`state`、`backups` 和 `logs`。

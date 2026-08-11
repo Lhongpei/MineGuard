@@ -1,0 +1,92 @@
+{
+    "format":  "mineguard-windows-installers-v1",
+    "classification":  "unsigned-test-artifacts",
+    "generated_utc":  "2026-08-05T09:11:34.0559252Z",
+    "source_revision":  "762065eb9a58a899167897d88b989e1e07908f66",
+    "source_dirty":  false,
+    "architecture":  "native-windows-x64",
+    "minimum_windows":  "Windows 10 1809 / Windows Server 2019 x64",
+    "arm64_status":  "not-validated-and-blocked",
+    "compatibility_profile":  {
+                                  "id":  "standard-windows-x64-v1",
+                                  "production_approved":  false,
+                                  "target_os_validation":  "release build-host lifecycle passed; minimum target OS was not independently attested",
+                                  "required_windows_powershell":  "5.1"
+                              },
+    "process_statement":  "Constrained, traceable and repeatable build; byte-for-byte identical output is not promised.",
+    "contents_statement":  "No MineGuard backend Python source, Python bytecode, tests, Git history or real secrets. Browser HTML/JavaScript/CSS and operations PowerShell remain visible plaintext.",
+    "toolchain":  {
+                      "inno_setup":  "6.7.1",
+                      "inno_setup_path_sha256":  "eb6f4410c8db367a5f74127e8025ad2ccacc0afabbe783959d237df3050f97fb",
+                      "inno_chinese_language_sha256":  "7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278",
+                      "expected_inno_setup_path_sha256":  null,
+                      "inno_external_anchor_verified":  false,
+                      "root_python":  "3.12.10",
+                      "python_executable_sha256":  "4d6f5f81a4bca11191c4c7c6b43632694d0a4ce74e068619d8fdc161d469859a",
+                      "expected_python_patch":  null,
+                      "expected_python_executable_sha256":  null,
+                      "python_external_anchor_verified":  false,
+                      "signtool_sha256":  null,
+                      "expected_signtool_sha256":  null,
+                      "signtool_external_anchor_verified":  false,
+                      "platform_python":  "3.12.10",
+                      "platform_nuitka":  "4.1.3",
+                      "platform_dependencies":  {
+                                                    "numpy":  "2.4.6",
+                                                    "scipy":  "1.17.1",
+                                                    "pydantic":  "2.11.9",
+                                                    "PyYAML":  "6.0.3",
+                                                    "tzdata":  "2025.2",
+                                                    "olefile":  "0.47",
+                                                    "xlrd":  "2.0.1"
+                                                },
+                      "agent_python":  "3.12.10",
+                      "agent_nuitka":  "4.1.3",
+                      "agent_build_dependencies":  {
+                                                       "setuptools":  "80.9.0",
+                                                       "wheel":  "0.45.1",
+                                                       "ordered_set":  "4.1.0",
+                                                       "zstandard":  "0.23.0"
+                                                   },
+                      "agent_runtime_dependencies":  {
+                                                         "openpyxl":  "3.1.5",
+                                                         "et_xmlfile":  "2.0.0",
+                                                         "xlrd":  "2.0.1",
+                                                         "tzdata":  "2025.2"
+                                                     }
+                  },
+    "third_party_review":  "Delivery organization must review the Nuitka builder/runtime exception, Inno Setup commercial-use terms and bundled dependency licenses before redistribution.",
+    "authenticode_signing":  {
+                                 "enabled":  false,
+                                 "certificate_store_location":  null,
+                                 "normalized_signer_thumbprint":  null,
+                                 "timestamp_url":  null
+                             },
+    "wheelhouse_supply_chain":  {
+                                    "verified":  false
+                                },
+    "installers":  [
+                       {
+                           "product":  "MineGuard Platform",
+                           "product_id":  "platform",
+                           "version":  "0.5.0",
+                           "file":  "MineGuard-Platform-0.5.0-windows-x64-UNSIGNED-TEST-ONLY.exe",
+                           "bytes":  42655433,
+                           "sha256":  "11db7dda424fb20b8de229ed741c7f0e21a38e54af90924cae157b470375ee5d",
+                           "authenticode_status":  "NotSigned",
+                           "signer_thumbprint":  null,
+                           "timestamped":  false
+                       },
+                       {
+                           "product":  "MineGuard Enterprise Agent",
+                           "product_id":  "enterprise-agent",
+                           "version":  "0.3.0",
+                           "file":  "MineGuard-EnterpriseAgent-0.3.0-windows-x64-UNSIGNED-TEST-ONLY.exe",
+                           "bytes":  11793479,
+                           "sha256":  "5ed376a98a6d3ca9cdac45d39c4ac4d1a146aaf951995269b08c112f967ca391",
+                           "authenticode_status":  "NotSigned",
+                           "signer_thumbprint":  null,
+                           "timestamped":  false
+                       }
+                   ]
+}

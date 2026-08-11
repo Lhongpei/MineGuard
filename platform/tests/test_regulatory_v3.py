@@ -573,6 +573,31 @@ def test_historical_outlier_can_only_create_p2() -> None:
     assert result.review_priority is not ReviewPriority.P1
 
 
+def test_historical_fire_material_intensities_remain_two_atomic_unit_tracks() -> None:
+    start = date(2026, 7, 1)
+
+    result = analyze_ten_quantity(_submission(), history=_history(start))
+
+    fire_diagnostics = {
+        item.relationship: item
+        for item in result.historical_diagnostics
+        if item.relationship
+        in {"detonators_per_extraction", "explosives_per_extraction"}
+    }
+    assert set(fire_diagnostics) == {
+        "detonators_per_extraction",
+        "explosives_per_extraction",
+    }
+    detonators = fire_diagnostics["detonators_per_extraction"]
+    explosives = fire_diagnostics["explosives_per_extraction"]
+    assert detonators.numerator_metric == "detonators_count"
+    assert explosives.numerator_metric == "explosives_kg"
+    assert detonators.denominator_metric == "extraction_t"
+    assert explosives.denominator_metric == "extraction_t"
+    assert detonators.observed_ratio == pytest.approx(10.0 / 105.0)
+    assert explosives.observed_ratio == pytest.approx(50.0 / 105.0)
+
+
 def test_future_or_not_yet_available_history_is_excluded() -> None:
     start = date(2026, 7, 1)
     future = _history(start)

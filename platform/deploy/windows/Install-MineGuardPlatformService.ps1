@@ -6,6 +6,9 @@ param(
     [string] $ExpectedConfigSha256,
     [switch] $Production,
     [string] $ExpectedSignerThumbprint = '',
+    [switch] $AllowUnsignedInternalRelease,
+    [string] $ExpectedRuntimeSha256 = '',
+    [string] $ExpectedReleaseManifestSha256 = '',
     [string] $InstallRoot = (Join-Path ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonApplicationData)) 'MineGuard\Platform'),
     [switch] $StartService
 )
@@ -192,7 +195,9 @@ function Assert-PlatformReleaseIdentity {
     $versionPath = Join-Path $metadataRoot 'VERSION.txt'
     $buildMetadataPath = Join-Path $metadataRoot 'build-metadata.json'
     $checksumsPath = Join-Path $metadataRoot 'SHA256SUMS.txt'
+    $trustAnchorPath = Join-Path $metadataRoot 'release-trust-anchor.json'
     Assert-NoReparseTree -Path (Join-Path $Root 'runtime') -Label 'runtime 目录'
+    Assert-NoReparseTree -Path (Join-Path $Root 'service') -Label 'service 目录'
     Assert-NoReparseTree -Path $metadataRoot -Label 'release-metadata 目录'
     $manifest = Read-JsonObject -Path $manifestPath -Label 'Platform release manifest'
     $build = Read-JsonObject -Path $buildMetadataPath -Label 'Platform build metadata'
@@ -222,14 +227,23 @@ function Assert-PlatformReleaseIdentity {
         [bool]$build.codeSigned -ne [bool]$manifest.codeSigned) {
         throw 'Platform 发布的代码签名声明无效或彼此不一致。'
     }
+    $declaredClassification = [string]$manifest.releaseClassification
     $expectedClassification = if ([bool]$manifest.codeSigned) {
         'signed-production-candidate'
+    } elseif ($declaredClassification -eq 'unsigned-internal-release') {
+        'unsigned-internal-release'
     } else {
         'unsigned-test-artifacts'
     }
     if ([string]$manifest.releaseClassification -ne $expectedClassification -or
         [string]$build.releaseClassification -ne $expectedClassification) {
         throw 'Platform 发布分类与代码签名状态不一致。'
+    }
+    if ($expectedClassification -eq 'unsigned-internal-release') {
+        $null = Assert-OrdinaryFile -Path $trustAnchorPath `
+            -Label 'Platform 发行信任锚' -MaximumBytes 65536
+    } elseif (Test-Path -LiteralPath $trustAnchorPath) {
+        throw '只有 unsigned-internal-release 可以携带持久化发行信任锚。'
     }
     $checksumMap = @{}
     foreach ($line in Get-Content -LiteralPath $checksumsPath -Encoding UTF8) {
@@ -278,6 +292,61 @@ function Assert-PlatformReleaseIdentity {
             throw "已安装发布文件与 release manifest 不一致：$relative"
         }
     }
+    $actualReleaseFiles = @{}
+    $runtimeRoot = Join-Path $Root 'runtime'
+    $serviceRoot = Join-Path $Root 'service'
+    foreach ($file in Get-ChildItem -LiteralPath $runtimeRoot -File -Recurse -Force) {
+        $relative = 'runtime/' + $file.FullName.Substring(
+            $runtimeRoot.Length
+        ).TrimStart('\').Replace('\', '/')
+        $key = $relative.ToLowerInvariant()
+        if ($actualReleaseFiles.ContainsKey($key)) {
+            throw "已安装 Platform 发布包含重复路径：$relative"
+        }
+        $actualReleaseFiles[$key] = $true
+    }
+    foreach ($file in Get-ChildItem -LiteralPath $serviceRoot -File -Recurse -Force) {
+        $serviceRelative = $file.FullName.Substring(
+            $serviceRoot.Length
+        ).TrimStart('\').Replace('\', '/')
+        if ($serviceRelative -in @(
+                'MineGuard.Platform.exe', 'MineGuard.Platform.exe.config',
+                'winsw-integrity.json'
+            )) {
+            continue
+        }
+        $relative = 'deploy/windows/' + $serviceRelative
+        $key = $relative.ToLowerInvariant()
+        if ($actualReleaseFiles.ContainsKey($key)) {
+            throw "已安装 Platform 发布包含重复路径：$relative"
+        }
+        $actualReleaseFiles[$key] = $true
+    }
+    foreach ($file in Get-ChildItem -LiteralPath $metadataRoot -File -Recurse -Force) {
+        $relative = $file.FullName.Substring($metadataRoot.Length).TrimStart('\').Replace('\', '/')
+        if ($relative -in @(
+                'release-manifest.json', 'SHA256SUMS.txt',
+                'release-trust-anchor.json'
+            )) {
+            continue
+        }
+        if ($relative -notin @('VERSION.txt', 'build-metadata.json')) {
+            throw "release-metadata 包含未批准文件：$relative"
+        }
+        $key = $relative.ToLowerInvariant()
+        if ($actualReleaseFiles.ContainsKey($key)) {
+            throw "已安装 Platform 发布包含重复路径：$relative"
+        }
+        $actualReleaseFiles[$key] = $true
+    }
+    if ($actualReleaseFiles.Count -ne $seen.Count) {
+        throw '已安装 Platform 实际文件集合与 release manifest 不一致。'
+    }
+    foreach ($key in $actualReleaseFiles.Keys) {
+        if (-not $seen.ContainsKey($key)) {
+            throw "已安装 Platform 包含清单外文件：$key"
+        }
+    }
     foreach ($required in @(
             'runtime/MineGuardPlatform.exe',
             'deploy/windows/Install-MineGuardPlatformService.ps1',
@@ -302,6 +371,7 @@ function Assert-PlatformReleaseIdentity {
         CodeSigned = [bool]$manifest.codeSigned
         ReleaseClassification = $expectedClassification
         RecordedSignerThumbprint = [string]$build.signingCertificateThumbprint
+        TrustAnchorPath = $trustAnchorPath
     }
 }
 
@@ -339,6 +409,62 @@ function Assert-ProductionRuntimeSignature {
     }
     if ($actual -ne $recorded) {
         throw 'Platform 主程序签名者与构建元数据不一致。'
+    }
+}
+
+function Assert-InternalUnsignedRuntimeIntegrity {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [object] $ReleaseIdentity,
+        [Parameter(Mandatory = $true)] [string] $ApprovedManifestSha256,
+        [string] $ApprovedRuntimeSha256 = ''
+    )
+    $approvedManifest = ($ApprovedManifestSha256 -replace '\s', '').ToUpperInvariant()
+    if ($approvedManifest -notmatch '^[A-F0-9]{64}$') {
+        throw '-ExpectedReleaseManifestSha256 必须是从介质外独立审批渠道取得的 64 位 SHA-256。'
+    }
+    if (-not ([string]$ReleaseIdentity.ManifestSha256).Equals(
+            $approvedManifest, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'Platform 子发行清单 SHA-256 与介质外独立批准值不一致。'
+    }
+    $trustAnchor = Read-JsonObject -Path ([string]$ReleaseIdentity.TrustAnchorPath) `
+        -Label 'Platform 持久化发行信任锚' -MaximumBytes 65536
+    $anchorProperties = @($trustAnchor.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($anchorProperties.Count -ne 4 -or
+        [int]$trustAnchor.schemaVersion -ne 1 -or
+        [string]$trustAnchor.product -ne 'MineGuard Platform release trust anchor' -or
+        [string]$trustAnchor.releaseClassification -ne 'unsigned-internal-release' -or
+        -not ([string]$trustAnchor.childReleaseManifestSha256).Equals(
+            $approvedManifest, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'Platform 持久化发行信任锚与介质外批准值不一致。'
+    }
+    if ([bool]$ReleaseIdentity.CodeSigned -or
+        [string]$ReleaseIdentity.ReleaseClassification -ne
+            'unsigned-internal-release') {
+        throw 'AllowUnsignedInternalRelease 只接受标记为 unsigned-internal-release 的未签名 Platform 发布。'
+    }
+    if (-not [string]::IsNullOrWhiteSpace(
+            [string]$ReleaseIdentity.RecordedSignerThumbprint
+        )) {
+        throw '无签名内网发布不得在构建元数据中声明签名者指纹。'
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne 'NotSigned') {
+        throw "Platform 主程序与无签名内网发布声明不一致：$($signature.Status)"
+    }
+    $approvedRuntime = ($ApprovedRuntimeSha256 -replace '\s', '').ToUpperInvariant()
+    if (-not [string]::IsNullOrWhiteSpace($approvedRuntime)) {
+        if ($approvedRuntime -notmatch '^[A-F0-9]{64}$') {
+            throw '-ExpectedRuntimeSha256 必须是 64 位十六进制 SHA-256。'
+        }
+        $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+        if (-not $actual.Equals(
+                $approvedRuntime, [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw 'Platform 主程序 SHA-256 与附加批准值不一致。'
+        }
     }
 }
 
@@ -562,6 +688,16 @@ if ([string]::IsNullOrWhiteSpace([string]$configuration.adminUsername) -or
     throw 'settings.json 的管理员身份无效。'
 }
 $configuredClientsFile = [string]$configuration.clientsFile
+$managedProvisioningRequired = $false
+$managedProvisioningProperty = $configuration.PSObject.Properties[
+    'managedProvisioningRequired'
+]
+if ($null -ne $managedProvisioningProperty) {
+    if ($managedProvisioningProperty.Value -isnot [bool]) {
+        throw 'settings.json 的 managedProvisioningRequired 必须是 JSON 布尔值。'
+    }
+    $managedProvisioningRequired = [bool]$managedProvisioningProperty.Value
+}
 $isFormalConfiguration = -not [string]::IsNullOrWhiteSpace(
     $configuredClientsFile
 )
@@ -576,16 +712,38 @@ if ($isFormalConfiguration) {
     if (-not $Production) {
         throw '正式配置安装服务必须显式使用 -Production。'
     }
-    Assert-ProductionRuntimeSignature -Path $runtimePath `
-        -ReleaseIdentity $releaseIdentity `
-        -ApprovedThumbprint $ExpectedSignerThumbprint
+    if ($AllowUnsignedInternalRelease) {
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedSignerThumbprint)) {
+            throw '无签名内网模式不接受 ExpectedSignerThumbprint；必须使用独立批准的 ExpectedReleaseManifestSha256。'
+        }
+        Assert-InternalUnsignedRuntimeIntegrity -Path $runtimePath `
+            -ReleaseIdentity $releaseIdentity `
+            -ApprovedManifestSha256 $ExpectedReleaseManifestSha256 `
+            -ApprovedRuntimeSha256 $ExpectedRuntimeSha256
+        Write-Warning (
+            '正在以内网无签名正式发行模式安装正式服务：生产配置与安全门禁全部保留，' +
+            '但 Windows 无法验证软件发布者；信任来自介质外独立批准的子发行清单 SHA-256，' +
+            '并覆盖完整 standalone 文件树。'
+        )
+    } else {
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedRuntimeSha256) -or
+            -not [string]::IsNullOrWhiteSpace($ExpectedReleaseManifestSha256)) {
+            throw '运行时/发行清单 SHA-256 只能与 -AllowUnsignedInternalRelease 同时使用。'
+        }
+        Assert-ProductionRuntimeSignature -Path $runtimePath `
+            -ReleaseIdentity $releaseIdentity `
+            -ApprovedThumbprint $ExpectedSignerThumbprint
+    }
 } elseif (-not [bool]$configuration.allowDemoDefaultPassword -or
     [bool]$configuration.secureCookie) {
     throw '无客户端注册表时只允许明确的本机 HTTP 演示配置；安全开关组合不一致。'
 }
 if ($isDemoConfiguration -and
-    ($Production -or -not [string]::IsNullOrWhiteSpace($ExpectedSignerThumbprint))) {
-    throw '演示配置不得声明 -Production 或正式签名者指纹。'
+    ($Production -or $AllowUnsignedInternalRelease -or
+        -not [string]::IsNullOrWhiteSpace($ExpectedSignerThumbprint) -or
+        -not [string]::IsNullOrWhiteSpace($ExpectedRuntimeSha256) -or
+        -not [string]::IsNullOrWhiteSpace($ExpectedReleaseManifestSha256))) {
+    throw '演示配置不得声明 -Production、内网未签名授权或正式信任锚。'
 }
 if (-not [string]::IsNullOrWhiteSpace($configuredClientsFile)) {
     $configuredClientsFile = Get-SafeLocalPath -Path $configuredClientsFile `
@@ -600,6 +758,64 @@ if (-not [string]::IsNullOrWhiteSpace($configuredClientsFile)) {
     }
     $null = Assert-OrdinaryFile -Path $configuredClientsFile `
         -Label 'settings.json 客户端注册表' -MaximumBytes 4194304
+    $registryProbeArguments = Join-MineGuardPlatformArguments `
+        -Runtime $runtime -Arguments @(
+            'config-check', '--clients-file', $configuredClientsFile
+        )
+    $registryProbeText = & $runtime.filePath @registryProbeArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw '客户端注册表无法通过短生命周期只读核验。'
+    }
+    try {
+        $registryProbe = $registryProbeText | Out-String | ConvertFrom-Json
+    } catch { throw '客户端注册表只读核验未返回有效 JSON。' }
+    $registryProbeText = $null
+    $hasManagedRegistryLock = [bool]$registryProbe.client_registry_managed
+    $registryProbe = $null
+    if ($hasManagedRegistryLock -and -not $managedProvisioningRequired) {
+        throw 'clients.json 已包含受管注册锁，但 settings.json 未启用强制受管校验。'
+    }
+    if ($managedProvisioningRequired) {
+        foreach ($requiredTrustName in @(
+                'provisioningTrustedPublicKeyFile',
+                'provisioningExpectedPublicKeySha256',
+                'provisioningExpectedIssuerKeyId'
+            )) {
+            if ($null -eq $configuration.PSObject.Properties[$requiredTrustName]) {
+                throw "受管 settings.json 缺少 $requiredTrustName。"
+            }
+        }
+        $trustedPublicKeyPath = Get-SafeLocalPath `
+            -Path ([string]$configuration.provisioningTrustedPublicKeyFile) `
+            -Label 'settings.json 签发信任公钥' -RequireFixedNtfs
+        $expectedTrustedPublicKeyPath = Join-Path $configDirectory `
+            'provisioning-issuer-public.pem'
+        if (-not $trustedPublicKeyPath.Equals(
+                $expectedTrustedPublicKeyPath,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw '受管签发公钥必须固定为 config\provisioning-issuer-public.pem。'
+        }
+        $null = Assert-OrdinaryFile -Path $trustedPublicKeyPath `
+            -Label 'settings.json 签发信任公钥' -MaximumBytes 65536
+        $expectedProvisioningHash = [string](
+            $configuration.provisioningExpectedPublicKeySha256
+        )
+        $expectedProvisioningIssuerKeyId = [string](
+            $configuration.provisioningExpectedIssuerKeyId
+        )
+        if ($expectedProvisioningHash -cnotmatch '^[0-9a-f]{64}$' -or
+            $expectedProvisioningIssuerKeyId -notmatch `
+                '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$') {
+            throw '受管签发公钥 SPKI SHA-256 或 issuer key ID 格式无效。'
+        }
+        $env:MINEGUARD_PROVISIONING_MANAGED_REQUIRED = 'true'
+        $env:MINEGUARD_PROVISIONING_TRUSTED_PUBLIC_KEY_FILE = `
+            $trustedPublicKeyPath
+        $env:MINEGUARD_PROVISIONING_EXPECTED_PUBLIC_KEY_SHA256 = `
+            $expectedProvisioningHash
+        $env:MINEGUARD_PROVISIONING_EXPECTED_ISSUER_KEY_ID = `
+            $expectedProvisioningIssuerKeyId
+    }
     $checkArguments = Join-MineGuardPlatformArguments -Runtime $runtime `
         -Arguments @(
             'config-check', '--clients-file', $configuredClientsFile, '--production',
@@ -788,9 +1004,16 @@ try {
     # 最后一次复核全部外部信任锚和产品身份，然后才开始写入服务目录。
     $lateReleaseIdentity = Assert-PlatformReleaseIdentity -Root $InstallRoot
     if ($isFormalConfiguration) {
-        Assert-ProductionRuntimeSignature -Path $runtimePath `
-            -ReleaseIdentity $lateReleaseIdentity `
-            -ApprovedThumbprint $ExpectedSignerThumbprint
+        if ($AllowUnsignedInternalRelease) {
+            Assert-InternalUnsignedRuntimeIntegrity -Path $runtimePath `
+                -ReleaseIdentity $lateReleaseIdentity `
+                -ApprovedManifestSha256 $ExpectedReleaseManifestSha256 `
+                -ApprovedRuntimeSha256 $ExpectedRuntimeSha256
+        } else {
+            Assert-ProductionRuntimeSignature -Path $runtimePath `
+                -ReleaseIdentity $lateReleaseIdentity `
+                -ApprovedThumbprint $ExpectedSignerThumbprint
+        }
     }
     $null = Assert-OrdinaryFile -Path $WinSWExecutable -Label 'WinSW 输入文件' `
         -MaximumBytes 134217728

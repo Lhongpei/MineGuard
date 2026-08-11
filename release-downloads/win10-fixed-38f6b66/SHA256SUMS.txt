@@ -1,0 +1,3 @@
+1922ee993b2e3ca7bfd40ad792246c7e59d5be5333e4b265da5b7a04c7f776ca *MineGuard-Platform-0.5.1-windows-x64-UNSIGNED-TEST-ONLY.exe
+cc58b7bc0270a01a40fa7ef1b2a88a01c4f882b9eb2fde0ecf421af30d09104f *MineGuard-EnterpriseAgent-0.3.0-windows-x64-UNSIGNED-TEST-ONLY.exe
+c36e12ee3353f7c200297ae88126539a85a28e982c617bae9fe86285aba3ced1 *release-manifest.json

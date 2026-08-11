@@ -3,8 +3,17 @@ name: Windows binary installer release
 on:
   workflow_dispatch:
     inputs:
+      release_mode:
+        description: Select unsigned test, strict INTERNAL-UNSIGNED, or signed release flow
+        required: true
+        default: unsigned-test
+        type: choice
+        options:
+          - unsigned-test
+          - internal-unsigned
+          - signed
       sign_artifacts:
-        description: Build production-candidate installers on the controlled signing runner
+        description: Legacy compatibility switch; release_mode=signed is preferred
         required: true
         default: false
         type: boolean
@@ -27,6 +36,9 @@ concurrency:
 jobs:
   unsigned-test:
     name: Build and install-test unsigned artifacts
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.release_mode != 'internal-unsigned'
     runs-on: windows-2022
     timeout-minutes: 180
     env:
@@ -212,7 +224,8 @@ jobs:
       - name: Build, audit, compile, install, health-check and uninstall
         shell: powershell
         run: |
-          if ('${{ inputs.sign_artifacts }}' -eq 'true' -and
+          if (('${{ inputs.sign_artifacts }}' -eq 'true' -or
+               '${{ inputs.release_mode }}' -eq 'signed') -and
               '${{ inputs.legacy_server_2012r2_compatibility_test }}' -eq 'true') {
             throw 'A legacy Windows Server 2012 R2 test cannot also request signed production candidates.'
           }
@@ -275,12 +288,206 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  internal-unsigned-release:
+    name: Build strict INTERNAL-UNSIGNED release on private runner
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.release_mode == 'internal-unsigned'
+    runs-on: [self-hosted, windows, x64, mineguard-release]
+    environment: windows-internal-unsigned-release
+    timeout-minutes: 180
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      WINDOWS_RELEASE_PYTHON_EXECUTABLE: ${{ vars.WINDOWS_RELEASE_PYTHON_EXECUTABLE }}
+      WINDOWS_RELEASE_PYTHON_PATCH_VERSION: ${{ vars.WINDOWS_RELEASE_PYTHON_PATCH_VERSION }}
+      WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256: ${{ vars.WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256 }}
+      WINDOWS_RELEASE_WHEELHOUSE: ${{ vars.WINDOWS_RELEASE_WHEELHOUSE }}
+      WINDOWS_RELEASE_WHEELHOUSE_MANIFEST: ${{ vars.WINDOWS_RELEASE_WHEELHOUSE_MANIFEST }}
+      WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256: ${{ vars.WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256 }}
+      WINDOWS_MODEL_ISSUER_TRUST_STORE: ${{ vars.WINDOWS_MODEL_ISSUER_TRUST_STORE }}
+      WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256: ${{ vars.WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256 }}
+      INNO_COMPILER: ${{ vars.WINDOWS_INNO_COMPILER }}
+      INNO_COMPILER_SHA256: ${{ vars.WINDOWS_INNO_COMPILER_SHA256 }}
+
+    steps:
+      - name: Check out exact private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
+          fetch-depth: 1
+
+      - name: Validate controlled offline release inputs
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ inputs.sign_artifacts }}' -eq 'true') {
+            throw 'INTERNAL-UNSIGNED cannot be combined with the legacy sign_artifacts switch.'
+          }
+          if ('${{ inputs.legacy_server_2012r2_compatibility_test }}' -eq 'true') {
+            throw 'INTERNAL-UNSIGNED supports the standard Windows 10 / Server 2019+ profile only.'
+          }
+          $identity = New-Object Security.Principal.WindowsPrincipal(
+            [Security.Principal.WindowsIdentity]::GetCurrent()
+          )
+          if (-not $identity.IsInRole(
+              [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'The private INTERNAL-UNSIGNED runner must be elevated for installer lifecycle tests.'
+          }
+          foreach ($required in @(
+            $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE,
+            $env:WINDOWS_RELEASE_PYTHON_PATCH_VERSION,
+            $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256,
+            $env:WINDOWS_RELEASE_WHEELHOUSE,
+            $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST,
+            $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256,
+            $env:WINDOWS_MODEL_ISSUER_TRUST_STORE,
+            $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256,
+            $env:INNO_COMPILER,
+            $env:INNO_COMPILER_SHA256
+          )) {
+            if ([string]::IsNullOrWhiteSpace($required)) {
+              throw 'The private release environment is missing a required controlled input.'
+            }
+          }
+          foreach ($leaf in @(
+            $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE,
+            $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST,
+            $env:WINDOWS_MODEL_ISSUER_TRUST_STORE,
+            $env:INNO_COMPILER
+          )) {
+            if (-not (Test-Path -LiteralPath $leaf -PathType Leaf)) {
+              throw "Controlled release file is unavailable: $leaf"
+            }
+          }
+          if (-not (Test-Path -LiteralPath $env:WINDOWS_RELEASE_WHEELHOUSE `
+              -PathType Container)) {
+            throw 'The approved offline wheelhouse is unavailable.'
+          }
+          foreach ($expectedHash in @(
+            $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256,
+            $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256,
+            $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256,
+            $env:INNO_COMPILER_SHA256
+          )) {
+            if ($expectedHash -notmatch '^[A-Fa-f0-9]{64}$') {
+              throw 'Every protected INTERNAL-UNSIGNED SHA-256 must contain 64 hexadecimal digits.'
+            }
+          }
+          if ($env:WINDOWS_RELEASE_PYTHON_PATCH_VERSION -notmatch '^3\.12\.\d+$') {
+            throw 'The protected Python version must be an exact CPython 3.12 patch.'
+          }
+          foreach ($definition in @(
+            [pscustomobject]@{
+              path = $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE
+              expected = $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256
+            },
+            [pscustomobject]@{
+              path = $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST
+              expected = $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256
+            },
+            [pscustomobject]@{
+              path = $env:WINDOWS_MODEL_ISSUER_TRUST_STORE
+              expected = $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256
+            },
+            [pscustomobject]@{
+              path = $env:INNO_COMPILER
+              expected = $env:INNO_COMPILER_SHA256
+            }
+          )) {
+            $actual = (Get-FileHash -LiteralPath $definition.path `
+              -Algorithm SHA256).Hash
+            if (-not $actual.Equals(
+                [string]$definition.expected,
+                [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Controlled release input SHA-256 mismatch: $($definition.path)"
+            }
+          }
+          $actualPythonVersion = (& $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE `
+            -c 'import platform; print(platform.python_version())' |
+            Select-Object -Last 1).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $actualPythonVersion -ne $env:WINDOWS_RELEASE_PYTHON_PATCH_VERSION) {
+            throw 'The controlled python.exe does not match its protected patch version.'
+          }
+          & $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE scripts/test_windows_packaging.py
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows packaging static checks failed.'
+          }
+
+      - name: Parse release PowerShell with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(Get-ChildItem -Path `
+            'platform\packaging\windows','platform\deploy\windows', `
+            'agent\packaging\windows','agent\deploy\windows','scripts' `
+            -Filter '*.ps1' -File -Recurse)
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile(
+              $file.FullName, [ref]$tokens, [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              throw (($errors | ForEach-Object {
+                "$($file.FullName):$($_.Extent.StartLineNumber): $($_.Message)"
+              }) -join [Environment]::NewLine)
+            }
+          }
+
+      - name: Preflight release text safety scanner
+        shell: powershell
+        run: |
+          $auditRoots = @(
+            "$pwd\platform\deploy\windows",
+            "$pwd\agent\deploy\windows"
+          )
+          .\scripts\Test-WindowsBinaryRelease.ps1 -SecretAuditRoots $auditRoots
+
+      - name: Build audit lifecycle-test and publish four files
+        shell: powershell
+        env:
+          WINDOWS_RELEASE_OUTPUT: ${{ runner.temp }}\mineguard-internal-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if (Test-Path -LiteralPath $env:WINDOWS_RELEASE_OUTPUT) {
+            throw 'The atomic INTERNAL-UNSIGNED output directory already exists.'
+          }
+          .\scripts\Build-WindowsBinaryRelease.ps1 `
+            -OutputDirectory $env:WINDOWS_RELEASE_OUTPUT `
+            -Wheelhouse $env:WINDOWS_RELEASE_WHEELHOUSE `
+            -WheelhouseManifest $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST `
+            -ExpectedWheelhouseManifestSha256 $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256 `
+            -PythonExecutable $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE `
+            -ExpectedPythonPatchVersion $env:WINDOWS_RELEASE_PYTHON_PATCH_VERSION `
+            -ExpectedPythonExecutableSha256 $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256 `
+            -ModelIssuerTrustStore $env:WINDOWS_MODEL_ISSUER_TRUST_STORE `
+            -ExpectedModelIssuerTrustStoreSha256 $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256 `
+            -InnoCompiler $env:INNO_COMPILER `
+            -ExpectedInnoCompilerSha256 $env:INNO_COMPILER_SHA256 `
+            -InternalUnsignedRelease `
+            -TestInstallerFailurePropagation `
+            -TestInstallerLifecycle
+
+      - name: Upload strict INTERNAL-UNSIGNED release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mineguard-windows-INTERNAL-UNSIGNED-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/mineguard-internal-unsigned-${{ github.run_id }}-${{ github.run_attempt }}/MineGuard-Platform-*-INTERNAL-UNSIGNED.exe
+            ${{ runner.temp }}/mineguard-internal-unsigned-${{ github.run_id }}-${{ github.run_attempt }}/MineGuard-EnterpriseAgent-*-INTERNAL-UNSIGNED.exe
+            ${{ runner.temp }}/mineguard-internal-unsigned-${{ github.run_id }}-${{ github.run_attempt }}/release-manifest.json
+            ${{ runner.temp }}/mineguard-internal-unsigned-${{ github.run_id }}-${{ github.run_attempt }}/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
   signed-production-candidate:
     name: Build signed production-candidate artifacts
     needs: unsigned-test
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      inputs.sign_artifacts &&
+      (inputs.sign_artifacts || inputs.release_mode == 'signed') &&
       !inputs.legacy_server_2012r2_compatibility_test
     runs-on: [self-hosted, windows, x64, signing]
     environment: windows-production-signing
@@ -298,6 +505,8 @@ jobs:
       WINDOWS_RELEASE_WHEELHOUSE: ${{ vars.WINDOWS_RELEASE_WHEELHOUSE }}
       WINDOWS_RELEASE_WHEELHOUSE_MANIFEST: ${{ vars.WINDOWS_RELEASE_WHEELHOUSE_MANIFEST }}
       WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256: ${{ vars.WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256 }}
+      WINDOWS_MODEL_ISSUER_TRUST_STORE: ${{ vars.WINDOWS_MODEL_ISSUER_TRUST_STORE }}
+      WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256: ${{ vars.WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256 }}
       INNO_COMPILER: ${{ vars.WINDOWS_INNO_COMPILER }}
       INNO_COMPILER_SHA256: ${{ vars.WINDOWS_INNO_COMPILER_SHA256 }}
 
@@ -322,6 +531,8 @@ jobs:
             $env:WINDOWS_RELEASE_WHEELHOUSE,
             $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST,
             $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256,
+            $env:WINDOWS_MODEL_ISSUER_TRUST_STORE,
+            $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256,
             $env:INNO_COMPILER,
             $env:INNO_COMPILER_SHA256
           )) {
@@ -344,12 +555,16 @@ jobs:
           if (-not (Test-Path -LiteralPath $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST -PathType Leaf)) {
             throw 'The approved wheelhouse supply-chain manifest is unavailable.'
           }
+          if (-not (Test-Path -LiteralPath $env:WINDOWS_MODEL_ISSUER_TRUST_STORE -PathType Leaf)) {
+            throw 'The approved model issuer trust store is unavailable.'
+          }
           if ($env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') {
             throw 'The protected wheelhouse manifest SHA-256 must contain exactly 64 hexadecimal digits.'
           }
           foreach ($expectedHash in @(
             $env:WINDOWS_SIGNTOOL_SHA256,
             $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256,
+            $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256,
             $env:INNO_COMPILER_SHA256
           )) {
             if ($expectedHash -notmatch '^[A-Fa-f0-9]{64}$') {
@@ -387,6 +602,8 @@ jobs:
             -PythonExecutable $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE `
             -ExpectedPythonPatchVersion $env:WINDOWS_RELEASE_PYTHON_PATCH_VERSION `
             -ExpectedPythonExecutableSha256 $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256 `
+            -ModelIssuerTrustStore $env:WINDOWS_MODEL_ISSUER_TRUST_STORE `
+            -ExpectedModelIssuerTrustStoreSha256 $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256 `
             -InnoCompiler $env:INNO_COMPILER `
             -ExpectedInnoCompilerSha256 $env:INNO_COMPILER_SHA256 `
             -SignToolPath $env:WINDOWS_SIGNTOOL_PATH `

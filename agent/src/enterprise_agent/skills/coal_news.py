@@ -586,12 +586,14 @@ class CoalNewsSearchSkill:
         config: CoalNewsConfig | None = None,
         *,
         llm_config: LLMConfig | None = None,
+        configuration_guard: Callable[[], Any] | None = None,
         opener: Callable[[urllib.request.Request, float], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
     ):
         self.config = config or CoalNewsConfig()
         self.llm_config = llm_config
+        self._configuration_guard = configuration_guard
         self._opener = opener or _default_opener
         self._clock = clock or _now
         self._monotonic = monotonic or time.monotonic
@@ -1240,6 +1242,12 @@ class CoalNewsSearchSkill:
                 "not_configured",
                 status="unavailable",
             )
+        # A managed credential is re-verified immediately before every
+        # authenticated request.  Rotation requires a service restart and a
+        # tampered/expired lock therefore fails before the API key can leave
+        # the process.  Public Baidu/Bing retrieval does not use this guard.
+        if self._configuration_guard is not None:
+            self._configuration_guard()
         start = (now - timedelta(days=normalized.window_days)).date().isoformat()
         end = now.date().isoformat()
         prompt = (

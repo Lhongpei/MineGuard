@@ -216,6 +216,54 @@ function Write-FailureProbeLog {
     Write-Host "--- end $Product failure-probe Inno log ---"
 }
 
+function Write-FailureProbeReleaseIntegrity {
+    param(
+        [ValidateSet("platform", "agent")][string]$Product,
+        [string]$StageRoot,
+        [string]$OriginalManifestPath
+    )
+    $Utf8NoBom = New-Object Text.UTF8Encoding($false)
+    $ManifestPath = Join-Path $StageRoot "release-manifest.json"
+    $ChecksumsPath = Join-Path $StageRoot "SHA256SUMS.txt"
+    $Manifest = Get-Content -LiteralPath $OriginalManifestPath `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    $ManifestEntries = @()
+    foreach ($File in Get-ChildItem -LiteralPath $StageRoot -File -Recurse -Force |
+        Where-Object {
+            $Relative = $_.FullName.Substring($StageRoot.Length + 1).Replace('\', '/')
+            $Relative -notin @("release-manifest.json", "SHA256SUMS.txt")
+        } | Sort-Object FullName) {
+        $Relative = $File.FullName.Substring($StageRoot.Length + 1).Replace('\', '/')
+        $ManifestEntries += [ordered]@{
+            path = $Relative
+            bytes = [long]$File.Length
+            sha256 = (Get-FileHash -LiteralPath $File.FullName `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    $Manifest.files = $ManifestEntries
+    [IO.File]::WriteAllText(
+        $ManifestPath,
+        (($Manifest | ConvertTo-Json -Depth 50) + [Environment]::NewLine),
+        $Utf8NoBom
+    )
+
+    $ChecksumLines = @()
+    foreach ($File in Get-ChildItem -LiteralPath $StageRoot -File -Recurse -Force |
+        Where-Object {
+            $_.FullName.Substring($StageRoot.Length + 1).Replace('\', '/') -ne
+                "SHA256SUMS.txt"
+        } | Sort-Object FullName) {
+        $Relative = $File.FullName.Substring($StageRoot.Length + 1).Replace('\', '/')
+        $Digest = (Get-FileHash -LiteralPath $File.FullName `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+        $Separator = if ($Product -eq "agent") { " *" } else { "  " }
+        $ChecksumLines += "$Digest$Separator$Relative"
+    }
+    [IO.File]::WriteAllLines($ChecksumsPath, $ChecksumLines, $Utf8NoBom)
+    return (Get-FileHash -LiteralPath $ManifestPath -Algorithm SHA256).Hash
+}
+
 function Test-OneFailureProbe {
     param(
         [ValidateSet("platform", "agent")][string]$Product,
@@ -236,6 +284,10 @@ function Test-OneFailureProbe {
     foreach ($MetadataName in @("VERSION.txt", "build-metadata.json", "release-manifest.json", "SHA256SUMS.txt")) {
         Copy-Item -LiteralPath (Join-Path $OriginalStage $MetadataName) -Destination $CorruptStage
     }
+    if ($Product -eq "agent") {
+        Copy-Item -LiteralPath (Join-Path $OriginalStage `
+            "model-credential-trust.json") -Destination $CorruptStage
+    }
     foreach ($DeployFile in Get-ChildItem -LiteralPath (Join-Path $OriginalStage "deploy\windows") -Force) {
         Copy-Item -LiteralPath $DeployFile.FullName -Destination (Join-Path $CorruptStage "deploy\windows") -Recurse
     }
@@ -249,6 +301,11 @@ function Test-OneFailureProbe {
         ($Version + "-deliberately-tampered" + [Environment]::NewLine),
         (New-Object Text.UTF8Encoding($false))
     )
+    $ChildReleaseManifestSha256 = Write-FailureProbeReleaseIntegrity `
+        -Product $Product -StageRoot $CorruptStage `
+        -OriginalManifestPath (Join-Path $OriginalStage "release-manifest.json")
+    $TrustedBootstrapSha256 = (Get-FileHash -LiteralPath (Join-Path $AssetsRoot `
+        "Invoke-MineGuardTrustedProductInstall.ps1") -Algorithm SHA256).Hash
     $ArtifactBase = "MineGuard-$Product-FailurePropagationProbe"
     $CompileArguments = @(
         "/Qp",
@@ -258,6 +315,8 @@ function Test-OneFailureProbe {
         "/DAppVersion=$Version",
         "/DNumericVersion=$Version.0",
         "/DArtifactFileName=$ArtifactBase",
+        "/DChildReleaseManifestSha256=$ChildReleaseManifestSha256",
+        "/DTrustedBootstrapSha256=$TrustedBootstrapSha256",
         $InnoScript
     )
     Invoke-NativeChecked -FilePath $InnoCompiler -ArgumentList $CompileArguments -Label "$Product negative-probe compilation"
@@ -321,6 +380,51 @@ function Invoke-ProductInstallerExpectFailure {
             "-InstallRoot", $InstallRoot,
             "-StateRoot", $StateRoot
         )
+    }
+    $BuildMetadata = Get-Content -LiteralPath (Join-Path $OriginalStage `
+        "build-metadata.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+    $ReleaseClassification = if ($Product -eq "platform") {
+        [string]$BuildMetadata.releaseClassification
+    }
+    else {
+        [string]$BuildMetadata.release_classification
+    }
+    switch ($ReleaseClassification) {
+        "signed-production-candidate" {
+            if ($Product -eq "agent") {
+                $ApprovedSignerThumbprint = [string](
+                    $BuildMetadata.signing_certificate_thumbprint
+                )
+                if ($ApprovedSignerThumbprint -notmatch '^[A-Fa-f0-9]{40}$') {
+                    throw "Agent signed failure probe has no valid approved signer thumbprint."
+                }
+                $Arguments += @(
+                    "-ApprovedSignerThumbprint", $ApprovedSignerThumbprint
+                )
+            }
+        }
+        "unsigned-internal-release" {
+            $ReleaseManifestSha256 = (Get-FileHash -LiteralPath (Join-Path `
+                $OriginalStage "release-manifest.json") -Algorithm SHA256).Hash
+            $Arguments += @(
+                "-AllowUnsignedInternalRelease",
+                "-ExpectedReleaseManifestSha256", $ReleaseManifestSha256
+            )
+        }
+        "unsigned-test-artifacts" {
+            if ($Product -ne "platform") {
+                throw "Only the Platform uses unsigned-test-artifacts classification."
+            }
+        }
+        "unsigned-test-only" {
+            if ($Product -ne "agent") {
+                throw "Only the Agent uses unsigned-test-only classification."
+            }
+            $Arguments += "-AllowUnsignedTestMedia"
+        }
+        default {
+            throw "$Product failure probe found unsupported release classification: $ReleaseClassification"
+        }
     }
     if ($InjectAfterSwitch) {
         $Arguments += "-AuditFailAfterRuntimeSwitch"
@@ -479,7 +583,7 @@ function Test-OneTransactionalRollbackAndDowngrade {
         }
         foreach ($MetadataName in @(
             "VERSION.txt", "build-metadata.json", "release-manifest.json",
-            "SHA256SUMS.txt"
+            "SHA256SUMS.txt", "model-credential-trust.json"
         )) {
             Copy-Item -LiteralPath (Join-Path $OriginalStage $MetadataName) `
                 -Destination $MetadataRoot

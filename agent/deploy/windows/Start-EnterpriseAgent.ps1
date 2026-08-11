@@ -36,7 +36,8 @@ Assert-EANoInstanceProcesses -Context $Context
 # values using these reserved names before the authoritative loader runs.
 foreach ($PolicyName in @(
     "MINEGUARD_SERVICE_PRODUCTION_MODE",
-    "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED"
+    "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED",
+    "MINEGUARD_SERVICE_PROVISIONING_MANAGED_REQUIRED"
 )) {
     [Environment]::SetEnvironmentVariable(
         $PolicyName, $null, [EnvironmentVariableTarget]::Process

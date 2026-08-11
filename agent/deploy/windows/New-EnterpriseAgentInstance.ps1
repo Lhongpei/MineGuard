@@ -11,6 +11,10 @@ param(
     [string]$StateRoot = (Join-Path $env:ProgramData "MineGuard\EnterpriseAgent\instances"),
     [string[]]$WatchDirectories = @(),
     [switch]$GrantWatchReadAcl,
+    [string]$ProvisionedEnvironmentFile = "",
+    [string]$ProvisioningLockFile = "",
+    [string]$ProvisioningSecretStoreFile = "",
+    [string]$ProvisioningCaFile = "",
     [switch]$SkipAcl,
     [switch]$DevelopmentOnly
 )
@@ -36,6 +40,26 @@ if ($DevelopmentOnly -and -not $SkipAcl) {
 }
 if ($SkipAcl -and $GrantWatchReadAcl) {
     throw "-GrantWatchReadAcl cannot be combined with -SkipAcl."
+}
+
+$ProvisioningInputs = @(
+    $ProvisionedEnvironmentFile,
+    $ProvisioningLockFile,
+    $ProvisioningSecretStoreFile,
+    $ProvisioningCaFile
+)
+$ProvisioningInputCount = @($ProvisioningInputs | Where-Object {
+    -not [string]::IsNullOrWhiteSpace([string]$_)
+}).Count
+if ($ProvisioningInputCount -notin @(0, 4)) {
+    throw (
+        "Provisioned instance creation requires all four prepared files: " +
+        "environment, lock, DPAPI secret store and Platform CA."
+    )
+}
+$UsingProvisioningPackage = $ProvisioningInputCount -eq 4
+if ($UsingProvisioningPackage -and ($SkipAcl -or $DevelopmentOnly)) {
+    throw "Provisioned access packages require the production ACL boundary."
 }
 
 if (-not $SkipAcl) {
@@ -116,6 +140,76 @@ $Template = Resolve-EASafeLocalPath -Name "Instance template" `
     -PathValue (Join-Path $InstallRoot "deploy\windows\agent.env.template") `
     -MustExist -RequiredType Leaf
 Assert-EAOrdinaryLeaf -Path $Template -Name "Instance template" -MaximumBytes 1MB
+
+$PreparedFiles = $null
+if ($UsingProvisioningPackage) {
+    $PreparedEnvironment = Resolve-EASafeLocalPath `
+        -Name "Prepared provisioned environment" `
+        -PathValue $ProvisionedEnvironmentFile -MustExist -RequiredType Leaf
+    $PreparedLock = Resolve-EASafeLocalPath -Name "Prepared provisioning lock" `
+        -PathValue $ProvisioningLockFile -MustExist -RequiredType Leaf
+    $PreparedSecretStore = Resolve-EASafeLocalPath `
+        -Name "Prepared provisioning secret store" `
+        -PathValue $ProvisioningSecretStoreFile -MustExist -RequiredType Leaf
+    $PreparedCa = Resolve-EASafeLocalPath -Name "Prepared Platform CA" `
+        -PathValue $ProvisioningCaFile -MustExist -RequiredType Leaf
+    $PreparedParent = [IO.Path]::GetDirectoryName($PreparedEnvironment)
+    $ExpectedPreparedParent = [IO.Path]::GetDirectoryName($PreparedLock)
+    foreach ($Candidate in @($PreparedSecretStore, $PreparedCa)) {
+        $CandidateParent = [IO.Path]::GetDirectoryName($Candidate)
+        if (-not $CandidateParent.Equals(
+                $PreparedParent, [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "Prepared provisioning files must share one transaction directory."
+        }
+    }
+    if (-not $ExpectedPreparedParent.Equals(
+            $PreparedParent, [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Prepared provisioning files must share one transaction directory."
+    }
+    $PreparedParentParent = [IO.Path]::GetDirectoryName($PreparedParent)
+    $PreparedLeaf = [IO.Path]::GetFileName($PreparedParent)
+    if (-not $PreparedParentParent.Equals(
+            $StateRoot, [StringComparison]::OrdinalIgnoreCase
+        ) -or $PreparedLeaf -notmatch '^\.instance-staging-[A-Fa-f0-9]{32}$') {
+        throw (
+            "Prepared provisioning files must be inside an owned, same-volume " +
+            "StateRoot transaction directory."
+        )
+    }
+    $ExpectedPreparedNames = @{
+        $PreparedEnvironment = "provisioned-agent.env"
+        $PreparedLock = "provisioning-lock.json"
+        $PreparedSecretStore = "provisioning-secrets.dpapi"
+        $PreparedCa = "platform-ca.pem"
+    }
+    foreach ($Entry in $ExpectedPreparedNames.GetEnumerator()) {
+        $ActualPreparedName = [IO.Path]::GetFileName([string]$Entry.Key)
+        if (-not $ActualPreparedName.Equals(
+                [string]$Entry.Value, [StringComparison]::Ordinal
+            )) {
+            throw "Prepared provisioning file has an unexpected name: $($Entry.Key)"
+        }
+    }
+    Assert-EAOrdinaryTree -Root $PreparedParent `
+        -Name "Prepared provisioning transaction" -MaximumEntries 12
+    Assert-EAOrdinaryLeaf -Path $PreparedEnvironment `
+        -Name "Prepared provisioned environment" -MaximumBytes 1MB
+    Assert-EAOrdinaryLeaf -Path $PreparedLock `
+        -Name "Prepared provisioning lock" -MaximumBytes 1MB
+    Assert-EAOrdinaryLeaf -Path $PreparedSecretStore `
+        -Name "Prepared provisioning secret store" -MaximumBytes 1MB
+    Assert-EAOrdinaryLeaf -Path $PreparedCa `
+        -Name "Prepared Platform CA" -MaximumBytes 1MB
+    $PreparedFiles = [pscustomobject]@{
+        Environment = $PreparedEnvironment
+        Lock = $PreparedLock
+        SecretStore = $PreparedSecretStore
+        Ca = $PreparedCa
+        Parent = $PreparedParent
+    }
+}
 
 $CreationMutexName = "Global\MineGuardEnterpriseAgent-StateRoot-$($StateMarker.root_id)"
 $CreationMutex = New-Object Threading.Mutex($false, $CreationMutexName)
@@ -223,27 +317,87 @@ try {
 
     $FinalConfigPath = Join-Path $InstanceRoot "config\agent.env"
     $FinalDatabasePath = Join-Path $InstanceRoot "data\enterprise-agent.db"
-    $Content = [IO.File]::ReadAllText($Template)
-    $Replacements = @{
-        "__DATABASE_PATH__" = $FinalDatabasePath
-        "__PORT__" = $Port.ToString()
-        "__MINE_ID__" = $MineId
-        "__MINE_NAME__" = $MineName
-        "__OPERATOR_ID__" = $OperatorId
-        "__OPERATOR_NAME__" = $OperatorName
-        "__SYSTEM_ID__" = $SystemId
-        "__WATCH_DIRECTORIES__" = ($ResolvedWatchDirectories -join ";")
-    }
-    foreach ($Entry in $Replacements.GetEnumerator()) {
-        $Content = $Content.Replace([string]$Entry.Key, [string]$Entry.Value)
-    }
-    if ($Content -match '__[A-Z0-9_]+__') {
-        throw "Instance template contains an unresolved placeholder."
-    }
     $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     $StageConfigPath = Join-Path $StageConfigDirectory "agent.env"
-    [IO.File]::WriteAllText($StageConfigPath, $Content, $Utf8NoBom)
-    [void](Read-EAEnvironmentFile -Path $StageConfigPath)
+    if ($UsingProvisioningPackage) {
+        [IO.File]::Copy($PreparedFiles.Environment, $StageConfigPath, $false)
+        [IO.File]::Copy(
+            $PreparedFiles.Lock,
+            (Join-Path $StageConfigDirectory "provisioning-lock.json"),
+            $false
+        )
+        [IO.File]::Copy(
+            $PreparedFiles.SecretStore,
+            (Join-Path $StageConfigDirectory "provisioning-secrets.dpapi"),
+            $false
+        )
+        [IO.File]::Copy(
+            $PreparedFiles.Ca,
+            (Join-Path $StageConfigDirectory "platform-ca.pem"),
+            $false
+        )
+    }
+    else {
+        $Content = [IO.File]::ReadAllText($Template)
+        $Replacements = @{
+            "__DATABASE_PATH__" = $FinalDatabasePath
+            "__PORT__" = $Port.ToString()
+            "__MINE_ID__" = $MineId
+            "__MINE_NAME__" = $MineName
+            "__OPERATOR_ID__" = $OperatorId
+            "__OPERATOR_NAME__" = $OperatorName
+            "__SYSTEM_ID__" = $SystemId
+            "__WATCH_DIRECTORIES__" = ($ResolvedWatchDirectories -join ";")
+        }
+        foreach ($Entry in $Replacements.GetEnumerator()) {
+            $Content = $Content.Replace([string]$Entry.Key, [string]$Entry.Value)
+        }
+        if ($Content -match '__[A-Z0-9_]+__') {
+            throw "Instance template contains an unresolved placeholder."
+        }
+        [IO.File]::WriteAllText($StageConfigPath, $Content, $Utf8NoBom)
+    }
+    $PreparedValues = Read-EAEnvironmentFile -Path $StageConfigPath
+    if ($UsingProvisioningPackage) {
+        $ExpectedProvisioningPaths = @{
+            "ENTERPRISE_PROVISIONING_LOCK_FILE" = (
+                Join-Path $InstanceRoot "config\provisioning-lock.json"
+            )
+            "ENTERPRISE_PROVISIONING_SECRET_STORE" = (
+                Join-Path $InstanceRoot "config\provisioning-secrets.dpapi"
+            )
+            "PLATFORM_V3_CA_BUNDLE" = (
+                Join-Path $InstanceRoot "config\platform-ca.pem"
+            )
+        }
+        foreach ($Entry in $ExpectedProvisioningPaths.GetEnumerator()) {
+            if (-not $PreparedValues.ContainsKey([string]$Entry.Key) -or
+                -not ([string]$PreparedValues[[string]$Entry.Key]).Equals(
+                    [string]$Entry.Value,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw "Provisioned environment does not bind $($Entry.Key) to this instance."
+            }
+        }
+        foreach ($SecretName in @(
+            "ENTERPRISE_EXCHANGE_HMAC_SECRET",
+            "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON",
+            "REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET",
+            "PLATFORM_V2_TRANSPORT_HMAC_SECRET",
+            "PLATFORM_V3_TRANSPORT_HMAC_SECRET"
+        )) {
+            if ($PreparedValues.ContainsKey($SecretName) -and
+                -not [string]::IsNullOrEmpty([string]$PreparedValues[$SecretName])) {
+                throw "Provisioned environment must not contain plaintext $SecretName."
+            }
+        }
+        # The four prepared files have now been copied into this creator's own
+        # transaction.  Consume the caller-owned same-volume staging tree
+        # before publication so a failed import cannot leave a second DPAPI
+        # store, password hashes or activation-derived metadata behind.
+        Remove-EAOwnedTemporaryTree -Path $PreparedFiles.Parent `
+            -ExpectedParent $StateRoot -RequiredPrefix ".instance-staging-"
+    }
 
     $Metadata = [ordered]@{
         format = "mineguard-enterprise-agent-windows-instance-v1"
@@ -314,6 +468,42 @@ try {
     Assert-EAInstanceGlobalIsolation -Context $CreatedContext
     if (-not $SkipAcl -and ($UsingDefaultInbox -or $GrantWatchReadAcl)) {
         Assert-EAInstanceWatchAcls -Context $CreatedContext
+    }
+    if ($UsingProvisioningPackage) {
+        $PolicyNames = @(
+            "MINEGUARD_SERVICE_PRODUCTION_MODE",
+            "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED",
+            "MINEGUARD_SERVICE_PROVISIONING_MANAGED_REQUIRED"
+        )
+        $OriginalPolicies = @{}
+        foreach ($PolicyName in $PolicyNames) {
+            $OriginalPolicies[$PolicyName] = [Environment]::GetEnvironmentVariable(
+                $PolicyName, [EnvironmentVariableTarget]::Process
+            )
+        }
+        try {
+            foreach ($PolicyName in $PolicyNames) {
+                [Environment]::SetEnvironmentVariable(
+                    $PolicyName, "true", [EnvironmentVariableTarget]::Process
+                )
+            }
+            & $CreatedContext.Executable "--env-file" $CreatedContext.ConfigPath `
+                "--authoritative-env-file" "config-check" "--production"
+            if ($LASTEXITCODE -ne 0) {
+                throw (
+                    "Provisioned instance failed the production configuration " +
+                    "preflight with exit code $LASTEXITCODE."
+                )
+            }
+        }
+        finally {
+            foreach ($PolicyName in $PolicyNames) {
+                [Environment]::SetEnvironmentVariable(
+                    $PolicyName, $OriginalPolicies[$PolicyName],
+                    [EnvironmentVariableTarget]::Process
+                )
+            }
+        }
     }
     $Published = $true
     Write-Host "Enterprise Agent instance created: $InstanceName"

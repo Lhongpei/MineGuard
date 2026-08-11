@@ -12,7 +12,14 @@ from . import __version__
 from .client import validate_agent_base_url
 from .config import load_config
 from .errors import ConnectorError
-from .quantity_catalog import METRICS, TEN_QUANTITY_SUBMISSION_CONTRACT
+from .quantity_catalog import (
+    METRICS,
+    OPTIONAL_SHIFT_METRICS,
+    REQUIRED_SHIFT_METRICS,
+    SCOPES,
+    TEN_QUANTITY_SUBMISSION_CONTRACT,
+    mapping_target_scopes,
+)
 from .service import ConnectorService
 from .state import StateStore
 
@@ -100,18 +107,82 @@ def main(argv: list[str] | None = None) -> int:
             ]
             mapping_coverage = []
             for pipeline in config.pipelines:
-                mapped = {
-                    mapping.target.split(".", 1)[-1]
-                    for source in pipeline.sources
-                    for mapping in (source.mappings or pipeline.mappings)
+                mapped_by_scope: dict[str, set[str]] = {
+                    scope: set() for scope in SCOPES
                 }
+                for source in pipeline.sources:
+                    mappings = source.mappings or pipeline.mappings
+                    period_type = source.period_type or pipeline.period_type
+                    scope_field = source.scope_field or pipeline.scope_field
+                    scope_values = (
+                        source.scope_values
+                        if source.scope_values is not None
+                        else pipeline.scope_values
+                    )
+                    shifts = source.shifts if source.shifts is not None else pipeline.shifts
+                    for mapping in mappings:
+                        metric = mapping.target.split(".", 1)[-1]
+                        for scope in mapping_target_scopes(
+                            mapping.target,
+                            period_type=period_type,
+                            scope_field=scope_field,
+                            scope_values=scope_values,
+                            shift_names=tuple(shift.name for shift in shifts),
+                        ):
+                            mapped_by_scope[scope].add(metric)
+
+                daily_mapped = [
+                    metric for metric in METRICS if metric in mapped_by_scope["daily_total"]
+                ]
+                daily_unmapped = [
+                    metric for metric in METRICS if metric not in mapped_by_scope["daily_total"]
+                ]
+                shift_coverage = {}
+                for scope in SCOPES[1:]:
+                    mapped = mapped_by_scope[scope]
+                    shift_coverage[scope] = {
+                        "required_metrics": [
+                            metric for metric in METRICS if metric in REQUIRED_SHIFT_METRICS
+                        ],
+                        "mapped_required_metrics": [
+                            metric
+                            for metric in METRICS
+                            if metric in REQUIRED_SHIFT_METRICS and metric in mapped
+                        ],
+                        "unmapped_required_metrics": [
+                            metric
+                            for metric in METRICS
+                            if metric in REQUIRED_SHIFT_METRICS and metric not in mapped
+                        ],
+                        "optional_metrics": [
+                            metric for metric in METRICS if metric in OPTIONAL_SHIFT_METRICS
+                        ],
+                        "mapped_optional_metrics": [
+                            metric
+                            for metric in METRICS
+                            if metric in OPTIONAL_SHIFT_METRICS and metric in mapped
+                        ],
+                        "unmapped_optional_metrics": [
+                            metric
+                            for metric in METRICS
+                            if metric in OPTIONAL_SHIFT_METRICS and metric not in mapped
+                        ],
+                    }
                 mapping_coverage.append(
                     {
                         "pipeline_id": pipeline.id,
-                        "mapped_metrics": [metric for metric in METRICS if metric in mapped],
-                        "unmapped_metrics": [
-                            metric for metric in METRICS if metric not in mapped
-                        ],
+                        # Compatibility aliases now deliberately mean daily
+                        # total coverage.  Older validate consumers can keep
+                        # reading these fields without accidentally treating a
+                        # shift-only mapping as a daily mapping.
+                        "mapped_metrics": daily_mapped,
+                        "unmapped_metrics": daily_unmapped,
+                        "daily_total": {
+                            "required_metrics": list(METRICS),
+                            "mapped_metrics": daily_mapped,
+                            "unmapped_metrics": daily_unmapped,
+                        },
+                        "shifts": shift_coverage,
                     }
                 )
             warnings: list[str] = []
@@ -124,10 +195,17 @@ def main(argv: list[str] | None = None) -> int:
             for coverage in mapping_coverage:
                 if coverage["unmapped_metrics"]:
                     warnings.append(
-                        f"{coverage['pipeline_id']} 尚未配置字段："
+                        f"{coverage['pipeline_id']} 日报尚未配置字段："
                         + ", ".join(coverage["unmapped_metrics"])
                         + "；这些字段只会输出 null + missing，不会自动估算"
                     )
+                for scope, shift in coverage["shifts"].items():
+                    if shift["unmapped_required_metrics"]:
+                        warnings.append(
+                            f"{coverage['pipeline_id']} {scope} 尚未覆盖班次必填字段："
+                            + ", ".join(shift["unmapped_required_metrics"])
+                            + "；这些字段只会输出 null + missing，不会自动估算"
+                        )
             print(
                 json.dumps(
                     {
@@ -135,6 +213,11 @@ def main(argv: list[str] | None = None) -> int:
                         "config": str(config.config_path),
                         "data_contract": TEN_QUANTITY_SUBMISSION_CONTRACT,
                         "atomic_metrics": list(METRICS),
+                        "mapping_coverage_version": 2,
+                        "mapping_coverage_compatibility": {
+                            "mapped_metrics": "daily_total.mapped_metrics",
+                            "unmapped_metrics": "daily_total.unmapped_metrics",
+                        },
                         "pipelines": len(config.pipelines),
                         "sources": sum(len(item.sources) for item in config.pipelines),
                         "mapping_coverage": mapping_coverage,

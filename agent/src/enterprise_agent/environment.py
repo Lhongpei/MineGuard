@@ -24,11 +24,35 @@ _AUTHORITATIVE_CONFIGURATION_PREFIXES = (
     "DEEPSEEK_",
     "COAL_NEWS_",
 )
-_AUTHORITATIVE_EXACT_NAMES = frozenset({"ENTERPRISE_AGENT_ENV_FILE"})
+_AUTHORITATIVE_MODEL_PLAINTEXT_NAMES = frozenset(
+    {
+        "MINEGUARD_AGENT_API_KEY",
+        "MINEGUARD_AGENT_BASE_URL",
+        "MINEGUARD_AGENT_MODEL",
+        "MINEGUARD_AGENT_TIMEOUT_SECONDS",
+        "MINEGUARD_AGENT_MAX_RETRIES",
+    }
+)
+_AUTHORITATIVE_MINEGUARD_CONFIGURATION_NAMES = frozenset(
+    {
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
+    }
+)
+_AUTHORITATIVE_MODEL_TRUST_OVERRIDE_NAMES = frozenset(
+    {"MINEGUARD_AGENT_MODEL_TRUST_STORE"}
+)
+_AUTHORITATIVE_EXACT_NAMES = (
+    frozenset({"ENTERPRISE_AGENT_ENV_FILE"})
+    | _AUTHORITATIVE_MINEGUARD_CONFIGURATION_NAMES
+    | _AUTHORITATIVE_MODEL_PLAINTEXT_NAMES
+    | _AUTHORITATIVE_MODEL_TRUST_OVERRIDE_NAMES
+)
 _SERVICE_POLICY_ENVIRONMENT = {
     "MINEGUARD_SERVICE_PRODUCTION_MODE": "ENTERPRISE_AGENT_PRODUCTION_MODE",
-    "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED": (
-        "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED"
+    "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED": ("ENTERPRISE_AGENT_FOUR_EYES_REQUIRED"),
+    "MINEGUARD_SERVICE_PROVISIONING_MANAGED_REQUIRED": (
+        "ENTERPRISE_PROVISIONING_MANAGED_REQUIRED"
     ),
 }
 
@@ -161,7 +185,7 @@ def load_authoritative_environment_file(
 
     Windows services use this mode so machine- or administrator-level
     configuration cannot silently replace another mine's identity, database,
-    endpoint or secrets.  The only values preserved outside the file are two
+    endpoint or secrets.  The only values preserved outside the file are three
     non-secret WinSW policy controls; they are parsed before clearing and may
     contain only the literal strings ``true`` or ``false``.
 
@@ -174,7 +198,10 @@ def load_authoritative_environment_file(
     # long-lived embedding process with a partially cleared configuration.
     values = parse_environment_file(path)
     reserved_names = sorted(
-        name for name in values if name.upper().startswith("MINEGUARD_")
+        name
+        for name in values
+        if name.upper().startswith("MINEGUARD_")
+        and name.upper() not in _AUTHORITATIVE_MINEGUARD_CONFIGURATION_NAMES
     )
     if reserved_names:
         raise ValueError(

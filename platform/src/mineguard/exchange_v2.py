@@ -1749,7 +1749,9 @@ def _parse_named_message_keys(entry: Mapping[str, Any]) -> tuple[str, dict[str, 
     return active_key_id, named
 
 
-def parse_exchange_clients(value: str | None) -> dict[str, ExchangeClient]:
+def parse_exchange_clients(
+    value: str | None, *, enforce_provisioning_policy: bool = True
+) -> dict[str, ExchangeClient]:
     if value is None or not value.strip():
         return {}
     try:
@@ -1760,6 +1762,13 @@ def parse_exchange_clients(value: str | None) -> dict[str, ExchangeClient]:
         )
     except (json.JSONDecodeError, ValueError) as error:
         raise ValueError("MINEGUARD_V2_CLIENTS_JSON must be valid JSON") from error
+    if enforce_provisioning_policy:
+        # Import lazily to keep the neutral exchange codec usable without a
+        # module cycle. External environment policy prevents deleting the lock
+        # from silently downgrading an enrolled production registry.
+        from .provisioning import registry_lock_status_from_environment
+
+        registry_lock_status_from_environment(document)
     entries = document.get("clients") if isinstance(document, dict) else document
     if not isinstance(entries, list):
         raise ValueError("V2 client registry must be an array")

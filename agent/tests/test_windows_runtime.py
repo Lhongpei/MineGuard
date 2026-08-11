@@ -87,6 +87,8 @@ def test_authoritative_environment_file_rejects_machine_configuration_pollution(
                 "PLATFORM_V2_TRANSPORT_HMAC_SECRET=file-transport-secret-32-bytes-long",
                 "ENTERPRISE_AGENT_PRODUCTION_MODE=true",
                 "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED=true",
+                r"MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE=C:\Mine\model-lock.json",
+                r"MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE=C:\Mine\model.dpapi",
             )
         )
         + "\n",
@@ -101,10 +103,17 @@ def test_authoritative_environment_file_rejects_machine_configuration_pollution(
         "REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET": "machine-only-value",
         "AGENT_V2_WORKER_COUNT": "8",
         "DEEPSEEK_API_KEY": "machine-only-value",
+        "MINEGUARD_AGENT_API_KEY": "machine-model-key",
+        "MINEGUARD_AGENT_BASE_URL": "https://wrong.internal.example",
+        "MINEGUARD_AGENT_MODEL": "wrong-model",
+        "MINEGUARD_AGENT_TIMEOUT_SECONDS": "99",
+        "MINEGUARD_AGENT_MAX_RETRIES": "5",
+        "MINEGUARD_AGENT_MODEL_TRUST_STORE": r"C:\Other\model-trust.json",
         "COAL_NEWS_SEARCH_ENABLED": "false",
         "ENTERPRISE_AGENT_ENV_FILE": r"C:\Other\agent.env",
         "MINEGUARD_SERVICE_PRODUCTION_MODE": "false",
         "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED": "false",
+        "MINEGUARD_SERVICE_PROVISIONING_MANAGED_REQUIRED": "true",
         "UNRELATED_KEEP_ME": "yes",
     }
 
@@ -117,14 +126,28 @@ def test_authoritative_environment_file_rejects_machine_configuration_pollution(
     assert environment["PLATFORM_V2_TRANSPORT_HMAC_SECRET"].startswith("file-")
     assert environment["ENTERPRISE_AGENT_PRODUCTION_MODE"] == "false"
     assert environment["ENTERPRISE_AGENT_FOUR_EYES_REQUIRED"] == "false"
+    assert environment["ENTERPRISE_PROVISIONING_MANAGED_REQUIRED"] == "true"
     assert "PLATFORM_BEARER_TOKEN" not in environment
     assert "REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET" not in environment
     assert "AGENT_V2_WORKER_COUNT" not in environment
     assert "DEEPSEEK_API_KEY" not in environment
+    assert "MINEGUARD_AGENT_API_KEY" not in environment
+    assert "MINEGUARD_AGENT_BASE_URL" not in environment
+    assert "MINEGUARD_AGENT_MODEL" not in environment
+    assert "MINEGUARD_AGENT_TIMEOUT_SECONDS" not in environment
+    assert "MINEGUARD_AGENT_MAX_RETRIES" not in environment
+    assert environment["MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE"] == (
+        r"C:\Mine\model-lock.json"
+    )
+    assert environment["MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE"] == (
+        r"C:\Mine\model.dpapi"
+    )
+    assert "MINEGUARD_AGENT_MODEL_TRUST_STORE" not in environment
     assert "COAL_NEWS_SEARCH_ENABLED" not in environment
     assert "ENTERPRISE_AGENT_ENV_FILE" not in environment
     assert "MINEGUARD_SERVICE_PRODUCTION_MODE" not in environment
     assert "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED" not in environment
+    assert "MINEGUARD_SERVICE_PROVISIONING_MANAGED_REQUIRED" not in environment
     assert environment["UNRELATED_KEEP_ME"] == "yes"
 
 
@@ -138,13 +161,15 @@ def test_authoritative_environment_requires_explicit_absolute_file_and_strict_po
             config,
             environment={"MINEGUARD_SERVICE_PRODUCTION_MODE": "1"},
         )
-    reserved = tmp_path / "reserved.env"
-    reserved.write_text(
-        "MINEGUARD_SERVICE_PRODUCTION_MODE=true\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="保留的 MINEGUARD_"):
-        load_authoritative_environment_file(reserved, environment={})
+    for reserved_name in (
+        "MINEGUARD_SERVICE_PRODUCTION_MODE",
+        "MINEGUARD_AGENT_UNAPPROVED_SETTING",
+        "MINEGUARD_AGENT_MODEL_TRUST_STORE",
+    ):
+        reserved = tmp_path / f"{reserved_name}.env"
+        reserved.write_text(f"{reserved_name}=true\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="保留的 MINEGUARD_"):
+            load_authoritative_environment_file(reserved, environment={})
     with pytest.raises(SystemExit):
         main(["--authoritative-env-file", "config-check"])
     with pytest.raises(SystemExit):
@@ -156,6 +181,28 @@ def test_authoritative_environment_requires_explicit_absolute_file_and_strict_po
                 "config-check",
             ]
         )
+
+
+def test_authoritative_environment_clears_unconfigured_inherited_model_family(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "agent.env"
+    config.write_text("ENTERPRISE_MINE_ID=mine-a\n", encoding="utf-8")
+    environment = {
+        "MINEGUARD_AGENT_API_KEY": "machine-model-key",
+        "MINEGUARD_AGENT_BASE_URL": "https://wrong.internal.example",
+        "MINEGUARD_AGENT_MODEL": "wrong-model",
+        "DEEPSEEK_API_KEY": "legacy-machine-key",
+        "UNRELATED_KEEP_ME": "yes",
+    }
+
+    load_authoritative_environment_file(config, environment=environment)
+
+    assert "MINEGUARD_AGENT_API_KEY" not in environment
+    assert "MINEGUARD_AGENT_BASE_URL" not in environment
+    assert "MINEGUARD_AGENT_MODEL" not in environment
+    assert "DEEPSEEK_API_KEY" not in environment
+    assert environment["UNRELATED_KEEP_ME"] == "yes"
 
 
 def test_authoritative_runtime_honors_restore_recovery_block(
@@ -193,6 +240,41 @@ def test_authoritative_runtime_honors_restore_recovery_block(
             config,
             command="database-restore",
         )
+
+
+def test_authoritative_runtime_only_allows_own_provisioning_update_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config" / "agent.env"
+    config.parent.mkdir()
+    config.write_text("ENTERPRISE_MINE_ID=mine-a\n", encoding="utf-8")
+    transaction_id = "c" * 32
+    (tmp_path / "restore-recovery-block.json").write_text(
+        json.dumps(
+            {
+                "format": ("mineguard-enterprise-agent-provisioning-update-block-v1"),
+                "transaction_id": transaction_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="未完成接入配置更新"):
+        cli._assert_authoritative_restore_not_blocked(config, command="serve")
+    with pytest.raises(ValueError, match="不属于当前更新事务"):
+        cli._assert_authoritative_restore_not_blocked(
+            config,
+            command="config-check",
+        )
+    monkeypatch.setenv(
+        "MINEGUARD_INTERNAL_PROVISIONING_UPDATE_TRANSACTION_ID",
+        transaction_id,
+    )
+    cli._assert_authoritative_restore_not_blocked(
+        config,
+        command="config-check",
+    )
 
 
 def test_windows_semicolon_watch_path_list_keeps_drive_colons() -> None:
@@ -348,14 +430,8 @@ def test_production_config_reports_reserved_https_origins(
         "transport-secret-with-at-least-thirty-two-bytes",
     )
     errors = _configuration_errors(Settings.from_environment(), production=True)
-    assert (
-        "正式服务 PUBLIC_ORIGIN 不能使用保留、示例、回环或不可路由特殊地址"
-        in errors
-    )
-    assert (
-        "正式服务政府 V2 地址不能使用保留、示例、回环或不可路由特殊地址"
-        in errors
-    )
+    assert "正式服务 PUBLIC_ORIGIN 不能使用保留、示例、回环或不可路由特殊地址" in errors
+    assert "正式服务政府 V2 地址不能使用保留、示例、回环或不可路由特殊地址" in errors
 
 
 def test_production_config_rejects_placeholder_connector_identities(
@@ -386,6 +462,11 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     expected = {
         "Install-EnterpriseAgent.ps1",
         "New-EnterpriseAgentInstance.ps1",
+        "Import-EnterpriseAgentAccessPackage.ps1",
+        "Update-EnterpriseAgentAccessPackage.ps1",
+        "Start-EnterpriseAgentProvisioningWizard.ps1",
+        "Import-EnterpriseAgentModelCredential.ps1",
+        "Start-EnterpriseAgentModelCredentialWizard.ps1",
         "Start-EnterpriseAgent.ps1",
         "Test-EnterpriseAgentHealth.ps1",
         "Install-EnterpriseAgentService.ps1",
@@ -403,12 +484,34 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     service_xml = (root / "enterprise-agent-service.xml.template").read_text(
         encoding="utf-8"
     )
+    environment_template = (root / "agent.env.template").read_text(encoding="utf-8")
+    for name in (
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
+    ):
+        assert f"{name}=" in environment_template
+    for name in (
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
+    ):
+        assert f"{name}=\n" in environment_template
+    for name in (
+        "MINEGUARD_AGENT_API_KEY",
+        "MINEGUARD_AGENT_BASE_URL",
+        "MINEGUARD_AGENT_MODEL",
+        "MINEGUARD_AGENT_TIMEOUT_SECONDS",
+        "MINEGUARD_AGENT_MAX_RETRIES",
+        "MINEGUARD_AGENT_MODEL_TRUST_STORE",
+    ):
+        assert f"{name}=" not in environment_template
+    assert "DEEPSEEK_API_KEY=" not in environment_template
     assert "__ENV_FILE__" in service_xml
     assert "--authoritative-env-file" in service_xml
     assert "MINEGUARD_SERVICE_PRODUCTION_MODE" in service_xml
     assert "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED" in service_xml
     assert "HMAC_SECRET" not in service_xml
     assert "DEEPSEEK_API_KEY" not in service_xml
+    assert "MINEGUARD_AGENT_API_KEY" not in service_xml
     installer = (root / "Install-EnterpriseAgentService.ps1").read_text(
         encoding="utf-8"
     )
@@ -417,6 +520,232 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     backup = (root / "Backup-EnterpriseAgent.ps1").read_text(encoding="utf-8")
     assert '"five-quantity-quarantine"' in backup
     assert '"snapshot.json"' in backup
+
+    importer = (root / "Import-EnterpriseAgentAccessPackage.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    wizard = (root / "Start-EnterpriseAgentProvisioningWizard.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    updater = (root / "Update-EnterpriseAgentAccessPackage.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    model_importer = (
+        root / "Import-EnterpriseAgentModelCredential.ps1"
+    ).read_text(encoding="utf-8-sig")
+    model_wizard = (
+        root / "Start-EnterpriseAgentModelCredentialWizard.ps1"
+    ).read_text(encoding="utf-8-sig")
+    cli_source = (
+        root.parents[1] / "src" / "enterprise_agent" / "cli.py"
+    ).read_text(encoding="utf-8")
+    for token in (
+        "--expected-public-key-sha256",
+        "--expected-ca-sha256",
+        '"dpapi-local-machine"',
+        "Security.SecureString",
+        "SecureStringToBSTR",
+        "ZeroFreeBSTR",
+        "ProvisionedEnvironmentFile",
+        "ProvisioningSecretStoreFile",
+        "实例已存在，接入包导入绝不会覆盖",
+    ):
+        assert token in importer
+    assert "PreparerPassword $PreparerPassword" not in importer
+    assert "ReviewerPassword $ReviewerPassword" not in importer
+    assert "--allow-unanchored-test-key" not in importer
+    assert "Windows.Forms" in wizard
+    assert "ConvertTo-SecureString" in wizard
+    assert "-PreparerPassword $PreparerSecure" in wizard
+    assert "-ReviewerPassword $ReviewerSecure" in wizard
+    assert "runas" in wizard
+    assert '"--current-lock", $FinalLockPath' in updater
+    assert '"--expected-issuer-key-id", $ExpectedIssuerKeyId' in updater
+    assert '"dpapi-local-machine"' in updater
+    assert "mineguard-enterprise-agent-provisioning-update-block-v1" in updater
+    assert "Stop-SelectedService" in updater
+    assert "Set-EAInstanceCanonicalAcl" in updater
+    assert "旧配置回滚自检" in updater
+    assert "MINEGUARD_INTERNAL_PROVISIONING_UPDATE_TRANSACTION_ID" in updater
+    assert "ENTERPRISE_AGENT_DB" in updater
+    assert "ENTERPRISE_AGENT_PORT" in updater
+    assert "Remove-EAOwnedTemporaryTree" in updater
+    assert "$Preparer" not in updater
+    assert "$Reviewer" not in updater
+    assert "--allow-unanchored-test-key" not in updater
+    assert '"Update-EnterpriseAgentAccessPackage.ps1"' in wizard
+    assert "安全更新现有实例" in wizard
+    assert "enterprise-install-manifest.json" in wizard
+    assert "加载企业交付目录" in wizard
+    assert "12 位" in wizard
+    assert "事务切换" in wizard
+    assert "原子切换" not in wizard
+    assert "当前尚未启动" in wizard
+    assert "批准的 WinSW" in wizard
+    for token in (
+        '"--env-file", $ImportEnvironment',
+        '"--authoritative-env-file"',
+        '"model-credential-import"',
+        '"--activation-code-file", $PreparedActivation',
+        '"--trust-store", $TrustStorePath',
+        '"--lock-output", $NewLock',
+        '"--lock-env-path", $FinalLockPath',
+        '"--secret-store-env-path", $FinalSecretStorePath',
+        '"--secret-protection", "dpapi-local-machine"',
+        '"--expected-mine-id", $Context.MineId',
+        '"--expected-system-id", $Context.SystemId',
+        '"--expected-party-id", $ExpectedPartyId',
+        '"--current-lock", $FinalLockPath',
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
+        "MINEGUARD_AGENT_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "Stop-SelectedService",
+        "Set-EAInstanceCanonicalAcl",
+        "MINEGUARD_INTERNAL_PROVISIONING_UPDATE_TRANSACTION_ID",
+        "mineguard-enterprise-agent-provisioning-update-block-v1",
+        "Assert-EANoRestoreRecoveryBlock -Context $Context",
+        "$ImportResult.managed",
+        "$ImportResult.party_id",
+        "$ImportResult.pair_id",
+        "$LockEntryExists",
+        "$StoreEntryExists",
+        "$StateEntryExists",
+        "$HasExistingState",
+        "$FinalAntiRollbackStatePath",
+        "$NewAntiRollbackState",
+        'Name = "model-credential-lock.state.json"',
+        "$ImportResult.anti_rollback_state_path",
+        "固定路径已被非文件对象占用",
+        "BackupCreated",
+        "Published",
+        "Move aside only files that this transaction",
+        'RequiredPrefix ".instance-staging-"',
+        "旧配置回滚自检",
+        "Test-EnterpriseAgentHealth.ps1",
+    ):
+        assert token in model_importer
+    assert "$ApiKey" not in model_importer
+    assert (
+        model_importer.count('"--secret-protection", "dpapi-local-machine"')
+        == 1
+    )
+    assert 'Name = "MINEGUARD_AGENT_MODEL_TRUST_STORE"' not in model_importer
+    assert "MINEGUARD_AGENT_MODEL_CREDENTIAL_STATE" not in model_importer
+    assert model_importer.count(
+        'Name = "model-credential-lock.state.json"'
+    ) == 1
+    state_file = model_importer.index(
+        'Name = "model-credential-lock.state.json"'
+    )
+    lock_file = model_importer.index('Name = "model-credential-lock.json"')
+    environment_file = model_importer.index('Name = "agent.env"', state_file)
+    assert state_file < lock_file < environment_file
+    assert "Get-Content -LiteralPath $ActivationCodeFile" not in model_importer
+    sanitize_start = model_importer.index(
+        "$ImportEnvironmentContent = $EnvironmentContent"
+    )
+    sanitize_end = model_importer.index(
+        "Write-NewUtf8File -PathValue $ImportEnvironment", sanitize_start
+    )
+    invoke_import = model_importer.index(
+        "$ImportResult = Invoke-AgentJson", sanitize_end
+    )
+    assert sanitize_start < sanitize_end < invoke_import
+    sanitized_block = model_importer[sanitize_start:sanitize_end]
+    assert "foreach ($Binding in $ManagedBindings)" in sanitized_block
+    assert "Remove-EnvironmentRecord" in sanitized_block
+    assert "if (-not $HasExistingLock)" not in sanitized_block
+    assert "expired but cryptographically intact active model" in sanitized_block
+    cli_import = cli_source[
+        cli_source.index('if args.command == "model-credential-import":') :
+        cli_source.index('if args.command == "model-credential-status":')
+    ]
+    for token in (
+        "expired (but still cryptographically intact) credential",
+        "final_lock_exists = args.lock_env_path.exists()",
+        "final_store_exists = args.secret_store_env_path.exists()",
+        "args.current_lock.resolve() != args.lock_env_path.resolve()",
+        "current_lock_path=args.current_lock",
+    ):
+        assert token in cli_import
+    assert "settings.model_credential_status.managed" not in cli_import
+    assert "$LASTEXITCODE" not in model_wizard
+    for token in (
+        "Windows.Forms",
+        '"Import-EnterpriseAgentModelCredential.ps1"',
+        "模型授权包（.mgllm）",
+        "独立交付的激活码",
+        "runas",
+        "trust_store_present = $true",
+        "api_configuration_editable = $false",
+        "trust_store_editable = $false",
+    ):
+        assert token in model_wizard
+    for forbidden in (
+        "API KeyBox",
+        "BaseUrlBox",
+        "ModelBox",
+        "TrustKeyBox",
+        "ExpectedTrustKeySha256",
+    ):
+        assert forbidden not in model_wizard
+    inno = (
+        root.parents[2]
+        / "packaging"
+        / "windows"
+        / "inno"
+        / "MineGuardEnterpriseAgent.iss"
+    ).read_text(encoding="utf-8")
+    assert "MineGuard 模型授权导入向导" in inno
+    assert "Start-EnterpriseAgentModelCredentialWizard.ps1" in inno
+    assert 'Source: "{#StageRoot}\\model-credential-trust.json"' in inno
+    for token in (
+        '"Install-EnterpriseAgentService.ps1"',
+        '"EnterpriseAgent.WindowsSafety.ps1"',
+        "安装并启动正式服务…",
+        "Show-FormalServiceInstallDialog",
+        "Get-EAInstanceContext",
+        "介质外 WinSW SHA-256",
+        "Agent runtime 签名者 SHA-1",
+        "不会下载、捆绑或自动计算批准值",
+        "-WinSWPath $WinSWBox.Text",
+        "-WinSWExpectedSha256 $ExpectedWinSWHash",
+        "-ApprovedSignerThumbprint $ApprovedRuntimeValue",
+        "-Start `",
+        "1>$null 3>$null 4>$null 5>$null 6>$null",
+        "正式服务已安装、启动并通过绑定当前实例的健康检查",
+    ):
+        assert token in wizard
+    assert wizard.count("Get-EAInstanceContext") >= 2
+    assert "Get-FileHash" not in wizard
+    assert "Invoke-WebRequest" not in wizard
+    assert "thumbprint: $ApprovedSignerThumbprint" not in installer
+    assert "matched the independently approved thumbprint" in installer
+    service_invocation = wizard.index("& $ServiceInstallScript")
+    assert wizard.index("$WinSWHashBox.Clear()", service_invocation) > (
+        service_invocation
+    )
+    update_mode = wizard.index("function Update-OperationModeUi")
+    update_branch = wizard.index("if ($IsUpdate)", update_mode)
+    update_password_clear = wizard.index("$PreparerPasswordBox.Clear()", update_branch)
+    disable_controls = wizard.index("$Control.Enabled = -not $IsUpdate", update_mode)
+    assert disable_controls < update_branch < update_password_clear
+    finalizer = wizard.index("finally {", wizard.index("$ImportButton.Add_Click"))
+    assert wizard.index("$PreparerPasswordBox.Clear()", finalizer) > finalizer
+
+    deployment_readme = (root / "README.md").read_text(encoding="utf-8")
+    for token in (
+        "加载企业交付目录",
+        "12 位独立核验码",
+        "安全更新现有实例",
+        "不重建 SQLite 数据库",
+        "失败自动回滚",
+        "安装并启动正式服务…",
+        "介质外审批记录中的 WinSW SHA-256",
+        "核验值不写日志",
+    ):
+        assert token in deployment_readme
 
 
 def test_windows_service_lifecycle_is_path_bound_and_transactional() -> None:
@@ -471,13 +800,9 @@ def test_windows_service_lifecycle_is_path_bound_and_transactional() -> None:
         in installer
     )
     assert (
-        "Move-Item -LiteralPath $TemporaryWrapper -Destination "
-        "$WrapperExecutable"
+        "Move-Item -LiteralPath $TemporaryWrapper -Destination $WrapperExecutable"
     ) in installer
-    assert (
-        "Move-Item -LiteralPath $TemporaryXml -Destination $WrapperXml"
-        in installer
-    )
+    assert "Move-Item -LiteralPath $TemporaryXml -Destination $WrapperXml" in installer
     assert "Remove-ServiceRegistrationChecked" in installer
     assert "rollback was incomplete" in installer
     assert installer.index("Invoke-NativeChecked -FilePath $WrapperExecutable") > (
@@ -496,27 +821,15 @@ def test_windows_service_lifecycle_is_path_bound_and_transactional() -> None:
 
 def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     root = Path(__file__).resolve().parents[1] / "deploy" / "windows"
-    helper = (root / "EnterpriseAgent.WindowsSafety.ps1").read_text(
-        encoding="utf-8"
-    )
-    creator = (root / "New-EnterpriseAgentInstance.ps1").read_text(
-        encoding="utf-8"
-    )
-    runtime = (root / "Install-EnterpriseAgent.ps1").read_text(
-        encoding="utf-8"
-    )
-    service = (root / "Install-EnterpriseAgentService.ps1").read_text(
-        encoding="utf-8"
-    )
+    helper = (root / "EnterpriseAgent.WindowsSafety.ps1").read_text(encoding="utf-8")
+    creator = (root / "New-EnterpriseAgentInstance.ps1").read_text(encoding="utf-8")
+    runtime = (root / "Install-EnterpriseAgent.ps1").read_text(encoding="utf-8")
+    service = (root / "Install-EnterpriseAgentService.ps1").read_text(encoding="utf-8")
     uninstaller = (root / "Uninstall-EnterpriseAgentService.ps1").read_text(
         encoding="utf-8"
     )
-    restore = (root / "Restore-EnterpriseAgent.ps1").read_text(
-        encoding="utf-8"
-    )
-    xml = (root / "enterprise-agent-service.xml.template").read_text(
-        encoding="utf-8"
-    )
+    restore = (root / "Restore-EnterpriseAgent.ps1").read_text(encoding="utf-8")
+    xml = (root / "enterprise-agent-service.xml.template").read_text(encoding="utf-8")
 
     assert "__SERVICE_ACCOUNT__" in xml
     assert "LOCAL SERVICE" not in xml.upper()
@@ -542,8 +855,9 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     ):
         assert token in helper
     assert "S-1-5-19:(OI)(CI)" not in helper
-    assert '"*S-1-5-80-0:(OI)(CI)RX"' in runtime
-    assert '"*S-1-5-80-0:RX"' in runtime
+    assert 'SecurityIdentifier("S-1-5-80-0")' in runtime
+    assert "Sid = $AllServices" in runtime
+    assert "if ($IsDirectory -and $TraverseOnly)" in runtime
     assert "S-1-5-19:(OI)(CI)" not in runtime
     assert "Assert-EARegisteredRuntimeServiceIdentity" in runtime
     assert "Registered service $ServiceId uses legacy/shared identity" in runtime
@@ -594,15 +908,12 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     assert "Assert-ServiceIdentityForRemoval" in uninstaller
 
 
-def test_windows_formal_install_uses_external_signer_pin_and_explicit_test_mode(
-) -> None:
+def test_windows_formal_install_uses_external_signer_pin_and_explicit_test_mode() -> (
+    None
+):
     root = Path(__file__).resolve().parents[1] / "deploy" / "windows"
-    runtime = (root / "Install-EnterpriseAgent.ps1").read_text(
-        encoding="utf-8"
-    )
-    service = (root / "Install-EnterpriseAgentService.ps1").read_text(
-        encoding="utf-8"
-    )
+    runtime = (root / "Install-EnterpriseAgent.ps1").read_text(encoding="utf-8")
+    service = (root / "Install-EnterpriseAgentService.ps1").read_text(encoding="utf-8")
 
     for script in (runtime, service):
         assert "ApprovedSignerThumbprint" in script
@@ -611,12 +922,11 @@ def test_windows_formal_install_uses_external_signer_pin_and_explicit_test_mode(
         assert 'Status.ToString() -ne "Valid"' in script
         assert "TimeStamperCertificate" in script
         assert "independently approved" in script
-        assert '^[A-F0-9]{40}$' in script
+        assert "^[A-F0-9]{40}$" in script
     assert "Unsigned Agent media is refused by default" in runtime
     assert (
         "-AllowUnsignedTestMedia is valid only for actually unsigned "
-        "internal-test media"
-        in runtime
+        "internal-test media" in runtime
     )
     assert "Unsigned test media cannot claim an approved production signer" in runtime
     assert "Assert-InstalledAgentReleaseClassification" in service
@@ -641,6 +951,7 @@ def test_windows_formal_install_uses_external_signer_pin_and_explicit_test_mode(
         "AGENT_V2_",
         "DEEPSEEK_",
         "COAL_NEWS_",
+        "MINEGUARD_AGENT_",
         "MINEGUARD_SERVICE_",
     ):
         assert prefix in service
@@ -671,6 +982,77 @@ def test_windows_powershell_has_no_adjacent_duplicate_param_or_throw_lines() -> 
                 assert normalized != previous.strip(), (
                     f"adjacent duplicate statement in {path.name}: {normalized}"
                 )
+
+
+def test_windows_unsigned_internal_is_a_distinct_production_trust_mode() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    deploy_root = project_root / "deploy" / "windows"
+    packaging_root = project_root / "packaging" / "windows"
+    build = (packaging_root / "Build-EnterpriseAgentBinary.ps1").read_text(
+        encoding="utf-8"
+    )
+    runtime = (deploy_root / "Install-EnterpriseAgent.ps1").read_text(
+        encoding="utf-8"
+    )
+    service = (deploy_root / "Install-EnterpriseAgentService.ps1").read_text(
+        encoding="utf-8"
+    )
+    wizard = (deploy_root / "Start-EnterpriseAgentProvisioningWizard.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    assert "[switch]$InternalUnsignedRelease" in build
+    assert "$FormalCandidate = $RequireSignedBinary -or $InternalUnsignedRelease" in build
+    assert "$FormalCandidate -and $AllowNuitkaToolDownloads" in build
+    assert "$FormalCandidate -and [string]::IsNullOrWhiteSpace($Wheelhouse)" in build
+    assert "$FormalCandidate -and $SkipSmokeTest" in build
+    assert "regardless of filename or JSON formatting" in build
+    assert "mineguard-test-only" in build
+    assert "test-only-no-private-key-2026" in build
+    assert "e3df516dc9ce7cce905597484d794625a6ac4e6ac2a11dfc07dbc8e2f15fb413" in build
+    assert build.count('"unsigned-internal-release"') >= 1
+    assert "release_classification = $ReleaseClassification" in build
+
+    assert "[switch]$AllowUnsignedInternalRelease" in runtime
+    assert "-AllowUnsignedTestMedia and -AllowUnsignedInternalRelease are mutually exclusive" in runtime
+    assert (
+        "-AllowUnsignedInternalRelease requires metadata explicitly classified as unsigned-internal-release"
+        in runtime
+    )
+    assert "Status.ToString() -ne \"NotSigned\"" in runtime
+
+    assert "[switch]$AllowUnsignedInternalRelease" in service
+    assert "[string]$ExpectedReleaseManifestSha256" in service
+    assert "-ExpectedReleaseManifestSha256 from independently approved offline material" in service
+    assert "-ExpectInternalUnsignedRelease" in service
+    assert "Assert-InternalUnsignedRuntime" in service
+    assert service.count("Assert-InternalUnsignedRuntime -ExecutablePath") >= 2
+    assert "Assert-InstalledAgentReleaseTree" in service
+    assert service.count("Assert-InstalledAgentReleaseTree -ApplicationRoot") >= 2
+    assert "-Algorithm SHA256" in service
+    assert "-AllowUnsignedInternalRelease is a formal-only mode" in service
+    policy_start = service.index("$ServiceProductionMode =")
+    policy_end = service.index("$CheckArguments =", policy_start)
+    policy_block = service[policy_start:policy_end]
+    assert "$AllowUnsignedInternalRelease" not in policy_block
+    assert "$ServiceProvisioningManagedRequired" in policy_block
+    assert '"--production"' in service
+
+    assert 'return "internal-unsigned"' in wizard
+    assert '"Agent 发行清单 SHA-256"' in wizard
+    assert "-AllowUnsignedInternalRelease `" in wizard
+    assert "-ExpectedReleaseManifestSha256 $ApprovedRuntimeValue" in wizard
+    assert "没有 Windows 发布者签名" in wizard
+    assert "本窗口不会自动计算" in wizard
+
+    combined = "\n".join((build, runtime, service, wizard))
+    for obsolete in (
+        "UnsignedIntranetCandidate",
+        "internal-unsigned-candidate",
+        "AllowUnsignedIntranetMedia",
+        "ApprovedRuntimeSha256",
+    ):
+        assert obsolete not in combined
 
 
 def test_windows_powershell_parses_when_native_parser_is_available() -> None:
@@ -710,14 +1092,13 @@ def test_windows_runtime_uninstall_is_transactional_and_preserves_instances() ->
         root / "deploy" / "windows" / "Uninstall-EnterpriseAgentRuntime.ps1"
     ).read_text(encoding="utf-8")
     inno = (
-        root.parent
-        / "packaging"
-        / "windows"
-        / "inno"
-        / "MineGuardEnterpriseAgent.iss"
+        root.parent / "packaging" / "windows" / "inno" / "MineGuardEnterpriseAgent.iss"
     ).read_text(encoding="utf-8")
     for required in (
         "InternalInnoUninstall",
+        "TrustedScriptSha256",
+        "TrustedScriptBytes",
+        "$script:TrustedInMemoryInvocation",
         "Assert-AgentReleaseIdentity",
         "Assert-AgentQuiescent",
         "$script:UninstallScriptPath",
@@ -729,6 +1110,7 @@ def test_windows_runtime_uninstall_is_transactional_and_preserves_instances() ->
         "Agent uninstall quarantine contains an unexpected item",
     ):
         assert required in script
+    assert "exit 0" not in script
     assert '$TargetNames = @("runtime", "deploy", "release-metadata")' in script
     assert "Remove-Item -LiteralPath $StateRoot" not in script
     assert '"config", "data", "logs", "backups", "inbox", "service"' not in script
@@ -739,9 +1121,7 @@ def test_windows_runtime_uninstall_is_transactional_and_preserves_instances() ->
 
 def test_windows_instance_operations_share_strict_path_and_identity_context() -> None:
     root = Path(__file__).resolve().parents[1] / "deploy" / "windows"
-    helper = (root / "EnterpriseAgent.WindowsSafety.ps1").read_text(
-        encoding="utf-8"
-    )
+    helper = (root / "EnterpriseAgent.WindowsSafety.ps1").read_text(encoding="utf-8")
     operations = {
         name: (root / name).read_text(encoding="utf-8")
         for name in (
@@ -800,6 +1180,8 @@ def test_windows_instance_operations_share_strict_path_and_identity_context() ->
     health = operations["Test-EnterpriseAgentHealth.ps1"]
     assert starter.count("Assert-EANoInstanceProcesses -Context $Context") >= 2
     assert '"--authoritative-env-file" "serve"' in starter
+    assert "MINEGUARD_SERVICE_PROVISIONING_MANAGED_REQUIRED" in starter
+    assert "MINEGUARD_SERVICE_PROVISIONING_MANAGED_REQUIRED" in creator
     assert "Assert-EAInstanceIsRunning -Context $Context" in health
     assert 'primary_contract_version -ne "ten-quantity-submission-v3"' in health
 
@@ -820,7 +1202,7 @@ def test_windows_instance_operations_share_strict_path_and_identity_context() ->
     assert "Snapshot must not overlap InstallRoot" in restore
     should_process = restore.index("if ($PSCmdlet.ShouldProcess(")
     assert should_process < restore.index(
-        'New-Item -ItemType Directory -Path $TransactionRoot', should_process
+        "New-Item -ItemType Directory -Path $TransactionRoot", should_process
     )
     assert "restore-transactions" in restore
     assert "throw $OriginalError" in restore
@@ -893,16 +1275,14 @@ def test_frozen_executable_directory_is_the_first_frontend_location(
 def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> None:
     project_root = Path(__file__).resolve().parents[1]
     packaging = project_root / "packaging" / "windows"
-    build = (packaging / "Build-EnterpriseAgentBinary.ps1").read_text(
-        encoding="utf-8"
-    )
-    requirements = (packaging / "build-requirements.txt").read_text(
-        encoding="utf-8"
-    )
-    smoke = (packaging / "Test-EnterpriseAgentBinary.ps1").read_text(
-        encoding="utf-8"
-    )
+    build = (packaging / "Build-EnterpriseAgentBinary.ps1").read_text(encoding="utf-8")
+    requirements = (packaging / "build-requirements.txt").read_text(encoding="utf-8")
+    smoke = (packaging / "Test-EnterpriseAgentBinary.ps1").read_text(encoding="utf-8")
+    constraints = (project_root / "constraints.txt").read_text(encoding="utf-8")
     assert "Nuitka==4.1.3" in requirements
+    assert "cryptography==46.0.5" in constraints
+    assert "cffi==2.0.0" in constraints
+    assert "pycparser==3.0" in constraints
     assert '"--mode=standalone"' in build
     assert '"--python-flag=isolated"' in build
     assert '"--python-flag=safe_path"' in build
@@ -912,6 +1292,9 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     assert "--include-data-dir=$WebRoot=web" in build
     assert "--include-package=tzdata" in build
     assert "--include-package-data=tzdata" in build
+    assert "--include-package=cryptography" in build
+    assert "--include-package=cffi" in build
+    assert "--include-module=_cffi_backend" in build
     assert "AllowNuitkaToolDownloads" in build
     assert '"--assume-yes-for-downloads"' in build
     assert "mineguard-enterprise-agent-windows-binary-v1" in build
@@ -919,10 +1302,9 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     assert "Set-StrictMode -Version 2.0" in build
     assert "Assert-SafeLocalFixedPath" in build
     assert "$SigningEnabled -and -not $RequireSignedBinary" in build
-    assert "$RequireSignedBinary -and $AllowNuitkaToolDownloads" in build
+    assert "$FormalCandidate -and $AllowNuitkaToolDownloads" in build
     assert (
-        '$RequireSignedBinary -and [string]::IsNullOrWhiteSpace($Wheelhouse)'
-        in build
+        "$FormalCandidate -and [string]::IsNullOrWhiteSpace($Wheelhouse)" in build
     )
     assert "Windows PowerShell 5.1 or later is required." in build
     assert "Invoke-WindowsAuthenticodeSign.ps1" in build
@@ -933,16 +1315,27 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     assert "signing_certificate_thumbprint = if ($SigningVerified)" in build
     assert "Get-AuthenticodeSignature -LiteralPath $StagedExecutable" in build
     assert "TimeStamperCertificate" in build
+    assert '$SelfCheckText = & $StagedExecutable "self-check"' in build
+    assert '"ed25519+aes-256-gcm+scrypt"' in build
+    assert '"model-trust-check" "--trust-store"' in build
+    assert "$ValidatedIssuerKeys.Count -ne [int]$ModelTrustCheck.issuer_count" in build
+    assert "$ActualModelIssuerTrustStoreSha256" in build
+    assert "BundledTestOnlyModelTrustStoreSha256" in build
+    assert "regardless of filename or JSON formatting" in build
+    assert "mineguard-test-only" in build
+    assert "test-only-no-private-key-2026" in build
+    assert "e3df516dc9ce7cce905597484d794625a6ac4e6ac2a11dfc07dbc8e2f15fb413" in build
     assert (
-        "Move-Item -LiteralPath $ReleaseRoot -Destination $ReplacedReleaseRoot"
-        in build
+        "Move-Item -LiteralPath $ReleaseRoot -Destination $ReplacedReleaseRoot" in build
     )
     assert (
-        "Move-Item -LiteralPath $ReplacedReleaseRoot -Destination $ReleaseRoot"
-        in build
+        "Move-Item -LiteralPath $ReplacedReleaseRoot -Destination $ReleaseRoot" in build
     )
-    assert 'setuptools = $(Get-DistributionVersion' in build
-    assert 'tzdata = $(Get-DistributionVersion' in build
+    assert "setuptools = $(Get-DistributionVersion" in build
+    assert "cryptography = $(Get-DistributionVersion" in build
+    assert "cffi = $(Get-DistributionVersion" in build
+    assert "pycparser = $(Get-DistributionVersion" in build
+    assert "tzdata = $(Get-DistributionVersion" in build
     assert "python = $PythonPatchVersion" in build
     assert 'Extension -in @(".py", ".pyw", ".pyc"' in build
     assert '".pdb", ".ilk", ".map"' in build
@@ -970,9 +1363,7 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
         "$ArtifactsRoot = [IO.Path]::GetFullPath($ArtifactsRoot)"
     )
     assert artifacts_guard < artifacts_normalization
-    assert build.count(
-        'Assert-SafeLocalFixedPath -Name "ArtifactsRoot"'
-    ) >= 2
+    assert build.count('Assert-SafeLocalFixedPath -Name "ArtifactsRoot"') >= 2
     assert build.count('Assert-SafeLocalFixedPath -Name "SignToolPath"') >= 2
     assert build.count('Assert-SafeLocalFixedPath -Name "Wheelhouse"') >= 2
     assert "Assert-OrdinaryDirectoryTree -Root $Wheelhouse" in build
@@ -987,18 +1378,37 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     assert "Test-BinaryReleaseManifest" in installer
     assert "Get-AuthenticodeSignature" in installer
     assert "release-metadata" in installer
+    assert '"model-credential-trust.json", "SHA256SUMS.txt"' in installer
+    assert (
+        '$ModelTrustSource = Join-Path $SourceRoot "model-credential-trust.json"'
+        in installer
+    )
+    assert (
+        "Installed release metadata staging must contain exactly five files."
+        in installer
+    )
+    assert installer.count('"model-credential-trust.json"') >= 5
+    assert "[switch]$RequireModelTrustStore" in installer
+    assert installer.count("-RequireModelTrustStore") == 1
     assert "MineGuardEnterpriseAgent.exe" in installer
     assert "BuildFromSource" in installer
     assert "Set-StrictMode -Version 2.0" in installer
     assert "Windows PowerShell 5.1 or later is required." in installer
     assert "function Set-EACanonicalProductTreeAcl" in installer
     assert "Set-EACanonicalProductTreeAcl -Path $InstallRoot" in installer
+    acl_helper = installer[
+        installer.index("function Set-EACanonicalProductTreeAcl") :
+        installer.index("function Get-EADerivedServiceIdentity")
+    ]
+    assert "SetAccessRuleProtection($true, $false)" in acl_helper
+    assert "[IO.Directory]::SetAccessControl" in acl_helper
+    assert "[IO.File]::SetAccessControl" in acl_helper
+    assert '"/reset"' not in acl_helper
     assert "AuditFailAfterRuntimeSwitch" in installer
     assert "installer-rollback-test" in installer
     assert "Agent downgrade from" in installer
     assert (
-        "[version]$CandidateVersionText -lt [version]$ExistingVersionText"
-        in installer
+        "[version]$CandidateVersionText -lt [version]$ExistingVersionText" in installer
     )
     assert installer.count("Assert-NoEnterpriseAgentRuntimeProcesses") >= 3
     assert "Get-CimInstance Win32_Process" in installer
@@ -1053,12 +1463,23 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     )
     assert installer.index(
         "Set-EACanonicalProductTreeAcl -Path $StagedMetadata"
-    ) < installer.index(
-        "-SourcePath $StagedMetadata -SourceParent $InstallRoot"
+    ) < installer.index("-SourcePath $StagedMetadata -SourceParent $InstallRoot")
+    first_runtime_switch = installer.index(
+        "-SourcePath $StagedRuntime -SourceParent $InstallRoot"
     )
-    binary_cleanup = installer.index(
-        'if (Test-Path -LiteralPath $RollbackRuntime)'
-    )
+    assert installer.index(
+        "Set-EACanonicalProductTreeAcl -Path $InstallRoot -Recurse"
+    ) < first_runtime_switch
+    assert installer.index(
+        "Set-EACanonicalProductTreeAcl -Path $StagedDeploy"
+    ) < first_runtime_switch
+    post_commit = installer[
+        installer.rindex("if (-not $BuildFromSource) {") :
+        installer.rindex("if ($BuildFromSource) {")
+    ]
+    assert "Set-EACanonicalProductTreeAcl" not in post_commit
+    assert "Post-commit ACL verification" in post_commit
+    binary_cleanup = installer.index("if (Test-Path -LiteralPath $RollbackRuntime)")
     source_acl = installer.rindex("if ($BuildFromSource) {")
     assert binary_cleanup < source_acl
     operational = (
@@ -1068,12 +1489,10 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
         "Backup-EnterpriseAgent.ps1",
         "Restore-EnterpriseAgent.ps1",
     )
-    safety_helper = (
-        deploy_root / "EnterpriseAgent.WindowsSafety.ps1"
-    ).read_text(encoding="utf-8")
-    assert 'Join-Path $RuntimeRoot "MineGuardEnterpriseAgent.exe"' in (
-        safety_helper
+    safety_helper = (deploy_root / "EnterpriseAgent.WindowsSafety.ps1").read_text(
+        encoding="utf-8"
     )
+    assert 'Join-Path $RuntimeRoot "MineGuardEnterpriseAgent.exe"' in (safety_helper)
     for name in operational:
         script = (deploy_root / name).read_text(encoding="utf-8")
         assert (
