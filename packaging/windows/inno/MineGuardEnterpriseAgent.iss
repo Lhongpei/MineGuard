@@ -76,28 +76,19 @@ Name: "{commonappdata}\MineGuard\InstallerBootstrap"; Permissions: admins-full s
 Name: "{code:GetTrustedBootstrapStage}"; Permissions: admins-full system-full
 
 [Files]
-Source: "{#AssetsRoot}\Invoke-MineGuardTrustedProductInstall.ps1"; DestDir: "{code:GetTrustedBootstrapStage}"; Flags: ignoreversion deleteafterinstall
-; This is the exact audited child-product staging layout. The installer never
-; rebuilds the Agent and never imports a root-level duplicate entry point. It
-; is unpacked only long enough for the product installer to verify its manifest
-; and perform the guarded runtime switch and ACL setup.
-Source: "{#StageRoot}\runtime\*"; DestDir: "{tmp}\MineGuardEnterpriseAgentRelease\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs deleteafterinstall
-Source: "{#StageRoot}\deploy\windows\*"; DestDir: "{tmp}\MineGuardEnterpriseAgentRelease\deploy\windows"; Flags: ignoreversion recursesubdirs createallsubdirs deleteafterinstall
-Source: "{#StageRoot}\model-credential-trust.json"; DestDir: "{tmp}\MineGuardEnterpriseAgentRelease"; Flags: ignoreversion deleteafterinstall
-Source: "{#StageRoot}\VERSION.txt"; DestDir: "{tmp}\MineGuardEnterpriseAgentRelease"; Flags: ignoreversion deleteafterinstall
-Source: "{#StageRoot}\build-metadata.json"; DestDir: "{tmp}\MineGuardEnterpriseAgentRelease"; Flags: ignoreversion deleteafterinstall
-Source: "{#StageRoot}\release-manifest.json"; DestDir: "{tmp}\MineGuardEnterpriseAgentRelease"; Flags: ignoreversion deleteafterinstall
+; These temporary transaction inputs are deliberately first for solid-compression
+; extraction. CurStepChanged(ssInstall) extracts them before Inno writes any
+; persistent Files/Icons/ARP/uninstaller state. They are never copied normally.
+Source: "{#AssetsRoot}\Invoke-MineGuardTrustedProductInstall.ps1"; Flags: dontcopy noencryption
+Source: "{#StageRoot}\*"; DestDir: "{tmp}\MineGuardEnterpriseAgentRelease"; Flags: ignoreversion recursesubdirs createallsubdirs dontcopy noencryption
 ; Keep the uninstall transaction runner outside every product-owned directory
 ; that it atomically quarantines. Inno owns and removes this protected copy.
 Source: "{#StageRoot}\deploy\windows\Uninstall-EnterpriseAgentRuntime.ps1"; DestDir: "{app}\uninstall-tools"; Flags: ignoreversion
 Source: "{#AssetsRoot}\Windows-binary-release-guide.html"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "{#AssetsRoot}\RELEASE-NOTICE.txt"; DestDir: "{app}\docs"; Flags: ignoreversion
-; Keep the guarded product transaction as the final [Files] action. If any
-; ordinary payload copy fails, the product runtime has not been switched yet.
-Source: "{#StageRoot}\SHA256SUMS.txt"; DestDir: "{tmp}\MineGuardEnterpriseAgentRelease"; Flags: ignoreversion deleteafterinstall; AfterInstall: InstallProductRuntime
 
 [Icons]
-Name: "{group}\MineGuard Enterprise Agent deployment guide"; Filename: "{app}\docs\Windows-binary-release-guide.html"
+Name: "{group}\MineGuard Enterprise Agent deployment guide"; Filename: "{app}\docs\Windows-binary-release-guide.html"; Check: AllowPostFilesFailureProbe
 Name: "{group}\MineGuard 企业接入配置向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File ""{app}\deploy\windows\Start-EnterpriseAgentProvisioningWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\deploy\windows"
 Name: "{group}\MineGuard 模型授权导入向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File ""{app}\deploy\windows\Start-EnterpriseAgentModelCredentialWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\deploy\windows"
 Name: "{group}\Enterprise Agent operations console"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -Command ""Set-Location -LiteralPath '{app}\deploy\windows'; Get-Content -LiteralPath '.\README.md' -TotalCount 45"""; WorkingDir: "{app}\deploy\windows"
@@ -119,6 +110,10 @@ const
 var
   RuntimeRemovalCompleted: Boolean;
   ProductInstallFailed: Boolean;
+  ProductTransactionStarted: Boolean;
+  ProductTransactionPrepared: Boolean;
+  WrapperTransactionSucceeded: Boolean;
+  ProductTransactionId: String;
   TrustedBootstrapStage: String;
 #ifdef EnableSigning
   SignerInputPage: TInputQueryWizardPage;
@@ -686,33 +681,65 @@ begin
     Result := PreflightError;
 end;
 
-procedure InstallProductRuntime();
+function GetProductTransactionId(): String;
 var
-  ResultCode: Integer;
+  UniqueSeed: String;
+begin
+  if ProductTransactionId = '' then
+  begin
+    UniqueSeed := GetTempFileName(ExpandConstant('{tmp}'));
+    DeleteFile(UniqueSeed);
+    ProductTransactionId := LowerCase(Copy(GetSHA256OfString(
+      UniqueSeed + '|' + ExpandConstant('{app}')), 1, 32));
+  end;
+  Result := ProductTransactionId;
+end;
+
+function GetExtractedAgentReleaseRoot(): String;
+begin
+  { ExtractTemporaryFiles preserves the unexpanded destination below Setup's
+    private temporary root. }
+  Result := AddBackslash(ExpandConstant('{tmp}')) +
+    '{tmp}\MineGuardEnterpriseAgentRelease';
+end;
+
+function InvokeProductTransactionAction(const ActionName: String;
+  const Visible: Boolean; var ResultCode: Integer): Boolean;
+var
   PowerShellPath: String;
   BootstrapPath: String;
   ActualBootstrapSha256: String;
   BootstrapArguments: String;
   LoaderCommand: String;
   Parameters: String;
+  WindowStyle: Integer;
 #ifdef InternalUnsignedRelease
   ApprovalError: String;
 #endif
 begin
+  Result := False;
+  ResultCode := -1;
   PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
-  BootstrapPath := AddBackslash(GetTrustedBootstrapStage('')) +
-    'Invoke-MineGuardTrustedProductInstall.ps1';
+  BootstrapPath := ExpandConstant(
+    '{tmp}\Invoke-MineGuardTrustedProductInstall.ps1');
+  if not FileExists(BootstrapPath) then
+  begin
+    Log('Trusted product bootstrap is not extracted: ' + BootstrapPath);
+    Exit;
+  end;
   ActualBootstrapSha256 := UpperCase(GetSHA256OfFile(BootstrapPath));
   if CompareText(ActualBootstrapSha256, '{#TrustedBootstrapSha256}') <> 0 then
   begin
-    ProductInstallFailed := True;
-    CleanupTrustedBootstrapStage();
-    RaiseException('The protected trusted product bootstrap failed its embedded SHA-256 check.');
+    Log('Trusted product bootstrap failed its embedded SHA-256 check.');
+    Exit;
   end;
-  BootstrapArguments := ' -Product ' +
+  BootstrapArguments :=
+    ' -TransactionAction ' + PowerShellSingleQuoted(ActionName) +
+    ' -TransactionId ' + PowerShellSingleQuoted(GetProductTransactionId()) +
+    ' -Product ' +
     PowerShellSingleQuoted('EnterpriseAgent') +
     ' -SourceRoot ' + PowerShellSingleQuoted(
-      ExpandConstant('{tmp}\MineGuardEnterpriseAgentRelease')) +
+      GetExtractedAgentReleaseRoot()) +
     ' -ExpectedReleaseManifestSha256 ' +
       PowerShellSingleQuoted('{#ChildReleaseManifestSha256}') +
     ' -InstallRoot ' + PowerShellSingleQuoted(ExpandConstant('{app}')) +
@@ -721,8 +748,8 @@ begin
 #ifdef EnableSigning
   if Length(ApprovedSignerThumbprint) <> 40 then
   begin
-    CleanupTrustedBootstrapStage();
-    RaiseException('The independently approved signer thumbprint was not resolved.');
+    Log('The independently approved signer thumbprint was not resolved.');
+    Exit;
   end;
   BootstrapArguments := BootstrapArguments +
     ' -ApprovedSignerThumbprint ' +
@@ -731,17 +758,16 @@ begin
 #ifdef InternalUnsignedRelease
   if not TryAuthorizeUnsignedInternalRelease(ApprovedInstallerSha256, ApprovalError) then
   begin
-    ProductInstallFailed := True;
-    CleanupTrustedBootstrapStage();
-    RaiseException(ApprovalError);
+    Log(ApprovalError);
+    Exit;
   end;
   BootstrapArguments := BootstrapArguments +
     ' -AllowUnsignedInternalRelease';
 #else
   if not IsUnsignedTestMediaAuthorized() then
   begin
-    CleanupTrustedBootstrapStage();
-    RaiseException('Unsigned test media was not explicitly authorized.');
+    Log('Unsigned test media was not explicitly authorized.');
+    Exit;
   end;
   BootstrapArguments := BootstrapArguments + ' -AllowUnsignedTestMedia';
 #endif
@@ -765,17 +791,93 @@ begin
     BootstrapArguments;
   Parameters := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' +
     LoaderCommand + '"';
-  if not ExecAndLogOutput(PowerShellPath, Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode, nil) then
+  if Visible then
+    WindowStyle := SW_SHOWNORMAL
+  else
+    WindowStyle := SW_HIDE;
+  if not ExecAndLogOutput(PowerShellPath, Parameters, '', WindowStyle,
+      ewWaitUntilTerminated, ResultCode, nil) then
   begin
-    ProductInstallFailed := True;
-    CleanupTrustedBootstrapStage();
-    RaiseException('Failed to launch the guarded Enterprise Agent product installer.');
+    Log('Failed to launch Agent transaction action ' + ActionName + '.');
+    Exit;
   end;
-  if ResultCode <> 0 then
+  Result := ResultCode = 0;
+end;
+
+procedure RequireProductTransactionAction(const ActionName: String);
+var
+  ResultCode: Integer;
+begin
+  if not InvokeProductTransactionAction(ActionName, True, ResultCode) then
   begin
     ProductInstallFailed := True;
-    CleanupTrustedBootstrapStage();
-    RaiseException(Format('The guarded Enterprise Agent product transaction failed with exit code %d. The runtime switch was aborted.', [ResultCode]));
+    RaiseException(Format(
+      'Enterprise Agent transaction action %s failed with exit code %d.',
+      [ActionName, ResultCode]));
+  end;
+end;
+
+procedure PrepareAndCommitProductRuntime();
+begin
+  { ssInstall runs before Inno makes persistent Files, Icons, ARP or uninstaller
+    changes. The retained child transaction is therefore the only state that
+    needs explicit rollback until ssPostInstall. }
+  ExtractTemporaryFiles(
+    '{tmp}\Invoke-MineGuardTrustedProductInstall.ps1');
+  ExtractTemporaryFiles('{tmp}\MineGuardEnterpriseAgentRelease\*');
+  ProductTransactionStarted := True;
+  RequireProductTransactionAction('Begin');
+  RequireProductTransactionAction('Prepare');
+  RequireProductTransactionAction('Commit');
+  ProductTransactionPrepared := True;
+end;
+
+function AllowPostFilesFailureProbe(): Boolean;
+begin
+#ifdef FailureAfterFilesProbe
+  ProductInstallFailed := True;
+  RaiseException(
+    'Release audit fault injection after persistent Files and before Icons.');
+#endif
+  Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssInstall then
+    PrepareAndCommitProductRuntime()
+  else if CurStep = ssPostInstall then
+  begin
+    if not ProductTransactionPrepared then
+    begin
+      ProductInstallFailed := True;
+      Log('Agent wrapper reached ssPostInstall without a retained product commit.');
+      Exit;
+    end;
+    if InvokeProductTransactionAction('Finalize', False, ResultCode) then
+      WrapperTransactionSucceeded := True
+    else
+    begin
+      ProductInstallFailed := True;
+      Log(Format(
+        'Agent wrapper success marker/finalization failed with exit code %d.',
+        [ResultCode]));
+    end;
+  end;
+end;
+
+procedure DeinitializeSetup();
+var
+  ResultCode: Integer;
+begin
+  if ProductTransactionStarted and not WrapperTransactionSucceeded then
+  begin
+    if not InvokeProductTransactionAction('Rollback', False, ResultCode) then
+      Log(Format(
+        'ERROR: Agent retained transaction rollback failed with exit code %d.',
+        [ResultCode]));
   end;
   CleanupTrustedBootstrapStage();
 end;

@@ -86,16 +86,11 @@ Name: "{commonappdata}\MineGuard\InstallerBootstrap"; Permissions: admins-full s
 Name: "{code:GetTrustedBootstrapStage}"; Permissions: admins-full system-full
 
 [Files]
-Source: "{#AssetsRoot}\Invoke-MineGuardTrustedProductInstall.ps1"; DestDir: "{code:GetTrustedBootstrapStage}"; Flags: ignoreversion deleteafterinstall
-; Consume the exact audited Platform staging layout. The root installer does not
-; carry a second Python entry point or a second Nuitka build definition. The
-; product installer validates the temporary media, switches runtime atomically
-; and applies the Platform ACLs.
-Source: "{#StageRoot}\runtime\*"; DestDir: "{tmp}\MineGuardPlatformRelease\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs deleteafterinstall
-Source: "{#StageRoot}\deploy\windows\*"; DestDir: "{tmp}\MineGuardPlatformRelease\deploy\windows"; Flags: ignoreversion recursesubdirs createallsubdirs deleteafterinstall
-Source: "{#StageRoot}\VERSION.txt"; DestDir: "{tmp}\MineGuardPlatformRelease"; Flags: ignoreversion deleteafterinstall
-Source: "{#StageRoot}\build-metadata.json"; DestDir: "{tmp}\MineGuardPlatformRelease"; Flags: ignoreversion deleteafterinstall
-Source: "{#StageRoot}\release-manifest.json"; DestDir: "{tmp}\MineGuardPlatformRelease"; Flags: ignoreversion deleteafterinstall
+; These temporary transaction inputs are deliberately first for solid-compression
+; extraction. CurStepChanged(ssInstall) extracts them before Inno writes any
+; persistent Files/Icons/ARP/uninstaller state. They are never copied normally.
+Source: "{#AssetsRoot}\Invoke-MineGuardTrustedProductInstall.ps1"; Flags: dontcopy noencryption
+Source: "{#StageRoot}\*"; DestDir: "{tmp}\MineGuardPlatformRelease"; Flags: ignoreversion recursesubdirs createallsubdirs dontcopy noencryption
 ; Keep the uninstall transaction runner outside every product-owned directory
 ; that it atomically quarantines. Inno owns and removes this protected copy.
 Source: "{#StageRoot}\deploy\windows\Uninstall-MineGuardPlatformRuntime.ps1"; DestDir: "{app}\uninstall-tools"; Flags: ignoreversion
@@ -105,12 +100,9 @@ Source: "{#AssetsRoot}\RELEASE-NOTICE.txt"; DestDir: "{app}\docs"; Flags: ignore
 ; runtime/config/state trees.  A desktop token can request UAC before opening
 ; the administrator control center.  It contains no configuration or secret.
 Source: "{#AssetsRoot}\Open-MineGuardPlatformControlCenter.ps1"; DestDir: "{app}\launcher"; Flags: ignoreversion; Permissions: users-readexec
-; Keep the guarded product transaction as the final [Files] action. If any
-; ordinary payload copy fails, the product runtime has not been switched yet.
-Source: "{#StageRoot}\SHA256SUMS.txt"; DestDir: "{tmp}\MineGuardPlatformRelease"; Flags: ignoreversion deleteafterinstall; AfterInstall: InstallProductRuntime
 
 [Icons]
-Name: "{group}\MineGuard Platform 控制中心"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"; IconFilename: "{app}\runtime\MineGuardPlatform.exe"
+Name: "{group}\MineGuard Platform 控制中心"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"; IconFilename: "{app}\runtime\MineGuardPlatform.exe"; Check: AllowPostFilesFailureProbe
 Name: "{group}\MineGuard 企业接入包与注册向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\service\Start-MineGuardPlatformProvisioningWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\service"; IconFilename: "{app}\runtime\MineGuardPlatform.exe"
 Name: "{commondesktop}\MineGuard Platform 控制中心"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"; IconFilename: "{app}\runtime\MineGuardPlatform.exe"; Tasks: desktopicon
 Name: "{group}\MineGuard Platform 使用与部署说明"; Filename: "{app}\docs\Windows-binary-release-guide.html"
@@ -131,6 +123,10 @@ const
 var
   RuntimeRemovalCompleted: Boolean;
   ProductInstallFailed: Boolean;
+  ProductTransactionStarted: Boolean;
+  ProductTransactionPrepared: Boolean;
+  WrapperTransactionSucceeded: Boolean;
+  ProductTransactionId: String;
   TrustedBootstrapStage: String;
 #ifndef EnableSigning
 #ifdef InternalUnsignedRelease
@@ -568,32 +564,64 @@ begin
     Result := PreflightError;
 end;
 
-procedure InstallProductRuntime();
+function GetProductTransactionId(): String;
 var
-  ResultCode: Integer;
+  UniqueSeed: String;
+begin
+  if ProductTransactionId = '' then
+  begin
+    UniqueSeed := GetTempFileName(ExpandConstant('{tmp}'));
+    DeleteFile(UniqueSeed);
+    ProductTransactionId := LowerCase(Copy(GetSHA256OfString(
+      UniqueSeed + '|' + ExpandConstant('{app}')), 1, 32));
+  end;
+  Result := ProductTransactionId;
+end;
+
+function GetExtractedPlatformReleaseRoot(): String;
+begin
+  { ExtractTemporaryFiles preserves the unexpanded DestDir below Setup's
+    private temporary root, as documented by Inno. }
+  Result := AddBackslash(ExpandConstant('{tmp}')) +
+    '{tmp}\MineGuardPlatformRelease';
+end;
+
+function InvokeProductTransactionAction(const ActionName: String;
+  const Visible: Boolean; var ResultCode: Integer): Boolean;
+var
   PowerShellPath: String;
   BootstrapPath: String;
   ActualBootstrapSha256: String;
   BootstrapArguments: String;
   LoaderCommand: String;
   Parameters: String;
+  WindowStyle: Integer;
 #ifdef InternalUnsignedRelease
   ApprovalError: String;
 #endif
 begin
+  Result := False;
+  ResultCode := -1;
   PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
-  BootstrapPath := AddBackslash(GetTrustedBootstrapStage('')) +
-    'Invoke-MineGuardTrustedProductInstall.ps1';
+  BootstrapPath := ExpandConstant(
+    '{tmp}\Invoke-MineGuardTrustedProductInstall.ps1');
+  if not FileExists(BootstrapPath) then
+  begin
+    Log('Trusted product bootstrap is not extracted: ' + BootstrapPath);
+    Exit;
+  end;
   ActualBootstrapSha256 := UpperCase(GetSHA256OfFile(BootstrapPath));
   if CompareText(ActualBootstrapSha256, '{#TrustedBootstrapSha256}') <> 0 then
   begin
-    ProductInstallFailed := True;
-    CleanupTrustedBootstrapStage();
-    RaiseException('The protected trusted product bootstrap failed its embedded SHA-256 check.');
+    Log('Trusted product bootstrap failed its embedded SHA-256 check.');
+    Exit;
   end;
-  BootstrapArguments := ' -Product ' + PowerShellSingleQuoted('Platform') +
+  BootstrapArguments :=
+    ' -TransactionAction ' + PowerShellSingleQuoted(ActionName) +
+    ' -TransactionId ' + PowerShellSingleQuoted(GetProductTransactionId()) +
+    ' -Product ' + PowerShellSingleQuoted('Platform') +
     ' -SourceRoot ' + PowerShellSingleQuoted(
-      ExpandConstant('{tmp}\MineGuardPlatformRelease')) +
+      GetExtractedPlatformReleaseRoot()) +
     ' -ExpectedReleaseManifestSha256 ' +
       PowerShellSingleQuoted('{#ChildReleaseManifestSha256}') +
     ' -InstallRoot ' + PowerShellSingleQuoted(ExpandConstant('{app}'));
@@ -601,17 +629,16 @@ begin
 #ifdef InternalUnsignedRelease
   if not TryAuthorizeUnsignedInternalRelease(ApprovedInstallerSha256, ApprovalError) then
   begin
-    ProductInstallFailed := True;
-    CleanupTrustedBootstrapStage();
-    RaiseException(ApprovalError);
+    Log(ApprovalError);
+    Exit;
   end;
   BootstrapArguments := BootstrapArguments +
     ' -AllowUnsignedInternalRelease';
 #else
   if not IsUnsignedTestMediaAuthorized() then
   begin
-    CleanupTrustedBootstrapStage();
-    RaiseException('Unsigned Platform test media was not explicitly authorized.');
+    Log('Unsigned Platform test media was not explicitly authorized.');
+    Exit;
   end;
 #endif
 #endif
@@ -635,17 +662,93 @@ begin
     BootstrapArguments;
   Parameters := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' +
     LoaderCommand + '"';
-  if not ExecAndLogOutput(PowerShellPath, Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode, nil) then
+  if Visible then
+    WindowStyle := SW_SHOWNORMAL
+  else
+    WindowStyle := SW_HIDE;
+  if not ExecAndLogOutput(PowerShellPath, Parameters, '', WindowStyle,
+      ewWaitUntilTerminated, ResultCode, nil) then
   begin
-    ProductInstallFailed := True;
-    CleanupTrustedBootstrapStage();
-    RaiseException('Failed to launch the guarded MineGuard Platform product installer.');
+    Log('Failed to launch Platform transaction action ' + ActionName + '.');
+    Exit;
   end;
-  if ResultCode <> 0 then
+  Result := ResultCode = 0;
+end;
+
+procedure RequireProductTransactionAction(const ActionName: String);
+var
+  ResultCode: Integer;
+begin
+  if not InvokeProductTransactionAction(ActionName, True, ResultCode) then
   begin
     ProductInstallFailed := True;
-    CleanupTrustedBootstrapStage();
-    RaiseException(Format('The guarded MineGuard Platform product transaction failed with exit code %d. The runtime switch was aborted.', [ResultCode]));
+    RaiseException(Format(
+      'MineGuard Platform transaction action %s failed with exit code %d.',
+      [ActionName, ResultCode]));
+  end;
+end;
+
+procedure PrepareAndCommitProductRuntime();
+begin
+  { ssInstall is dispatched with HandleExceptions=False immediately before
+    PerformInstall. A failure here is fatal while Inno still has no persistent
+    Files/Icons/ARP/uninstaller changes to unwind. }
+  ExtractTemporaryFiles(
+    '{tmp}\Invoke-MineGuardTrustedProductInstall.ps1');
+  ExtractTemporaryFiles('{tmp}\MineGuardPlatformRelease\*');
+  ProductTransactionStarted := True;
+  RequireProductTransactionAction('Begin');
+  RequireProductTransactionAction('Prepare');
+  RequireProductTransactionAction('Commit');
+  ProductTransactionPrepared := True;
+end;
+
+function AllowPostFilesFailureProbe(): Boolean;
+begin
+#ifdef FailureAfterFilesProbe
+  ProductInstallFailed := True;
+  RaiseException(
+    'Release audit fault injection after persistent Files and before Icons.');
+#endif
+  Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssInstall then
+    PrepareAndCommitProductRuntime()
+  else if CurStep = ssPostInstall then
+  begin
+    if not ProductTransactionPrepared then
+    begin
+      ProductInstallFailed := True;
+      Log('Platform wrapper reached ssPostInstall without a retained product commit.');
+      Exit;
+    end;
+    if InvokeProductTransactionAction('Finalize', False, ResultCode) then
+      WrapperTransactionSucceeded := True
+    else
+    begin
+      ProductInstallFailed := True;
+      Log(Format(
+        'Platform wrapper success marker/finalization failed with exit code %d.',
+        [ResultCode]));
+    end;
+  end;
+end;
+
+procedure DeinitializeSetup();
+var
+  ResultCode: Integer;
+begin
+  if ProductTransactionStarted and not WrapperTransactionSucceeded then
+  begin
+    if not InvokeProductTransactionAction('Rollback', False, ResultCode) then
+      Log(Format(
+        'ERROR: Platform retained transaction rollback failed with exit code %d.',
+        [ResultCode]));
   end;
   CleanupTrustedBootstrapStage();
 end;
