@@ -254,8 +254,10 @@ jobs:
         shell: pwsh
         run: |
           $ready = $false
-          if (Test-Path -LiteralPath $env:MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER `
-              -PathType Leaf) {
+          if (-not [string]::IsNullOrWhiteSpace(
+                $env:MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER) -and
+              (Test-Path -LiteralPath $env:MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER `
+                -PathType Leaf)) {
             $marker = Get-Content -LiteralPath `
               $env:MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER -Raw -Encoding UTF8
             $ready = $marker -match '^Both child compilers completed for source '

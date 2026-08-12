@@ -147,10 +147,19 @@ function Assert-NoDevelopmentOrSecretMaterial {
                             '^\[(?i:bool)\]\s*\$[A-Za-z_][A-Za-z0-9_]*$'
                         )
                     )
+                    $IsPowerShellStringVariableCastExpression = (
+                        ($LowerExtension -eq ".ps1" -or
+                            $LowerExtension -eq ".psm1") -and
+                        [regex]::IsMatch(
+                            $Value,
+                            '^\[(?i:string)\]\s*\$[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$'
+                        )
+                    )
                     $IsPlaceholder = (
                         $Value.StartsWith("<") -or $Value.StartsWith("__") -or
                         $Value.StartsWith("$") -or $Value.StartsWith("%") -or
                         $IsKnownBooleanSwitchExpression -or
+                        $IsPowerShellStringVariableCastExpression -or
                         $Value -match '^(?i:REPLACE|CHANGE[_-]?ME|NOT[_-]?CONFIGURED|NULL|NONE|FALSE|TRUE)'
                     )
                     if (-not $IsPlaceholder) {

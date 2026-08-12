@@ -1143,6 +1143,8 @@ def test_audit_and_lifecycle() -> None:
         "[StringComparison]::OrdinalIgnoreCase",
         "'^\\[(?i:bool)\\]\\s*\\$[A-Za-z_][A-Za-z0-9_]*$'",
         "[regex]::IsMatch(",
+        "$IsPowerShellStringVariableCastExpression",
+        "'^\\[(?i:string)\\]\\s*\\$[A-Za-z_][A-Za-z0-9_]*",
         'Release contains a non-placeholder value for ${SensitiveName}',
         "Windows release text safety preflight passed",
     ):
@@ -1890,6 +1892,7 @@ def test_workflow() -> None:
         "MINEGUARD_UNSIGNED_CLCACHE_READY_MARKER",
         "UnsignedCompilerCacheReadyMarker",
         "Qualify complete unsigned compiler cache",
+        "IsNullOrWhiteSpace(",
         "Save complete unsigned Nuitka compiler cache",
         "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
         "steps.nuitka_cache_ready.outputs.ready == 'true'",
