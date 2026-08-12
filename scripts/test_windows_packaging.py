@@ -2081,6 +2081,18 @@ def test_audit_and_lifecycle() -> None:
         "the raw ACL helper must not resolve an unregistered service SID "
         "through icacls"
     )
+    platform_service_sid = (
+        "S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346"
+    )
+    for label, source in (
+        ("runtime installer", platform_installer),
+        ("service installer", platform_service_installer),
+        ("ACL helper", platform_acl_helper),
+        ("ACL execution probe", acl_probe),
+    ):
+        assert platform_service_sid in source, (
+            f"Platform {label} service SID drifted from the product identity"
+        )
     for label, source, production_call in (
         (
             "configuration",
