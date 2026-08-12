@@ -364,9 +364,9 @@ def test_inno_scripts() -> None:
             if name == "platform"
             else "MineGuardEnterpriseAgentRelease"
         )
-        assert "AddBackslash(ExpandConstant('{tmp}')) +" in script
-        assert f"'{{tmp}}\\{release_leaf}'" in script
-        assert f"Result := ExpandConstant('{{tmp}}\\{release_leaf}')" not in script
+        assert f"Result := ExpandConstant('{{tmp}}\\{release_leaf}')" in script
+        assert "AddBackslash(ExpandConstant('{tmp}')) +" not in script
+        assert "preserves the unexpanded destination" not in script
         assert "example.invalid" not in script
         assert "compiler:Languages\\ChineseSimplified.isl" not in script
         icons = script.split("[Icons]", 1)[1].split("[Run]", 1)[0]

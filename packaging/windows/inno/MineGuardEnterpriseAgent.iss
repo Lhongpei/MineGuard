@@ -764,10 +764,9 @@ end;
 
 function GetExtractedAgentReleaseRoot(): String;
 begin
-  { ExtractTemporaryFiles preserves the unexpanded destination below Setup's
-    private temporary root. }
-  Result := AddBackslash(ExpandConstant('{tmp}')) +
-    '{tmp}\MineGuardEnterpriseAgentRelease';
+  { ExtractTemporaryFiles maps a leading {tmp}\ DestDir to Setup's private
+    temporary root instead of preserving that token as a literal subfolder. }
+  Result := ExpandConstant('{tmp}\MineGuardEnterpriseAgentRelease');
 end;
 
 function InvokeProductTransactionAction(const ActionName: String;
