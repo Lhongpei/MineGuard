@@ -878,6 +878,12 @@ function Set-ExactSecuritySddl {
         [Parameter(Mandatory = $true)] [string] $Kind,
         [Parameter(Mandatory = $true)] [string] $Sddl
     )
+    # Avoid a lossy no-op round trip. Windows may normalize control flags or
+    # ACE representation when the same SDDL is loaded into a new managed ACL
+    # object and written back, defeating the exact rollback comparison below.
+    if ((Get-OriginalSecuritySddl -Path $Path) -ceq $Sddl) {
+        return
+    }
     $security = if ($Kind -eq 'directory') {
         New-Object -TypeName Security.AccessControl.DirectorySecurity
     } elseif ($Kind -eq 'file') {

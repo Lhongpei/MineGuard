@@ -467,7 +467,7 @@ $ActualInnoChineseLanguageSha256 = Assert-ApprovedFileSha256 `
 $TrustedBootstrapPath = Join-Path $RepositoryRoot `
     "packaging\windows\assets\Invoke-MineGuardTrustedProductInstall.ps1"
 $ExpectedTrustedBootstrapSha256 = `
-    "fe20a4365676c8d4ecd8c3c7d5659048a5a964be560e0a8dee8051aeec89cf25"
+    "a48c9cc24fa321799a0717ec864cd181c5544f6b894a268a10cf3c4690b45bcb"
 $ActualTrustedBootstrapSha256 = Assert-ApprovedFileSha256 `
     -Name 'trusted product install bootstrap' `
     -PathValue $TrustedBootstrapPath `

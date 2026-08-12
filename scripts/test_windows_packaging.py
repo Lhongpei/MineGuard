@@ -972,6 +972,14 @@ def test_trusted_product_install_bootstrap() -> None:
     assert bootstrap.count("-IncludeCurrentStateRoot") >= 5
     assert "SetSecurityDescriptorSddlForm($Sddl, $managedSections)" in bootstrap
     assert "existing Audit/SACL section is intentionally neither replaced nor cleared" in bootstrap
+    set_exact_security = bootstrap[
+        bootstrap.index("function Set-ExactSecuritySddl") :
+        bootstrap.index("function Assert-ExactSecuritySddl")
+    ]
+    assert set_exact_security.index("Get-OriginalSecuritySddl -Path $Path") < (
+        set_exact_security.index("Set-Acl -LiteralPath $Path")
+    ), "exact ACL restore must skip an already-identical descriptor"
+    assert "-ceq $Sddl" in set_exact_security
     assert "$leafPattern = '^\\.mineguard-" in bootstrap
     assert "$leafPattern = '^\\\\.mineguard-" not in bootstrap
     for token in (
@@ -1506,6 +1514,7 @@ def test_audit_and_lifecycle() -> None:
         "the transaction-created StateRoot was not removed",
         "the transaction-created InstallRoot was not removed",
         "transaction-created StateRoot ancestor directories were not removed",
+        "Platform baseline docs retained inherited ACLs",
         "Platform fresh wrapper persistence probe returned",
         "platform fresh wrapper persistence rollback",
         "Platform fresh wrapper fixture unexpectedly has HKLM64 ARP",

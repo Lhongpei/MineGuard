@@ -406,6 +406,11 @@ def test_platform_trusted_bootstrap_transaction_preserves_existing_acls() -> Non
         "if (-not $binaryMode -and $sourceMode -and $trustedBootstrapTransaction)"
     )
     assert source_rejection < install.index("$directories = @(")
+    directories = install[
+        install.index("$directories = @(") :
+        install.index("$newlyCreatedDirectories = @{}")
+    ]
+    assert "(Join-Path $InstallRoot 'docs')" in directories
     read_only_validation = install[
         install.index("if ($binaryMode -and $trustedBootstrapTransaction)") :
         install.index("$directories = @(")
@@ -452,11 +457,12 @@ def test_platform_trusted_bootstrap_transaction_preserves_existing_acls() -> Non
     wrapper_business = binary_transaction[
         wrapper_business_start:wrapper_business_end
     ]
-    assert wrapper_business.count("$newlyCreatedDirectories.ContainsKey(") == 2
+    assert wrapper_business.count("$newlyCreatedDirectories.ContainsKey(") == 3
     assert "Set-MineGuardDirectoryAcl -Path $InstallRoot" not in wrapper_business
     assert "Set-MineGuardDirectoryAcl -Path $configDirectory" in wrapper_business
     assert "Set-MineGuardDirectoryAcl -Path $writableDirectory" in wrapper_business
-    assert "$docsDirectory" not in wrapper_business
+    assert "Set-MineGuardDirectoryAcl -Path $docsDirectory `" in wrapper_business
+    assert "-ServicePermission 'RX' -UsersReadExecute -Recurse" in wrapper_business
 
     # Source/direct installs retain their original full-tree ACL path.
     source_tail = install[transaction_end:]

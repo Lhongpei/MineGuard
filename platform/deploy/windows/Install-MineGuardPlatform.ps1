@@ -983,7 +983,8 @@ $directories = @(
     (Join-Path $InstallRoot 'logs'),
     (Join-Path $InstallRoot 'service'),
     (Join-Path $InstallRoot 'launcher'),
-    (Join-Path $InstallRoot 'release-metadata')
+    (Join-Path $InstallRoot 'release-metadata'),
+    (Join-Path $InstallRoot 'docs')
 )
 $newlyCreatedDirectories = @{}
 foreach ($directory in $directories) {
@@ -1239,6 +1240,7 @@ if ($binaryMode) {
         Set-MineGuardDirectoryAcl -Path $launcherIncoming `
             -ServicePermission 'RX' -UsersReadExecute -Recurse
         $configDirectory = Join-Path $InstallRoot 'config'
+        $docsDirectory = Join-Path $InstallRoot 'docs'
         $writableDirectories = @(
             (Join-Path $InstallRoot 'state'),
             (Join-Path $InstallRoot 'backups'),
@@ -1251,7 +1253,6 @@ if ($binaryMode) {
                 Set-MineGuardDirectoryAcl -Path $writableDirectory `
                     -ServicePermission 'M' -Recurse
             }
-            $docsDirectory = Join-Path $InstallRoot 'docs'
             if (Test-Path -LiteralPath $docsDirectory -PathType Container) {
                 Set-MineGuardDirectoryAcl -Path $docsDirectory `
                     -ServicePermission 'RX' -UsersReadExecute -Recurse
@@ -1270,6 +1271,12 @@ if ($binaryMode) {
                     Set-MineGuardDirectoryAcl -Path $writableDirectory `
                         -ServicePermission 'M' -Recurse
                 }
+            }
+            if ($newlyCreatedDirectories.ContainsKey(
+                    [System.IO.Path]::GetFullPath(
+                        $docsDirectory).TrimEnd('\'))) {
+                Set-MineGuardDirectoryAcl -Path $docsDirectory `
+                    -ServicePermission 'RX' -UsersReadExecute -Recurse
             }
         }
 

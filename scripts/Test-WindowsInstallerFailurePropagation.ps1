@@ -1141,6 +1141,13 @@ function Test-OneWrapperPersistenceRollback {
                 throw "$Product baseline is missing managed wrapper directory: $Name"
             }
         }
+        if ($Product -eq "platform") {
+            $BaselineDocsAcl = Get-Acl -LiteralPath (
+                Join-Path $InstallRoot "docs")
+            if (-not $BaselineDocsAcl.AreAccessRulesProtected) {
+                throw "Platform baseline docs retained inherited ACLs."
+            }
+        }
         $UninstallerParts = @(Get-ChildItem -LiteralPath $InstallRoot -File -Force |
             Where-Object {
                 $_.Name -cmatch '^unins[0-9]{3}\.(?:exe|dat|msg)$'
