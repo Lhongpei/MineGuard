@@ -656,11 +656,27 @@ function Invoke-RuntimeSmoke {
             $BaseUrl = "http://127.0.0.1:$Port"
             $IndexResponse = Invoke-WebRequest `
                 -Uri "$BaseUrl/" -UseBasicParsing -TimeoutSec 5
+            $IndexContent = [string]$IndexResponse.Content
+            $ScriptVersionMatch = [regex]::Match(
+                $IndexContent,
+                '/assets/app\.js\?v=([0-9]+(?:\.[0-9]+)+)'
+            )
+            $StyleVersionMatch = [regex]::Match(
+                $IndexContent,
+                '/assets/styles\.css\?v=([0-9]+(?:\.[0-9]+)+)'
+            )
+            if (-not $ScriptVersionMatch.Success -or
+                -not $StyleVersionMatch.Success -or
+                $ScriptVersionMatch.Groups[1].Value -cne
+                    $StyleVersionMatch.Groups[1].Value) {
+                throw "Platform frozen frontend cache versions are missing or inconsistent."
+            }
+            $FrontendVersion = $ScriptVersionMatch.Groups[1].Value
             $ScriptResponse = Invoke-WebRequest `
-                -Uri "$BaseUrl/assets/app.js?v=2.9.0" `
+                -Uri "$BaseUrl/assets/app.js?v=$FrontendVersion" `
                 -UseBasicParsing -TimeoutSec 5
             $StyleResponse = Invoke-WebRequest `
-                -Uri "$BaseUrl/assets/styles.css?v=2.9.0" `
+                -Uri "$BaseUrl/assets/styles.css?v=$FrontendVersion" `
                 -UseBasicParsing -TimeoutSec 5
             if ([int]$IndexResponse.StatusCode -ne 200 -or
                 [string]$IndexResponse.Headers["Content-Type"] -ne
@@ -673,9 +689,7 @@ function Invoke-RuntimeSmoke {
                     "nosniff" -or
                 [string]$StyleResponse.Headers["X-Content-Type-Options"] -ne
                     "nosniff" -or
-                $IndexResponse.Content -notmatch
-                    '/assets/app\.js\?v=2\.8\.1' -or
-                $IndexResponse.Content -notmatch 'id="frontendBootGuard"') {
+                $IndexContent -notmatch 'id="frontendBootGuard"') {
                 throw "Platform frozen frontend MIME, cache version or boot guard is invalid."
             }
             $OverviewResponse = Invoke-WebRequest `
