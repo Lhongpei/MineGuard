@@ -838,7 +838,14 @@ def test_trusted_product_install_bootstrap() -> None:
     assert "Set-ExactRegistrySecuritySddl -Key $key" in arp_restore
     assert "Assert-ExactRegistrySecuritySddl -Key $key" in arp_restore
     assert "Convert-ArpRegistrationToCanonicalJson" in arp_restore
+    current_compare = arp_restore.index("$currentCanonical =")
+    idempotent_return = arp_restore.index(
+        "if ($currentCanonical -ceq $expectedCanonical)"
+    )
     delete_index = arp_restore.index("DeleteSubKeyTree")
+    assert current_compare < idempotent_return < delete_index, (
+        "an already-identical restrictive ARP tree must be a strict no-op"
+    )
     first_parent_flush = arp_restore.index("Flush-ArpRegistryParent")
     first_recreate = arp_restore.index("New-ArpRegistryKeyAfterDelete")
     assert delete_index < first_parent_flush < first_recreate, (

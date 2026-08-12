@@ -2038,6 +2038,18 @@ function Restore-ArpRegistration {
     }
     $expectedCanonical = Convert-ArpRegistrationToCanonicalJson `
         -Snapshot $Snapshot
+    # Rollback is intentionally replayable.  If the complete current ARP
+    # tree (values, kinds, hierarchy and managed ACL sections) already equals
+    # the snapshot, do not delete and recreate it.  Apart from avoiding an
+    # unnecessary global registry mutation, this is required for legitimate
+    # restrictive registrations: deletion can succeed via DELETE while an
+    # immediate same-name recreation is denied or remains pending behind an
+    # external read handle.
+    $currentCanonical = Convert-ArpRegistrationToCanonicalJson `
+        -Snapshot (Capture-ArpRegistration)
+    if ($currentCanonical -ceq $expectedCanonical) {
+        return
+    }
     $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
         [Microsoft.Win32.RegistryHive]::LocalMachine,
         [Microsoft.Win32.RegistryView]::Registry64)
