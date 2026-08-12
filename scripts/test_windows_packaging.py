@@ -1549,7 +1549,7 @@ def test_audit_and_lifecycle() -> None:
         '"SHA256SUMS.txt", "model-credential-trust.json"',
         "MINEGUARD_RELEASE_AUDIT_MARKER=$Product-post-switch",
         ".prior-install-identity",
-        'Join-Path ([IO.Path]::GetTempPath()) "mgfp"',
+        'Join-Path $env:ProgramData `\n    "MineGuardFailurePropagationVerification"',
         "function Remove-DirectoryWithRetry",
         "function Remove-FileWithRetry",
         "function Wait-ProcessExecutableVisible",
@@ -1580,6 +1580,9 @@ def test_audit_and_lifecycle() -> None:
         "Failure-probe cleanup also failed after the primary audit failure",
     ):
         assert token in failure_probe, f"failure audit misses: {token}"
+    assert (
+        'Write-FailureProbeLog -Product "platform fresh wrapper"' in failure_probe
+    ), "fresh wrapper failures must emit their Inno PrepareToInstall diagnostics"
     final_cleanup = failure_probe[failure_probe.rindex("finally {") :]
     assert "Remove-DirectoryWithRetry" in final_cleanup
     assert "-PathValue $FullProbeRoot -TimeoutSeconds 30" in final_cleanup

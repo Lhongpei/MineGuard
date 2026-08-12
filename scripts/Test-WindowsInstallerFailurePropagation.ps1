@@ -1010,6 +1010,8 @@ function Test-OneWrapperPersistenceRollback {
                 -ArgumentList (@($InstallArguments) + "/LOG=$FreshFailureLog") `
                 -TimeoutSeconds 120
             if ($FreshFailureExit -ne 1001) {
+                Write-FailureProbeLog -Product "platform fresh wrapper" `
+                    -LogPath $FreshFailureLog
                 throw (
                     "Platform fresh wrapper persistence probe returned " +
                     "$FreshFailureExit instead of exit code 1001."
@@ -1552,7 +1554,11 @@ function Test-OneTransactionalRollbackAndDowngrade {
     }
 }
 
-$ProbeParent = Join-Path ([IO.Path]::GetTempPath()) "mgfp"
+# Wrapper install-root preflight intentionally rejects user-writable ancestors.
+# Exercise Setup beneath ProgramData, matching both production defaults and the
+# final installer lifecycle audit, while retaining a per-run isolated GUID root.
+$ProbeParent = Join-Path $env:ProgramData `
+    "MineGuardFailurePropagationVerification"
 New-Item -ItemType Directory -Path $ProbeParent -Force | Out-Null
 $ProbeRoot = Join-Path $ProbeParent (
     "p-" + [Guid]::NewGuid().ToString("N").Substring(0, 16)
