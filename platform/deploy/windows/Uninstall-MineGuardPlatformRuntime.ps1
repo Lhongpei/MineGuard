@@ -287,7 +287,9 @@ function Remove-PlatformQuarantineTree {
     foreach ($Child in $Children) {
         if ($Child.Name -eq "quarantine-marker.json") { continue }
         if (-not $Child.PSIsContainer -or
-            $Child.Name -notin @("runtime", "deploy", "service", "release-metadata")) {
+            $Child.Name -notin @(
+                "runtime", "deploy", "service", "release-metadata", "launcher"
+            )) {
             throw "Platform uninstall quarantine contains an unexpected item: $($Child.FullName)"
         }
         Remove-Item -LiteralPath $Child.FullName -Recurse -Force
@@ -330,10 +332,28 @@ function Remove-RecognizedQuarantines {
 
 $InstallRoot = Get-SafeLocalFixedPath -PathValue $InstallRoot -Label "InstallRoot"
 Assert-NotBroadInstallRoot -PathValue $InstallRoot
+$configurationMutex = New-Object -TypeName System.Threading.Mutex `
+    -ArgumentList @($false, 'Global\MineGuardPlatform.Configuration')
+$configurationMutexHeld = $false
+try {
+    try {
+        $configurationMutexHeld = $configurationMutex.WaitOne(
+            [TimeSpan]::FromSeconds(30)
+        )
+    } catch [System.Threading.AbandonedMutexException] {
+        $configurationMutexHeld = $true
+    }
+    if (-not $configurationMutexHeld) {
+        throw (
+            "Another MineGuard Platform configuration, startup or service " +
+            "transaction still holds the machine-wide lock; uninstall was " +
+            "refused after waiting 30 seconds."
+        )
+    }
 Assert-InnoInstallBoundary -RootPath $InstallRoot
 Remove-RecognizedQuarantines -RootPath $InstallRoot
 
-$TargetNames = @("runtime", "deploy", "service", "release-metadata")
+$TargetNames = @("runtime", "deploy", "service", "release-metadata", "launcher")
 $Targets = @()
 foreach ($TargetName in $TargetNames) {
     $TargetPath = [IO.Path]::GetFullPath((Join-Path $InstallRoot $TargetName)).TrimEnd('\')
@@ -433,3 +453,11 @@ catch {
 }
 
 Write-Host "MineGuard Platform immutable runtime was transactionally removed."
+} finally {
+    if ($configurationMutexHeld) {
+        try { $configurationMutex.ReleaseMutex() }
+        catch { }
+        $configurationMutexHeld = $false
+    }
+    $configurationMutex.Dispose()
+}

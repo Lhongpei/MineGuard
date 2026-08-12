@@ -3,6 +3,7 @@ from __future__ import annotations
 from importlib.metadata import version
 import json
 from pathlib import Path
+import re
 import tomllib
 from xml.etree import ElementTree
 from zoneinfo import ZoneInfo, reset_tzpath
@@ -585,13 +586,26 @@ def test_windows_runtime_uninstall_is_transactional_and_data_preserving() -> Non
     ):
         assert required in script
     assert "exit 0" not in script
-    assert '$TargetNames = @("runtime", "deploy", "service", "release-metadata")' in script
+    expected_targets = ["runtime", "deploy", "service", "release-metadata", "launcher"]
+    target_match = re.search(r"\$TargetNames = @\(([^)]*)\)", script)
+    assert target_match is not None
+    target_names = re.findall(r'"([^"]+)"', target_match.group(1))
+    assert target_names == expected_targets
+    quarantine_match = re.search(
+        r"\$Child\.Name -notin @\((.*?)\)\)", script, re.DOTALL
+    )
+    assert quarantine_match is not None
+    assert re.findall(r'"([^"]+)"', quarantine_match.group(1)) == expected_targets
     for preserved in ("config", "state", "backups", "logs"):
-        expanded = (
-            '$TargetNames = @("runtime", "deploy", "service", '
-            f'"release-metadata", "{preserved}")'
-        )
-        assert expanded not in script
+        assert preserved not in target_names
+    mutex_name = script.index("Global\\MineGuardPlatform.Configuration")
+    mutex_wait = script.index("$configurationMutex.WaitOne", mutex_name)
+    first_boundary_check = script.index("Assert-InnoInstallBoundary", mutex_wait)
+    first_move = script.index("[IO.Directory]::Move($Target.Source, $Destination)")
+    mutex_release = script.rindex("$configurationMutex.ReleaseMutex()")
+    assert mutex_name < mutex_wait < first_boundary_check < first_move < mutex_release
+    assert "[TimeSpan]::FromSeconds(30)" in script[mutex_name:first_boundary_check]
+    assert "$configurationMutex.Dispose()" in script[mutex_release:]
 
 
 def test_windows_configuration_and_service_templates_fail_closed() -> None:

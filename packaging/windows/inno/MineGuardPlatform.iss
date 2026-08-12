@@ -81,10 +81,11 @@ Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
 Name: "desktopicon"; Description: "创建 MineGuard Platform 控制中心桌面快捷方式"; GroupDescription: "快捷方式："; Flags: checkedonce
 
 [Dirs]
-; Only this tiny launcher directory is readable by desktop users.  The product
+; The launcher and product documentation are readable by desktop users. They
+; can predate Inno's file phase, so remove them on uninstall only when empty;
 ; runtime, configuration, state and logs keep their stricter service ACLs.
-Name: "{app}\launcher"; Permissions: users-readexec
-Name: "{app}\docs"; Permissions: users-readexec
+Name: "{app}\launcher"; Permissions: users-readexec; Flags: uninsalwaysuninstall
+Name: "{app}\docs"; Permissions: users-readexec; Flags: uninsalwaysuninstall
 
 [Files]
 ; These temporary transaction inputs are deliberately first for solid-compression
@@ -114,7 +115,7 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 [UninstallDelete]
 ; Product-owned immutable directories are removed only by the guarded
 ; same-volume quarantine transaction in [Code]. Never list runtime, deploy,
-; service, release-metadata, config, state, backups or logs here.
+; service, release-metadata, launcher, config, state, backups or logs here.
 Type: filesandordirs; Name: "{app}\uninstall-tools"
 
 [Code]

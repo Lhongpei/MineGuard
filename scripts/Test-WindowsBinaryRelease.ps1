@@ -1673,7 +1673,16 @@ function Invoke-InstallerLifecycleTest {
         } while ([DateTime]::UtcNow -lt $RemovalDeadline)
         foreach ($RemovedPath in $PathsExpectedRemoved) {
             if (Test-Path -LiteralPath $RemovedPath) {
-                throw "$Product uninstall left immutable runtime/deployment content: $RemovedPath"
+                $Residual = Get-Item -LiteralPath $RemovedPath -Force
+                $ResidualKind = if ($Residual.PSIsContainer) {
+                    $DirectItems = @(Get-ChildItem -LiteralPath $RemovedPath -Force)
+                    "directory with $($DirectItems.Count) direct item(s)"
+                }
+                else { "file" }
+                throw (
+                    "$Product uninstall left runtime/deployment content " +
+                    "($ResidualKind): $RemovedPath"
+                )
             }
         }
         foreach ($DirectoryName in @("config", "state", "backups", "logs")) {

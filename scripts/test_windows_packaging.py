@@ -76,6 +76,7 @@ def test_layout() -> None:
         "scripts/Test-WindowsTrustedBootstrapTransaction.ps1",
         "scripts/Test-WindowsInstallerFailurePropagation.ps1",
         "scripts/Test-WindowsAclGrantSemantics.ps1",
+        "scripts/Test-WindowsProductUninstallTransactions.ps1",
         "scripts/Invoke-WindowsAuthenticodeSign.ps1",
         "scripts/New-WindowsWheelhouseManifest.ps1",
         ".github/actionlint.yaml",
@@ -413,6 +414,11 @@ def test_inno_scripts() -> None:
             re.search(r"\\(state|config|backups|logs)(?:\"|\\)", line)
             for line in deletion_lines
         ), f"{name} uninstaller must preserve operational state"
+        if name == "platform":
+            assert not any(
+                re.search(r"\\(launcher|docs)(?:\"|\\)", line)
+                for line in deletion_lines
+            ), "Platform launcher/docs cleanup must not recursively delete user files"
     assert len(set(app_ids)) == 2, "the two independent installers need distinct AppIds"
     assert "{app}\\service" in platform
     icons_section = platform.split("[Icons]", 1)[1].split("[Run]", 1)[0]
@@ -420,8 +426,14 @@ def test_inno_scripts() -> None:
     for token in (
         "MineGuard Platform 控制中心",
         "Open-MineGuardPlatformControlCenter.ps1",
-        'Name: "{app}\\launcher"; Permissions: users-readexec',
-        'Name: "{app}\\docs"; Permissions: users-readexec',
+        (
+            'Name: "{app}\\launcher"; Permissions: users-readexec; '
+            'Flags: uninsalwaysuninstall'
+        ),
+        (
+            'Name: "{app}\\docs"; Permissions: users-readexec; '
+            'Flags: uninsalwaysuninstall'
+        ),
         "Start-MineGuardPlatformWizard.ps1",
         "-InstallRoot \"\"{app}\"\"",
         "-STA",
@@ -2058,6 +2070,22 @@ def test_audit_and_lifecycle() -> None:
         "MineGuard canonical NTFS ACL grant semantics passed",
     ):
         assert token in acl_probe, f"Windows ACL regression probe misses: {token}"
+    uninstall_probe = read("scripts/Test-WindowsProductUninstallTransactions.ps1")
+    for token in (
+        "Uninstall-MineGuardPlatformRuntime.ps1",
+        "Uninstall-EnterpriseAgentRuntime.ps1",
+        '"runtime", "deploy", "service", "release-metadata", "launcher"',
+        '"config", "state", "backups", "logs", "docs", "uninstall-tools"',
+        "-InternalInnoUninstall",
+        "release-manifest.json",
+        "probe-sentinel.txt",
+        "uninstall transaction left a managed directory",
+        "uninstall transaction removed preserved content",
+        "production uninstall transactions removed every managed",
+    ):
+        assert token in uninstall_probe, (
+            f"production uninstall transaction probe misses: {token}"
+        )
     for token in (
         "function Set-MineGuardPlatformCanonicalTreeAcl",
         "function Set-MineGuardPlatformServiceReadableFileAcl",
@@ -2387,6 +2415,10 @@ def test_workflow() -> None:
     assert "Verify elevated NTFS ACL grant semantics" in native_workflow
     assert ".\\scripts\\Test-WindowsAclGrantSemantics.ps1" in native_workflow
     assert (
+        ".\\scripts\\Test-WindowsProductUninstallTransactions.ps1"
+        in native_workflow
+    )
+    assert (
         "Verify trusted bootstrap transactions with Windows PowerShell 5.1"
         in native_workflow
     )
@@ -2500,6 +2532,7 @@ def test_workflow() -> None:
         "shell: powershell",
         "$PSVersionTable.PSEdition -ne 'Desktop'",
         ".\\scripts\\Test-WindowsAclGrantSemantics.ps1",
+        ".\\scripts\\Test-WindowsProductUninstallTransactions.ps1",
         ".\\scripts\\Test-WindowsTrustedBootstrapTransaction.ps1",
         ".\\scripts\\Test-WindowsProductionInnoCompile.ps1",
         ".\\scripts\\Test-WindowsGuiProcessWait.ps1",
