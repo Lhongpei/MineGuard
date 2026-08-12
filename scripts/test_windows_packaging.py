@@ -1202,13 +1202,18 @@ def test_audit_and_lifecycle() -> None:
         '"/DFixturePayload=$ProbeExecutable"',
         '"/DFixtureAppId=$FixtureAppId"',
         '"/DIR=$FixtureInstallRoot"',
-        '"/FIXTUREFAIL=1"',
-        "$FailureExitCode -ne 1001",
+        '"/FIXTURECUSTOMEXIT=1001"',
+        "$CustomExitCode -ne 1001",
+        "FixtureCustomExitCode := 1001",
+        "Result := FixtureCustomExitCode",
+        "$CustomExitUninstallCode -ne 0",
         "afterinstall-root.txt",
         "Dedicated Inno /DIR, AfterInstall, exit-code and uninstall",
         'Get-ChildItem -LiteralPath $FixtureInstallRoot `\n        -Filter "unins*.exe"',
     ):
         assert token in wait_probe, f"fast GUI wait probe contract missing: {token}"
+    assert "Intentional dedicated Inno fixture failure" not in wait_probe
+    assert "FixtureInstallFailed" not in wait_probe
     for production_token in (
         "MineGuardPlatform.iss",
         "ChildReleaseManifestSha256",

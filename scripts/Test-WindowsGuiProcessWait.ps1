@@ -44,8 +44,9 @@ $ProbeRoot = Join-Path $ProbeParent (
     "MineGuardGuiWaitProbe-" + [Guid]::NewGuid().ToString("N")
 )
 New-Item -ItemType Directory -Path $ProbeRoot | Out-Null
+$CustomExitInstallRoot = $null
 $FixtureInstallRoot = $null
-$FailureLog = $null
+$CustomExitLog = $null
 $FixtureLog = $null
 try {
     $ProbeExecutable = Join-Path $ProbeRoot "GuiWaitProbe.exe"
@@ -146,32 +147,24 @@ const
   FixtureFailureExitCode = 1001;
 
 var
-  FixtureInstallFailed: Boolean;
+  FixtureCustomExitCode: Integer;
 
 procedure CompleteFixtureInstall();
 var
   MarkerPath: String;
 begin
   Sleep(1200);
-  if CompareText(Trim(ExpandConstant('{param:FIXTUREFAIL|0}')), '1') = 0 then
-  begin
-    FixtureInstallFailed := True;
-    RaiseException('Intentional dedicated Inno fixture failure.');
-  end;
   MarkerPath := ExpandConstant('{app}\runtime\afterinstall-root.txt');
   if not SaveStringToFile(MarkerPath, ExpandConstant('{app}'), False) then
-  begin
-    FixtureInstallFailed := True;
     RaiseException('Dedicated Inno fixture could not write its completion marker.');
-  end;
+  if CompareText(Trim(ExpandConstant(
+      '{param:FIXTURECUSTOMEXIT|0}')), '1001') = 0 then
+    FixtureCustomExitCode := 1001;
 end;
 
 function GetCustomSetupExitCode: Integer;
 begin
-  if FixtureInstallFailed then
-    Result := FixtureFailureExitCode
-  else
-    Result := 0;
+  Result := FixtureCustomExitCode;
 end;
 '@
     $Utf8NoBom = New-Object Text.UTF8Encoding($false)
@@ -200,28 +193,54 @@ end;
         throw "Dedicated Inno fixture compiler did not create its installer."
     }
 
-    $FailureInstallRoot = Join-Path $ProbeRoot "Failed Fixture Root"
-    $FailureLog = Join-Path $ProbeRoot "failed install.log"
-    $FailureStopwatch = [Diagnostics.Stopwatch]::StartNew()
-    $FailureExitCode = Invoke-WindowsGuiProcessAndWait `
+    $CustomExitInstallRoot = Join-Path $ProbeRoot "Custom Exit Fixture Root"
+    $CustomExitLog = Join-Path $ProbeRoot "custom exit install.log"
+    $CustomExitStopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $CustomExitCode = Invoke-WindowsGuiProcessAndWait `
         -FilePath $FixtureInstaller `
         -ArgumentList @(
             "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
-            "/DIR=$FailureInstallRoot", "/LOG=$FailureLog",
-            "/FIXTUREFAIL=1"
+            "/DIR=$CustomExitInstallRoot", "/LOG=$CustomExitLog",
+            "/FIXTURECUSTOMEXIT=1001"
         )
-    $FailureStopwatch.Stop()
-    if ($FailureExitCode -ne 1001) {
-        throw "Dedicated Inno fixture returned $FailureExitCode instead of 1001."
+    $CustomExitStopwatch.Stop()
+    if ($CustomExitCode -ne 1001) {
+        throw "Dedicated Inno fixture returned $CustomExitCode instead of 1001."
     }
-    if ($FailureStopwatch.ElapsedMilliseconds -lt 900) {
-        throw "Dedicated Inno failure path returned before AfterInstall finished."
+    if ($CustomExitStopwatch.ElapsedMilliseconds -lt 900) {
+        throw "Dedicated Inno custom-exit path returned before AfterInstall finished."
     }
-    if (Test-Path -LiteralPath (Join-Path $FailureInstallRoot "runtime")) {
-        throw "Failed dedicated Inno fixture left an installed runtime."
+    foreach ($ExpectedFile in @(
+        (Join-Path $CustomExitInstallRoot "runtime\GuiWaitProbe.exe"),
+        (Join-Path $CustomExitInstallRoot "runtime\afterinstall-root.txt"),
+        $CustomExitLog
+    )) {
+        if (-not (Test-Path -LiteralPath $ExpectedFile -PathType Leaf)) {
+            throw "Custom-exit Inno fixture is missing: $ExpectedFile"
+        }
     }
-    if (Test-Path -LiteralPath $FailureInstallRoot) {
-        Remove-Item -LiteralPath $FailureInstallRoot -Recurse -Force
+    $CustomExitUninstallers = @(Get-ChildItem `
+        -LiteralPath $CustomExitInstallRoot -Filter "unins*.exe" -File)
+    if ($CustomExitUninstallers.Count -ne 1) {
+        throw "Custom-exit Inno fixture must create exactly one uninstaller."
+    }
+    $CustomExitUninstallCode = Invoke-WindowsGuiProcessAndWait `
+        -FilePath $CustomExitUninstallers[0].FullName `
+        -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+    if ($CustomExitUninstallCode -ne 0) {
+        throw "Custom-exit Inno fixture uninstall returned $CustomExitUninstallCode."
+    }
+    $CustomExitCleanupDeadline = [DateTime]::UtcNow.AddSeconds(20)
+    do {
+        $CustomExitResidue = @(Get-ChildItem `
+            -LiteralPath $CustomExitInstallRoot -Filter "unins*.*" -File `
+            -ErrorAction SilentlyContinue)
+        if ($CustomExitResidue.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $CustomExitCleanupDeadline)
+    if ($CustomExitResidue.Count -ne 0 -or
+        (Test-Path -LiteralPath (Join-Path $CustomExitInstallRoot "runtime"))) {
+        throw "Custom-exit Inno fixture uninstall left managed artifacts."
     }
 
     $FixtureInstallRoot = Join-Path $ProbeRoot "Custom Fixture Root"
@@ -290,7 +309,7 @@ end;
     )
 }
 catch {
-    foreach ($DiagnosticLog in @($FailureLog, $FixtureLog)) {
+    foreach ($DiagnosticLog in @($CustomExitLog, $FixtureLog)) {
         if (-not [string]::IsNullOrWhiteSpace([string]$DiagnosticLog) -and
             (Test-Path -LiteralPath $DiagnosticLog -PathType Leaf)) {
             Write-Host "--- fixture diagnostic: $([IO.Path]::GetFileName($DiagnosticLog)) ---"
@@ -301,20 +320,22 @@ catch {
     throw
 }
 finally {
-    if ($null -ne $FixtureInstallRoot -and
-        (Test-Path -LiteralPath $FixtureInstallRoot -PathType Container)) {
-        $ResidualUninstallers = @(Get-ChildItem -LiteralPath $FixtureInstallRoot `
-            -Filter "unins*.exe" -File -ErrorAction SilentlyContinue)
-        if ($ResidualUninstallers.Count -eq 1) {
-            try {
-                [void](Invoke-WindowsGuiProcessAndWait `
-                    -FilePath $ResidualUninstallers[0].FullName `
-                    -ArgumentList @(
-                        "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
-                    ))
-            }
-            catch {
-                Write-Warning "Fixture uninstaller cleanup failed: $($_.Exception.Message)"
+    foreach ($ResidualRoot in @($CustomExitInstallRoot, $FixtureInstallRoot)) {
+        if ($null -ne $ResidualRoot -and
+            (Test-Path -LiteralPath $ResidualRoot -PathType Container)) {
+            $ResidualUninstallers = @(Get-ChildItem -LiteralPath $ResidualRoot `
+                -Filter "unins*.exe" -File -ErrorAction SilentlyContinue)
+            if ($ResidualUninstallers.Count -eq 1) {
+                try {
+                    [void](Invoke-WindowsGuiProcessAndWait `
+                        -FilePath $ResidualUninstallers[0].FullName `
+                        -ArgumentList @(
+                            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
+                        ))
+                }
+                catch {
+                    Write-Warning "Fixture uninstaller cleanup failed: $($_.Exception.Message)"
+                }
             }
         }
     }
