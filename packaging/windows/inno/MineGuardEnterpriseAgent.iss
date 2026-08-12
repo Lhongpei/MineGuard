@@ -854,7 +854,7 @@ begin
     '$sha=[Security.Cryptography.SHA256]::Create();try{' +
     '$digest=[BitConverter]::ToString($sha.ComputeHash($bytes)).Replace([string][char]45,[string]::Empty).ToLowerInvariant()' +
     '}finally{$sha.Dispose()};' +
-    'if($digest -cne ''{#TrustedBootstrapSha256}''){' +
+    'if($digest -cne (''{#TrustedBootstrapSha256}'').ToLowerInvariant()){' +
     'throw ''Trusted bootstrap changed after Setup verification.''};' +
     '$offset=0;if(($bytes.Length -ge 3) -and ($bytes[0] -eq 0xEF) -and ' +
     '($bytes[1] -eq 0xBB) -and ($bytes[2] -eq 0xBF)){$offset=3};' +
@@ -993,7 +993,7 @@ begin
     '$sha=[Security.Cryptography.SHA256]::Create();try{' +
     '$mh=[BitConverter]::ToString($sha.ComputeHash($mb)).Replace([string][char]45,[string]::Empty).ToLowerInvariant()' +
     '}finally{$sha.Dispose()};' +
-    'if($mh -cne ''{#ChildReleaseManifestSha256}''){' +
+    'if($mh -cne (''{#ChildReleaseManifestSha256}'').ToLowerInvariant()){' +
     'throw ''Installed Agent manifest does not match this uninstaller.''};' +
     '$utf8=[System.Text.UTF8Encoding]::new($false,$true);' +
     '$mo=0;if(($mb.Length -ge 3) -and ($mb[0] -eq 0xEF) -and ' +

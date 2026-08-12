@@ -461,12 +461,14 @@ def test_inno_scripts() -> None:
             "GetSHA256OfFile(BootstrapPath)",
             "[IO.File]::ReadAllBytes($p)",
             "$sha.ComputeHash($bytes)",
+            "if($digest -cne (''{#TrustedBootstrapSha256}'').ToLowerInvariant())",
             "[System.Text.UTF8Encoding]::new($false,$true)",
             "[ScriptBlock]::Create($text)",
             "Trusted bootstrap changed after Setup verification",
             "TrustedScriptSha256",
             "TrustedScriptBytes",
             "ChildReleaseManifestSha256",
+            "if($mh -cne (''{#ChildReleaseManifestSha256}'').ToLowerInvariant())",
         ):
             assert token in script, f"{name} trusted bootstrap gate missing: {token}"
         assert not re.search(
