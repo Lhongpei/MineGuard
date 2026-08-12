@@ -1787,8 +1787,15 @@ function Convert-RegistryValueToRecord {
 function Convert-RecordToRegistryValue {
     param($Record, [Microsoft.Win32.RegistryValueKind] $Kind)
     switch ([string]$Record.encoding) {
-        'base64' { return [Convert]::FromBase64String([string]$Record.data) }
-        'string-array' { return [string[]]@($Record.data) }
+        # PowerShell enumerates arrays written to the success pipeline.  A
+        # normal return would therefore turn byte[]/string[] into object[],
+        # which RegistryKey.SetValue rejects for Binary/None/MultiString on
+        # Windows PowerShell 5.1.  The unary comma preserves the typed array as
+        # one return object.
+        'base64' {
+            return ,([Convert]::FromBase64String([string]$Record.data))
+        }
+        'string-array' { return ,([string[]]@($Record.data)) }
         'scalar' {
             if ($Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord) {
                 return [int][string]$Record.data

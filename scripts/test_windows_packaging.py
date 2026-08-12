@@ -857,6 +857,13 @@ def test_trusted_product_install_bootstrap() -> None:
         registry_acl_restore.index("$Key.SetAccessControl($security)")
     )
     assert "-ceq $Sddl" in registry_acl_restore
+    registry_value_decode = bootstrap[
+        bootstrap.index("function Convert-RecordToRegistryValue") :
+        bootstrap.index("function Convert-ArpRegistrationToCanonicalJson")
+    ]
+    assert "return ,([Convert]::FromBase64String" in registry_value_decode
+    assert "return ,([string[]]@($Record.data))" in registry_value_decode
+    assert "return [Convert]::FromBase64String" not in registry_value_decode
 
     # PowerShell single-quoted strings do not escape backslashes. These exact
     # forms are required for correct Windows relative-path calculation.
@@ -1051,8 +1058,16 @@ def test_trusted_product_install_bootstrap() -> None:
         "Restore-ProductRootMetadataBeforeArtifacts",
         "Complete-ProductRootMetadataRollback",
         "AllowMissingInstallRoot",
+        "return ,([Convert]::FromBase64String([string]$Record.data))",
+        "return ,([string[]]@($Record.data))",
     ):
         assert token in bootstrap
+    record_conversion = bootstrap[
+        bootstrap.index("function Convert-RecordToRegistryValue") :
+        bootstrap.index("function Convert-ArpRegistrationToCanonicalJson")
+    ]
+    assert "return [Convert]::FromBase64String" not in record_conversion
+    assert "return [string[]]@($Record.data)" not in record_conversion
     rollback_metadata = bootstrap[
         bootstrap.index("function Get-ValidatedProductRootRollbackMetadata") :
         bootstrap.index("function Restore-ProductRootMetadataBeforeArtifacts")
@@ -1132,6 +1147,8 @@ def test_trusted_bootstrap_transaction_probe() -> None:
         "Refusing transaction tests because the MineGuard shortcut group exists",
         "New-SecureVerificationRoot",
         "Remove-SafeVerificationRoot",
+        "Format-TestFailure",
+        "Original script stack:",
         "$createdShortcutPaths.ToArray()",
         "$cleanupFailures.ToArray()",
         "[AllowEmptyCollection()]",
