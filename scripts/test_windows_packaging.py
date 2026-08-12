@@ -828,6 +828,15 @@ def test_trusted_product_install_bootstrap() -> None:
     assert "Create and flush the complete key/value tree" in arp_restore
     assert "$securityRecords = @($records | Sort-Object" in arp_restore
     assert "}; Descending = $true }" in arp_restore
+    for required_right in ("ReadKey", "ChangePermissions", "TakeOwnership"):
+        assert (
+            f"[Security.AccessControl.RegistryRights]::{required_right}"
+            in arp_restore
+        ), (
+            "ARP ACL rollback must request read/flush and "
+            f"WRITE_DAC/WRITE_OWNER-capable access: {required_right}"
+        )
+    assert "[Security.AccessControl.RegistryRights]::FullControl" not in arp_restore
     first_value_flush = arp_restore.index("$key.Flush()")
     security_records = arp_restore.index("$securityRecords = @($records")
     acl_restore = arp_restore.index(
@@ -1097,6 +1106,9 @@ def test_trusted_bootstrap_transaction_probe() -> None:
         "A new Begin must first roll back the unconfirmed prior commit",
         "-Action Rollback",
         "Set-RestrictedArpFixtureAcl",
+        "MineGuardTransactionTestOwner",
+        "Enable-PlatformArpFixtureCleanupAccess",
+        "Remove-TestOwnedPlatformArpRegistration",
         "$security.SetAccessRuleProtection($true, $false)",
         "RegistryRights]::CreateSubKey",
         "RegistryRights]::SetValue",
@@ -1129,6 +1141,17 @@ def test_trusted_bootstrap_transaction_probe() -> None:
     assert probe.count("[AllowEmptyCollection()]") == 2, (
         "both initially-empty PowerShell 5.1 List tracker parameters must "
         "explicitly allow an empty collection"
+    )
+    cleanup_access = probe[
+        probe.index("function Enable-PlatformArpFixtureCleanupAccess") :
+        probe.index("function Remove-TestOwnedPlatformArpRegistration")
+    ]
+    assert "RegistryKeyPermissionCheck]::ReadWriteSubTree" in cleanup_access
+    assert "RegistryRights]::ReadKey" in cleanup_access
+    assert "RegistryRights]::ChangePermissions" in cleanup_access
+    assert "$security.SetOwner(" not in cleanup_access, (
+        "test cleanup only holds ChangePermissions and must not request an "
+        "owner rewrite that would require WRITE_OWNER"
     )
 
     preflight_end = probe.index("$testRoot = Join-Path $commonData")

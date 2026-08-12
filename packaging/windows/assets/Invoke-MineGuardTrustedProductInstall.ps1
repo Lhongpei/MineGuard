@@ -2058,7 +2058,18 @@ function Restore-ArpRegistration {
             } else {
                 $expectedSubKey + '\' + [string]$record.path
             }
-            $key = $base.OpenSubKey($currentSubKey, $true)
+            # The freshly materialized tree still has the uninstall parent's
+            # permissive inherited security here. Request only the rights
+            # needed to read/flush and restore Access, Owner and Group;
+            # writable=$true omits WRITE_DAC/WRITE_OWNER.
+            $securityRights = `
+                [Security.AccessControl.RegistryRights]::ReadKey -bor `
+                [Security.AccessControl.RegistryRights]::ChangePermissions -bor `
+                [Security.AccessControl.RegistryRights]::TakeOwnership
+            $key = $base.OpenSubKey(
+                $currentSubKey,
+                [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+                $securityRights)
             if ($null -eq $key) {
                 throw "Restored ARP registry key disappeared before ACL restore: $currentSubKey"
             }

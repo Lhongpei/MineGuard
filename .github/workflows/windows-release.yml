@@ -32,7 +32,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-release-${{ github.ref }}
+  group: windows-release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: >-
     ${{ github.event_name == 'push' &&
         github.ref == 'refs/heads/main' &&
@@ -101,6 +101,10 @@ jobs:
       - name: Verify trusted bootstrap transactions with Windows PowerShell 5.1
         shell: powershell
         run: .\scripts\Test-WindowsTrustedBootstrapTransaction.ps1
+
+      - name: Compile both production Inno scripts with minimal release trees
+        shell: powershell
+        run: .\scripts\Test-WindowsProductionInnoCompile.ps1
 
       - name: Verify fast real Inno install exit and uninstall flow
         shell: powershell

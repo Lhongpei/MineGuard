@@ -400,10 +400,13 @@ function Enable-PlatformArpFixtureCleanupAccess {
             } else {
                 $subKey + '\' + $relative
             }
+            $cleanupRights = `
+                [Security.AccessControl.RegistryRights]::ReadKey -bor `
+                [Security.AccessControl.RegistryRights]::ChangePermissions
             $key = $base.OpenSubKey(
                 $currentSubKey,
-                [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree,
-                [Security.AccessControl.RegistryRights]::ChangePermissions)
+                [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+                $cleanupRights)
             if ($null -eq $key) {
                 throw 'Test-owned ARP key denied cleanup ACL access.'
             }
@@ -411,7 +414,6 @@ function Enable-PlatformArpFixtureCleanupAccess {
                 $security = New-Object -TypeName `
                     Security.AccessControl.RegistrySecurity
                 $security.SetAccessRuleProtection($true, $false)
-                $security.SetOwner($administrators)
                 foreach ($sid in @($administrators, $localSystem)) {
                     $rule = New-Object -TypeName `
                         Security.AccessControl.RegistryAccessRule -ArgumentList @(
@@ -437,14 +439,24 @@ function Enable-PlatformArpFixtureCleanupAccess {
 
 function Remove-TestOwnedPlatformArpRegistration {
     if (-not (Enable-PlatformArpFixtureCleanupAccess)) { return }
-    Remove-ArpRegistration -Product Platform
-}
-
-function Remove-ArpRegistration {
-    param([ValidateSet('Platform', 'EnterpriseAgent')] [string] $Product)
-    $subKey = Get-ArpSubKey -Product $Product
+    $subKey = Get-ArpSubKey -Product Platform
     $base = Open-Registry64Base
     try {
+        # Recheck ownership after the ACL transition and immediately before
+        # deleting this fixed global identity.  A concurrently replaced real
+        # registration must be preserved.
+        $root = $base.OpenSubKey($subKey, $false)
+        if ($null -eq $root) { return }
+        try {
+            $token = [string]$root.GetValue(
+                'MineGuardTransactionTestOwner', '',
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($token -cne $script:platformArpOwnershipToken) {
+                throw 'Refusing to delete an ARP key no longer owned by this test.'
+            }
+        } finally {
+            $root.Dispose()
+        }
         $base.DeleteSubKeyTree($subKey, $false)
         Flush-ArpParent -Base $base -SubKey $subKey
     } finally {
@@ -455,26 +467,21 @@ function Remove-ArpRegistration {
 function New-PlatformArpFixture {
     $subKey = Get-ArpSubKey -Product Platform
     $providerPath = 'Registry::HKEY_LOCAL_MACHINE\' + $subKey
-    $created = $false
     if (Test-ArpRegistrationExists -Product Platform) {
         throw 'Refusing to overwrite a Platform ARP registration created during the test.'
     }
-    try {
-        # New-Item without -Force is the create-new boundary.  If another
-        # installer wins the fixed-name race, it fails instead of opening and
-        # overwriting that registration.
-        [void](New-Item -Path $providerPath -ErrorAction Stop)
-        $created = $true
-    } catch {
-        if ($created) {
-            try { Remove-ArpRegistration -Product Platform } catch { }
-        }
-        throw
-    }
+    # New-Item without -Force is the create-new boundary.  If another
+    # installer wins the fixed-name race, it fails instead of opening and
+    # overwriting that registration.  Until the ownership token is written,
+    # no catch path deletes this fixed name merely because creation started.
+    [void](New-Item -Path $providerPath -ErrorAction Stop)
     $ownershipSet = $false
     $base = Open-Registry64Base
     try {
-        $root = $base.OpenSubKey($subKey, $true)
+        $root = $base.OpenSubKey(
+            $subKey,
+            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+            [Security.AccessControl.RegistryRights]::FullControl)
         if ($null -eq $root) {
             throw 'New Platform ARP fixture could not be reopened for writing.'
         }
@@ -553,8 +560,6 @@ function New-PlatformArpFixture {
         try {
             if ($ownershipSet) {
                 Remove-TestOwnedPlatformArpRegistration
-            } else {
-                Remove-ArpRegistration -Product Platform
             }
         } catch {
             throw (
@@ -571,11 +576,17 @@ function New-PlatformArpFixture {
 function Set-ChangedPlatformArpFixture {
     Remove-TestOwnedPlatformArpRegistration
     $subKey = Get-ArpSubKey -Product Platform
+    $providerPath = 'Registry::HKEY_LOCAL_MACHINE\' + $subKey
+    if (Test-ArpRegistrationExists -Product Platform) {
+        throw 'Refusing to overwrite a Platform ARP registration created during mutation.'
+    }
+    [void](New-Item -Path $providerPath -ErrorAction Stop)
     $base = Open-Registry64Base
     try {
-        $root = $base.CreateSubKey(
-            $subKey,
-            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree)
+        $root = $base.OpenSubKey($subKey, $true)
+        if ($null -eq $root) {
+            throw 'Changed Platform ARP fixture could not be reopened for writing.'
+        }
         try {
             $root.SetValue(
                 'MineGuardTransactionTestOwner',
@@ -1051,6 +1062,11 @@ function Test-PlatformUpgradeRecovery {
         -Message 'Platform stale recovery retained a desktop shortcut.'
     Assert-Condition -Condition (-not (Test-Path -LiteralPath $ShortcutGroup)) `
         -Message 'Platform stale recovery retained its new shortcut group.'
+    # The rollback above proved that every test-created global shortcut and
+    # its group are absent. Relinquish cleanup ownership now so a real
+    # installer that runs later cannot have its new files removed in finally.
+    $CreatedShortcutPaths.Clear()
+    $ShortcutGroupOwned.Value = $false
     Assert-PlatformArpFixture
 
     Invoke-TrustedBootstrapAction -Action Rollback `
@@ -1336,6 +1352,13 @@ try {
                     ($item.Attributes -band
                         [IO.FileAttributes]::ReparsePoint) -ne 0) {
                     throw "Shortcut cleanup target changed type: $shortcut"
+                }
+                $expectedBytes = $script:utf8NoBom.GetBytes(
+                    'test-only-shortcut')
+                $actualBytes = [IO.File]::ReadAllBytes($shortcut)
+                if ([Convert]::ToBase64String($actualBytes) -cne
+                    [Convert]::ToBase64String($expectedBytes)) {
+                    throw "Shortcut cleanup target is no longer test-owned: $shortcut"
                 }
                 Remove-Item -LiteralPath $shortcut -Force
             }
