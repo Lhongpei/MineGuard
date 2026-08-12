@@ -699,7 +699,11 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     ).read_text(encoding="utf-8")
     assert "MineGuard 模型授权导入向导" in inno
     assert "Start-EnterpriseAgentModelCredentialWizard.ps1" in inno
-    assert 'Source: "{#StageRoot}\\model-credential-trust.json"' in inno
+    assert (
+        'Source: "{#StageRoot}\\*"; '
+        'DestDir: "{tmp}\\MineGuardEnterpriseAgentRelease"' in inno
+    )
+    assert "dontcopy noencryption" in inno
     for token in (
         '"Install-EnterpriseAgentService.ps1"',
         '"EnterpriseAgent.WindowsSafety.ps1"',
@@ -846,6 +850,8 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
         "StartName",
         "Virtual service account SID does not match the derived service SID",
         "Set-EAInstanceCanonicalAcl",
+        "Assert-EAInstanceCanonicalAcl",
+        "Assert-EACanonicalInstanceBoundaryAcl",
         "Assert-EAInstanceWatchAcls",
         "Assert-EAInstanceGlobalIsolation",
         "Watch directory isolation violation",
@@ -855,6 +861,27 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     ):
         assert token in helper
     assert "S-1-5-19:(OI)(CI)" not in helper
+    instance_acl_verifier = helper[
+        helper.index("function Assert-EACanonicalInstanceBoundaryAcl") : helper.index(
+            "function Grant-EAServiceWatchReadAcl"
+        )
+    ]
+    assert "-ServicePermission 'RX'" in instance_acl_verifier
+    assert "-ServicePermission 'M'" in instance_acl_verifier
+    assert "-ServicePermission 'None'" in instance_acl_verifier
+    assert "$trustedOwners" in instance_acl_verifier
+    trusted_owners = instance_acl_verifier[
+        instance_acl_verifier.index("$trustedOwners = @(") : instance_acl_verifier.index(
+            "$identity =", instance_acl_verifier.index("$trustedOwners = @(")
+        )
+    ]
+    assert "$ServiceSid" not in trusted_owners
+    assert "AllowDedicatedServiceOwner" in instance_acl_verifier
+    assert "$runtimeCreatedServiceOwner" in instance_acl_verifier
+    assert "-AllowDedicatedServiceOwner" in instance_acl_verifier
+    assert "$serviceRightsWithSynchronize" in instance_acl_verifier
+    assert "FileSystemRights]::Synchronize" in instance_acl_verifier
+    assert "broad/different identity" in instance_acl_verifier
     assert 'SecurityIdentifier("S-1-5-80-0")' in runtime
     assert "Sid = $AllServices" in runtime
     assert "if ($IsDirectory -and $TraverseOnly)" in runtime
@@ -1508,6 +1535,105 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
         or "Assert-EAStateRootMarker" in instance_creator
     )
     assert ".mineguard-enterprise-agent-instances.json" in safety_helper
+
+
+def test_binary_installer_binds_new_state_marker_to_trusted_transaction() -> None:
+    installer = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "windows"
+        / "Install-EnterpriseAgent.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert '[string]$TrustedBootstrapTransactionId = ""' in installer
+    validation_helper_start = installer.index(
+        "function Get-ValidatedTrustedBootstrapTransactionGuid"
+    )
+    validation_helper_end = installer.index(
+        "# Validate the wrapper-only transaction token",
+        validation_helper_start,
+    )
+    validation_helper = installer[validation_helper_start:validation_helper_end]
+    assert "[string]::IsNullOrEmpty($Value)" in validation_helper
+    assert "$Value -cnotmatch '^[a-f0-9]{32}$'" in validation_helper
+    assert '[Guid]::TryParseExact($Value, "N", [ref]$Parsed)' in validation_helper
+    assert "$Parsed -eq [Guid]::Empty" in validation_helper
+    assert ".Trim()" not in validation_helper
+    assert ".ToLowerInvariant()" not in validation_helper
+
+    script_validation = installer.index(
+        "$null = Get-ValidatedTrustedBootstrapTransactionGuid"
+    )
+    source_mode_rejection = installer.index(
+        "TrustedBootstrapTransactionId is reserved for verified binary installation."
+    )
+    source_root_default = installer.index(
+        "if ([string]::IsNullOrWhiteSpace($SourceRoot))"
+    )
+    assert script_validation < source_mode_rejection < source_root_default
+    assert (
+        "$BuildFromSource -and\n"
+        "    -not [string]::IsNullOrEmpty($TrustedBootstrapTransactionId)"
+        in installer
+    )
+
+    initializer_start = installer.index(
+        "function Initialize-EnterpriseAgentStateRoot"
+    )
+    initializer_end = installer.index(
+        "function Test-BinaryReleaseManifest", initializer_start
+    )
+    initializer = installer[initializer_start:initializer_end]
+    inner_validation = initializer.index(
+        "$BootstrapTransactionGuid = "
+        "Get-ValidatedTrustedBootstrapTransactionGuid"
+    )
+    state_root_creation = initializer.index(
+        "New-Item -ItemType Directory -Path $Root -Force"
+    )
+    existing_marker_branch = initializer.index(
+        "if (Test-Path -LiteralPath $MarkerPath)"
+    )
+    assert inner_validation < state_root_creation < existing_marker_branch
+
+    existing_marker_end = initializer.index(
+        "$ExistingItems = @(", existing_marker_branch
+    )
+    existing_marker_code = initializer[existing_marker_branch:existing_marker_end]
+    assert "Assert-StateRootMarker -Root $Root" in existing_marker_code
+    assert "return" in existing_marker_code
+    assert "Move-Item" not in existing_marker_code
+    assert "Set-Content" not in existing_marker_code
+
+    assert '$BootstrapTransactionGuid.ToString("D")' in initializer
+    assert "installer_transaction_id" not in initializer
+    assert (
+        "$MarkerTemporaryId = if ($HasBootstrapTransaction) {\n"
+        "        $BootstrapTransactionId"
+        in initializer
+    )
+    assert (
+        '".mineguard-enterprise-agent-instances.tmp-" + '
+        "$MarkerTemporaryId"
+        in initializer
+    )
+    assert "$NormalizedBootstrapTransactionId" not in initializer
+
+    assert "installer_transaction_id" not in installer
+
+    assert installer.count(
+        "-BootstrapTransactionId $TrustedBootstrapTransactionId"
+    ) == 2
+    assert "-VerifyOnly:$HasTrustedBootstrapTransaction" in installer
+    verify_only = installer[
+        installer.index("function Set-EAInstalledInstanceAcls") : installer.index(
+            'Assert-LocalFixedPath -Name "InstallRoot"'
+        )
+    ]
+    assert verify_only.index("Assert-EAInstanceCanonicalAcl") < verify_only.index(
+        "Assert-EAInstanceWatchAcls"
+    )
+    assert "Set-EAInstanceCanonicalAcl" in verify_only
 
 
 def test_database_backup_restore_manifest_rollback_and_instance_lock(

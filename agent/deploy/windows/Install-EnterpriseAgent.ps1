@@ -11,7 +11,8 @@ param(
     [switch]$AllowUnsignedTestMedia,
     [switch]$AllowUnsignedInternalRelease,
     [string]$ExpectedReleaseManifestSha256 = "",
-    [switch]$AuditFailAfterRuntimeSwitch
+    [switch]$AuditFailAfterRuntimeSwitch,
+    [string]$TrustedBootstrapTransactionId = ""
 )
 
 Set-StrictMode -Version 2.0
@@ -20,6 +21,37 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONUNBUFFERED = "1"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
+
+function Get-ValidatedTrustedBootstrapTransactionGuid {
+    param([AllowEmptyString()][string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) {
+        return [Guid]::Empty
+    }
+    if ($Value -cnotmatch '^[a-f0-9]{32}$') {
+        throw (
+            "TrustedBootstrapTransactionId must be an exact lowercase " +
+            "GUID in 32-character N format."
+        )
+    }
+    $Parsed = [Guid]::Empty
+    if (-not [Guid]::TryParseExact($Value, "N", [ref]$Parsed) -or
+        $Parsed -eq [Guid]::Empty) {
+        throw "TrustedBootstrapTransactionId must identify a non-empty GUID."
+    }
+    return $Parsed
+}
+
+# Validate the wrapper-only transaction token before any StateRoot operation.
+# Keep the caller's exact lowercase N-format text; it is also the provisioning
+# token used in the marker and temporary marker filename.
+$null = Get-ValidatedTrustedBootstrapTransactionGuid `
+    -Value $TrustedBootstrapTransactionId
+if ($BuildFromSource -and
+    -not [string]::IsNullOrEmpty($TrustedBootstrapTransactionId)) {
+    throw "TrustedBootstrapTransactionId is reserved for verified binary installation."
+}
+$HasTrustedBootstrapTransaction =
+    -not [string]::IsNullOrEmpty($TrustedBootstrapTransactionId)
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
     $SourceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 }
@@ -471,7 +503,17 @@ function Test-RecognizableLegacyInstance {
 }
 
 function Initialize-EnterpriseAgentStateRoot {
-    param([string]$Root)
+    param(
+        [string]$Root,
+        [string]$BootstrapTransactionId = ""
+    )
+    # Defense in depth: validate before even creating an absent StateRoot and
+    # before the early return for a pre-existing ownership marker.
+    $BootstrapTransactionGuid = Get-ValidatedTrustedBootstrapTransactionGuid `
+        -Value $BootstrapTransactionId
+    $HasBootstrapTransaction = -not [string]::IsNullOrEmpty(
+        $BootstrapTransactionId
+    )
     Assert-NotBroadProductRoot -Name "StateRoot" -PathValue $Root
     if ((Test-Path -LiteralPath $Root) -and
         -not (Test-Path -LiteralPath $Root -PathType Container)) {
@@ -498,17 +540,25 @@ function Initialize-EnterpriseAgentStateRoot {
         }
     }
 
+    $MarkerRootId = if ($HasBootstrapTransaction) {
+        $BootstrapTransactionGuid.ToString("D")
+    }
+    else { [Guid]::NewGuid().ToString("D") }
     $Marker = [ordered]@{
         format = "mineguard-enterprise-agent-state-root-v1"
         product = "MineGuard Enterprise Agent"
         canonical_path = [IO.Path]::GetFullPath($Root).TrimEnd('\')
-        root_id = [Guid]::NewGuid().ToString("D")
+        root_id = $MarkerRootId
         created_utc = [DateTimeOffset]::UtcNow.ToString("o")
     }
     $MarkerJson = ($Marker | ConvertTo-Json -Depth 3) + [Environment]::NewLine
     $MarkerBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($MarkerJson)
+    $MarkerTemporaryId = if ($HasBootstrapTransaction) {
+        $BootstrapTransactionId
+    }
+    else { [Guid]::NewGuid().ToString("N") }
     $MarkerTemporary = Join-Path $Root (
-        ".mineguard-enterprise-agent-instances.tmp-" + [Guid]::NewGuid().ToString("N")
+        ".mineguard-enterprise-agent-instances.tmp-" + $MarkerTemporaryId
     )
     $MarkerStream = $null
     try {
@@ -1087,6 +1137,90 @@ function Set-EACanonicalProductTreeAcl {
     }
 }
 
+function Assert-EAExistingAclSafe {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [switch]$AllowAllServicesRead
+    )
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Existing Agent state ACL target is a reparse point: $Path"
+    }
+    $trusted = @{
+        'S-1-5-18' = $true
+        'S-1-5-32-544' = $true
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' = $true
+    }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if ($principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        $trusted[$identity.User.Value] = $true
+    }
+    $dangerous = [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::Modify -bor
+        [Security.AccessControl.FileSystemRights]::FullControl -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    $security = Get-Acl -LiteralPath $item.FullName
+    $owner = $security.GetOwner(
+        [Security.Principal.SecurityIdentifier]).Value
+    if (-not $trusted.ContainsKey($owner)) {
+        throw "Existing Agent state path has an untrusted owner: $Path"
+    }
+    foreach ($rule in $security.GetAccessRules(
+            $true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne
+                [Security.AccessControl.AccessControlType]::Allow) {
+            continue
+        }
+        $sid = $rule.IdentityReference.Value
+        if ($trusted.ContainsKey($sid)) { continue }
+        $allowedAllServicesRead = $AllowAllServicesRead -and
+            $sid -eq 'S-1-5-80-0' -and
+            ($rule.FileSystemRights -band $dangerous) -eq 0
+        if (-not $allowedAllServicesRead) {
+            throw "Existing Agent state path exposes access to a broad/different identity: $Path ($sid)"
+        }
+    }
+}
+
+function Set-EAStateRootMarkerAcl {
+    param([Parameter(Mandatory = $true)] [string]$StateRootPath)
+    $markerPath = Join-Path $StateRootPath `
+        '.mineguard-enterprise-agent-instances.json'
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+        throw "Agent StateRoot marker is missing before ACL hardening: $markerPath"
+    }
+    $item = Get-Item -LiteralPath $markerPath -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Agent StateRoot marker ACL target is unsafe: $markerPath"
+    }
+    $administrators = New-Object Security.Principal.SecurityIdentifier(
+        'S-1-5-32-544')
+    $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $security = New-Object Security.AccessControl.FileSecurity
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner($administrators)
+    foreach ($sid in @($system, $administrators)) {
+        [void]$security.AddAccessRule(
+            (New-Object Security.AccessControl.FileSystemAccessRule(
+                $sid,
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                $allow
+            )))
+    }
+    [IO.File]::SetAccessControl($markerPath, $security)
+    $applied = [IO.File]::GetAccessControl($markerPath)
+    if (-not $applied.AreAccessRulesProtected) {
+        throw "Agent StateRoot marker ACL retained inheritance: $markerPath"
+    }
+}
+
 function Get-EADerivedServiceIdentity {
     param([string]$ServiceId)
     if ($ServiceId -notmatch '^MineGuardEnterpriseAgent-[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$') {
@@ -1443,9 +1577,11 @@ function Set-EAInstalledInstanceAcls {
     param(
         [string]$ApplicationRoot,
         [string]$InstancesRoot,
-        [switch]$FormalMode
+        [switch]$FormalMode,
+        [switch]$VerifyOnly,
+        [string]$HelperRoot = $ApplicationRoot
     )
-    $HelperPath = Join-Path $ApplicationRoot `
+    $HelperPath = Join-Path $HelperRoot `
         "deploy\windows\EnterpriseAgent.WindowsSafety.ps1"
     if (-not (Test-Path -LiteralPath $HelperPath -PathType Leaf)) {
         throw "Installed Windows safety helper is missing: $HelperPath"
@@ -1465,6 +1601,11 @@ function Set-EAInstalledInstanceAcls {
                 throw "Formal runtime installation refuses an instance created with -SkipAcl: $($Directory.Name)"
             }
             Write-Warning "DEVELOPMENT ONLY instance retains skipped ACL hardening: $($Directory.Name)"
+            continue
+        }
+        if ($VerifyOnly) {
+            Assert-EAInstanceCanonicalAcl -Context $InstanceContext
+            Assert-EAInstanceWatchAcls -Context $InstanceContext
             continue
         }
         Set-EAInstanceCanonicalAcl -Context $InstanceContext
@@ -1647,15 +1788,43 @@ if (-not $BuildFromSource) {
     # Do not create or adopt mutable product/state directories until the binary
     # media, signature contract, executable version and upgrade direction have
     # all passed their read-only checks above.
+    $StateRootExistedBeforeInstall =
+        Test-Path -LiteralPath $StateRoot -PathType Container
+    if ($HasTrustedBootstrapTransaction -and
+        $StateRootExistedBeforeInstall) {
+        Assert-EAExistingAclSafe -Path $StateRoot -AllowAllServicesRead
+        $ExistingStateMarker = Join-Path $StateRoot `
+            '.mineguard-enterprise-agent-instances.json'
+        if (Test-Path -LiteralPath $ExistingStateMarker -PathType Leaf) {
+            # Legacy markers inherited ALL SERVICES read access from the
+            # StateRoot. Accept that non-secret migration state read-only; the
+            # marker is made administrative-only immediately after adoption.
+            Assert-EAExistingAclSafe -Path $ExistingStateMarker `
+                -AllowAllServicesRead
+        }
+    }
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-    Initialize-EnterpriseAgentStateRoot -Root $StateRoot
+    Initialize-EnterpriseAgentStateRoot -Root $StateRoot `
+        -BootstrapTransactionId $TrustedBootstrapTransactionId
+    Set-EAStateRootMarkerAcl -StateRootPath $StateRoot
+    if ($HasTrustedBootstrapTransaction) {
+        # Legacy adoption may create the transaction-bound marker immediately
+        # above. Use the authenticated candidate helper now, while still
+        # evaluating instances against the real application root and before
+        # any runtime/deploy switch.
+        Set-EAInstalledInstanceAcls -ApplicationRoot $InstallRoot `
+            -HelperRoot $SourceRoot -InstancesRoot $StateRoot `
+            -FormalMode:(-not $AllowUnsignedTestMedia) -VerifyOnly
+    }
     Assert-LocalFixedPath -Name "InstallRoot" -PathValue $InstallRoot
     Assert-LocalFixedPath -Name "StateRoot" -PathValue $StateRoot
     Assert-NotBroadProductRoot -Name "InstallRoot" -PathValue $InstallRoot
     # The trusted Setup bootstrap has authenticated the candidate source.
     # Harden the destination parent before executable staging directories are
     # created so ordinary local users cannot modify a copied file before use.
-    Set-EACanonicalProductTreeAcl -Path $InstallRoot
+    if (-not $HasTrustedBootstrapTransaction) {
+        Set-EACanonicalProductTreeAcl -Path $InstallRoot
+    }
 
     $StagedRuntime = Join-Path $InstallRoot (".runtime-stage-" + [Guid]::NewGuid().ToString("N"))
     $RollbackRuntime = Join-Path $InstallRoot (".runtime-rollback-" + [Guid]::NewGuid().ToString("N"))
@@ -1690,8 +1859,11 @@ if (-not $BuildFromSource) {
         Assert-NotBroadProductRoot -Name "StateRoot" -PathValue $StateRoot
         Assert-StateRootOrdinary -Root $StateRoot
         Assert-StateRootMarker -Root $StateRoot
-        Set-EACanonicalProductTreeAcl -Path $StateRoot `
-            -RootTraverseOnly
+        if (-not $HasTrustedBootstrapTransaction -or
+            -not $StateRootExistedBeforeInstall) {
+            Set-EACanonicalProductTreeAcl -Path $StateRoot `
+                -RootTraverseOnly
+        }
         Set-EACanonicalProductTreeAcl -Path $StagedRuntime -Recurse
         Set-EACanonicalProductTreeAcl -Path $StagedDeploy `
             -UsersReadExecute -Recurse
@@ -1730,7 +1902,9 @@ if (-not $BuildFromSource) {
         # helper by this point. Canonicalize the complete existing/staged tree
         # while every switch flag is still false, so any ACL failure is handled
         # by the guarded transaction before candidate code becomes active.
-        Set-EACanonicalProductTreeAcl -Path $InstallRoot -Recurse
+        if (-not $HasTrustedBootstrapTransaction) {
+            Set-EACanonicalProductTreeAcl -Path $InstallRoot -Recurse
+        }
         foreach ($PublicTree in @(
             $StagedDeploy,
             $DeployTarget,
@@ -1834,7 +2008,8 @@ if (-not $BuildFromSource) {
         $MetadataSwitched = $true
         Set-EAInstalledInstanceAcls -ApplicationRoot $InstallRoot `
             -InstancesRoot $StateRoot `
-            -FormalMode:(-not $AllowUnsignedTestMedia)
+            -FormalMode:(-not $AllowUnsignedTestMedia) `
+            -VerifyOnly:$HasTrustedBootstrapTransaction
         $PostInstallVersion = Test-InstalledBinaryRuntime `
             -ApplicationRoot $InstallRoot -RuntimeDirectory $RuntimeRoot `
             -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
@@ -2052,7 +2227,9 @@ else {
         }
     }
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-    Initialize-EnterpriseAgentStateRoot -Root $StateRoot
+    Initialize-EnterpriseAgentStateRoot -Root $StateRoot `
+        -BootstrapTransactionId $TrustedBootstrapTransactionId
+    Set-EAStateRootMarkerAcl -StateRootPath $StateRoot
     Assert-LocalFixedPath -Name "InstallRoot" -PathValue $InstallRoot
     Assert-LocalFixedPath -Name "StateRoot" -PathValue $StateRoot
     New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null

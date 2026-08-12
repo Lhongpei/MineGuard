@@ -150,11 +150,11 @@ def test_unsigned_platform_setup_requires_explicit_test_authorization() -> None:
 
     prepare = installer[
         installer.index("function PrepareToInstall") : installer.index(
-            "procedure InstallProductRuntime"
+            "function GetProductTransactionId"
         )
     ]
     install = installer[
-        installer.index("procedure InstallProductRuntime") : installer.index(
+        installer.index("function InvokeProductTransactionAction") : installer.index(
             "function GetCustomSetupExitCode"
         )
     ]
@@ -348,7 +348,7 @@ def test_binary_install_validates_then_atomically_switches_runtime() -> None:
         "-SourcePath $runtimeTarget -SourceParent $InstallRoot"
     )
     assert install.index(
-        "Set-MineGuardDirectoryAcl -Path $InstallRoot `\n            -ServicePermission 'RX' -Recurse"
+        "Set-MineGuardDirectoryAcl -Path $InstallRoot `\n                -ServicePermission 'RX' -Recurse"
     ) < install.index(
         "-SourcePath $runtimeTarget -SourceParent $InstallRoot"
     )
@@ -359,9 +359,111 @@ def test_binary_install_validates_then_atomically_switches_runtime() -> None:
     transaction_end = install.index("\n} else {\n    $venvPython", transaction_start)
     binary_transaction = install[transaction_start:transaction_end]
     assert binary_transaction.count(
-        "Set-MineGuardDirectoryAcl -Path $InstallRoot `\n            -ServicePermission 'RX' -Recurse"
+        "Set-MineGuardDirectoryAcl -Path $InstallRoot `\n                -ServicePermission 'RX' -Recurse"
     ) == 1
     assert "二进制发布包不接受 PythonExecutable 或 Wheelhouse" in install
+
+
+def test_platform_trusted_bootstrap_transaction_preserves_existing_acls() -> None:
+    install = (WINDOWS_DEPLOY / "Install-MineGuardPlatform.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    for required in (
+        "[string] $TrustedBootstrapTransactionId = ''",
+        "function Get-ValidatedTrustedBootstrapTransactionGuid",
+        "^[a-f0-9]{32}$",
+        "[Guid]::TryParseExact($Value, 'N', [ref]$parsed)",
+        "$parsed -eq [Guid]::Empty",
+        "$trustedBootstrapTransaction",
+        "TrustedBootstrapTransactionId is reserved for verified binary installation.",
+        "$newlyCreatedDirectories = @{}",
+        "$newlyCreatedDirectories.ContainsKey(",
+        "Only its fresh candidate",
+        "function Assert-MineGuardExistingTreeAclSafe",
+        "$trustedOwners",
+        "$serviceRightsWithSynchronize",
+        "$usersReadWithSynchronize",
+        "向普通主体暴露访问权限",
+        "AreAccessRulesProtected",
+        "包含非规范拒绝规则",
+        "AllowDedicatedServiceOwner",
+        "$runtimeCreatedServiceOwner",
+    ):
+        assert required in install
+
+    validation = install[
+        install.index("function Get-ValidatedTrustedBootstrapTransactionGuid") :
+        install.index("function Assert-Administrator")
+    ]
+    assert validation.index("^[a-f0-9]{32}$") < validation.index(
+        "[Guid]::TryParseExact"
+    ) < validation.index("$parsed -eq [Guid]::Empty")
+    assert validation.index("Get-ValidatedTrustedBootstrapTransactionGuid `") < (
+        validation.index("Resolve-Path")
+    )
+
+    source_rejection = install.index(
+        "if (-not $binaryMode -and $sourceMode -and $trustedBootstrapTransaction)"
+    )
+    assert source_rejection < install.index("$directories = @(")
+    read_only_validation = install[
+        install.index("if ($binaryMode -and $trustedBootstrapTransaction)") :
+        install.index("$directories = @(")
+    ]
+    assert "-ExpectedServicePermission 'RX'" in read_only_validation
+    assert read_only_validation.count("-ExpectedServicePermission 'M'") == 1
+    assert "-AllowUsersReadExecute" in read_only_validation
+
+    transaction_start = install.index("if ($binaryMode) {\n    $runtimeTarget")
+    transaction_end = install.index("\n} else {\n    $venvPython", transaction_start)
+    binary_transaction = install[transaction_start:transaction_end]
+    root_recursive = (
+        "Set-MineGuardDirectoryAcl -Path $InstallRoot `\n"
+        "                -ServicePermission 'RX' -Recurse"
+    )
+    assert binary_transaction.count(root_recursive) == 1
+    root_acl = binary_transaction.index(root_recursive)
+    assert binary_transaction.rfind(
+        "if (-not $trustedBootstrapTransaction)", 0, root_acl
+    ) != -1
+
+    candidate_acl_start = binary_transaction.index(
+        "Set-MineGuardDirectoryAcl -Path $runtimeIncoming"
+    )
+    for candidate in (
+        "$runtimeIncoming",
+        "$serviceIncoming",
+        "$metadataIncoming",
+        "$launcherIncoming",
+    ):
+        assert (
+            f"Set-MineGuardDirectoryAcl -Path {candidate}"
+            in binary_transaction[candidate_acl_start:]
+        )
+
+    wrapper_business_start = binary_transaction.index(
+        "        } else {\n            if ($newlyCreatedDirectories.ContainsKey(",
+        candidate_acl_start,
+    )
+    wrapper_business_end = binary_transaction.index(
+        "\n        }\n\n        $service = Get-Service",
+        wrapper_business_start,
+    )
+    wrapper_business = binary_transaction[
+        wrapper_business_start:wrapper_business_end
+    ]
+    assert wrapper_business.count("$newlyCreatedDirectories.ContainsKey(") == 2
+    assert "Set-MineGuardDirectoryAcl -Path $InstallRoot" not in wrapper_business
+    assert "Set-MineGuardDirectoryAcl -Path $configDirectory" in wrapper_business
+    assert "Set-MineGuardDirectoryAcl -Path $writableDirectory" in wrapper_business
+    assert "$docsDirectory" not in wrapper_business
+
+    # Source/direct installs retain their original full-tree ACL path.
+    source_tail = install[transaction_end:]
+    assert (
+        "Set-MineGuardDirectoryAcl -Path $InstallRoot `\n"
+        "        -ServicePermission 'RX' -Recurse"
+    ) in source_tail
 
 
 def test_unsigned_internal_platform_release_is_explicit_and_fail_closed() -> None:

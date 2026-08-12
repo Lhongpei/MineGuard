@@ -251,16 +251,33 @@ def test_inno_scripts() -> None:
             '#define MinimumWindowsVersion "10.0.17763"',
             "MinVersion={#MinimumWindowsVersion}",
             "CloseApplications=no",
-            "{#StageRoot}\\runtime\\*",
-            "{#StageRoot}\\deploy\\windows\\*",
-            "VERSION.txt",
-            "build-metadata.json",
-            "release-manifest.json",
-            "SHA256SUMS.txt",
+            "SetupMutex=MineGuard-Setup-Transaction-v1,Global\\MineGuard-Setup-Transaction-v1",
+            "CheckForMutexes(ProductTransactionMutexes)",
+            "CreateMutex(ProductTransactionLocalMutex)",
+            "CreateMutex(ProductTransactionGlobalMutex)",
+            "{#StageRoot}\\*",
+            "dontcopy noencryption",
             executable,
-            "AfterInstall: InstallProductRuntime",
+            "ExtractTemporaryFiles",
+            "if CurStep = ssInstall",
+            "else if CurStep = ssPostInstall",
+            "RequireProductTransactionAction('Begin')",
+            "RequireProductTransactionAction('Prepare')",
+            "RequireProductTransactionAction('Commit')",
+            "InvokeProductTransactionAction('Finalize'",
+            "InvokeProductTransactionAction('Rollback'",
+            "procedure DeinitializeSetup()",
+            "WrapperTransactionSucceeded",
+            "ReleaseAuthorizationCaptured",
+            "function IsWrapperTransactionConfirmed(): Boolean",
+            "WrapperTransactionSucceeded and (not ProductInstallFailed)",
+            "CaptureWrapperOriginalState",
+            "CleanupWrapperCreatedEmptyInstallChain",
+            "WrapperOriginalInstallRoot",
+            "The install directory changed after its original state was captured",
+            "FailureAfterWrapperPersistenceProbe",
+            "Release audit fault injection after wrapper persistence",
             "ExecAndLogOutput",
-            "ResultCode <> 0",
             "RaiseException",
             "ProductInstallFailureExitCode = 1001",
             "ProductInstallFailed := True",
@@ -286,11 +303,42 @@ def test_inno_scripts() -> None:
         assert process_guard and "$_.Name -eq" not in process_guard.group(0), (
             f"{name} runtime guard must cover every executable in the runtime subtree"
         )
-        assert script.index("RELEASE-NOTICE.txt") < script.index(
-            "SHA256SUMS.txt\"; DestDir: \"{tmp}"
-        ), f"{name} guarded product transaction must be the final [Files] action"
+        files_section = script.split("[Files]", 1)[1].split("[Icons]", 1)[0]
+        assert files_section.index("Invoke-MineGuardTrustedProductInstall.ps1") < (
+            files_section.index("uninstall-tools")
+        ), f"{name} temporary transaction media must precede persistent files"
+        assert "AfterInstall: InstallProductRuntime" not in files_section
+        assert "AllowPostFilesFailureProbe" not in script
+        run_section = script.split("[Run]", 1)[1].split("[UninstallDelete]", 1)[0]
+        run_entries = [
+            line for line in run_section.splitlines() if line.startswith("Filename:")
+        ]
+        assert run_entries and all(
+            "Check: IsWrapperTransactionConfirmed" in line for line in run_entries
+        ), f"{name} postinstall launch must wait for durable wrapper confirmation"
+        stage_line = next(
+            line for line in files_section.splitlines() if "{#StageRoot}\\*" in line
+        )
+        assert "dontcopy" in stage_line and "noencryption" in stage_line
+        release_leaf = (
+            "MineGuardPlatformRelease"
+            if name == "platform"
+            else "MineGuardEnterpriseAgentRelease"
+        )
+        assert "AddBackslash(ExpandConstant('{tmp}')) +" in script
+        assert f"'{{tmp}}\\{release_leaf}'" in script
+        assert f"Result := ExpandConstant('{{tmp}}\\{release_leaf}')" not in script
         assert "example.invalid" not in script
         assert "compiler:Languages\\ChineseSimplified.isl" not in script
+        icons = script.split("[Icons]", 1)[1].split("[Run]", 1)[0]
+        assert "{group}" not in icons, (
+            f"{name} start-menu paths must not be mutable through /GROUP or "
+            "a previous installation"
+        )
+        expected_shortcut_count = 3 if name == "platform" else 4
+        assert icons.count('Name: "{commonprograms}\\MineGuard\\') == (
+            expected_shortcut_count
+        ), f"{name} start-menu shortcuts must use the fixed audited group"
         deletion_lines = [
             line.lower()
             for line in script.splitlines()
@@ -320,10 +368,8 @@ def test_inno_scripts() -> None:
         assert token in platform
     assert "MineGuard Platform 高级运维" not in icons_section
     launcher_copy = platform.index("Open-MineGuardPlatformControlCenter.ps1")
-    guarded_transaction = platform.index(
-        'SHA256SUMS.txt"; DestDir: "{tmp}\\MineGuardPlatformRelease"'
-    )
-    assert launcher_copy < guarded_transaction
+    temporary_transaction = platform.index('{#StageRoot}\\*"; DestDir: "{tmp}')
+    assert temporary_transaction < launcher_copy
     assert "MineGuardEnterpriseAgent-*" in agent
     assert "Status -ne ''Stopped''" in platform
     assert "Status -ne ''Stopped''" in agent
@@ -344,14 +390,36 @@ def test_inno_scripts() -> None:
             assert token in script, (
                 f"{name} internal-unsigned release gate missing: {token}"
             )
+        prepare = script[
+            script.index("function PrepareToInstall") : script.index(
+                "function GetProductTransactionId"
+            )
+        ]
+        invoke = script[
+            script.index("function InvokeProductTransactionAction") : script.index(
+                "procedure RequireProductTransactionAction"
+            )
+        ]
+        deinitialize = script[
+            script.index("procedure DeinitializeSetup") : script.index(
+                "function GetCustomSetupExitCode"
+            )
+        ]
+        assert "CaptureWrapperOriginalState();" in prepare
+        assert "if not ReleaseAuthorizationCaptured then" in prepare
+        assert "TryAuthorizeUnsignedInternalRelease" not in invoke, (
+            f"{name} rollback/finalize must not re-read the source Setup"
+        )
+        assert "The locked INTERNAL-UNSIGNED authorization is unavailable" in invoke
+        assert "CleanupWrapperCreatedEmptyInstallChain();" in deinitialize
+        capture_start = script.index("procedure CaptureWrapperOriginalState")
+        capture = script[capture_start : script.index("function HasActive", capture_start)]
+        assert "WrapperOriginalInstallRoot := ExpandConstant('{app}')" in capture
+        assert capture.count("Cursor := WrapperOriginalInstallRoot") == 2
         for token in (
             "TrustedBootstrapSha256",
             "Invoke-MineGuardTrustedProductInstall.ps1",
-            "GetTrustedBootstrapStage",
-            "{commonappdata}\\MineGuard\\InstallerBootstrap",
-            "Permissions: admins-full system-full",
             "GetSHA256OfFile(BootstrapPath)",
-            "CleanupTrustedBootstrapStage",
             "[IO.File]::ReadAllBytes($p)",
             "$sha.ComputeHash($bytes)",
             "[System.Text.UTF8Encoding]::new($false,$true)",
@@ -428,7 +496,7 @@ def test_inno_scripts() -> None:
         ) > create_index, (
             f"{name} must revalidate every newly created/raced parent after atomic creation"
         )
-        prepare_end = script.index("procedure InstallProductRuntime", prepare_start)
+        prepare_end = script.index("function GetProductTransactionId", prepare_start)
         prepare = script[prepare_start:prepare_end]
         authorization_index = min(
             index
@@ -485,7 +553,7 @@ def test_inno_scripts() -> None:
         "the GUI must not derive its trust pin from bundled metadata"
     )
     install_command = agent[
-        agent.index("procedure InstallProductRuntime") : agent.index(
+        agent.index("function InvokeProductTransactionAction") : agent.index(
             "function GetCustomSetupExitCode"
         )
     ]
@@ -536,8 +604,90 @@ def test_trusted_product_install_bootstrap() -> None:
         "Remove-ProtectedStagingDirectory",
         "Trusted installer staging cleanup did not complete",
         "finally",
+        "[ValidateSet('Install', 'Begin', 'Prepare', 'Commit', 'Rollback', 'Finalize')]",
+        "product_committed_unconfirmed",
+        "wrapper_succeeded",
+        "function Recover-StaleTransactions",
+        "function Restore-ManagedArtifacts",
+        "function Capture-ArpRegistration",
+        "function Restore-ArpRegistration",
+        "RegistryView]::Registry64",
+        "8B391CBD-E234-46D7-9946-E9D37F2649C1",
+        "9B73DE95-6B38-4482-A8BC-2A4FC656D05A",
+        "CommonPrograms",
+        "CommonDesktopDirectory",
+        "MineGuard Platform 控制中心.lnk",
+        "MineGuard 企业接入配置向导.lnk",
+        "uninstaller",
+        "shortcut",
+        "snapshot",
+        "$generation.ToString(",
+        "'D20', [Globalization.CultureInfo]::InvariantCulture",
+        "payloadEncoding = 'utf-8-base64'",
+        "payloadSha256",
+        "payloadBase64",
+        "[IO.FileMode]::CreateNew",
+        "[IO.FileOptions]::WriteThrough",
+        "$stream.Flush($true)",
+        "function Read-TransactionJournalGeneration",
+        "function Get-ValidTransactionJournalRecords",
+        "function Test-SafeUninitializedTransactionOrphan",
+        "function Sync-FileTreeToDisk",
+        "Compatibility with transactions created by the schema-1 implementation",
+        "because it contains snapshot, candidate, or unknown data",
     ):
         assert token in bootstrap, f"trusted bootstrap contract missing: {token}"
+
+    assert "Move-Item -LiteralPath $temporary -Destination " not in bootstrap
+    assert "[IO.File]::WriteAllText($temporary" not in bootstrap
+    journal_writer = bootstrap[
+        bootstrap.index("function Write-TransactionJournal") :
+        bootstrap.index("function Assert-TransactionJournalIdentity")
+    ]
+    post_flush = journal_writer[journal_writer.index("$stream.Flush($true)") :]
+    assert "$durableWriteCompleted = $true" in post_flush
+    assert "Set-Acl" not in post_flush
+    assert "Read-TransactionJournalGeneration" not in post_flush
+    assert "try { $stream.Dispose() } catch { }" in post_flush
+    assert bootstrap.index("Sync-FileTreeToDisk -Path $snapshotPath") < (
+        bootstrap.index(
+            "Write-TransactionJournal -Descriptor $Descriptor -Journal $Journal",
+            bootstrap.index("Sync-FileTreeToDisk -Path $snapshotPath"),
+        )
+    )
+    prepare_start = bootstrap.index("    'Prepare' {")
+    prepare_end = bootstrap.index("    'Commit' {", prepare_start)
+    prepare = bootstrap[prepare_start:prepare_end]
+    assert prepare.index("Sync-FileTreeToDisk -Path $candidate") < prepare.index(
+        "state = 'prepared'"
+    )
+    orphan_check = bootstrap[
+        bootstrap.index("function Test-TransactionContainsOnlyJournalArtifacts") :
+        bootstrap.index("function Sync-FileTreeToDisk")
+    ]
+    assert "if ($item.PSIsContainer)" in orphan_check
+    assert "return $false" in orphan_check
+    cleanup = bootstrap[
+        bootstrap.index("function Remove-TransactionDirectory") :
+        bootstrap.index("function Write-TransactionJournal")
+    ]
+    assert cleanup.index("foreach ($item in $payloadItems)") < cleanup.index(
+        "foreach ($journalFile in $journalFiles)"
+    ) < cleanup.index("The final valid journal is deliberately the last file")
+    assert "Remove-Item -LiteralPath $full -Recurse" not in cleanup
+    restore = bootstrap[
+        bootstrap.index("function Restore-ManagedArtifacts") :
+        bootstrap.index("function Assert-TransactionContext")
+    ]
+    assert restore.index("Sync-FileTreeToDisk -Path $target") < restore.index(
+        "state = 'rolledback'"
+    )
+    arp_restore = bootstrap[
+        bootstrap.index("function Restore-ArpRegistration") :
+        bootstrap.index("function Capture-ManagedArtifacts")
+    ]
+    assert "$key.Flush()" in arp_restore
+    assert "Flush-ArpRegistryParent" in arp_restore
 
     # PowerShell single-quoted strings do not escape backslashes. These exact
     # forms are required for correct Windows relative-path calculation.
@@ -548,16 +698,172 @@ def test_trusted_product_install_bootstrap() -> None:
         "$installerRelative.Replace('/', '\\')",
     ):
         assert token in bootstrap, f"trusted bootstrap path separator bug: {token}"
+    for forbidden in (
+        ".TrimEnd('\\\\') + '\\\\'",
+        ".Replace('\\\\', '/')",
+        ".Replace('/', '\\\\')",
+    ):
+        assert forbidden not in bootstrap, (
+            "PowerShell single-quoted path separators must contain one literal "
+            f"backslash: {forbidden}"
+        )
+    assert "$group = Join-Path $programs 'MineGuard'" in bootstrap
 
     assert "Get-ChildItem -LiteralPath $source -Force" in bootstrap
     assert "Copy-Item -LiteralPath $item.FullName -Destination $stage.Path" in bootstrap
-    assert bootstrap.index("Assert-TrustedReleaseTree -Root $stage.Path") < (
-        bootstrap.index("& $stagedInstaller @arguments")
+    direct_install = bootstrap[
+        bootstrap.index("function Invoke-DirectInstall") :
+        bootstrap.index("Assert-Administrator", bootstrap.index("function Invoke-DirectInstall"))
+    ]
+    assert direct_install.index("Assert-TrustedReleaseTree -Root $stage.Path") < (
+        direct_install.index("Invoke-StagedProductInstaller")
     )
     final_cleanup = bootstrap[bootstrap.rindex("finally {") :]
     assert "try {" in final_cleanup and "catch {" in final_cleanup
     assert "Write-Warning" in final_cleanup
     assert "& (Join-Path $source" not in bootstrap
+    commit = bootstrap[bootstrap.index("    'Commit' {") : bootstrap.index(
+        "    'Rollback' {", bootstrap.index("    'Commit' {")
+    )]
+    assert commit.index("state = 'committing'") < commit.index(
+        "Invoke-StagedProductInstaller"
+    ) < commit.index("state = 'product_committed_unconfirmed'")
+    finalize = bootstrap[bootstrap.index("    'Finalize' {") :]
+    assert finalize.index("state = 'wrapper_succeeded'") < finalize.index(
+        "Remove-TransactionDirectory"
+    )
+    rollback = bootstrap[
+        bootstrap.index("function Invoke-TransactionRollback") :
+        bootstrap.index("function Recover-StaleTransactions")
+    ]
+    assert "product_committed_unconfirmed" not in rollback
+    assert "wrapper_succeeded" in rollback
+    assert "rolledback" in rollback
+    assert "[long]$journalRecord.Generation -eq 0" in rollback
+    assert "Legacy capturing transaction has payload and was preserved" in rollback
+    stale_recovery = bootstrap[
+        bootstrap.index("function Recover-StaleTransactions") :
+        bootstrap.index("function Invoke-DirectInstall")
+    ]
+    stale_success = stale_recovery[
+        stale_recovery.index(
+            "if ([string]$journal.state -in @('rolledback', 'wrapper_succeeded'))"
+        ) :
+        stale_recovery.index("} elseif", stale_recovery.index(
+            "if ([string]$journal.state -in @('rolledback', 'wrapper_succeeded'))"
+        ))
+    ]
+    assert "Remove-TransactionDirectory -Descriptor $stale" in stale_success
+    assert "release-manifest.json" not in stale_success
+    invoke_start = bootstrap.index("function Invoke-StagedProductInstaller")
+    platform_start = bootstrap.index("if ($Product -eq 'Platform') {", invoke_start)
+    platform_arguments = bootstrap[
+        platform_start : bootstrap.index("} else {", platform_start)
+    ]
+    assert platform_arguments.count("InstallRoot = $InstallRoot") == 1
+
+    # The cross-Inno transaction covers Agent StateRoot ownership and its root
+    # ACL without serializing every business-data descendant into every durable
+    # journal generation. Existing descendants are verified read-only.
+    begin = bootstrap[
+        bootstrap.index("    'Begin' {") : bootstrap.index("    'Prepare' {")
+    ]
+    for token in (
+        "Assert-SafeAgentStateRootScope",
+        "Capture-AgentStateRootMetadata",
+        "agentStateRootMetadata = $agentStateRootMetadata",
+        "StateRoot is required only for the Enterprise Agent transaction",
+    ):
+        assert token in begin, f"Agent StateRoot Begin contract missing: {token}"
+    assert begin.index("Assert-SafeAgentStateRootScope") < begin.index(
+        "Recover-StaleTransactions"
+    ) < begin.index("Capture-AgentStateRootMetadata") < begin.index(
+        "New-ProtectedTransactionDirectory"
+    )
+    state_capture = bootstrap[
+        bootstrap.index("function Capture-AgentStateRootMetadata") :
+        bootstrap.index("function Restore-AgentStateRootMetadata")
+    ]
+    for token in (
+        "Get-AgentStateAclInventory",
+        "expectedMarkerRootId",
+        "reserved transaction marker temporary path",
+        "Assert-SafeAgentStateRootScope",
+        "missingAncestors = @($missingAncestors)",
+        "existingAncestor = $existingAncestor",
+    ):
+        assert token in state_capture
+    state_acl_capture = bootstrap[
+        bootstrap.index("function Get-AgentStateAclInventory") : bootstrap.index(
+            "function Get-AgentStateAclEntryPath"
+        )
+    ]
+    assert "path = '.'" in state_acl_capture
+    assert "kind = 'directory'" in state_acl_capture
+    assert "Get-ChildItem" not in state_acl_capture
+    assert "-Recurse" not in state_acl_capture
+    state_restore = bootstrap[
+        bootstrap.index("function Restore-AgentStateRootMetadata") :
+        bootstrap.index("function Get-TreeInventory")
+    ]
+    for token in (
+        "Agent rollback StateRoot disappeared; business data recovery is required",
+        "Agent StateRoot ACL snapshot must contain only its root entry",
+        "Assert-TransactionCreatedAgentStateMarker",
+        "ExpectedTransactionId $transactionId",
+        "Assert-ExactSecuritySddl",
+        "Agent StateRoot rollback chain crossed its existing ancestor",
+        "Transaction-created Agent StateRoot ancestor contains unknown data",
+    ):
+        assert token in state_restore
+    assert "CreateDirectory($root)" not in state_restore
+    assert "contentBase64" not in state_restore
+    marker_assertion = bootstrap[
+        bootstrap.index("function Assert-TransactionCreatedAgentStateMarker") :
+        bootstrap.index("function Get-AgentStateAclInventory")
+    ]
+    assert "[Guid]::ParseExact($transactionId, 'N').ToString('D')" in marker_assertion
+    assert "installer_transaction_id" not in marker_assertion
+    managed_restore = bootstrap[
+        bootstrap.index("function Restore-ManagedArtifacts") :
+        bootstrap.index("function Assert-TransactionContext")
+    ]
+    assert managed_restore.index("Restore-AgentStateRootMetadata") < (
+        managed_restore.index("Complete-ProductRootMetadataRollback")
+    ) < managed_restore.index("$Journal.state = 'rolledback'")
+    context = bootstrap[
+        bootstrap.index("function Assert-TransactionContext") :
+        bootstrap.index("function Invoke-StagedProductInstaller")
+    ]
+    assert "IncludeCurrentStateRoot" in context
+    assert "Installer transaction StateRoot changed between phases" in context
+    staged = bootstrap[
+        bootstrap.index("function Invoke-StagedProductInstaller") :
+        bootstrap.index("function Invoke-TransactionRollback")
+    ]
+    assert "TrustedBootstrapTransactionId" in staged
+    assert "Get-NormalizedTransactionId -Value $MarkerTransactionId" in staged
+    platform_staged = staged[
+        staged.index("if ($Product -eq 'Platform') {") : staged.index("} else {")
+    ]
+    assert "TrustedBootstrapTransactionId" in platform_staged
+    assert "-MarkerTransactionId $journal.transactionId" in commit
+    assert "IncludeCurrentStateRoot" not in stale_recovery
+    assert bootstrap.count("-IncludeCurrentStateRoot") >= 5
+    assert "SetSecurityDescriptorSddlForm($Sddl, $managedSections)" in bootstrap
+    assert "existing Audit/SACL section is intentionally neither replaced nor cleared" in bootstrap
+    assert "$leafPattern = '^\\.mineguard-" in bootstrap
+    assert "$leafPattern = '^\\\\.mineguard-" not in bootstrap
+    for token in (
+        "WrapperInstallRootPreexisted",
+        "WrapperShortcutGroupPreexisted",
+        "Capture-ProductRootMetadata",
+        "Get-ValidatedProductRootRollbackMetadata",
+        "Restore-ProductRootMetadataBeforeArtifacts",
+        "Complete-ProductRootMetadataRollback",
+        "AllowMissingInstallRoot",
+    ):
+        assert token in bootstrap
 
     expected_match = re.search(
         r'\$ExpectedTrustedBootstrapSha256\s*=\s*`\s*\n\s*"([a-f0-9]{64})"',
@@ -1000,9 +1306,13 @@ def test_audit_and_lifecycle() -> None:
     ), "agent rollback must quarantine the active candidate before restoration"
 
     failure_probe = read("scripts/Test-WindowsInstallerFailurePropagation.ps1")
+    assert (ROOT / "scripts/Test-WindowsInstallerFailurePropagation.ps1").read_bytes().startswith(
+        b"\xef\xbb\xbf"
+    ), "the Windows PowerShell 5.1 failure probe needs a UTF-8 BOM"
     assert "deliberately-tampered" in failure_probe
     assert "ProbeExitCode -eq 0" in failure_probe
-    assert "ProbeExitCode -ne 1001" in failure_probe
+    assert "ProbeExitCode -ne 1001" not in failure_probe
+    assert "FailureExit -ne 1001" in failure_probe
     for token in (
         "function Write-FailureProbeReleaseIntegrity",
         '"model-credential-trust.json"',
@@ -1010,6 +1320,46 @@ def test_audit_and_lifecycle() -> None:
         '"/DTrustedBootstrapSha256=$TrustedBootstrapSha256"',
         "ConvertTo-Json -Depth 50",
         'if ($Product -eq "agent") { " *" } else { "  " }',
+        "function Test-OneWrapperPersistenceRollback",
+        "function Test-OneSetupMutexExclusion",
+        "function Test-OneUninstallMutexExclusion",
+        "function Test-AgentStateRootMarkerRollback",
+        "Global\\MineGuard-Setup-Transaction-v1",
+        "The SetupMutex native probe must run in an elevated administrator process",
+        "$Mutex.ReleaseMutex()",
+        "$Mutex.Dispose()",
+        "if ($null -eq $BlockedExit -or [int]$BlockedExit -eq 0)",
+        "SetupMutex rejection created InstallRoot",
+        "SetupMutex rejection created StateRoot",
+        "SetupMutex rejection created an HKLM64 ARP registration",
+        "SetupMutex rejection created a shortcut",
+        "SetupMutex rejection created a retained transaction",
+        "The uninstall SetupMutex probe must run in an elevated administrator process",
+        "$Product blocked uninstall",
+        "the blocked uninstaller did not return a nonzero exit code",
+        "the blocked uninstaller changed HKLM64 ARP",
+        ".mineguard-enterprise-agent-instances.json",
+        "preexisting-empty-unmarked",
+        "new-state-root",
+        'StateRelative = "missing-parent-a\\missing-parent-b\\state"',
+        'MissingAncestorRelative = "missing-parent-a"',
+        "transaction-created StateRoot marker was retained",
+        "the pre-existing empty unmarked StateRoot was not restored",
+        "the transaction-created StateRoot was not removed",
+        "the transaction-created InstallRoot was not removed",
+        "transaction-created StateRoot ancestor directories were not removed",
+        "Platform fresh wrapper persistence probe returned",
+        "platform fresh wrapper persistence rollback",
+        "Platform fresh wrapper rollback changed HKLM64 ARP",
+        "Platform fresh wrapper rollback leaked transaction",
+        "FailureAfterWrapperPersistenceProbe",
+        "function Get-ExactArtifactSnapshot",
+        "function Assert-ExactArtifactSnapshot",
+        "function Get-ArpRegistrationSnapshot",
+        "Get-WrapperShortcutPaths",
+        "HKLM64 ARP",
+        '"docs", "uninstall-tools"',
+        "unins[0-9]",
     ):
         assert token in failure_probe, (
             f"native failure fixture misses trusted bootstrap input: {token}"
@@ -1018,6 +1368,103 @@ def test_audit_and_lifecycle() -> None:
         'foreach ($ImmutableDirectory in @('
         '"runtime", "release-metadata", "deploy", "service"))'
         in failure_probe
+    )
+    assert failure_probe.count("Test-OneWrapperPersistenceRollback `") == 2
+    assert '-Product platform -OriginalStage $PlatformStage' in failure_probe
+    assert '-Product agent -OriginalStage $AgentStage' in failure_probe
+    mutex_probe = failure_probe[
+        failure_probe.index("function Test-OneSetupMutexExclusion") :
+        failure_probe.index("function Test-OneWrapperPersistenceRollback")
+    ]
+    assert mutex_probe.index("[Threading.Mutex]::new(") < mutex_probe.index(
+        "Invoke-ProcessTreeWithTransientAccessRetry"
+    ) < mutex_probe.index("$Mutex.ReleaseMutex()") < mutex_probe.index(
+        "$Mutex.Dispose()"
+    ) < mutex_probe.index("[int]$BlockedExit -eq 0")
+    uninstall_mutex_probe = failure_probe[
+        failure_probe.index("function Test-OneUninstallMutexExclusion") :
+        failure_probe.index("function Test-OneWrapperPersistenceRollback")
+    ]
+    assert uninstall_mutex_probe.index(
+        "$BeforeArtifacts = Get-ExactArtifactSnapshot"
+    ) < uninstall_mutex_probe.index(
+        "$BeforeArp = Get-ArpRegistrationSnapshot"
+    ) < uninstall_mutex_probe.index(
+        "[Threading.Mutex]::new("
+    ) < uninstall_mutex_probe.index(
+        "-FilePath $UninstallerPath"
+    ) < uninstall_mutex_probe.index(
+        "$Mutex.ReleaseMutex()"
+    ) < uninstall_mutex_probe.index(
+        "[int]$BlockedExit -eq 0"
+    ) < uninstall_mutex_probe.index(
+        "Assert-ExactArtifactSnapshot -Expected $BeforeArtifacts"
+    ) < uninstall_mutex_probe.index(
+        "$AfterArp = Get-ArpRegistrationSnapshot"
+    )
+    assert '$SnapshotPaths += $StateRoot' in uninstall_mutex_probe
+    state_root_probe = failure_probe[
+        failure_probe.index("function Test-AgentStateRootMarkerRollback") :
+        failure_probe.index("function Test-OneWrapperPersistenceRollback")
+    ]
+    assert state_root_probe.index(
+        'Name = "preexisting-empty-unmarked"'
+    ) < state_root_probe.index(
+        'RootExisted = $true'
+    ) < state_root_probe.index(
+        'Name = "new-state-root"'
+    ) < state_root_probe.index('RootExisted = $false')
+    assert state_root_probe.index(
+        "$BeforeState = Get-ExactArtifactSnapshot"
+    ) < state_root_probe.index(
+        "Invoke-ProcessTreeWithTransientAccessRetry"
+    ) < state_root_probe.index(
+        "$FailureExit -ne 1001"
+    ) < state_root_probe.index(
+        "Assert-ExactArtifactSnapshot -Expected $BeforeState"
+    ) < state_root_probe.index(
+        "transaction-created StateRoot marker was retained"
+    )
+    assert "Release audit fault injection after wrapper persistence" in (
+        state_root_probe
+    )
+    assert 'Get-ChildItem -LiteralPath $StateRoot -Force).Count -ne 0' in (
+        state_root_probe
+    )
+    assert 'elseif (Test-Path -LiteralPath $StateRoot)' in state_root_probe
+    assert 'if (Test-Path -LiteralPath $InstallRoot)' in state_root_probe
+    assert state_root_probe.index(
+        'StateRelative = "missing-parent-a\\missing-parent-b\\state"'
+    ) < state_root_probe.index(
+        "Invoke-ProcessTreeWithTransientAccessRetry"
+    ) < state_root_probe.index(
+        "transaction-created StateRoot ancestor directories were not removed"
+    )
+    wrapper_probe = failure_probe[
+        failure_probe.index("function Test-OneWrapperPersistenceRollback") :
+        failure_probe.index("function Invoke-ProductInstallerExpectFailure")
+    ]
+    assert wrapper_probe.index('$Product -eq "agent"') < wrapper_probe.index(
+        "$BeforeFreshArtifacts = Get-ExactArtifactSnapshot"
+    ) < wrapper_probe.index("$BaselineExit =")
+    assert wrapper_probe.index("Test-OneSetupMutexExclusion `") < (
+        wrapper_probe.index("$BaselineExit =")
+    ), "each product's baseline must first prove SetupMutex exclusion"
+    assert wrapper_probe.index("Test-OneSetupMutexExclusion `") < (
+        wrapper_probe.index("Test-AgentStateRootMarkerRollback `")
+    ) < wrapper_probe.index("$BaselineExit ="), (
+        "the Agent fresh-StateRoot rollback probes must run before its baseline"
+    )
+    assert wrapper_probe.index("$BaselineExit =") < wrapper_probe.index(
+        "Test-OneUninstallMutexExclusion `"
+    ) < wrapper_probe.index("$ManagedPaths ="), (
+        "each installed baseline must prove uninstall mutex exclusion before "
+        "the wrapper rollback snapshot"
+    )
+    assert wrapper_probe.index("$ManagedPaths =") < wrapper_probe.index(
+        'if ($Product -eq "agent") { $ManagedPaths += $StateRoot }'
+    ) < wrapper_probe.index("$BeforeArtifacts = Get-ExactArtifactSnapshot"), (
+        "the Agent wrapper rollback snapshot must cover the complete StateRoot"
     )
     for token in (
         "AuditFailAfterRuntimeSwitch",

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet('Install', 'Begin', 'Prepare', 'Commit', 'Rollback', 'Finalize')]
     [string] $TransactionAction = 'Install',
@@ -15,7 +15,11 @@ param(
     [string] $StateRoot = '',
     [string] $ApprovedSignerThumbprint = '',
     [switch] $AllowUnsignedTestMedia,
-    [switch] $AllowUnsignedInternalRelease
+    [switch] $AllowUnsignedInternalRelease,
+    [ValidateSet('0', '1')]
+    [string] $WrapperInstallRootPreexisted = '1',
+    [ValidateSet('0', '1')]
+    [string] $WrapperShortcutGroupPreexisted = '1'
 )
 
 Set-StrictMode -Version 2.0
@@ -398,6 +402,11 @@ function New-ProtectedFileSecurity {
 function Set-ProtectedTransactionTree {
     param([Parameter(Mandatory = $true)] [string] $Path)
     Assert-NoReparseTree -Path $Path -Label 'installer transaction tree'
+    $rootItem = Get-Item -LiteralPath $Path -Force
+    if (-not $rootItem.PSIsContainer) {
+        Set-Acl -LiteralPath $Path -AclObject (New-ProtectedFileSecurity)
+        return
+    }
     foreach ($file in @(Get-ChildItem -LiteralPath $Path -File -Force -Recurse)) {
         Set-Acl -LiteralPath $file.FullName -AclObject (New-ProtectedFileSecurity)
     }
@@ -417,6 +426,11 @@ function Get-NormalizedTransactionId {
     if ($normalized -cnotmatch '^[a-f0-9]{32}$') {
         throw 'TransactionId must be exactly 32 hexadecimal characters.'
     }
+    $parsed = [Guid]::Empty
+    if (-not [Guid]::TryParseExact($normalized, 'N', [ref]$parsed) -or
+        $parsed -eq [Guid]::Empty) {
+        throw 'TransactionId must identify a non-empty GUID.'
+    }
     return $normalized
 }
 
@@ -425,13 +439,15 @@ function Get-NormalizedPathText {
     if ([string]::IsNullOrWhiteSpace($Value) -or $Value -notmatch '^[A-Za-z]:\\') {
         throw "$Label must be an absolute local drive path."
     }
-    return [IO.Path]::GetFullPath($Value).TrimEnd('\\')
+    return [IO.Path]::GetFullPath($Value).TrimEnd('\')
 }
 
 function Get-TransactionDescriptor {
-    param([string] $Root, [string] $Kind, [string] $Id)
+    param([string] $Root, [string] $Kind, [string] $Id,
+          [switch] $AllowMissingInstallRoot)
     $install = Get-SafeLocalNtfsPath -Path $Root `
-        -Label 'transaction install root' -MustExist
+        -Label 'transaction install root' `
+        -MustExist:(-not $AllowMissingInstallRoot)
     $parent = Split-Path -Parent $install
     [void](Get-SafeLocalNtfsPath -Path $parent `
         -Label 'transaction parent' -MustExist)
@@ -461,9 +477,9 @@ function New-ProtectedTransactionDirectory {
 function Remove-TransactionDirectory {
     param([Parameter(Mandatory = $true)] $Descriptor)
     if (-not (Test-Path -LiteralPath $Descriptor.Path)) { return }
-    $full = [IO.Path]::GetFullPath($Descriptor.Path).TrimEnd('\\')
-    $parent = [IO.Path]::GetFullPath($Descriptor.Parent).TrimEnd('\\')
-    $leafPattern = '^\\.mineguard-(?:platform|agent)-inno-transaction-[a-f0-9]{32}$'
+    $full = [IO.Path]::GetFullPath($Descriptor.Path).TrimEnd('\')
+    $parent = [IO.Path]::GetFullPath($Descriptor.Parent).TrimEnd('\')
+    $leafPattern = '^\.mineguard-(?:platform|agent)-inno-transaction-[a-f0-9]{32}$'
     if (-not ([IO.Path]::GetDirectoryName($full)).Equals(
             $parent, [StringComparison]::OrdinalIgnoreCase) -or
         [IO.Path]::GetFileName($full) -cnotmatch $leafPattern) {
@@ -474,8 +490,61 @@ function Remove-TransactionDirectory {
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     $lastError = $null
     do {
-        try { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop }
-        catch { $lastError = $_ }
+        try {
+            $items = @(Get-ChildItem -LiteralPath $full -Force)
+            $journalFiles = @()
+            $payloadItems = @()
+            foreach ($item in $items) {
+                if (-not $item.PSIsContainer -and (
+                        $item.Name -ceq 'journal.json' -or
+                        $item.Name -cmatch '^journal-[0-9]{20}\.json$' -or
+                        $item.Name -cmatch '^\.journal-[a-f0-9]{32}\.tmp$')) {
+                    $journalFiles += @($item)
+                } else {
+                    $payloadItems += @($item)
+                }
+            }
+
+            $validRecords = @(Get-ValidTransactionJournalRecords `
+                -Descriptor $Descriptor | Sort-Object Generation -Descending)
+            if ($validRecords.Count -eq 0 -and $payloadItems.Count -gt 0) {
+                throw (
+                    'Refusing to clean a transaction that has payload but no ' +
+                    'valid durable journal.')
+            }
+            $authoritativeJournal = if ($validRecords.Count -gt 0) {
+                [IO.Path]::GetFullPath([string]$validRecords[0].Path)
+            } else {
+                ''
+            }
+
+            # Snapshot/candidate/other payload is always removed before any
+            # journal.  If cleanup is interrupted, the authoritative state is
+            # therefore still available to the next recovery attempt.
+            foreach ($item in $payloadItems) {
+                Remove-Item -LiteralPath $item.FullName -Recurse -Force `
+                    -ErrorAction Stop
+            }
+            foreach ($journalFile in $journalFiles) {
+                $journalFullName = [IO.Path]::GetFullPath($journalFile.FullName)
+                if ([string]::IsNullOrWhiteSpace($authoritativeJournal) -or
+                    -not $journalFullName.Equals(
+                        $authoritativeJournal,
+                        [StringComparison]::OrdinalIgnoreCase)) {
+                    Remove-Item -LiteralPath $journalFullName -Force `
+                        -ErrorAction Stop
+                }
+            }
+            if (-not [string]::IsNullOrWhiteSpace($authoritativeJournal) -and
+                (Test-Path -LiteralPath $authoritativeJournal -PathType Leaf)) {
+                # The final valid journal is deliberately the last file.
+                Remove-Item -LiteralPath $authoritativeJournal -Force `
+                    -ErrorAction Stop
+            }
+            # No recursive root deletion: reaching this line means every
+            # child, including the final journal, was removed in order.
+            Remove-Item -LiteralPath $full -Force -ErrorAction Stop
+        } catch { $lastError = $_ }
         if (-not (Test-Path -LiteralPath $full)) { return }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
@@ -494,44 +563,1025 @@ function Write-TransactionJournal {
         throw 'The protected transaction directory disappeared.'
     }
     Assert-ProtectedDirectoryAcl -Path $Descriptor.Path
-    $temporary = Join-Path $Descriptor.Path (
-        '.journal-' + [Guid]::NewGuid().ToString('N') + '.tmp')
-    $json = $Journal | ConvertTo-Json -Depth 12
-    $utf8 = New-Object -TypeName Text.UTF8Encoding -ArgumentList $false
-    [IO.File]::WriteAllText($temporary, $json, $utf8)
-    Set-Acl -LiteralPath $temporary -AclObject (New-ProtectedFileSecurity)
-    Move-Item -LiteralPath $temporary -Destination $Descriptor.JournalPath -Force
+    Assert-TransactionJournalIdentity -Descriptor $Descriptor -Journal $Journal
+    # Each generation is immutable.  A torn highest-generation write is
+    # ignored by Read-TransactionJournal, which falls back to the preceding
+    # valid generation.  Reusing journal.json with Move-Item -Force would not
+    # provide that guarantee across sudden power loss.
+    $highestNamedGeneration = [long]0
+    foreach ($file in @(Get-ChildItem -LiteralPath $Descriptor.Path `
+            -File -Force)) {
+        if ($file.Name -cmatch '^journal-(?<generation>[0-9]{20})\.json$') {
+            try {
+                $generation = [long]::Parse(
+                    [string]$Matches['generation'],
+                    [Globalization.CultureInfo]::InvariantCulture)
+            } catch {
+                throw 'Installer transaction journal generation is out of range.'
+            }
+            if ($generation -gt $highestNamedGeneration) {
+                $highestNamedGeneration = $generation
+            }
+        }
+    }
+    if ($highestNamedGeneration -eq [long]::MaxValue) {
+        throw 'Installer transaction journal generation space is exhausted.'
+    }
+    $generation = $highestNamedGeneration + 1
+
+    $utf8 = New-Object -TypeName Text.UTF8Encoding -ArgumentList @($false, $true)
+    $payloadJson = $Journal | ConvertTo-Json -Depth 16 -Compress
+    $payloadBytes = $utf8.GetBytes($payloadJson)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $payloadSha256 = ([BitConverter]::ToString(
+            $sha256.ComputeHash($payloadBytes))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
+    $envelope = [ordered]@{
+        schemaVersion = 2
+        generation = $generation
+        payloadEncoding = 'utf-8-base64'
+        payloadSha256 = $payloadSha256
+        payloadBase64 = [Convert]::ToBase64String($payloadBytes)
+    }
+    $envelopeBytes = $utf8.GetBytes(
+        ($envelope | ConvertTo-Json -Depth 4 -Compress))
+    $journalName = 'journal-' + $generation.ToString(
+        'D20', [Globalization.CultureInfo]::InvariantCulture) + '.json'
+    $journalPath = Join-Path $Descriptor.Path $journalName
+    $stream = $null
+    $durableWriteCompleted = $false
+    try {
+        $stream = [IO.FileStream]::new(
+            $journalPath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            4096,
+            [IO.FileOptions]::WriteThrough)
+        $stream.Write($envelopeBytes, 0, $envelopeBytes.Length)
+        $stream.Flush($true)
+        $durableWriteCompleted = $true
+    } finally {
+        if ($null -ne $stream) {
+            if ($durableWriteCompleted) {
+                # Flush(true) is the acknowledgement boundary.  The new file
+                # already inherited the protected Admin/System-only DACL from
+                # its transaction directory.  No post-durable ACL/readback or
+                # close error may turn wrapper_succeeded into a reported
+                # failure while recovery correctly treats it as committed.
+                try { $stream.Dispose() } catch { }
+            } else {
+                $stream.Dispose()
+            }
+        }
+    }
+}
+
+function Assert-TransactionJournalIdentity {
+    param([Parameter(Mandatory = $true)] $Descriptor,
+          [Parameter(Mandatory = $true)] $Journal)
+    if ([int]$Journal.schemaVersion -ne 1 -or
+        [string]$Journal.product -cne $Product -or
+        [string]$Journal.transactionId -cne `
+            ([IO.Path]::GetFileName($Descriptor.Path).Substring(
+                $Descriptor.Prefix.Length)) -or
+        -not ([string]$Journal.installRoot).Equals(
+            $Descriptor.InstallRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Installer transaction journal identity does not match its protected path.'
+    }
+}
+
+function Read-TransactionJournalGeneration {
+    param([Parameter(Mandatory = $true)] $Descriptor,
+          [Parameter(Mandatory = $true)] [string] $Path,
+          [Parameter(Mandatory = $true)] [long] $ExpectedGeneration)
+    try {
+        $envelopeBytes = [IO.File]::ReadAllBytes($Path)
+    } catch {
+        throw "Installer transaction journal generation could not be read: $Path"
+    }
+    try {
+        $strictUtf8 = New-Object -TypeName Text.UTF8Encoding `
+            -ArgumentList @($false, $true)
+        $envelope = $strictUtf8.GetString($envelopeBytes) | ConvertFrom-Json
+        if ([int]$envelope.schemaVersion -ne 2 -or
+            [long]$envelope.generation -ne $ExpectedGeneration -or
+            [string]$envelope.payloadEncoding -cne 'utf-8-base64' -or
+            [string]$envelope.payloadSha256 -cnotmatch '^[a-f0-9]{64}$' -or
+            [string]$envelope.payloadBase64 -cnotmatch `
+                '^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$') {
+            return $null
+        }
+        $payloadBytes = [Convert]::FromBase64String(
+            [string]$envelope.payloadBase64)
+        if ([Convert]::ToBase64String($payloadBytes) -cne
+            [string]$envelope.payloadBase64) {
+            return $null
+        }
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $actualSha256 = ([BitConverter]::ToString(
+                $sha256.ComputeHash($payloadBytes))).Replace(
+                    '-', '').ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+        if ($actualSha256 -cne [string]$envelope.payloadSha256) {
+            return $null
+        }
+        $journal = $strictUtf8.GetString($payloadBytes) | ConvertFrom-Json
+        Assert-TransactionJournalIdentity -Descriptor $Descriptor `
+            -Journal $journal
+        return [pscustomobject]@{
+            Generation = $ExpectedGeneration
+            Journal = $journal
+            Path = $Path
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Get-ValidTransactionJournalRecords {
+    param([Parameter(Mandatory = $true)] $Descriptor)
+    $records = New-Object System.Collections.Generic.List[object]
+    $unreadableGenerations = New-Object System.Collections.Generic.List[long]
+    foreach ($file in @(Get-ChildItem -LiteralPath $Descriptor.Path `
+            -File -Force)) {
+        if ($file.Name -cmatch '^journal-(?<generation>[0-9]{20})\.json$') {
+            try {
+                $generation = [long]::Parse(
+                    [string]$Matches['generation'],
+                    [Globalization.CultureInfo]::InvariantCulture)
+            } catch {
+                continue
+            }
+            if ($generation -lt 1) { continue }
+            try {
+                $record = Read-TransactionJournalGeneration `
+                    -Descriptor $Descriptor -Path $file.FullName `
+                    -ExpectedGeneration $generation
+            } catch {
+                $unreadableGenerations.Add($generation)
+                continue
+            }
+            if ($null -ne $record) { $records.Add($record) }
+        }
+    }
+
+    $highestValidGeneration = if ($records.Count -eq 0) {
+        [long]0
+    } else {
+        [long](($records | Measure-Object -Property Generation -Maximum).Maximum)
+    }
+    if (@($unreadableGenerations | Where-Object {
+                $_ -gt $highestValidGeneration
+            }).Count -gt 0) {
+        throw 'A newer installer transaction journal generation is temporarily unreadable.'
+    }
+
+    # Compatibility with transactions created by the schema-1 implementation.
+    # It is generation zero and therefore loses to every valid envelope.
+    if ($records.Count -eq 0 -and
+        (Test-Path -LiteralPath $Descriptor.JournalPath -PathType Leaf)) {
+        try {
+            $legacyBytes = [IO.File]::ReadAllBytes($Descriptor.JournalPath)
+        } catch {
+            throw 'The legacy installer transaction journal is temporarily unreadable.'
+        }
+        try {
+            $strictUtf8 = New-Object -TypeName Text.UTF8Encoding `
+                -ArgumentList @($false, $true)
+            $legacy = $strictUtf8.GetString($legacyBytes) | ConvertFrom-Json
+            Assert-TransactionJournalIdentity -Descriptor $Descriptor `
+                -Journal $legacy
+            $records.Add([pscustomobject]@{
+                Generation = [long]0
+                Journal = $legacy
+                Path = $Descriptor.JournalPath
+            })
+        } catch {
+            # A torn legacy journal is not authoritative.  Recovery below only
+            # removes it when no snapshot/candidate or other payload exists.
+        }
+    }
+    return @($records)
+}
+
+function Read-TransactionJournalRecord {
+    param([Parameter(Mandatory = $true)] $Descriptor)
+    Assert-ProtectedDirectoryAcl -Path $Descriptor.Path
+    $records = @(Get-ValidTransactionJournalRecords -Descriptor $Descriptor |
+        Sort-Object Generation -Descending)
+    if ($records.Count -eq 0) {
+        throw "Installer transaction has no valid durable journal: $($Descriptor.Path)"
+    }
+    return $records[0]
 }
 
 function Read-TransactionJournal {
     param([Parameter(Mandatory = $true)] $Descriptor)
+    $record = Read-TransactionJournalRecord -Descriptor $Descriptor
+    return $record.Journal
+}
+
+function Test-TransactionContainsOnlyJournalArtifacts {
+    param([Parameter(Mandatory = $true)] $Descriptor)
     Assert-ProtectedDirectoryAcl -Path $Descriptor.Path
-    if (-not (Test-Path -LiteralPath $Descriptor.JournalPath -PathType Leaf)) {
-        throw "Installer transaction journal is missing: $($Descriptor.JournalPath)"
+    Assert-NoReparseTree -Path $Descriptor.Path `
+        -Label 'journal-only installer transaction'
+    foreach ($item in @(Get-ChildItem -LiteralPath $Descriptor.Path -Force)) {
+        if ($item.PSIsContainer) {
+            # In particular, never discard snapshot or candidate content when
+            # no authenticated journal survives a power interruption.
+            return $false
+        }
+        if ($item.Name -cne 'journal.json' -and
+            $item.Name -cnotmatch '^journal-[0-9]{20}\.json$' -and
+            $item.Name -cnotmatch '^\.journal-[a-f0-9]{32}\.tmp$') {
+            return $false
+        }
     }
-    try {
-        $journal = Get-Content -LiteralPath $Descriptor.JournalPath `
-            -Raw -Encoding UTF8 | ConvertFrom-Json
-    } catch {
-        throw "Installer transaction journal is invalid: $($_.Exception.Message)"
+    return $true
+}
+
+function Test-SafeUninitializedTransactionOrphan {
+    param([Parameter(Mandatory = $true)] $Descriptor)
+    if (@(Get-ValidTransactionJournalRecords -Descriptor $Descriptor).Count -gt 0) {
+        return $false
     }
-    if ([int]$journal.schemaVersion -ne 1 -or
-        [string]$journal.product -cne $Product -or
-        [string]$journal.transactionId -cne `
-            ([IO.Path]::GetFileName($Descriptor.Path).Substring(
-                $Descriptor.Prefix.Length)) -or
-        -not ([string]$journal.installRoot).Equals(
-            $Descriptor.InstallRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Installer transaction journal identity does not match its protected path.'
+    return Test-TransactionContainsOnlyJournalArtifacts -Descriptor $Descriptor
+}
+
+function Sync-FileTreeToDisk {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+    $item = Get-Item -LiteralPath $Path -Force
+    $files = if ($item.PSIsContainer) {
+        @(Get-ChildItem -LiteralPath $Path -File -Force -Recurse)
+    } else {
+        @($item)
     }
-    return $journal
+    foreach ($file in $files) {
+        $originalAttributes = [IO.File]::GetAttributes($file.FullName)
+        $clearedReadOnly = ($originalAttributes -band
+            [IO.FileAttributes]::ReadOnly) -ne 0
+        if ($clearedReadOnly) {
+            [IO.File]::SetAttributes(
+                $file.FullName,
+                $originalAttributes -band (-bnot [IO.FileAttributes]::ReadOnly))
+        }
+        $stream = $null
+        try {
+            $stream = [IO.FileStream]::new(
+                $file.FullName,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::ReadWrite,
+                [IO.FileShare]::Read,
+                4096,
+                [IO.FileOptions]::WriteThrough)
+            $stream.Flush($true)
+        } finally {
+            if ($null -ne $stream) { $stream.Dispose() }
+            if ($clearedReadOnly) {
+                [IO.File]::SetAttributes($file.FullName, $originalAttributes)
+            }
+        }
+    }
 }
 
 function Get-OriginalSecuritySddl {
     param([Parameter(Mandatory = $true)] [string] $Path)
     $acl = Get-Acl -LiteralPath $Path
-    return $acl.GetSecurityDescriptorSddlForm(
-        [Security.AccessControl.AccessControlSections]::All)
+    $sections = [Security.AccessControl.AccessControlSections]::Access -bor
+        [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Group
+    return $acl.GetSecurityDescriptorSddlForm($sections)
+}
+
+function Get-ByteArraySha256 {
+    param([Parameter(Mandatory = $true)] [byte[]] $Bytes)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString(
+            $sha256.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Set-ExactSecuritySddl {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $Kind,
+        [Parameter(Mandatory = $true)] [string] $Sddl
+    )
+    $security = if ($Kind -eq 'directory') {
+        New-Object -TypeName Security.AccessControl.DirectorySecurity
+    } elseif ($Kind -eq 'file') {
+        New-Object -TypeName Security.AccessControl.FileSecurity
+    } else {
+        throw "Unsupported security descriptor kind: $Kind"
+    }
+    $managedSections =
+        [Security.AccessControl.AccessControlSections]::Access -bor
+        [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Group
+    # Restore only the sections captured by Get-OriginalSecuritySddl.  The
+    # existing Audit/SACL section is intentionally neither replaced nor cleared.
+    $security.SetSecurityDescriptorSddlForm($Sddl, $managedSections)
+    Set-Acl -LiteralPath $Path -AclObject $security
+}
+
+function Assert-ExactSecuritySddl {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $ExpectedSddl
+    )
+    if ((Get-OriginalSecuritySddl -Path $Path) -cne $ExpectedSddl) {
+        throw "Restored security descriptor does not match its snapshot: $Path"
+    }
+}
+
+function Get-PlatformMutableDirectorySpecifications {
+    param([Parameter(Mandatory = $true)] [string] $Root)
+    return @(
+        [pscustomobject]@{ name = 'config'; path = Join-Path $Root 'config' },
+        [pscustomobject]@{ name = 'state'; path = Join-Path $Root 'state' },
+        [pscustomobject]@{ name = 'backups'; path = Join-Path $Root 'backups' },
+        [pscustomobject]@{ name = 'logs'; path = Join-Path $Root 'logs' }
+    )
+}
+
+function Capture-ProductRootMetadata {
+    param(
+        [Parameter(Mandatory = $true)] $Descriptor,
+        [Parameter(Mandatory = $true)] [bool] $InstallRootPreexisted,
+        [Parameter(Mandatory = $true)] [bool] $ShortcutGroupPreexisted
+    )
+    $root = Get-SafeLocalNtfsPath -Path $Descriptor.InstallRoot `
+        -Label 'transaction product root' -MustExist
+    $rootItem = Get-Item -LiteralPath $root -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Transaction product root cannot be a reparse point.'
+    }
+    $mutableDirectories = @()
+    if ($Product -eq 'Platform') {
+        foreach ($specification in @(
+                Get-PlatformMutableDirectorySpecifications -Root $root)) {
+            $exists = Test-Path -LiteralPath $specification.path
+            if ($exists -and
+                -not (Test-Path -LiteralPath $specification.path `
+                    -PathType Container)) {
+                throw "Platform mutable directory has the wrong type: $($specification.path)"
+            }
+            if ($exists) {
+                $item = Get-Item -LiteralPath $specification.path -Force
+                if (($item.Attributes -band
+                        [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'Platform mutable directory cannot be a reparse point.'
+                }
+            }
+            $mutableDirectories += [pscustomobject]@{
+                name = [string]$specification.name
+                path = [IO.Path]::GetFullPath([string]$specification.path).TrimEnd('\')
+                existed = [bool]$exists
+                sddl = if ($exists) {
+                    Get-OriginalSecuritySddl -Path $specification.path
+                } else { '' }
+            }
+        }
+    }
+    return [pscustomobject]@{
+        format = 'mineguard-product-root-rollback-v1'
+        product = $Product
+        installRoot = $root
+        installRootPreexisted = $InstallRootPreexisted
+        installRootSddl = Get-OriginalSecuritySddl -Path $root
+        mutableDirectories = @($mutableDirectories)
+        shortcutGroup = [IO.Path]::GetFullPath(
+            (Join-Path ([Environment]::GetFolderPath(
+                [Environment+SpecialFolder]::CommonPrograms)) 'MineGuard')).TrimEnd('\')
+        shortcutGroupPreexisted = $ShortcutGroupPreexisted
+    }
+}
+
+function Get-ValidatedProductRootRollbackMetadata {
+    param(
+        [Parameter(Mandatory = $true)] $Snapshot,
+        [Parameter(Mandatory = $true)] $Descriptor
+    )
+    foreach ($propertyName in @(
+            'format', 'product', 'installRoot', 'installRootPreexisted',
+            'installRootSddl', 'mutableDirectories', 'shortcutGroup',
+            'shortcutGroupPreexisted')) {
+        if ($null -eq $Snapshot.PSObject.Properties[$propertyName]) {
+            throw 'Product-root rollback metadata is incomplete.'
+        }
+    }
+    if ([string]$Snapshot.format -cne 'mineguard-product-root-rollback-v1' -or
+        [string]$Snapshot.product -cne $Product -or
+        $Snapshot.installRootPreexisted -isnot [bool] -or
+        $Snapshot.shortcutGroupPreexisted -isnot [bool] -or
+        [string]::IsNullOrWhiteSpace([string]$Snapshot.installRootSddl) -or
+        -not ([string]$Snapshot.installRoot).Equals(
+            $Descriptor.InstallRoot,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Product-root rollback metadata does not match this transaction.'
+    }
+    $installRootExists = Test-Path -LiteralPath $Descriptor.InstallRoot
+    if ($installRootExists) {
+        if (-not (Test-Path -LiteralPath $Descriptor.InstallRoot `
+                -PathType Container)) {
+            throw 'Rollback product root changed type.'
+        }
+        [void](Get-SafeLocalNtfsPath -Path $Descriptor.InstallRoot `
+            -Label 'rollback product root' -MustExist)
+    } elseif ([bool]$Snapshot.installRootPreexisted) {
+        throw 'Pre-existing rollback product root disappeared.'
+    }
+    $expectedShortcutGroup = [IO.Path]::GetFullPath(
+        (Join-Path ([Environment]::GetFolderPath(
+            [Environment+SpecialFolder]::CommonPrograms)) 'MineGuard')).TrimEnd('\')
+    if (-not ([string]$Snapshot.shortcutGroup).Equals(
+            $expectedShortcutGroup, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Product-root rollback shortcut group is invalid.'
+    }
+    if (Test-Path -LiteralPath $expectedShortcutGroup) {
+        if (-not (Test-Path -LiteralPath $expectedShortcutGroup `
+                -PathType Container)) {
+            throw 'MineGuard shortcut group changed type.'
+        }
+        $groupItem = Get-Item -LiteralPath $expectedShortcutGroup -Force
+        if (($groupItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'MineGuard shortcut group became a reparse point.'
+        }
+    } elseif ([bool]$Snapshot.shortcutGroupPreexisted) {
+        throw 'Pre-existing MineGuard shortcut group disappeared.'
+    }
+    $expectedSpecifications = if ($Product -eq 'Platform') {
+        @(Get-PlatformMutableDirectorySpecifications `
+            -Root $Descriptor.InstallRoot)
+    } else { @() }
+    $records = @($Snapshot.mutableDirectories)
+    if ($records.Count -ne $expectedSpecifications.Count) {
+        throw 'Product-root rollback directory set is invalid.'
+    }
+    $validated = New-Object System.Collections.Generic.List[object]
+    for ($index = 0; $index -lt $records.Count; $index++) {
+        $record = $records[$index]
+        foreach ($propertyName in @('name', 'path', 'existed', 'sddl')) {
+            if ($null -eq $record.PSObject.Properties[$propertyName]) {
+                throw 'Product-root rollback directory record is incomplete.'
+            }
+        }
+        $expected = $expectedSpecifications[$index]
+        $expectedPath = [IO.Path]::GetFullPath(
+            [string]$expected.path).TrimEnd('\')
+        if ([string]$record.name -cne [string]$expected.name -or
+            -not ([string]$record.path).Equals(
+                $expectedPath, [StringComparison]::OrdinalIgnoreCase) -or
+            $record.existed -isnot [bool] -or
+            ([bool]$record.existed -and
+                [string]::IsNullOrWhiteSpace([string]$record.sddl))) {
+            throw 'Product-root rollback directory record is invalid.'
+        }
+        if (Test-Path -LiteralPath $expectedPath) {
+            if (-not (Test-Path -LiteralPath $expectedPath -PathType Container)) {
+                throw 'Platform mutable rollback path changed type.'
+            }
+            $item = Get-Item -LiteralPath $expectedPath -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Platform mutable rollback path became a reparse point.'
+            }
+            if (-not [bool]$record.existed) {
+                foreach ($child in @(
+                        Get-ChildItem -LiteralPath $expectedPath -Force)) {
+                    $allowedSettings = [string]$record.name -ceq 'config' -and
+                        $child.Name -ceq 'settings.json' -and
+                        -not $child.PSIsContainer -and
+                        ($child.Attributes -band
+                            [IO.FileAttributes]::ReparsePoint) -eq 0
+                    if (-not $allowedSettings) {
+                        throw 'New Platform mutable directory contains unknown data and was preserved.'
+                    }
+                }
+            }
+        } elseif ([bool]$record.existed) {
+            throw 'Existing Platform mutable directory disappeared.'
+        }
+        $validated.Add([pscustomobject]@{
+            name = [string]$record.name
+            path = $expectedPath
+            existed = [bool]$record.existed
+            sddl = [string]$record.sddl
+        })
+    }
+    return [pscustomobject]@{
+        installRoot = $Descriptor.InstallRoot
+        installRootPreexisted = [bool]$Snapshot.installRootPreexisted
+        installRootSddl = [string]$Snapshot.installRootSddl
+        mutableDirectories = @($validated)
+        shortcutGroup = $expectedShortcutGroup
+        shortcutGroupPreexisted = [bool]$Snapshot.shortcutGroupPreexisted
+    }
+}
+
+function Restore-ProductRootMetadataBeforeArtifacts {
+    param([Parameter(Mandatory = $true)] $Validated)
+    if (Test-Path -LiteralPath $Validated.installRoot -PathType Container) {
+        Set-ExactSecuritySddl -Path $Validated.installRoot -Kind 'directory' `
+            -Sddl $Validated.installRootSddl
+    } elseif ([bool]$Validated.installRootPreexisted) {
+        throw 'Pre-existing rollback product root disappeared.'
+    }
+    foreach ($record in @($Validated.mutableDirectories)) {
+        if ([bool]$record.existed) {
+            Set-ExactSecuritySddl -Path $record.path -Kind 'directory' `
+                -Sddl $record.sddl
+        }
+    }
+}
+
+function Complete-ProductRootMetadataRollback {
+    param([Parameter(Mandatory = $true)] $Validated)
+    foreach ($record in @($Validated.mutableDirectories)) {
+        if ([bool]$record.existed) {
+            Assert-ExactSecuritySddl -Path $record.path `
+                -ExpectedSddl $record.sddl
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $record.path)) { continue }
+        if (-not (Test-Path -LiteralPath $record.path -PathType Container) -or
+            @(Get-ChildItem -LiteralPath $record.path -Force).Count -ne 0) {
+            throw 'New Platform mutable directory is not empty after rollback.'
+        }
+        Remove-Item -LiteralPath $record.path -Force
+    }
+    if (-not [bool]$Validated.shortcutGroupPreexisted -and
+        (Test-Path -LiteralPath $Validated.shortcutGroup)) {
+        if (@(Get-ChildItem -LiteralPath $Validated.shortcutGroup -Force).Count -ne 0) {
+            throw 'New MineGuard shortcut group is not empty after rollback.'
+        }
+        Remove-Item -LiteralPath $Validated.shortcutGroup -Force
+    }
+    if ([bool]$Validated.installRootPreexisted) {
+        Assert-ExactSecuritySddl -Path $Validated.installRoot `
+            -ExpectedSddl $Validated.installRootSddl
+    } elseif (Test-Path -LiteralPath $Validated.installRoot) {
+        if (@(Get-ChildItem -LiteralPath $Validated.installRoot -Force).Count -ne 0) {
+            throw 'New product InstallRoot is not empty after rollback.'
+        }
+        Remove-Item -LiteralPath $Validated.installRoot -Force
+    }
+}
+
+function Get-AgentStateMarkerPath {
+    param([Parameter(Mandatory = $true)] [string] $Root)
+    return Join-Path $Root '.mineguard-enterprise-agent-instances.json'
+}
+
+function Assert-SafeAgentStateRootScope {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Root,
+        [Parameter(Mandatory = $true)] [string] $ApplicationRoot
+    )
+    $normalizedRoot = Get-SafeLocalNtfsPath -Path $Root `
+        -Label 'Agent transaction StateRoot'
+    $normalizedApplication = Get-SafeLocalNtfsPath -Path $ApplicationRoot `
+        -Label 'Agent transaction InstallRoot' -MustExist
+    $protectedCandidates = @(
+        $env:ProgramData,
+        $env:ALLUSERSPROFILE,
+        $env:SystemRoot,
+        $env:ProgramFiles,
+        ${env:ProgramFiles(x86)},
+        $env:CommonProgramFiles,
+        ${env:CommonProgramFiles(x86)},
+        $env:PUBLIC
+    )
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemDrive)) {
+        $protectedCandidates += Join-Path $env:SystemDrive 'Users'
+    }
+    foreach ($candidate in @($protectedCandidates | Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$_)
+            })) {
+        $protected = [IO.Path]::GetFullPath([string]$candidate).TrimEnd('\')
+        if ($normalizedRoot.Equals(
+                $protected, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Agent StateRoot cannot be a broad Windows/system data directory.'
+        }
+    }
+    $statePrefix = $normalizedRoot.TrimEnd('\') + '\'
+    $applicationPrefix = $normalizedApplication.TrimEnd('\') + '\'
+    if ($normalizedRoot.Equals(
+            $normalizedApplication, [StringComparison]::OrdinalIgnoreCase) -or
+        $normalizedRoot.StartsWith(
+            $applicationPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        $normalizedApplication.StartsWith(
+            $statePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Agent InstallRoot and StateRoot must be separate, non-nested directories.'
+    }
+    return $normalizedRoot
+}
+
+function Assert-OrdinaryAgentStateMarkerFile {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Agent StateRoot marker is not a regular file: $Path"
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -le 0 -or $item.Length -gt 1MB) {
+        throw "Agent StateRoot marker is unsafe or outside its size limit: $Path"
+    }
+    return $item
+}
+
+function Assert-TransactionCreatedAgentStateMarker {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $ExpectedRoot,
+        [Parameter(Mandatory = $true)] [string] $ExpectedTransactionId
+    )
+    [void](Assert-OrdinaryAgentStateMarkerFile -Path $Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $strictUtf8 = New-Object -TypeName Text.UTF8Encoding `
+        -ArgumentList @($false, $true)
+    try {
+        $marker = $strictUtf8.GetString($bytes) | ConvertFrom-Json
+    } catch {
+        throw "Transaction-created Agent StateRoot marker is invalid JSON: $Path"
+    }
+    $transactionId = Get-NormalizedTransactionId -Value $ExpectedTransactionId
+    $expectedRootId = [Guid]::ParseExact($transactionId, 'N').ToString('D')
+    $createdUtc = [DateTimeOffset]::MinValue
+    foreach ($propertyName in @(
+            'format', 'product', 'canonical_path', 'root_id', 'created_utc')) {
+        if ($null -eq $marker.PSObject.Properties[$propertyName]) {
+            throw 'Transaction-created Agent StateRoot marker is missing its transaction binding.'
+        }
+    }
+    if ([string]$marker.format -cne
+            'mineguard-enterprise-agent-state-root-v1' -or
+        [string]$marker.product -cne 'MineGuard Enterprise Agent' -or
+        -not ([string]$marker.canonical_path).Equals(
+            $ExpectedRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]$marker.root_id -cne $expectedRootId -or
+        -not [DateTimeOffset]::TryParse(
+            [string]$marker.created_utc, [ref]$createdUtc)) {
+        throw 'Refusing to remove an Agent StateRoot marker not proven to be transaction-created.'
+    }
+}
+
+function Get-AgentStateAclInventory {
+    param([Parameter(Mandatory = $true)] [string] $Root)
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $item = Get-Item -LiteralPath $fullRoot -Force
+    if (-not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Agent StateRoot ACL snapshot root is unsafe: $fullRoot"
+    }
+    # The wrapper-aware child installer never rewrites ACLs below an existing
+    # StateRoot.  Persist only the root descriptor; the marker has a separate
+    # byte/hash/ACL record below.  This keeps a large business-data tree out of
+    # every durable journal generation.
+    return @([pscustomobject]@{
+        path = '.'
+        kind = 'directory'
+        sddl = Get-OriginalSecuritySddl -Path $fullRoot
+    })
+}
+
+function Get-AgentStateAclEntryPath {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Root,
+        [Parameter(Mandatory = $true)] [string] $RelativePath
+    )
+    if ($RelativePath -eq '.') { return $Root }
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or
+        $RelativePath.StartsWith('/') -or $RelativePath.Contains('\') -or
+        $RelativePath.Contains(':')) {
+        throw 'Agent StateRoot ACL snapshot contains an unsafe relative path.'
+    }
+    $segments = $RelativePath.Split('/')
+    if ($segments -contains '' -or $segments -contains '.' -or
+        $segments -contains '..') {
+        throw 'Agent StateRoot ACL snapshot contains an unsafe path segment.'
+    }
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $candidate = [IO.Path]::GetFullPath(
+        (Join-Path $fullRoot $RelativePath.Replace('/', '\')))
+    if (-not $candidate.StartsWith(
+            $fullRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Agent StateRoot ACL snapshot escaped its protected root.'
+    }
+    return $candidate
+}
+
+function Capture-AgentStateRootMetadata {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Root,
+        [Parameter(Mandatory = $true)] [string] $TransactionId
+    )
+    if ($Product -ne 'EnterpriseAgent') { return $null }
+    $normalizedTransactionId = Get-NormalizedTransactionId -Value $TransactionId
+    $normalizedRoot = Assert-SafeAgentStateRootScope -Root $Root `
+        -ApplicationRoot $InstallRoot
+    $rootExisted = Test-Path -LiteralPath $normalizedRoot
+    if ($rootExisted -and
+        -not (Test-Path -LiteralPath $normalizedRoot -PathType Container)) {
+        throw 'Agent transaction StateRoot exists but is not a directory.'
+    }
+    $aclInventory = @()
+    if ($rootExisted) {
+        $aclInventory = @(Get-AgentStateAclInventory -Root $normalizedRoot)
+    }
+    $missingAncestors = New-Object System.Collections.Generic.List[string]
+    $existingAncestor = $normalizedRoot
+    if (-not $rootExisted) {
+        $cursor = $normalizedRoot
+        while (-not (Test-Path -LiteralPath $cursor)) {
+            $missingAncestors.Add($cursor)
+            $parent = Split-Path -Parent $cursor
+            if ([string]::IsNullOrWhiteSpace($parent) -or
+                $parent.Equals($cursor, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Agent StateRoot has no safe existing ancestor.'
+            }
+            $cursor = [IO.Path]::GetFullPath($parent).TrimEnd('\')
+        }
+        if (-not (Test-Path -LiteralPath $cursor -PathType Container)) {
+            throw 'Agent StateRoot existing ancestor is not a directory.'
+        }
+        [void](Get-SafeLocalNtfsPath -Path $cursor `
+            -Label 'Agent StateRoot existing ancestor' -MustExist)
+        $existingAncestor = $cursor
+    }
+    $transactionTemporary = Join-Path $normalizedRoot (
+        '.mineguard-enterprise-agent-instances.tmp-' +
+        $normalizedTransactionId)
+    if (Test-Path -LiteralPath $transactionTemporary) {
+        throw 'Agent StateRoot already contains the reserved transaction marker temporary path.'
+    }
+    $markerPath = Get-AgentStateMarkerPath -Root $normalizedRoot
+    $markerExisted = Test-Path -LiteralPath $markerPath
+    $markerRecord = if ($markerExisted) {
+        $markerItem = Assert-OrdinaryAgentStateMarkerFile -Path $markerPath
+        $markerBytes = [IO.File]::ReadAllBytes($markerPath)
+        [pscustomobject]@{
+            existed = $true
+            bytes = [long]$markerBytes.LongLength
+            sha256 = Get-ByteArraySha256 -Bytes $markerBytes
+            sddl = Get-OriginalSecuritySddl -Path $markerPath
+            attributes = [int]$markerItem.Attributes
+        }
+    } else {
+        [pscustomobject]@{
+            existed = $false
+            bytes = [long]0
+            sha256 = ''
+            sddl = ''
+            attributes = [int]0
+        }
+    }
+    return [pscustomobject]@{
+        format = 'mineguard-enterprise-agent-state-root-rollback-v1'
+        stateRoot = $normalizedRoot
+        rootExisted = [bool]$rootExisted
+        transactionId = $normalizedTransactionId
+        expectedMarkerRootId = [Guid]::ParseExact(
+            $normalizedTransactionId, 'N').ToString('D')
+        marker = $markerRecord
+        aclInventory = @($aclInventory)
+        missingAncestors = @($missingAncestors)
+        existingAncestor = $existingAncestor
+    }
+}
+
+function Restore-AgentStateRootMetadata {
+    param(
+        [Parameter(Mandatory = $true)] $Snapshot,
+        [Parameter(Mandatory = $true)] $Journal
+    )
+    if ($Product -ne 'EnterpriseAgent') { return }
+    foreach ($propertyName in @(
+            'format', 'stateRoot', 'rootExisted', 'transactionId',
+            'expectedMarkerRootId', 'marker', 'aclInventory',
+            'missingAncestors', 'existingAncestor')) {
+        if ($null -eq $Snapshot.PSObject.Properties[$propertyName]) {
+            throw 'Agent StateRoot rollback metadata is incomplete.'
+        }
+    }
+    foreach ($propertyName in @(
+            'existed', 'bytes', 'sha256', 'sddl', 'attributes')) {
+        if ($null -eq $Snapshot.marker.PSObject.Properties[$propertyName]) {
+            throw 'Agent StateRoot marker rollback metadata is incomplete.'
+        }
+    }
+    $transactionId = Get-NormalizedTransactionId -Value (
+        [string]$Snapshot.transactionId)
+    $expectedMarkerRootId = [Guid]::ParseExact(
+        $transactionId, 'N').ToString('D')
+    if ([string]$Snapshot.format -cne
+            'mineguard-enterprise-agent-state-root-rollback-v1' -or
+        [string]::IsNullOrWhiteSpace([string]$Snapshot.stateRoot) -or
+        -not ([string]$Snapshot.stateRoot).Equals(
+            [string]$Journal.stateRoot,
+            [StringComparison]::OrdinalIgnoreCase) -or
+        $transactionId -cne [string]$Journal.transactionId -or
+        [string]$Snapshot.expectedMarkerRootId -cne $expectedMarkerRootId -or
+        $Snapshot.rootExisted -isnot [bool] -or
+        $Snapshot.marker.existed -isnot [bool]) {
+        throw 'Agent StateRoot rollback metadata is invalid.'
+    }
+    $root = Get-SafeLocalNtfsPath -Path ([string]$Snapshot.stateRoot) `
+        -Label 'Agent rollback StateRoot'
+    $missingAncestors = @($Snapshot.missingAncestors)
+    $existingAncestor = Get-SafeLocalNtfsPath `
+        -Path ([string]$Snapshot.existingAncestor) `
+        -Label 'Agent rollback existing StateRoot ancestor' -MustExist
+    if ([bool]$Snapshot.rootExisted) {
+        if ($missingAncestors.Count -ne 0 -or
+            -not $existingAncestor.Equals(
+                $root, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Existing Agent StateRoot has invalid ancestor rollback metadata.'
+        }
+    } else {
+        if ($missingAncestors.Count -eq 0) {
+            throw 'New Agent StateRoot is missing its ancestor rollback metadata.'
+        }
+        $expectedMissing = $root
+        foreach ($missing in $missingAncestors) {
+            $normalizedMissing = Get-SafeLocalNtfsPath `
+                -Path ([string]$missing) `
+                -Label 'Agent rollback missing ancestor'
+            if (-not $normalizedMissing.Equals(
+                    $expectedMissing,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Agent StateRoot ancestor rollback chain is invalid.'
+            }
+            $expectedMissing = [IO.Path]::GetFullPath(
+                (Split-Path -Parent $expectedMissing)).TrimEnd('\')
+        }
+        if (-not $expectedMissing.Equals(
+                $existingAncestor, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Agent StateRoot rollback chain crossed its existing ancestor.'
+        }
+    }
+    if ((Test-Path -LiteralPath $root) -and
+        -not (Test-Path -LiteralPath $root -PathType Container)) {
+        throw 'Agent rollback StateRoot is no longer a directory.'
+    }
+    if ([bool]$Snapshot.rootExisted -and
+        -not (Test-Path -LiteralPath $root -PathType Container)) {
+        throw 'Agent rollback StateRoot disappeared; business data recovery is required.'
+    }
+
+    $markerPath = Get-AgentStateMarkerPath -Root $root
+    $transactionTemporary = Join-Path $root (
+        '.mineguard-enterprise-agent-instances.tmp-' + $transactionId)
+    if (-not [bool]$Snapshot.rootExisted) {
+        for ($index = 0; $index -lt $missingAncestors.Count; $index++) {
+            $missingPath = [IO.Path]::GetFullPath(
+                [string]$missingAncestors[$index]).TrimEnd('\')
+            if (-not (Test-Path -LiteralPath $missingPath)) { continue }
+            if (-not (Test-Path -LiteralPath $missingPath -PathType Container)) {
+                throw 'Transaction-created Agent StateRoot ancestor changed type.'
+            }
+            $missingItem = Get-Item -LiteralPath $missingPath -Force
+            if (($missingItem.Attributes -band
+                    [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Transaction-created Agent StateRoot ancestor became a reparse point.'
+            }
+            foreach ($item in @(
+                    Get-ChildItem -LiteralPath $missingPath -Force)) {
+                $allowed = if ($index -eq 0) {
+                    $item.FullName.Equals(
+                        $markerPath, [StringComparison]::OrdinalIgnoreCase) -or
+                    $item.FullName.Equals(
+                        $transactionTemporary,
+                        [StringComparison]::OrdinalIgnoreCase)
+                } else {
+                    $item.FullName.Equals(
+                        [IO.Path]::GetFullPath(
+                            [string]$missingAncestors[$index - 1]).TrimEnd('\'),
+                        [StringComparison]::OrdinalIgnoreCase)
+                }
+                if (-not $allowed) {
+                    throw 'New Agent StateRoot ancestor contains unknown data and was preserved.'
+                }
+            }
+        }
+    }
+
+    # Existing business descendants are deliberately absent from this record:
+    # the wrapper-aware child installer only validates them and never rewrites
+    # their ACLs.  Validate the one root entry before the first mutation.
+    $validatedEntries = New-Object System.Collections.Generic.List[object]
+    if ([bool]$Snapshot.rootExisted) {
+        $seenPaths = @{}
+        foreach ($entry in @($Snapshot.aclInventory)) {
+            foreach ($propertyName in @('path', 'kind', 'sddl')) {
+                if ($null -eq $entry.PSObject.Properties[$propertyName]) {
+                    throw 'Agent StateRoot ACL snapshot entry is incomplete.'
+                }
+            }
+            $relative = [string]$entry.path
+            $key = $relative.ToLowerInvariant()
+            if ($seenPaths.ContainsKey($key) -or
+                [string]::IsNullOrWhiteSpace([string]$entry.sddl) -or
+                [string]$entry.kind -notin @('directory', 'file')) {
+                throw 'Agent StateRoot ACL snapshot entry is invalid or duplicated.'
+            }
+            $seenPaths[$key] = $true
+            $path = Get-AgentStateAclEntryPath -Root $root `
+                -RelativePath $relative
+            if (-not (Test-Path -LiteralPath $path)) {
+                throw "Agent StateRoot snapshot object disappeared: $path"
+            }
+            $item = Get-Item -LiteralPath $path -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                (([string]$entry.kind -eq 'directory') -ne
+                    [bool]$item.PSIsContainer)) {
+                throw "Agent StateRoot snapshot object changed type: $path"
+            }
+            $validatedEntries.Add([pscustomobject]@{
+                path = $path
+                relative = $relative
+                kind = [string]$entry.kind
+                sddl = [string]$entry.sddl
+                depth = if ($relative -eq '.') { 0 } else {
+                    $relative.Split('/').Count
+                }
+            })
+        }
+        if ($validatedEntries.Count -ne 1 -or
+            -not $seenPaths.ContainsKey('.') -or
+            [string]$validatedEntries[0].kind -cne 'directory') {
+            throw 'Agent StateRoot ACL snapshot must contain only its root entry.'
+        }
+    }
+    if (Test-Path -LiteralPath $transactionTemporary) {
+        $temporaryItem = Get-Item -LiteralPath $transactionTemporary -Force
+        if ($temporaryItem.PSIsContainer -or
+            ($temporaryItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Transaction-bound Agent marker temporary path is unsafe.'
+        }
+    }
+
+    if ([bool]$Snapshot.marker.existed) {
+        $markerItem = Assert-OrdinaryAgentStateMarkerFile -Path $markerPath
+        $markerBytes = [IO.File]::ReadAllBytes($markerPath)
+        if ([long]$markerBytes.LongLength -ne [long]$Snapshot.marker.bytes -or
+            [string]$Snapshot.marker.sha256 -cnotmatch '^[a-f0-9]{64}$' -or
+            (Get-ByteArraySha256 -Bytes $markerBytes) -cne
+                [string]$Snapshot.marker.sha256 -or
+            [string]::IsNullOrWhiteSpace([string]$Snapshot.marker.sddl)) {
+            throw 'Existing Agent StateRoot marker changed during installation.'
+        }
+        [IO.File]::SetAttributes(
+            $markerPath, [IO.FileAttributes][int]$Snapshot.marker.attributes)
+        Set-ExactSecuritySddl -Path $markerPath -Kind 'file' `
+            -Sddl ([string]$Snapshot.marker.sddl)
+    } elseif (Test-Path -LiteralPath $markerPath) {
+        Assert-TransactionCreatedAgentStateMarker -Path $markerPath `
+            -ExpectedRoot $root -ExpectedTransactionId $transactionId
+        Remove-Item -LiteralPath $markerPath -Force
+    }
+
+    if (Test-Path -LiteralPath $transactionTemporary) {
+        Remove-Item -LiteralPath $transactionTemporary -Force
+    }
+
+    if ([bool]$Snapshot.rootExisted) {
+        foreach ($entry in @($validatedEntries |
+                Sort-Object -Property depth, relative)) {
+            Set-ExactSecuritySddl -Path $entry.path -Kind $entry.kind `
+                -Sddl $entry.sddl
+        }
+        foreach ($entry in $validatedEntries) {
+            Assert-ExactSecuritySddl -Path $entry.path `
+                -ExpectedSddl $entry.sddl
+        }
+    } else {
+        foreach ($missing in $missingAncestors) {
+            $path = [IO.Path]::GetFullPath([string]$missing).TrimEnd('\')
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+                throw 'Transaction-created Agent StateRoot ancestor changed type.'
+            }
+            $item = Get-Item -LiteralPath $path -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                @(Get-ChildItem -LiteralPath $path -Force).Count -ne 0) {
+                throw 'Transaction-created Agent StateRoot ancestor contains unknown data.'
+            }
+            Remove-Item -LiteralPath $path -Force
+        }
+    }
 }
 
 function Get-TreeInventory {
@@ -543,7 +1593,7 @@ function Get-TreeInventory {
         $items += @(Get-ChildItem -LiteralPath $Root -Force -Recurse |
             Sort-Object FullName)
     }
-    $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\\') + '\\'
+    $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
     foreach ($item in $items) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Managed product artifact contains a reparse point: $($item.FullName)"
@@ -553,7 +1603,7 @@ function Get-TreeInventory {
                 [StringComparison]::OrdinalIgnoreCase)) {
             '.'
         } else {
-            $item.FullName.Substring($prefix.Length).Replace('\\', '/')
+            $item.FullName.Substring($prefix.Length).Replace('\', '/')
         }
         if ($item.PSIsContainer) {
             $records.Add([pscustomobject]@{
@@ -792,7 +1842,9 @@ function Capture-ArpRegistration {
                 $records.Add([pscustomobject]@{
                     path = [string]$relative
                     sddl = $security.GetSecurityDescriptorSddlForm(
-                        [Security.AccessControl.AccessControlSections]::All)
+                        [Security.AccessControl.AccessControlSections]::Access -bor
+                        [Security.AccessControl.AccessControlSections]::Owner -bor
+                        [Security.AccessControl.AccessControlSections]::Group)
                     values = @($values)
                 })
                 foreach ($child in @($key.GetSubKeyNames() | Sort-Object)) {
@@ -817,6 +1869,26 @@ function Capture-ArpRegistration {
     }
 }
 
+function Flush-ArpRegistryParent {
+    param([Parameter(Mandatory = $true)] $BaseKey,
+          [Parameter(Mandatory = $true)] [string] $SubKey)
+    $separator = $SubKey.LastIndexOf('\')
+    if ($separator -le 0) {
+        throw 'ARP registry path has no flushable parent.'
+    }
+    $parentPath = $SubKey.Substring(0, $separator)
+    $parentKey = $BaseKey.OpenSubKey($parentPath, $true)
+    if ($null -eq $parentKey) {
+        throw 'ARP registry parent disappeared during durable rollback.'
+    }
+    try {
+        # RegistryKey.Flush maps to the native RegFlushKey durability boundary.
+        $parentKey.Flush()
+    } finally {
+        $parentKey.Dispose()
+    }
+}
+
 function Restore-ArpRegistration {
     param([Parameter(Mandatory = $true)] $Snapshot)
     $expectedSubKey = Get-ArpRegistrySubKey -Kind $Product
@@ -828,7 +1900,10 @@ function Restore-ArpRegistration {
         [Microsoft.Win32.RegistryView]::Registry64)
     try {
         try { $base.DeleteSubKeyTree($expectedSubKey, $false) } catch { throw }
-        if (-not [bool]$Snapshot.existed) { return }
+        if (-not [bool]$Snapshot.existed) {
+            Flush-ArpRegistryParent -BaseKey $base -SubKey $expectedSubKey
+            return
+        }
         $records = @($Snapshot.keys | Sort-Object {
             if ([string]$_.path -eq '') {
                 0
@@ -859,12 +1934,21 @@ function Restore-ArpRegistration {
                 }
                 $security = New-Object -TypeName `
                     Security.AccessControl.RegistrySecurity
-                $security.SetSecurityDescriptorSddlForm([string]$record.sddl)
+                $managedSections =
+                    [Security.AccessControl.AccessControlSections]::Access -bor
+                    [Security.AccessControl.AccessControlSections]::Owner -bor
+                    [Security.AccessControl.AccessControlSections]::Group
+                $security.SetSecurityDescriptorSddlForm(
+                    [string]$record.sddl, $managedSections)
                 $key.SetAccessControl($security)
+                # Flush every restored key before rolledback can become
+                # durable; this covers values, security and child-key state.
+                $key.Flush()
             } finally {
                 $key.Dispose()
             }
         }
+        Flush-ArpRegistryParent -BaseKey $base -SubKey $expectedSubKey
     } finally {
         $base.Dispose()
     }
@@ -893,6 +1977,9 @@ function Capture-ManagedArtifacts {
             Copy-Item -LiteralPath $target -Destination $snapshotPath `
                 -Recurse -Force
             Set-ProtectedTransactionTree -Path $snapshotPath
+            # Snapshot content must reach stable storage before a durable
+            # journal generation is allowed to reference it.
+            Sync-FileTreeToDisk -Path $snapshotPath
             Assert-InventoryContent -Root $snapshotPath -Inventory $inventory
         }
         $artifact = [pscustomobject]@{
@@ -932,14 +2019,19 @@ function Set-RestoredTreeSecurity {
         $path = if ([string]$entry.path -eq '.') {
             $Root
         } else {
-            Join-Path $Root ([string]$entry.path).Replace('/', '\\')
+            Join-Path $Root ([string]$entry.path).Replace('/', '\')
         }
         $acl = if ([string]$entry.kind -eq 'directory') {
             New-Object -TypeName Security.AccessControl.DirectorySecurity
         } else {
             New-Object -TypeName Security.AccessControl.FileSecurity
         }
-        $acl.SetSecurityDescriptorSddlForm([string]$entry.sddl)
+        $managedSections =
+            [Security.AccessControl.AccessControlSections]::Access -bor
+            [Security.AccessControl.AccessControlSections]::Owner -bor
+            [Security.AccessControl.AccessControlSections]::Group
+        $acl.SetSecurityDescriptorSddlForm(
+            [string]$entry.sddl, $managedSections)
         Set-Acl -LiteralPath $path -AclObject $acl
     }
 }
@@ -947,17 +2039,28 @@ function Set-RestoredTreeSecurity {
 function Restore-ManagedArtifacts {
     param([Parameter(Mandatory = $true)] $Descriptor,
           [Parameter(Mandatory = $true)] $Journal)
+    $productRootProperty =
+        $Journal.PSObject.Properties['productRootMetadata']
+    if ($null -eq $productRootProperty -or
+        $null -eq $productRootProperty.Value) {
+        throw 'Transaction has no product-root rollback metadata and was preserved.'
+    }
+    $validatedProductRoot = Get-ValidatedProductRootRollbackMetadata `
+        -Snapshot $productRootProperty.Value -Descriptor $Descriptor
     $Journal.state = 'rollingback'
     Write-TransactionJournal -Descriptor $Descriptor -Journal $Journal
 
+    Restore-ProductRootMetadataBeforeArtifacts -Validated $validatedProductRoot
     Restore-ArpRegistration -Snapshot $Journal.arpRegistration
 
-    foreach ($currentUninstaller in @(Get-ChildItem `
-            -LiteralPath $Descriptor.InstallRoot -File -Force |
-            Where-Object {
-                $_.Name -cmatch '^unins[0-9]{3}\.(?:exe|dat|msg)$'
-            })) {
-        Remove-ManagedTarget -Path $currentUninstaller.FullName
+    if (Test-Path -LiteralPath $Descriptor.InstallRoot -PathType Container) {
+        foreach ($currentUninstaller in @(Get-ChildItem `
+                -LiteralPath $Descriptor.InstallRoot -File -Force |
+                Where-Object {
+                    $_.Name -cmatch '^unins[0-9]{3}\.(?:exe|dat|msg)$'
+                })) {
+            Remove-ManagedTarget -Path $currentUninstaller.FullName
+        }
     }
 
     $snapshotRoot = Join-Path $Descriptor.Path 'snapshot'
@@ -998,40 +2101,90 @@ function Restore-ManagedArtifacts {
         Remove-ManagedTarget -Path $target
         Move-Item -LiteralPath $restorePath -Destination $target
         Assert-InventoryContent -Root $target -Inventory @($artifact.inventory)
+        # The restored active tree must be on stable storage before the
+        # cleanup-only rolledback generation is acknowledged.
+        Sync-FileTreeToDisk -Path $target
         $index++
     }
+    if ($Product -eq 'EnterpriseAgent') {
+        $stateMetadataProperty =
+            $Journal.PSObject.Properties['agentStateRootMetadata']
+        if ($null -eq $stateMetadataProperty -or
+            $null -eq $stateMetadataProperty.Value) {
+            throw 'Agent transaction has no StateRoot rollback metadata and was preserved.'
+        }
+        Restore-AgentStateRootMetadata -Snapshot $stateMetadataProperty.Value `
+            -Journal $Journal
+    }
+    # Restore the independent Agent StateRoot before the final fresh-product
+    # directory deletion.  If power is lost after that deletion, a replay can
+    # tolerate the already-absent InstallRoot and still reach the durable
+    # cleanup-only terminal state.
+    Complete-ProductRootMetadataRollback -Validated $validatedProductRoot
     $Journal.state = 'rolledback'
     Write-TransactionJournal -Descriptor $Descriptor -Journal $Journal
 }
 
 function Assert-TransactionContext {
     param([Parameter(Mandatory = $true)] $Journal,
-          [switch] $IncludeRelease)
+          [switch] $IncludeRelease,
+          [switch] $IncludeCurrentStateRoot)
     if ([string]$Journal.product -cne $Product -or
         -not ([string]$Journal.installRoot).Equals(
-            [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\\'),
+            [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\'),
             [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Installer transaction context does not match the current product.'
     }
+    if ($IncludeCurrentStateRoot) {
+        $currentStateRoot = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+            ''
+        } else {
+            Get-NormalizedPathText -Value $StateRoot -Label 'StateRoot'
+        }
+        if (($Product -eq 'EnterpriseAgent' -and
+                [string]::IsNullOrWhiteSpace($currentStateRoot)) -or
+            ($Product -eq 'Platform' -and
+                -not [string]::IsNullOrWhiteSpace($currentStateRoot)) -or
+            -not ([string]$Journal.stateRoot).Equals(
+                $currentStateRoot,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Installer transaction StateRoot changed between phases.'
+        }
+    }
     if ($IncludeRelease) {
         $expected = ($ExpectedReleaseManifestSha256 -replace '\s', '').ToLowerInvariant()
+        $rootMetadataProperty =
+            $Journal.PSObject.Properties['productRootMetadata']
         if ([string]$Journal.expectedReleaseManifestSha256 -cne $expected -or
             [bool]$Journal.allowUnsignedTestMedia -ne [bool]$AllowUnsignedTestMedia -or
             [bool]$Journal.allowUnsignedInternalRelease -ne
                 [bool]$AllowUnsignedInternalRelease -or
             [string]$Journal.approvedSignerThumbprint -cne
-                (($ApprovedSignerThumbprint -replace '\s', '').ToUpperInvariant())) {
+                (($ApprovedSignerThumbprint -replace '\s', '').ToUpperInvariant()) -or
+            $null -eq $rootMetadataProperty -or
+            [bool]$rootMetadataProperty.Value.installRootPreexisted -ne
+                ($WrapperInstallRootPreexisted -ceq '1') -or
+            [bool]$rootMetadataProperty.Value.shortcutGroupPreexisted -ne
+                ($WrapperShortcutGroupPreexisted -ceq '1')) {
             throw 'Installer transaction release authorization changed between phases.'
         }
     }
 }
 
 function Invoke-StagedProductInstaller {
-    param([string] $CandidateRoot, [string] $InstallerPath)
+    param(
+        [string] $CandidateRoot,
+        [string] $InstallerPath,
+        [string] $MarkerTransactionId = ''
+    )
     if ($Product -eq 'Platform') {
         $arguments = @{
             SourceDirectory = $CandidateRoot
             InstallRoot = $InstallRoot
+        }
+        if (-not [string]::IsNullOrWhiteSpace($MarkerTransactionId)) {
+            $arguments['TrustedBootstrapTransactionId'] =
+                Get-NormalizedTransactionId -Value $MarkerTransactionId
         }
         if ($AllowUnsignedInternalRelease) {
             $arguments['AllowUnsignedInternalRelease'] = $true
@@ -1043,6 +2196,10 @@ function Invoke-StagedProductInstaller {
             SourceRoot = $CandidateRoot
             InstallRoot = $InstallRoot
             StateRoot = $StateRoot
+        }
+        if (-not [string]::IsNullOrWhiteSpace($MarkerTransactionId)) {
+            $arguments['TrustedBootstrapTransactionId'] =
+                Get-NormalizedTransactionId -Value $MarkerTransactionId
         }
         if (-not [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint)) {
             $arguments['ApprovedSignerThumbprint'] = $ApprovedSignerThumbprint
@@ -1060,18 +2217,49 @@ function Invoke-StagedProductInstaller {
 }
 
 function Invoke-TransactionRollback {
-    param([Parameter(Mandatory = $true)] $Descriptor)
+    param(
+        [Parameter(Mandatory = $true)] $Descriptor,
+        [switch] $IncludeCurrentStateRoot
+    )
     if (-not (Test-Path -LiteralPath $Descriptor.Path -PathType Container)) {
         return
     }
-    $journal = Read-TransactionJournal -Descriptor $Descriptor
-    Assert-TransactionContext -Journal $journal
+    try {
+        $journalRecord = Read-TransactionJournalRecord -Descriptor $Descriptor
+        $journal = $journalRecord.Journal
+    } catch {
+        if (Test-SafeUninitializedTransactionOrphan -Descriptor $Descriptor) {
+            # Begin may lose power between protected-directory creation and
+            # its first complete journal generation.  With no payload at all,
+            # this orphan cannot represent an installed-product mutation.
+            Remove-TransactionDirectory -Descriptor $Descriptor
+            return
+        }
+        throw (
+            'Installer rollback preserved a transaction with no valid journal ' +
+            'because it contains snapshot, candidate, or unknown data: ' +
+            $Descriptor.Path)
+    }
+    Assert-TransactionContext -Journal $journal `
+        -IncludeCurrentStateRoot:$IncludeCurrentStateRoot
     if ([string]$journal.state -eq 'capturing') {
+        if ([long]$journalRecord.Generation -eq 0 -and
+            -not (Test-TransactionContainsOnlyJournalArtifacts `
+                -Descriptor $Descriptor)) {
+            # The legacy writer overwrote journal.json without a durable
+            # generation.  Its capturing value can lag a later product
+            # mutation, so payload-bearing legacy transactions are preserved
+            # for manual recovery instead of being discarded.
+            throw 'Legacy capturing transaction has payload and was preserved.'
+        }
         Remove-TransactionDirectory -Descriptor $Descriptor
         return
     }
-    if ([string]$journal.state -eq 'wrapper_succeeded') {
-        throw 'A wrapper-confirmed installer transaction cannot be rolled back.'
+    if ([string]$journal.state -in @('rolledback', 'wrapper_succeeded')) {
+        # These durable terminal states are cleanup-only.  Replaying rollback
+        # after a partial cleanup could consume a half-removed snapshot.
+        Remove-TransactionDirectory -Descriptor $Descriptor
+        return
     }
     Restore-ManagedArtifacts -Descriptor $Descriptor -Journal $journal
     Remove-TransactionDirectory -Descriptor $Descriptor
@@ -1091,18 +2279,31 @@ function Recover-StaleTransactions {
         $staleId = $directory.Name.Substring($CurrentDescriptor.Prefix.Length)
         $stale = Get-TransactionDescriptor -Root $CurrentDescriptor.InstallRoot `
             -Kind $Product -Id $staleId
-        $journal = Read-TransactionJournal -Descriptor $stale
-        Assert-TransactionContext -Journal $journal
-        if ([string]$journal.state -eq 'wrapper_succeeded') {
-            $manifestPath = Join-Path $CurrentDescriptor.InstallRoot `
-                'release-metadata\release-manifest.json'
-            if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
-                (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash `
-                    -cne ([string]$journal.expectedReleaseManifestSha256).ToUpperInvariant()) {
-                throw 'A committed stale transaction does not match the active product manifest.'
+        try {
+            $journalRecord = Read-TransactionJournalRecord -Descriptor $stale
+            $journal = $journalRecord.Journal
+        } catch {
+            if (Test-SafeUninitializedTransactionOrphan -Descriptor $stale) {
+                Remove-TransactionDirectory -Descriptor $stale
+                continue
             }
+            throw (
+                'Stale recovery preserved a transaction with no valid journal ' +
+                'because it contains snapshot, candidate, or unknown data: ' +
+                $stale.Path)
+        }
+        Assert-TransactionContext -Journal $journal
+        if ([string]$journal.state -in @('rolledback', 'wrapper_succeeded')) {
+            # Durable wrapper success is the no-return point. Its retained
+            # snapshot, like a rolled-back terminal snapshot, is cleanup-only
+            # data even if a later uninstall or upgrade changed active files.
             Remove-TransactionDirectory -Descriptor $stale
         } elseif ([string]$journal.state -eq 'capturing') {
+            if ([long]$journalRecord.Generation -eq 0 -and
+                -not (Test-TransactionContainsOnlyJournalArtifacts `
+                    -Descriptor $stale)) {
+                throw 'Legacy capturing transaction has payload and was preserved.'
+            }
             Remove-TransactionDirectory -Descriptor $stale
         } else {
             Restore-ManagedArtifacts -Descriptor $stale -Journal $journal
@@ -1152,22 +2353,42 @@ if ($TransactionAction -eq 'Install') {
 
 $normalizedTransactionId = Get-NormalizedTransactionId -Value $TransactionId
 $descriptor = Get-TransactionDescriptor -Root $InstallRoot `
-    -Kind $Product -Id $normalizedTransactionId
+    -Kind $Product -Id $normalizedTransactionId `
+    -AllowMissingInstallRoot:($TransactionAction -eq 'Rollback')
 
 switch ($TransactionAction) {
     'Begin' {
-        Recover-StaleTransactions -CurrentDescriptor $descriptor
-        New-ProtectedTransactionDirectory -Descriptor $descriptor
         $normalizedStateRoot = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
             ''
         } else {
             Get-NormalizedPathText -Value $StateRoot -Label 'StateRoot'
+        }
+        if (($Product -eq 'EnterpriseAgent' -and
+                [string]::IsNullOrWhiteSpace($normalizedStateRoot)) -or
+            ($Product -eq 'Platform' -and
+                -not [string]::IsNullOrWhiteSpace($normalizedStateRoot))) {
+            throw 'StateRoot is required only for the Enterprise Agent transaction.'
         }
         $normalizedExpectedHash = (
             $ExpectedReleaseManifestSha256 -replace '\s', '').ToLowerInvariant()
         if ($normalizedExpectedHash -cnotmatch '^[a-f0-9]{64}$') {
             throw 'ExpectedReleaseManifestSha256 must be exactly 64 hexadecimal characters.'
         }
+        if ($Product -eq 'EnterpriseAgent') {
+            $normalizedStateRoot = Assert-SafeAgentStateRootScope `
+                -Root $normalizedStateRoot `
+                -ApplicationRoot $descriptor.InstallRoot
+        }
+        Recover-StaleTransactions -CurrentDescriptor $descriptor
+        $productRootMetadata = Capture-ProductRootMetadata `
+            -Descriptor $descriptor `
+            -InstallRootPreexisted:($WrapperInstallRootPreexisted -ceq '1') `
+            -ShortcutGroupPreexisted:($WrapperShortcutGroupPreexisted -ceq '1')
+        $agentStateRootMetadata = if ($Product -eq 'EnterpriseAgent') {
+            Capture-AgentStateRootMetadata -Root $normalizedStateRoot `
+                -TransactionId $normalizedTransactionId
+        } else { $null }
+        New-ProtectedTransactionDirectory -Descriptor $descriptor
         $journal = [pscustomobject]@{
             schemaVersion = 1
             product = $Product
@@ -1182,6 +2403,8 @@ switch ($TransactionAction) {
             state = 'capturing'
             arpRegistration = $null
             artifacts = @()
+            productRootMetadata = $productRootMetadata
+            agentStateRootMetadata = $agentStateRootMetadata
         }
         Write-TransactionJournal -Descriptor $descriptor -Journal $journal
         $journal.arpRegistration = Capture-ArpRegistration
@@ -1192,7 +2415,8 @@ switch ($TransactionAction) {
     }
     'Prepare' {
         $journal = Read-TransactionJournal -Descriptor $descriptor
-        Assert-TransactionContext -Journal $journal -IncludeRelease
+        Assert-TransactionContext -Journal $journal -IncludeRelease `
+            -IncludeCurrentStateRoot
         if ([string]$journal.state -cne 'begun') {
             throw 'Installer transaction is not ready for candidate preparation.'
         }
@@ -1210,6 +2434,9 @@ switch ($TransactionAction) {
                 -Recurse -Force
         }
         Set-ProtectedTransactionTree -Path $candidate
+        # The prepared state is recoverable only when every candidate byte was
+        # flushed before its journal generation became durable.
+        Sync-FileTreeToDisk -Path $candidate
         [void](Assert-TrustedReleaseTree -Root $candidate `
             -ExpectedManifestHash $ExpectedReleaseManifestSha256 -Kind $Product)
         $journal.state = 'prepared'
@@ -1217,7 +2444,8 @@ switch ($TransactionAction) {
     }
     'Commit' {
         $journal = Read-TransactionJournal -Descriptor $descriptor
-        Assert-TransactionContext -Journal $journal -IncludeRelease
+        Assert-TransactionContext -Journal $journal -IncludeRelease `
+            -IncludeCurrentStateRoot
         if ([string]$journal.state -cne 'prepared') {
             throw 'Installer transaction is not ready to commit.'
         }
@@ -1228,7 +2456,8 @@ switch ($TransactionAction) {
         $journal.state = 'committing'
         Write-TransactionJournal -Descriptor $descriptor -Journal $journal
         Invoke-StagedProductInstaller -CandidateRoot $candidate `
-            -InstallerPath $stagedInstaller
+            -InstallerPath $stagedInstaller `
+            -MarkerTransactionId $journal.transactionId
         $activeManifest = Join-Path $descriptor.InstallRoot `
             'release-metadata\release-manifest.json'
         if (-not (Test-Path -LiteralPath $activeManifest -PathType Leaf) -or
@@ -1243,14 +2472,16 @@ switch ($TransactionAction) {
         Write-TransactionJournal -Descriptor $descriptor -Journal $journal
     }
     'Rollback' {
-        Invoke-TransactionRollback -Descriptor $descriptor
+        Invoke-TransactionRollback -Descriptor $descriptor `
+            -IncludeCurrentStateRoot
     }
     'Finalize' {
         if (-not (Test-Path -LiteralPath $descriptor.Path -PathType Container)) {
             return
         }
         $journal = Read-TransactionJournal -Descriptor $descriptor
-        Assert-TransactionContext -Journal $journal -IncludeRelease
+        Assert-TransactionContext -Journal $journal -IncludeRelease `
+            -IncludeCurrentStateRoot
         if ([string]$journal.state -cne 'product_committed_unconfirmed') {
             throw 'Only an unconfirmed product commit can be wrapper-confirmed.'
         }

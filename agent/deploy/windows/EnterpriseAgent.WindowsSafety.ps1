@@ -720,6 +720,133 @@ function Set-EAInstanceCanonicalAcl {
         )
 }
 
+function Assert-EACanonicalInstanceBoundaryAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$ServiceSid,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('None', 'RX', 'M')][string]$ServicePermission,
+        [switch]$AllowDedicatedServiceOwner,
+        [string[]]$ExcludedRoots = @()
+    )
+    Assert-EAOrdinaryTree -Root $Root -Name $Name
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $normalizedExclusions = @($ExcludedRoots | ForEach-Object {
+        [IO.Path]::GetFullPath($_).TrimEnd('\')
+    })
+    $allowedSids = @('S-1-5-18', 'S-1-5-32-544')
+    $requiredServiceRights = switch ($ServicePermission) {
+        'RX' { [Security.AccessControl.FileSystemRights]::ReadAndExecute }
+        'M' { [Security.AccessControl.FileSystemRights]::Modify }
+        default { $null }
+    }
+    if ($null -ne $requiredServiceRights) {
+        $allowedSids += $ServiceSid
+    }
+    $trustedOwners = @(
+        'S-1-5-18',
+        'S-1-5-32-544',
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    )
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if ($principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        $trustedOwners += $identity.User.Value
+    }
+    $items = @((Get-Item -LiteralPath $fullRoot -Force)) + @(
+        Get-ChildItem -LiteralPath $fullRoot -Force -Recurse
+    )
+    foreach ($item in $items) {
+        $itemPath = [IO.Path]::GetFullPath($item.FullName).TrimEnd('\')
+        $excluded = @($normalizedExclusions | Where-Object {
+            $itemPath.Equals($_, [StringComparison]::OrdinalIgnoreCase) -or
+            $itemPath.StartsWith(
+                $_ + '\', [StringComparison]::OrdinalIgnoreCase)
+        }).Count -ne 0
+        if ($excluded) { continue }
+        $acl = Get-Acl -LiteralPath $item.FullName
+        if ($itemPath.Equals(
+                $fullRoot, [StringComparison]::OrdinalIgnoreCase) -and
+            -not $acl.AreAccessRulesProtected) {
+            throw "$Name root must disable inherited ACL entries: $fullRoot"
+        }
+        $ownerSid = $acl.GetOwner(
+            [Security.Principal.SecurityIdentifier]).Value
+        $runtimeCreatedServiceOwner = $AllowDedicatedServiceOwner -and
+            $ownerSid -eq $ServiceSid -and
+            -not $itemPath.Equals(
+                $fullRoot, [StringComparison]::OrdinalIgnoreCase)
+        if ($trustedOwners -notcontains $ownerSid -and
+            -not $runtimeCreatedServiceOwner) {
+            throw "$Name has an untrusted owner: $($item.FullName) ($ownerSid)"
+        }
+        $effective = @{}
+        foreach ($rule in $acl.GetAccessRules(
+                $true, $true,
+                [Security.Principal.SecurityIdentifier])) {
+            $sid = $rule.IdentityReference.Value
+            if ($rule.AccessControlType -ne
+                    [Security.AccessControl.AccessControlType]::Allow -or
+                $allowedSids -notcontains $sid) {
+                throw "$Name grants a broad/different identity or noncanonical rule: $($item.FullName) ($sid)"
+            }
+            if (-not $effective.ContainsKey($sid)) {
+                $effective[$sid] =
+                    [Security.AccessControl.FileSystemRights]0
+            }
+            $effective[$sid] = $effective[$sid] -bor $rule.FileSystemRights
+        }
+        $fullControl = [Security.AccessControl.FileSystemRights]::FullControl
+        foreach ($administrativeSid in @('S-1-5-18', 'S-1-5-32-544')) {
+            if (-not $effective.ContainsKey($administrativeSid) -or
+                ($effective[$administrativeSid] -band $fullControl) -ne
+                    $fullControl) {
+                throw "$Name lacks effective SYSTEM/Administrators FullControl: $($item.FullName)"
+            }
+        }
+        if ($null -ne $requiredServiceRights) {
+            $serviceRightsWithSynchronize = $requiredServiceRights -bor
+                [Security.AccessControl.FileSystemRights]::Synchronize
+            if (-not $effective.ContainsKey($ServiceSid) -or
+                ($effective[$ServiceSid] -ne $requiredServiceRights -and
+                    $effective[$ServiceSid] -ne
+                        $serviceRightsWithSynchronize)) {
+                throw "$Name does not have the exact dedicated instance service permission: $($item.FullName)"
+            }
+        }
+    }
+}
+
+function Assert-EAInstanceCanonicalAcl {
+    param([Parameter(Mandatory = $true)][object]$Context)
+    if (-not [bool]$Context.Metadata.acl_hardened) {
+        throw 'Canonical ACL verification refuses an instance created with -SkipAcl.'
+    }
+    $serviceSid = [string]$Context.ServiceIdentity.Sid
+    if ($serviceSid -notmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$') {
+        throw 'Instance service SID is invalid.'
+    }
+    Assert-EACanonicalInstanceBoundaryAcl -Root $Context.InstanceRoot `
+        -Name 'Agent instance boundary' -ServiceSid $serviceSid `
+        -ServicePermission 'RX' `
+        -ExcludedRoots @(
+            $Context.DataDirectory,
+            $Context.LogDirectory,
+            $Context.BackupDirectory
+        )
+    foreach ($writable in @($Context.DataDirectory, $Context.LogDirectory)) {
+        Assert-EACanonicalInstanceBoundaryAcl -Root $writable `
+            -Name 'Writable Agent instance directory' `
+            -ServiceSid $serviceSid -ServicePermission 'M' `
+            -AllowDedicatedServiceOwner
+    }
+    Assert-EACanonicalInstanceBoundaryAcl -Root $Context.BackupDirectory `
+        -Name 'Agent backup directory' -ServiceSid $serviceSid `
+        -ServicePermission 'None'
+}
+
 function Grant-EAServiceWatchReadAcl {
     param(
         [Parameter(Mandatory = $true)][string]$WatchRoot,

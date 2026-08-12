@@ -7,7 +7,8 @@ param(
     [ValidateRange(1, 65535)] [int] $Port = 8080,
     [switch] $AllowUnsignedInternalRelease,
     [string] $ExpectedReleaseManifestSha256 = '',
-    [switch] $AuditFailAfterRuntimeSwitch
+    [switch] $AuditFailAfterRuntimeSwitch,
+    [string] $TrustedBootstrapTransactionId = ''
 )
 
 Set-StrictMode -Version 2.0
@@ -18,6 +19,32 @@ $ServiceAccount = 'NT SERVICE\MineGuardPlatform'
 $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 $OutputEncoding = $utf8NoBom
 try { [Console]::OutputEncoding = $utf8NoBom } catch { }
+
+function Get-ValidatedTrustedBootstrapTransactionGuid {
+    param([AllowEmptyString()] [string] $Value)
+    if ([string]::IsNullOrEmpty($Value)) {
+        return [Guid]::Empty
+    }
+    if ($Value -cnotmatch '^[a-f0-9]{32}$') {
+        throw (
+            'TrustedBootstrapTransactionId must be an exact lowercase ' +
+            'GUID in 32-character N format.'
+        )
+    }
+    $parsed = [Guid]::Empty
+    if (-not [Guid]::TryParseExact($Value, 'N', [ref]$parsed) -or
+        $parsed -eq [Guid]::Empty) {
+        throw 'TrustedBootstrapTransactionId must identify a non-empty GUID.'
+    }
+    return $parsed
+}
+
+# This wrapper-only token changes only which pre-existing ACLs the child may
+# rewrite. Validate it before any installation path is inspected or mutated.
+$null = Get-ValidatedTrustedBootstrapTransactionGuid `
+    -Value $TrustedBootstrapTransactionId
+$trustedBootstrapTransaction = `
+    -not [string]::IsNullOrEmpty($TrustedBootstrapTransactionId)
 if ([string]::IsNullOrWhiteSpace($SourceDirectory)) {
     $SourceDirectory = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 }
@@ -443,6 +470,105 @@ function Set-MineGuardDirectoryAcl {
     }
 }
 
+function Assert-MineGuardExistingTreeAclSafe {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [ValidateSet('RX', 'M')] [string] $ExpectedServicePermission,
+        [switch] $AllowUsersReadExecute,
+        [switch] $AllowDedicatedServiceOwner
+    )
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $fullRoot = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    Assert-MineGuardNoReparseTree -Path $Path
+    $trusted = @{
+        'S-1-5-18' = $true
+        'S-1-5-32-544' = $true
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' = $true
+    }
+    $trustedOwners = @{
+        'S-1-5-18' = $true
+        'S-1-5-32-544' = $true
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' = $true
+    }
+    $trusted[$ServiceSid] = $true
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if ($principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        $trusted[$identity.User.Value] = $true
+        $trustedOwners[$identity.User.Value] = $true
+    }
+    $expectedServiceRights = if ($ExpectedServicePermission -eq 'M') {
+        [Security.AccessControl.FileSystemRights]::Modify
+    } else {
+        [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    }
+    $items = @((Get-Item -LiteralPath $Path -Force))
+    if ($items[0].PSIsContainer) {
+        $items += @(Get-ChildItem -LiteralPath $Path -Force -Recurse)
+    }
+    foreach ($item in $items) {
+        $security = Get-Acl -LiteralPath $item.FullName
+        if ($item.FullName.Equals(
+                $fullRoot, [StringComparison]::OrdinalIgnoreCase) -and
+            -not $security.AreAccessRulesProtected) {
+            throw "Platform 既有业务目录仍在继承外部 ACL：$($item.FullName)"
+        }
+        $owner = $security.GetOwner(
+            [Security.Principal.SecurityIdentifier]).Value
+        $runtimeCreatedServiceOwner = $AllowDedicatedServiceOwner -and
+            $owner -eq $ServiceSid -and
+            -not $item.FullName.Equals(
+                $fullRoot,
+                [StringComparison]::OrdinalIgnoreCase)
+        if (-not $trustedOwners.ContainsKey($owner) -and
+            -not $runtimeCreatedServiceOwner) {
+            throw "Platform 既有业务目录包含不受信任的所有者：$($item.FullName)"
+        }
+        $serviceEffectiveRights =
+            [Security.AccessControl.FileSystemRights]0
+        $usersEffectiveRights =
+            [Security.AccessControl.FileSystemRights]0
+        foreach ($rule in $security.GetAccessRules(
+                $true, $true,
+                [Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -ne
+                    [Security.AccessControl.AccessControlType]::Allow) {
+                throw "Platform 既有业务目录包含非规范拒绝规则：$($item.FullName)"
+            }
+            $sid = $rule.IdentityReference.Value
+            if ($sid -eq $ServiceSid) {
+                $serviceEffectiveRights = $serviceEffectiveRights -bor
+                    $rule.FileSystemRights
+            }
+            if ($trusted.ContainsKey($sid)) { continue }
+            $allowedPublicRead = $AllowUsersReadExecute -and
+                $sid -eq 'S-1-5-32-545'
+            if (-not $allowedPublicRead) {
+                throw "Platform 既有业务目录向普通主体暴露访问权限：$($item.FullName)"
+            }
+            $usersEffectiveRights = $usersEffectiveRights -bor
+                $rule.FileSystemRights
+        }
+        $serviceRightsWithSynchronize = $expectedServiceRights -bor
+            [Security.AccessControl.FileSystemRights]::Synchronize
+        if ($serviceEffectiveRights -ne $expectedServiceRights -and
+            $serviceEffectiveRights -ne $serviceRightsWithSynchronize) {
+            throw "Platform 既有业务目录没有服务所需的精确权限：$($item.FullName)"
+        }
+        if ($AllowUsersReadExecute) {
+            $usersRead =
+                [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            $usersReadWithSynchronize = $usersRead -bor
+                [Security.AccessControl.FileSystemRights]::Synchronize
+            if ($usersEffectiveRights -ne $usersRead -and
+                $usersEffectiveRights -ne $usersReadWithSynchronize) {
+                throw "Platform 公开文档目录没有 Users 精确只读权限：$($item.FullName)"
+            }
+        }
+    }
+}
+
 function Test-MineGuardPlatformRuntimeProcess {
     param([string] $RuntimeRoot)
     $runtimePrefix = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\\') + '\'
@@ -483,6 +609,9 @@ if (-not $binaryMode -and -not $sourceMode) {
 }
 if ($AllowUnsignedInternalRelease -and -not $binaryMode) {
     throw 'AllowUnsignedInternalRelease 只能授权安装标记为 unsigned-internal-release 的二进制发布包。'
+}
+if (-not $binaryMode -and $sourceMode -and $trustedBootstrapTransaction) {
+    throw 'TrustedBootstrapTransactionId is reserved for verified binary installation.'
 }
 if ((Test-PathEqualOrChild -Candidate $InstallRoot -Parent $SourceDirectory) -or
     (Test-PathEqualOrChild -Candidate $SourceDirectory -Parent $InstallRoot)) {
@@ -826,6 +955,25 @@ print(json.dumps({'version': list(sys.version_info[:3]), 'bits': struct.calcsize
     }
 }
 
+if ($binaryMode -and $trustedBootstrapTransaction) {
+    # Existing mutable/public trees are business state owned by the outer
+    # transaction.  Validate them read-only before creating or switching any
+    # candidate path; do not silently repair and thereby evade exact rollback.
+    Assert-MineGuardExistingTreeAclSafe `
+        -Path (Join-Path $InstallRoot 'config') `
+        -ExpectedServicePermission 'RX'
+    foreach ($existingTree in @(
+            (Join-Path $InstallRoot 'state'),
+            (Join-Path $InstallRoot 'backups'),
+            (Join-Path $InstallRoot 'logs'))) {
+        Assert-MineGuardExistingTreeAclSafe -Path $existingTree `
+            -ExpectedServicePermission 'M' -AllowDedicatedServiceOwner
+    }
+    Assert-MineGuardExistingTreeAclSafe `
+        -Path (Join-Path $InstallRoot 'docs') `
+        -ExpectedServicePermission 'RX' -AllowUsersReadExecute
+}
+
 $directories = @(
     $InstallRoot,
     (Join-Path $InstallRoot 'runtime'),
@@ -837,9 +985,13 @@ $directories = @(
     (Join-Path $InstallRoot 'launcher'),
     (Join-Path $InstallRoot 'release-metadata')
 )
+$newlyCreatedDirectories = @{}
 foreach ($directory in $directories) {
     if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        $newlyCreatedDirectories[
+            [System.IO.Path]::GetFullPath($directory).TrimEnd('\')
+        ] = $true
     }
     [void](Get-LocalAbsolutePath -Value $directory -Label '安装目录树' `
         -RequireFixedNtfs)
@@ -872,7 +1024,12 @@ if ($binaryMode) {
     # The trusted Setup bootstrap has already authenticated the staged source.
     # Protect the destination parent before creating any executable incoming
     # directory so an unprivileged local process cannot win a copy/use race.
-    Set-MineGuardDirectoryAcl -Path $InstallRoot -ServicePermission 'RX'
+    if (-not $trustedBootstrapTransaction -or
+        $newlyCreatedDirectories.ContainsKey(
+            [System.IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+        )) {
+        Set-MineGuardDirectoryAcl -Path $InstallRoot -ServicePermission 'RX'
+    }
     $runtimeIncoming = Join-Path $InstallRoot (
         '.runtime.incoming.' + [Guid]::NewGuid().ToString('N')
     )
@@ -1061,12 +1218,18 @@ if ($binaryMode) {
             )
             $settingsCreated = $true
         }
-        # Canonicalize the entire Inno-created tree before the first directory
-        # switch. This removes stale writable ACEs and makes any ACL failure a
-        # pre-commit failure instead of leaving a committed runtime half-frozen.
+        # A direct binary install retains the historical full-tree
+        # canonicalization.  Under the trusted wrapper transaction, the outer
+        # journal owns rollback of pre-existing product and business data, so
+        # this child must not rewrite their ACLs.  Only its fresh candidate
+        # trees (and business directories created by this invocation) are
+        # canonicalized before the first switch. In direct mode this still
+        # makes any ACL failure a pre-commit failure.
         Assert-MineGuardNoReparseTree -Path $InstallRoot
-        Set-MineGuardDirectoryAcl -Path $InstallRoot `
-            -ServicePermission 'RX' -Recurse
+        if (-not $trustedBootstrapTransaction) {
+            Set-MineGuardDirectoryAcl -Path $InstallRoot `
+                -ServicePermission 'RX' -Recurse
+        }
         Set-MineGuardDirectoryAcl -Path $runtimeIncoming `
             -ServicePermission 'RX' -Recurse
         Set-MineGuardDirectoryAcl -Path $serviceIncoming `
@@ -1075,20 +1238,39 @@ if ($binaryMode) {
             -ServicePermission 'RX' -Recurse
         Set-MineGuardDirectoryAcl -Path $launcherIncoming `
             -ServicePermission 'RX' -UsersReadExecute -Recurse
-        Set-MineGuardDirectoryAcl -Path (Join-Path $InstallRoot 'config') `
-            -ServicePermission 'RX' -Recurse
-        foreach ($writableDirectory in @(
+        $configDirectory = Join-Path $InstallRoot 'config'
+        $writableDirectories = @(
             (Join-Path $InstallRoot 'state'),
             (Join-Path $InstallRoot 'backups'),
             (Join-Path $InstallRoot 'logs')
-        )) {
-            Set-MineGuardDirectoryAcl -Path $writableDirectory `
-                -ServicePermission 'M' -Recurse
-        }
-        $docsDirectory = Join-Path $InstallRoot 'docs'
-        if (Test-Path -LiteralPath $docsDirectory -PathType Container) {
-            Set-MineGuardDirectoryAcl -Path $docsDirectory `
-                -ServicePermission 'RX' -UsersReadExecute -Recurse
+        )
+        if (-not $trustedBootstrapTransaction) {
+            Set-MineGuardDirectoryAcl -Path $configDirectory `
+                -ServicePermission 'RX' -Recurse
+            foreach ($writableDirectory in $writableDirectories) {
+                Set-MineGuardDirectoryAcl -Path $writableDirectory `
+                    -ServicePermission 'M' -Recurse
+            }
+            $docsDirectory = Join-Path $InstallRoot 'docs'
+            if (Test-Path -LiteralPath $docsDirectory -PathType Container) {
+                Set-MineGuardDirectoryAcl -Path $docsDirectory `
+                    -ServicePermission 'RX' -UsersReadExecute -Recurse
+            }
+        } else {
+            if ($newlyCreatedDirectories.ContainsKey(
+                    [System.IO.Path]::GetFullPath(
+                        $configDirectory).TrimEnd('\'))) {
+                Set-MineGuardDirectoryAcl -Path $configDirectory `
+                    -ServicePermission 'RX' -Recurse
+            }
+            foreach ($writableDirectory in $writableDirectories) {
+                if ($newlyCreatedDirectories.ContainsKey(
+                        [System.IO.Path]::GetFullPath(
+                            $writableDirectory).TrimEnd('\'))) {
+                    Set-MineGuardDirectoryAcl -Path $writableDirectory `
+                        -ServicePermission 'M' -Recurse
+                }
+            }
         }
 
         $service = Get-Service -Name 'MineGuardPlatform' -ErrorAction SilentlyContinue

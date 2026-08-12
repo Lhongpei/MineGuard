@@ -23,6 +23,8 @@ on:
         default: false
         type: boolean
   push:
+    branches:
+      - "main"
     tags:
       - "windows-v*"
 
@@ -37,8 +39,12 @@ jobs:
   unsigned-test:
     name: Build and install-test unsigned artifacts
     if: >-
-      github.event_name != 'workflow_dispatch' ||
-      inputs.release_mode != 'internal-unsigned'
+      (github.event_name == 'workflow_dispatch' &&
+       inputs.release_mode != 'internal-unsigned') ||
+      (github.event_name == 'push' &&
+       (startsWith(github.ref, 'refs/tags/windows-v') ||
+        (github.ref == 'refs/heads/main' &&
+         contains(github.event.head_commit.message, '[windows-build]'))))
     runs-on: windows-2022
     timeout-minutes: 180
     env:

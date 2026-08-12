@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$InnoCompiler,
     [Parameter(Mandatory = $true)][string]$PlatformStage,
@@ -30,6 +30,22 @@ function Invoke-NativeChecked {
     & $FilePath @ArgumentList
     if ($LASTEXITCODE -ne 0) {
         throw "$Label failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Invoke-RegExeForExitCode {
+    param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 can surface native stderr as an error record
+        # when the script-wide preference is Stop. Missing-key probes are an
+        # expected nonzero result, so retain only reg.exe's native exit code.
+        $ErrorActionPreference = "Continue"
+        & "$env:SystemRoot\System32\reg.exe" @ArgumentList 2>&1 | Out-Null
+        return [int]$LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
     }
 }
 
@@ -264,6 +280,221 @@ function Write-FailureProbeReleaseIntegrity {
     return (Get-FileHash -LiteralPath $ManifestPath -Algorithm SHA256).Hash
 }
 
+function Remove-TestAuthenticodeCertificate {
+    param([Parameter(Mandatory = $true)][string]$ExecutablePath)
+    $Signature = Get-AuthenticodeSignature -LiteralPath $ExecutablePath
+    if ($Signature.Status.ToString() -eq "NotSigned") { return }
+    $Bytes = [IO.File]::ReadAllBytes($ExecutablePath)
+    if ($Bytes.Length -lt 256) {
+        throw "Signed probe executable is too small to be a valid PE image."
+    }
+    $PeOffset = [BitConverter]::ToInt32($Bytes, 0x3c)
+    if ($PeOffset -lt 0x40 -or $PeOffset + 256 -gt $Bytes.Length -or
+        [BitConverter]::ToUInt32($Bytes, $PeOffset) -ne 0x00004550) {
+        throw "Signed probe executable has an invalid PE header."
+    }
+    $OptionalHeader = $PeOffset + 24
+    $Magic = [BitConverter]::ToUInt16($Bytes, $OptionalHeader)
+    $DataDirectoryOffset = switch ($Magic) {
+        0x10b { $OptionalHeader + 96; break }
+        0x20b { $OptionalHeader + 112; break }
+        default { throw "Signed probe executable has an unsupported PE format." }
+    }
+    $SecurityDirectory = $DataDirectoryOffset + (8 * 4)
+    $CertificateOffset = [BitConverter]::ToUInt32($Bytes, $SecurityDirectory)
+    $CertificateSize = [BitConverter]::ToUInt32($Bytes, $SecurityDirectory + 4)
+    if ($CertificateOffset -eq 0 -or $CertificateSize -eq 0 -or
+        [long]$CertificateOffset + [long]$CertificateSize -gt $Bytes.LongLength) {
+        throw "Signed probe executable has an invalid Authenticode directory."
+    }
+    # The PE security directory is a file offset, not an RVA. Zeroing the
+    # directory removes the signature without changing executable code or
+    # depending on a certificate/private key; the orphaned certificate bytes
+    # remain inert overlay data for this test-only copy.
+    for ($Index = 0; $Index -lt 8; $Index++) {
+        $Bytes[$SecurityDirectory + $Index] = 0
+    }
+    [IO.File]::WriteAllBytes($ExecutablePath, $Bytes)
+    $Unsigned = Get-AuthenticodeSignature -LiteralPath $ExecutablePath
+    if ($Unsigned.Status.ToString() -ne "NotSigned" -or
+        $null -ne $Unsigned.SignerCertificate) {
+        throw "Could not create an unsigned test-only copy of the probe executable."
+    }
+}
+
+function New-UnsignedWrapperProbeStage {
+    param(
+        [ValidateSet("platform", "agent")][string]$Product,
+        [string]$OriginalStage,
+        [string]$Destination
+    )
+    New-Item -ItemType Directory -Path $Destination | Out-Null
+    foreach ($Item in Get-ChildItem -LiteralPath $OriginalStage -Force) {
+        Copy-Item -LiteralPath $Item.FullName -Destination $Destination -Recurse
+    }
+    $ExecutableName = if ($Product -eq "platform") {
+        "MineGuardPlatform.exe"
+    }
+    else {
+        "MineGuardEnterpriseAgent.exe"
+    }
+    $Executable = Join-Path $Destination "runtime\$ExecutableName"
+    Remove-TestAuthenticodeCertificate -ExecutablePath $Executable
+
+    $Utf8NoBom = New-Object Text.UTF8Encoding($false)
+    $ManifestPath = Join-Path $Destination "release-manifest.json"
+    $MetadataPath = Join-Path $Destination "build-metadata.json"
+    $Manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+    $Metadata = Get-Content -LiteralPath $MetadataPath -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+    if ($Product -eq "platform") {
+        $Manifest.codeSigned = $false
+        $Manifest.authenticodeVerified = $false
+        $Manifest.releaseClassification = "unsigned-test-artifacts"
+        $Metadata.codeSigned = $false
+        $Metadata.authenticodeVerified = $false
+        $Metadata.releaseClassification = "unsigned-test-artifacts"
+        $Metadata.signingCertificateThumbprint = $null
+    }
+    else {
+        $Manifest.authenticode_signed = $false
+        $Manifest.signing_certificate_thumbprint = $null
+        $Manifest.timestamp_verified = $false
+        $Manifest.timestamp_url = $null
+        $Manifest.release_classification = "unsigned-test-only"
+        $Metadata.authenticode_signed = $false
+        $Metadata.signing_certificate_thumbprint = $null
+        $Metadata.timestamp_verified = $false
+        $Metadata.timestamp_url = $null
+        $Metadata.release_classification = "unsigned-test-only"
+    }
+    [IO.File]::WriteAllText(
+        $MetadataPath,
+        (($Metadata | ConvertTo-Json -Depth 50) + [Environment]::NewLine),
+        $Utf8NoBom
+    )
+    [IO.File]::WriteAllText(
+        $ManifestPath,
+        (($Manifest | ConvertTo-Json -Depth 50) + [Environment]::NewLine),
+        $Utf8NoBom
+    )
+    return Write-FailureProbeReleaseIntegrity `
+        -Product $Product -StageRoot $Destination `
+        -OriginalManifestPath $ManifestPath
+}
+
+function Get-WrapperShortcutPaths {
+    param([ValidateSet("platform", "agent")][string]$Product)
+    $Group = Join-Path ([Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::CommonPrograms)) "MineGuard"
+    $Names = if ($Product -eq "platform") {
+        @(
+            "MineGuard Platform 控制中心.lnk",
+            "MineGuard 企业接入包与注册向导.lnk",
+            "MineGuard Platform 使用与部署说明.lnk"
+        )
+    }
+    else {
+        @(
+            "MineGuard Enterprise Agent deployment guide.lnk",
+            "MineGuard 企业接入配置向导.lnk",
+            "MineGuard 模型授权导入向导.lnk",
+            "Enterprise Agent operations console.lnk"
+        )
+    }
+    $Paths = @($Names | ForEach-Object { Join-Path $Group $_ })
+    if ($Product -eq "platform") {
+        $Paths += Join-Path ([Environment]::GetFolderPath(
+            [Environment+SpecialFolder]::CommonDesktopDirectory)) `
+            "MineGuard Platform 控制中心.lnk"
+    }
+    return $Paths
+}
+
+function Get-ExactArtifactSnapshot {
+    param([Parameter(Mandatory = $true)][string[]]$Paths)
+    $Snapshot = @{}
+    foreach ($PathValue in $Paths) {
+        $Full = [IO.Path]::GetFullPath($PathValue)
+        $RootKey = $Full.ToLowerInvariant()
+        if (-not (Test-Path -LiteralPath $Full)) {
+            $Snapshot[$RootKey] = "<missing>"
+            continue
+        }
+        $RootItem = Get-Item -LiteralPath $Full -Force
+        $Items = @($RootItem)
+        if ($RootItem.PSIsContainer) {
+            $Items += @(Get-ChildItem -LiteralPath $Full -Force -Recurse |
+                Sort-Object FullName)
+        }
+        $Prefix = $Full.TrimEnd('\') + '\'
+        foreach ($Item in $Items) {
+            $Relative = if ($Item.FullName.Equals(
+                    $Full, [StringComparison]::OrdinalIgnoreCase)) {
+                "."
+            }
+            else {
+                $Item.FullName.Substring($Prefix.Length).Replace('\', '/')
+            }
+            $Key = "$RootKey|$Relative"
+            $Acl = Get-Acl -LiteralPath $Item.FullName
+            $Security = "$($Acl.Owner)|$($Acl.AreAccessRulesProtected)|$($Acl.Sddl)"
+            if ($Item.PSIsContainer) {
+                $Snapshot[$Key] = "directory|$Security"
+            }
+            else {
+                $Snapshot[$Key] = (
+                    "file|$($Item.Length)|" +
+                    (Get-FileHash -LiteralPath $Item.FullName `
+                        -Algorithm SHA256).Hash + "|$Security"
+                )
+            }
+        }
+    }
+    return $Snapshot
+}
+
+function Assert-ExactArtifactSnapshot {
+    param([hashtable]$Expected, [string[]]$Paths, [string]$Label)
+    $Actual = Get-ExactArtifactSnapshot -Paths $Paths
+    if ($Expected.Count -ne $Actual.Count) {
+        throw "$Label changed the managed artifact set."
+    }
+    foreach ($Key in $Expected.Keys) {
+        if (-not $Actual.ContainsKey($Key) -or $Actual[$Key] -cne $Expected[$Key]) {
+            throw "$Label failed exact content/ACL restoration: $Key"
+        }
+    }
+}
+
+function Get-ArpRegistrationSnapshot {
+    param(
+        [ValidateSet("platform", "agent")][string]$Product,
+        [string]$ScratchRoot
+    )
+    $ApplicationId = if ($Product -eq "platform") {
+        "{8B391CBD-E234-46D7-9946-E9D37F2649C1}"
+    }
+    else {
+        "{9B73DE95-6B38-4482-A8BC-2A4FC656D05A}"
+    }
+    $Key = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\${ApplicationId}_is1"
+    $ExportPath = Join-Path $ScratchRoot (
+        "arp-" + [Guid]::NewGuid().ToString("N") + ".reg")
+    try {
+        & "$env:SystemRoot\System32\reg.exe" export $Key $ExportPath /y `
+            /reg:64 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "$Product ARP registration is missing after baseline install."
+        }
+        return (Get-FileHash -LiteralPath $ExportPath -Algorithm SHA256).Hash
+    }
+    finally {
+        Remove-Item -LiteralPath $ExportPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-OneFailureProbe {
     param(
         [ValidateSet("platform", "agent")][string]$Product,
@@ -338,13 +569,6 @@ function Test-OneFailureProbe {
         Write-FailureProbeLog -Product $Product -LogPath $ProbeLog
         throw "$Product corrupted staging was incorrectly accepted by the installer."
     }
-    if ($ProbeExitCode -ne 1001) {
-        Write-FailureProbeLog -Product $Product -LogPath $ProbeLog
-        throw (
-            "$Product corrupted staging returned unexpected installer exit code " +
-            "$ProbeExitCode instead of guarded product failure code 1001."
-        )
-    }
     foreach ($ImmutableDirectory in @("runtime", "release-metadata", "deploy", "service")) {
         if (Test-Path -LiteralPath (Join-Path $InstallRoot $ImmutableDirectory)) {
             Write-FailureProbeLog -Product $Product -LogPath $ProbeLog
@@ -355,6 +579,570 @@ function Test-OneFailureProbe {
         }
     }
     Write-Host "$Product installer propagated the guarded product-installer failure (exit $ProbeExitCode)."
+}
+
+function Test-OneSetupMutexExclusion {
+    param(
+        [ValidateSet("platform", "agent")][string]$Product,
+        [string]$InstallerPath,
+        [object[]]$InstallArguments,
+        [string]$InstallRoot,
+        [string]$StateRoot,
+        [string]$ArpKey,
+        [string[]]$ShortcutPaths,
+        [string]$TransactionPrefix,
+        [string]$ProbeRoot
+    )
+    $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $Principal = [Security.Principal.WindowsPrincipal]::new($Identity)
+    if (-not $Principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw "The SetupMutex native probe must run in an elevated administrator process."
+    }
+    $UnexpectedRoots = @($InstallRoot)
+    if ($Product -eq "agent") { $UnexpectedRoots += $StateRoot }
+    foreach ($UnexpectedRoot in $UnexpectedRoots) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$UnexpectedRoot) -and
+            (Test-Path -LiteralPath $UnexpectedRoot)) {
+            throw "$Product SetupMutex probe precondition already exists: $UnexpectedRoot"
+        }
+    }
+    $ExistingTransaction = Get-ChildItem -LiteralPath (
+        Split-Path -Parent $InstallRoot) -Directory -Force |
+        Where-Object { $_.Name.StartsWith($TransactionPrefix) } |
+        Select-Object -First 1
+    if ($null -ne $ExistingTransaction) {
+        throw "$Product SetupMutex probe found a pre-existing transaction: $($ExistingTransaction.FullName)"
+    }
+
+    $MutexName = "Global\MineGuard-Setup-Transaction-v1"
+    $CreatedNew = $false
+    $Mutex = $null
+    $MutexLog = Join-Path $ProbeRoot "setup-mutex-blocked.log"
+    $BlockedExit = $null
+    try {
+        $Mutex = [Threading.Mutex]::new(
+            $true, $MutexName, [ref]$CreatedNew)
+        if (-not $CreatedNew) {
+            throw "The stable global MineGuard SetupMutex already exists."
+        }
+        $BlockedArguments = @($InstallArguments) + "/LOG=$MutexLog"
+        $BlockedExit = Invoke-ProcessTreeWithTransientAccessRetry `
+            -FilePath $InstallerPath -ArgumentList $BlockedArguments `
+            -TimeoutSeconds 30
+    }
+    finally {
+        if ($null -ne $Mutex) {
+            try {
+                if ($CreatedNew) { [void]$Mutex.ReleaseMutex() }
+            }
+            finally {
+                $Mutex.Dispose()
+            }
+        }
+    }
+    if ($null -eq $BlockedExit -or [int]$BlockedExit -eq 0) {
+        Write-FailureProbeLog -Product $Product -LogPath $MutexLog
+        throw "$Product Setup incorrectly ran while the stable global SetupMutex was held."
+    }
+    if (Test-Path -LiteralPath $InstallRoot) {
+        Write-FailureProbeLog -Product $Product -LogPath $MutexLog
+        throw "$Product SetupMutex rejection created InstallRoot."
+    }
+    if ($Product -eq "agent" -and (Test-Path -LiteralPath $StateRoot)) {
+        Write-FailureProbeLog -Product $Product -LogPath $MutexLog
+        throw "$Product SetupMutex rejection created StateRoot."
+    }
+    if ((Invoke-RegExeForExitCode -ArgumentList @(
+            "query", $ArpKey, "/reg:64")) -eq 0) {
+        throw "$Product SetupMutex rejection created an HKLM64 ARP registration."
+    }
+    foreach ($Shortcut in $ShortcutPaths) {
+        if (Test-Path -LiteralPath $Shortcut) {
+            throw "$Product SetupMutex rejection created a shortcut: $Shortcut"
+        }
+    }
+    $LeakedTransaction = Get-ChildItem -LiteralPath (
+        Split-Path -Parent $InstallRoot) -Directory -Force |
+        Where-Object { $_.Name.StartsWith($TransactionPrefix) } |
+        Select-Object -First 1
+    if ($null -ne $LeakedTransaction) {
+        throw "$Product SetupMutex rejection created a retained transaction: $($LeakedTransaction.FullName)"
+    }
+    Write-Host (
+        "$Product SetupMutex rejected the competing Setup with exit " +
+        "$BlockedExit before any persistent product artifact was created."
+    )
+}
+
+function Test-OneUninstallMutexExclusion {
+    param(
+        [ValidateSet("platform", "agent")][string]$Product,
+        [string]$UninstallerPath,
+        [string]$InstallRoot,
+        [string]$StateRoot,
+        [string]$ArpKey,
+        [string[]]$ShortcutPaths,
+        [string]$ProbeRoot
+    )
+    if (-not (Test-Path -LiteralPath $InstallRoot -PathType Container) -or
+        -not (Test-Path -LiteralPath $UninstallerPath -PathType Leaf)) {
+        throw "$Product uninstall SetupMutex probe requires a complete baseline install."
+    }
+    $SnapshotPaths = @($InstallRoot) + @($ShortcutPaths)
+    if ($Product -eq "agent") {
+        if (-not (Test-Path -LiteralPath $StateRoot -PathType Container)) {
+            throw "$Product uninstall SetupMutex probe is missing StateRoot."
+        }
+        $SnapshotPaths += $StateRoot
+    }
+    $BeforeArtifacts = Get-ExactArtifactSnapshot -Paths $SnapshotPaths
+    $BeforeArp = Get-ArpRegistrationSnapshot `
+        -Product $Product -ScratchRoot $ProbeRoot
+
+    $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $Principal = [Security.Principal.WindowsPrincipal]::new($Identity)
+    if (-not $Principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw "The uninstall SetupMutex probe must run in an elevated administrator process."
+    }
+    $MutexName = "Global\MineGuard-Setup-Transaction-v1"
+    $CreatedNew = $false
+    $Mutex = $null
+    $MutexLog = Join-Path $ProbeRoot "uninstall-mutex-blocked.log"
+    $BlockedExit = $null
+    try {
+        $Mutex = [Threading.Mutex]::new(
+            $true, $MutexName, [ref]$CreatedNew)
+        if (-not $CreatedNew) {
+            throw "The stable global MineGuard SetupMutex already exists."
+        }
+        $BlockedExit = Invoke-ProcessTreeWithTransientAccessRetry `
+            -FilePath $UninstallerPath `
+            -ArgumentList @(
+                "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                "/LOG=$MutexLog"
+            ) -TimeoutSeconds 30
+    }
+    finally {
+        if ($null -ne $Mutex) {
+            try {
+                if ($CreatedNew) { [void]$Mutex.ReleaseMutex() }
+            }
+            finally {
+                $Mutex.Dispose()
+            }
+        }
+    }
+
+    $Failures = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $BlockedExit -or [int]$BlockedExit -eq 0) {
+        $Failures.Add("the blocked uninstaller did not return a nonzero exit code")
+    }
+    try {
+        Assert-ExactArtifactSnapshot -Expected $BeforeArtifacts `
+            -Paths $SnapshotPaths -Label "$Product blocked uninstall"
+    }
+    catch {
+        $Failures.Add($_.Exception.Message)
+    }
+    try {
+        $AfterArp = Get-ArpRegistrationSnapshot `
+            -Product $Product -ScratchRoot $ProbeRoot
+        if ($AfterArp -cne $BeforeArp) {
+            $Failures.Add("the blocked uninstaller changed HKLM64 ARP")
+        }
+    }
+    catch {
+        $Failures.Add($_.Exception.Message)
+    }
+    if ($Failures.Count -ne 0) {
+        Write-FailureProbeLog -Product $Product -LogPath $MutexLog
+        throw (
+            "$Product uninstall SetupMutex exclusion failed: " +
+            (@($Failures) -join "; ")
+        )
+    }
+    Write-Host (
+        "$Product uninstall SetupMutex rejected the competing uninstaller " +
+        "with exit $BlockedExit and preserved InstallRoot/StateRoot, " +
+        "shortcuts and HKLM64 ARP exactly."
+    )
+}
+
+function Test-AgentStateRootMarkerRollback {
+    param(
+        [string]$FailureInstaller,
+        [string]$ProbeRoot,
+        [string]$ArpKey,
+        [string[]]$ShortcutPaths,
+        [string]$TransactionPrefix
+    )
+    $MarkerLeaf = ".mineguard-enterprise-agent-instances.json"
+    $ShortcutGroup = Split-Path -Parent $ShortcutPaths[0]
+    $Scenarios = @(
+        [pscustomobject]@{
+            Name = "preexisting-empty-unmarked"
+            RootExisted = $true
+            StateRelative = "state"
+            MissingAncestorRelative = ""
+        },
+        [pscustomobject]@{
+            Name = "new-state-root"
+            RootExisted = $false
+            StateRelative = "missing-parent-a\missing-parent-b\state"
+            MissingAncestorRelative = "missing-parent-a"
+        }
+    )
+    foreach ($Scenario in $Scenarios) {
+        $ScenarioRoot = Join-Path $ProbeRoot ("state-" + $Scenario.Name)
+        $InstallRoot = Join-Path $ScenarioRoot "installed"
+        $StateRoot = Join-Path $ScenarioRoot ([string]$Scenario.StateRelative)
+        $MissingAncestorRoot = if ([string]::IsNullOrWhiteSpace(
+                [string]$Scenario.MissingAncestorRelative)) {
+            ""
+        }
+        else {
+            Join-Path $ScenarioRoot ([string]$Scenario.MissingAncestorRelative)
+        }
+        $FailureLog = Join-Path $ScenarioRoot "failure.log"
+        New-Item -ItemType Directory -Path $ScenarioRoot | Out-Null
+        if ([bool]$Scenario.RootExisted) {
+            New-Item -ItemType Directory -Path $StateRoot | Out-Null
+            if (@(Get-ChildItem -LiteralPath $StateRoot -Force).Count -ne 0) {
+                throw "Agent StateRoot rollback fixture must start empty and unmarked."
+            }
+        }
+        $BeforeState = Get-ExactArtifactSnapshot `
+            -Paths @($InstallRoot, $StateRoot, $ShortcutGroup)
+        $InstallArguments = @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
+            "/ALLOW_UNSIGNED_TEST_MEDIA=1", "/DIR=$InstallRoot",
+            "/STATE_ROOT=$StateRoot", "/LOG=$FailureLog"
+        )
+        $FailureExit = Invoke-ProcessTreeWithTransientAccessRetry `
+            -FilePath $FailureInstaller -ArgumentList $InstallArguments `
+            -TimeoutSeconds 120
+
+        $Failures = New-Object System.Collections.Generic.List[string]
+        if ($FailureExit -ne 1001) {
+            $Failures.Add(
+                "wrapper fault returned $FailureExit instead of exit code 1001")
+        }
+        if (-not (Test-Path -LiteralPath $FailureLog -PathType Leaf)) {
+            $Failures.Add("wrapper fault did not create its Inno diagnostic log")
+        }
+        else {
+            $FailureLogText = Get-Content -LiteralPath $FailureLog -Raw
+            if ($FailureLogText -notmatch
+                "Release audit fault injection after wrapper persistence") {
+                $Failures.Add("wrapper fault did not reach ssPostInstall")
+            }
+        }
+        try {
+            Assert-ExactArtifactSnapshot -Expected $BeforeState `
+                -Paths @($InstallRoot, $StateRoot, $ShortcutGroup) `
+                -Label "Agent $($Scenario.Name) StateRoot rollback"
+        }
+        catch {
+            $Failures.Add($_.Exception.Message)
+        }
+        $MarkerPath = Join-Path $StateRoot $MarkerLeaf
+        if (Test-Path -LiteralPath $MarkerPath) {
+            $Failures.Add("transaction-created StateRoot marker was retained")
+        }
+        if ([bool]$Scenario.RootExisted) {
+            if (-not (Test-Path -LiteralPath $StateRoot -PathType Container) -or
+                @(Get-ChildItem -LiteralPath $StateRoot -Force).Count -ne 0) {
+                $Failures.Add(
+                    "the pre-existing empty unmarked StateRoot was not restored")
+            }
+        }
+        elseif (Test-Path -LiteralPath $StateRoot) {
+            $Failures.Add("the transaction-created StateRoot was not removed")
+        }
+        if (Test-Path -LiteralPath $InstallRoot) {
+            $Failures.Add("the transaction-created InstallRoot was not removed")
+        }
+        if (-not [string]::IsNullOrWhiteSpace($MissingAncestorRoot) -and
+            (Test-Path -LiteralPath $MissingAncestorRoot)) {
+            $Failures.Add(
+                "transaction-created StateRoot ancestor directories were not removed")
+        }
+        if ((Invoke-RegExeForExitCode -ArgumentList @(
+                "query", $ArpKey, "/reg:64")) -eq 0) {
+            $Failures.Add("StateRoot rollback left an HKLM64 ARP registration")
+        }
+        foreach ($Shortcut in $ShortcutPaths) {
+            if (Test-Path -LiteralPath $Shortcut) {
+                $Failures.Add("StateRoot rollback left a shortcut: $Shortcut")
+            }
+        }
+        $LeakedTransaction = Get-ChildItem -LiteralPath $ScenarioRoot `
+            -Directory -Force |
+            Where-Object { $_.Name.StartsWith($TransactionPrefix) } |
+            Select-Object -First 1
+        if ($null -ne $LeakedTransaction) {
+            $Failures.Add(
+                "StateRoot rollback leaked transaction $($LeakedTransaction.FullName)")
+        }
+        if ($Failures.Count -ne 0) {
+            Write-FailureProbeLog -Product "agent $($Scenario.Name)" `
+                -LogPath $FailureLog
+            throw (
+                "Agent StateRoot marker rollback probe failed: " +
+                (@($Failures) -join "; ")
+            )
+        }
+        Write-Host (
+            "Agent $($Scenario.Name) failure restored the StateRoot path, " +
+            "root ACL and marker absence exactly."
+        )
+    }
+}
+
+function Test-OneWrapperPersistenceRollback {
+    param(
+        [ValidateSet("platform", "agent")][string]$Product,
+        [string]$OriginalStage,
+        [string]$InnoScript,
+        [string]$Version,
+        [string]$ProbeRoot
+    )
+    $Stage = Join-Path $ProbeRoot "stage"
+    $BaselineOutput = Join-Path $ProbeRoot "baseline-output"
+    $FailureOutput = Join-Path $ProbeRoot "failure-output"
+    $InstallRoot = Join-Path $ProbeRoot "installed"
+    $StateRoot = Join-Path $ProbeRoot "state"
+    $FailureLog = Join-Path $ProbeRoot "wrapper-failure.log"
+    New-Item -ItemType Directory -Path $ProbeRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $BaselineOutput | Out-Null
+    New-Item -ItemType Directory -Path $FailureOutput | Out-Null
+    $ChildManifestHash = New-UnsignedWrapperProbeStage `
+        -Product $Product -OriginalStage $OriginalStage -Destination $Stage
+    $TrustedBootstrapHash = (Get-FileHash -LiteralPath (Join-Path $AssetsRoot `
+        "Invoke-MineGuardTrustedProductInstall.ps1") -Algorithm SHA256).Hash
+    $ShortcutPaths = @(Get-WrapperShortcutPaths -Product $Product)
+    foreach ($Shortcut in $ShortcutPaths) {
+        if (Test-Path -LiteralPath $Shortcut) {
+            throw "$Product wrapper probe refuses to overwrite an existing shortcut: $Shortcut"
+        }
+    }
+    $ApplicationId = if ($Product -eq "platform") {
+        "{8B391CBD-E234-46D7-9946-E9D37F2649C1}"
+    }
+    else {
+        "{9B73DE95-6B38-4482-A8BC-2A4FC656D05A}"
+    }
+    $ArpKey = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\${ApplicationId}_is1"
+    if ((Invoke-RegExeForExitCode -ArgumentList @(
+            "query", $ArpKey, "/reg:64")) -eq 0) {
+        throw "$Product wrapper probe refuses to overwrite an existing ARP registration."
+    }
+    $TransactionPrefix = if ($Product -eq "platform") {
+        ".mineguard-platform-inno-transaction-"
+    }
+    else {
+        ".mineguard-agent-inno-transaction-"
+    }
+
+    $CommonCompileArguments = @(
+        "/Qp",
+        "/DStageRoot=$Stage",
+        "/DAssetsRoot=$AssetsRoot",
+        "/DAppVersion=$Version",
+        "/DNumericVersion=$Version.0",
+        "/DChildReleaseManifestSha256=$ChildManifestHash",
+        "/DTrustedBootstrapSha256=$TrustedBootstrapHash"
+    )
+    $BaselineArtifact = "MineGuard-$Product-WrapperBaseline"
+    $FailureArtifact = "MineGuard-$Product-WrapperPersistenceFailure"
+    Invoke-NativeChecked -FilePath $InnoCompiler -ArgumentList (
+        $CommonCompileArguments + @(
+            "/DOutputDir=$BaselineOutput",
+            "/DArtifactFileName=$BaselineArtifact",
+            $InnoScript
+        )) -Label "$Product wrapper baseline compilation"
+    Invoke-NativeChecked -FilePath $InnoCompiler -ArgumentList (
+        $CommonCompileArguments + @(
+            "/DOutputDir=$FailureOutput",
+            "/DArtifactFileName=$FailureArtifact",
+            "/DFailureAfterWrapperPersistenceProbe=1",
+            $InnoScript
+        )) -Label "$Product wrapper persistence-failure compilation"
+
+    $InstallArguments = @(
+        "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
+        "/ALLOW_UNSIGNED_TEST_MEDIA=1", "/DIR=$InstallRoot"
+    )
+    if ($Product -eq "agent") {
+        $InstallArguments += "/STATE_ROOT=$StateRoot"
+    }
+    $BaselineInstaller = Join-Path $BaselineOutput ($BaselineArtifact + ".exe")
+    $FailureInstaller = Join-Path $FailureOutput ($FailureArtifact + ".exe")
+    try {
+        Test-OneSetupMutexExclusion `
+            -Product $Product -InstallerPath $BaselineInstaller `
+            -InstallArguments $InstallArguments -InstallRoot $InstallRoot `
+            -StateRoot $StateRoot -ArpKey $ArpKey `
+            -ShortcutPaths $ShortcutPaths `
+            -TransactionPrefix $TransactionPrefix -ProbeRoot $ProbeRoot
+        if ($Product -eq "agent") {
+            Test-AgentStateRootMarkerRollback `
+                -FailureInstaller $FailureInstaller `
+                -ProbeRoot $ProbeRoot -ArpKey $ArpKey `
+                -ShortcutPaths $ShortcutPaths `
+                -TransactionPrefix $TransactionPrefix
+        }
+        else {
+            $ShortcutGroup = Split-Path -Parent $ShortcutPaths[0]
+            $FreshPaths = @($InstallRoot, $ShortcutGroup) + $ShortcutPaths
+            $BeforeFreshArtifacts = Get-ExactArtifactSnapshot `
+                -Paths $FreshPaths
+            $BeforeFreshArp = Get-ArpRegistrationSnapshot `
+                -Product $Product -ScratchRoot $ProbeRoot
+            $FreshFailureLog = Join-Path $ProbeRoot `
+                "fresh-wrapper-failure.log"
+            $FreshFailureExit = Invoke-ProcessTreeWithTransientAccessRetry `
+                -FilePath $FailureInstaller `
+                -ArgumentList (@($InstallArguments) + "/LOG=$FreshFailureLog") `
+                -TimeoutSeconds 120
+            if ($FreshFailureExit -ne 1001) {
+                throw (
+                    "Platform fresh wrapper persistence probe returned " +
+                    "$FreshFailureExit instead of exit code 1001."
+                )
+            }
+            Assert-ExactArtifactSnapshot -Expected $BeforeFreshArtifacts `
+                -Paths $FreshPaths `
+                -Label "platform fresh wrapper persistence rollback"
+            $AfterFreshArp = Get-ArpRegistrationSnapshot `
+                -Product $Product -ScratchRoot $ProbeRoot
+            if ($AfterFreshArp -cne $BeforeFreshArp) {
+                throw "Platform fresh wrapper rollback changed HKLM64 ARP."
+            }
+            $FreshLeakedTransaction = Get-ChildItem -LiteralPath (
+                Split-Path -Parent $InstallRoot) -Directory -Force |
+                Where-Object { $_.Name.StartsWith($TransactionPrefix) } |
+                Select-Object -First 1
+            if ($null -ne $FreshLeakedTransaction) {
+                throw (
+                    "Platform fresh wrapper rollback leaked transaction " +
+                    $FreshLeakedTransaction.FullName
+                )
+            }
+        }
+        $BaselineExit = Invoke-ProcessTreeWithTransientAccessRetry `
+            -FilePath $BaselineInstaller -ArgumentList $InstallArguments `
+            -TimeoutSeconds 120
+        if ($BaselineExit -ne 0) {
+            throw "$Product wrapper baseline install failed with exit code $BaselineExit."
+        }
+        $RequiredDirectories = if ($Product -eq "platform") {
+            @("runtime", "service", "launcher", "release-metadata", "docs",
+              "uninstall-tools")
+        }
+        else {
+            @("runtime", "deploy", "release-metadata", "docs", "uninstall-tools")
+        }
+        foreach ($Name in $RequiredDirectories) {
+            if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot $Name) `
+                    -PathType Container)) {
+                throw "$Product baseline is missing managed wrapper directory: $Name"
+            }
+        }
+        $UninstallerParts = @(Get-ChildItem -LiteralPath $InstallRoot -File -Force |
+            Where-Object {
+                $_.Name -cmatch '^unins[0-9]{3}\.(?:exe|dat|msg)$'
+            })
+        if (@($UninstallerParts | Where-Object {
+                    $_.Extension -eq ".exe"
+                }).Count -ne 1 -or
+            @($UninstallerParts | Where-Object {
+                    $_.Extension -eq ".dat"
+                }).Count -ne 1) {
+            throw "$Product baseline does not have one complete Inno uninstaller."
+        }
+        foreach ($Shortcut in $ShortcutPaths) {
+            if (-not (Test-Path -LiteralPath $Shortcut -PathType Leaf)) {
+                throw "$Product baseline shortcut was not created: $Shortcut"
+            }
+        }
+        $BaselineUninstaller = $UninstallerParts | Where-Object {
+            $_.Extension -eq ".exe"
+        } | Select-Object -First 1
+        Test-OneUninstallMutexExclusion `
+            -Product $Product `
+            -UninstallerPath $BaselineUninstaller.FullName `
+            -InstallRoot $InstallRoot -StateRoot $StateRoot `
+            -ArpKey $ArpKey -ShortcutPaths $ShortcutPaths `
+            -ProbeRoot $ProbeRoot
+        $ManagedPaths = @($InstallRoot) + $ShortcutPaths
+        if ($Product -eq "agent") { $ManagedPaths += $StateRoot }
+        $BeforeArtifacts = Get-ExactArtifactSnapshot -Paths $ManagedPaths
+        $BeforeArp = Get-ArpRegistrationSnapshot `
+            -Product $Product -ScratchRoot $ProbeRoot
+
+        $FaultArguments = @($InstallArguments) + "/LOG=$FailureLog"
+        $FailureExit = Invoke-ProcessTreeWithTransientAccessRetry `
+            -FilePath $FailureInstaller -ArgumentList $FaultArguments `
+            -TimeoutSeconds 120
+        if ($FailureExit -ne 1001) {
+            Write-FailureProbeLog -Product $Product -LogPath $FailureLog
+            throw (
+                "$Product wrapper persistence probe returned $FailureExit " +
+                "instead of deterministic exit code 1001."
+            )
+        }
+        $FailureLogText = Get-Content -LiteralPath $FailureLog -Raw
+        if ($FailureLogText -notmatch
+            "Release audit fault injection after wrapper persistence") {
+            Write-FailureProbeLog -Product $Product -LogPath $FailureLog
+            throw "$Product wrapper probe failed before its ssPostInstall checkpoint."
+        }
+        Assert-ExactArtifactSnapshot -Expected $BeforeArtifacts `
+            -Paths $ManagedPaths `
+            -Label "$Product wrapper persistence rollback"
+        $AfterArp = Get-ArpRegistrationSnapshot `
+            -Product $Product -ScratchRoot $ProbeRoot
+        if ($AfterArp -cne $BeforeArp) {
+            throw "$Product wrapper persistence rollback did not restore HKLM64 ARP."
+        }
+        $LeakedTransaction = Get-ChildItem -LiteralPath (
+            Split-Path -Parent $InstallRoot) -Directory -Force |
+            Where-Object { $_.Name.StartsWith($TransactionPrefix) } |
+            Select-Object -First 1
+        if ($null -ne $LeakedTransaction) {
+            throw "$Product wrapper rollback leaked: $($LeakedTransaction.FullName)"
+        }
+        Write-Host (
+            "$Product wrapper persistence failure restored product tree, docs, " +
+            "launcher/deploy, uninstall-tools, uninstaller, shortcuts and HKLM64 ARP."
+        )
+    }
+    finally {
+        if (Test-Path -LiteralPath $InstallRoot) {
+            try {
+                $Uninstaller = Get-ChildItem -LiteralPath $InstallRoot `
+                    -Filter "unins*.exe" -File | Select-Object -First 1
+                if ($null -ne $Uninstaller) {
+                    [void](Invoke-ProcessTreeWithTransientAccessRetry `
+                        -FilePath $Uninstaller.FullName `
+                        -ArgumentList @(
+                            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
+                        ) -TimeoutSeconds 120)
+                }
+            }
+            catch {
+                Write-Warning "$Product wrapper baseline uninstall cleanup failed: $($_.Exception.Message)"
+            }
+        }
+        [void](Invoke-RegExeForExitCode -ArgumentList @(
+            "delete", $ArpKey, "/f", "/reg:64"))
+        foreach ($Shortcut in $ShortcutPaths) {
+            Remove-Item -LiteralPath $Shortcut -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Invoke-ProductInstallerExpectFailure {
@@ -781,6 +1569,14 @@ try {
         -Product agent -OriginalStage $AgentStage `
         -InnoScript (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardEnterpriseAgent.iss") `
         -Version $AgentVersion -ProbeRoot (Join-Path $ProbeRoot "af")
+    Test-OneWrapperPersistenceRollback `
+        -Product platform -OriginalStage $PlatformStage `
+        -InnoScript (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardPlatform.iss") `
+        -Version $PlatformVersion -ProbeRoot (Join-Path $ProbeRoot "pw")
+    Test-OneWrapperPersistenceRollback `
+        -Product agent -OriginalStage $AgentStage `
+        -InnoScript (Join-Path $RepositoryRoot "packaging\windows\inno\MineGuardEnterpriseAgent.iss") `
+        -Version $AgentVersion -ProbeRoot (Join-Path $ProbeRoot "aw")
     Test-OneTransactionalRollbackAndDowngrade `
         -Product platform -OriginalStage $PlatformStage `
         -Version $PlatformVersion -ProbeRoot (Join-Path $ProbeRoot "pt")

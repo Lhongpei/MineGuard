@@ -60,6 +60,9 @@ UninstallDisplayIcon={app}\runtime\MineGuardEnterpriseAgent.exe
 SetupLogging=yes
 RestartIfNeededByRun=no
 CloseApplications=no
+; Serialize both products across Windows sessions. Their retained transaction
+; directories share one MineGuard parent and must never recover a live peer.
+SetupMutex=MineGuard-Setup-Transaction-v1,Global\MineGuard-Setup-Transaction-v1
 #ifdef EnableSigning
 SignTool=release_signer
 SignedUninstaller=yes
@@ -70,10 +73,6 @@ SignedUninstaller=no
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
-
-[Dirs]
-Name: "{commonappdata}\MineGuard\InstallerBootstrap"; Permissions: admins-full system-full
-Name: "{code:GetTrustedBootstrapStage}"; Permissions: admins-full system-full
 
 [Files]
 ; These temporary transaction inputs are deliberately first for solid-compression
@@ -88,14 +87,14 @@ Source: "{#AssetsRoot}\Windows-binary-release-guide.html"; DestDir: "{app}\docs"
 Source: "{#AssetsRoot}\RELEASE-NOTICE.txt"; DestDir: "{app}\docs"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\MineGuard Enterprise Agent deployment guide"; Filename: "{app}\docs\Windows-binary-release-guide.html"; Check: AllowPostFilesFailureProbe
-Name: "{group}\MineGuard 企业接入配置向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File ""{app}\deploy\windows\Start-EnterpriseAgentProvisioningWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\deploy\windows"
-Name: "{group}\MineGuard 模型授权导入向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File ""{app}\deploy\windows\Start-EnterpriseAgentModelCredentialWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\deploy\windows"
-Name: "{group}\Enterprise Agent operations console"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -Command ""Set-Location -LiteralPath '{app}\deploy\windows'; Get-Content -LiteralPath '.\README.md' -TotalCount 45"""; WorkingDir: "{app}\deploy\windows"
+Name: "{commonprograms}\MineGuard\MineGuard Enterprise Agent deployment guide"; Filename: "{app}\docs\Windows-binary-release-guide.html"
+Name: "{commonprograms}\MineGuard\MineGuard 企业接入配置向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File ""{app}\deploy\windows\Start-EnterpriseAgentProvisioningWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\deploy\windows"
+Name: "{commonprograms}\MineGuard\MineGuard 模型授权导入向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File ""{app}\deploy\windows\Start-EnterpriseAgentModelCredentialWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\deploy\windows"
+Name: "{commonprograms}\MineGuard\Enterprise Agent operations console"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -Command ""Set-Location -LiteralPath '{app}\deploy\windows'; Get-Content -LiteralPath '.\README.md' -TotalCount 45"""; WorkingDir: "{app}\deploy\windows"
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File ""{app}\deploy\windows\Start-EnterpriseAgentProvisioningWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\deploy\windows"; Description: "立即打开 MineGuard 企业接入配置向导"; Flags: postinstall skipifsilent nowait
-Filename: "{app}\docs\Windows-binary-release-guide.html"; Description: "Open the deployment guide"; Flags: postinstall shellexec skipifsilent nowait
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File ""{app}\deploy\windows\Start-EnterpriseAgentProvisioningWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\deploy\windows"; Description: "立即打开 MineGuard 企业接入配置向导"; Flags: postinstall skipifsilent nowait; Check: IsWrapperTransactionConfirmed
+Filename: "{app}\docs\Windows-binary-release-guide.html"; Description: "Open the deployment guide"; Flags: postinstall shellexec skipifsilent nowait; Check: IsWrapperTransactionConfirmed
 
 [UninstallDelete]
 ; Product-owned immutable directories are removed only by the guarded
@@ -106,6 +105,10 @@ Type: filesandordirs; Name: "{app}\uninstall-tools"
 [Code]
 const
   ProductInstallFailureExitCode = 1001;
+  ProductTransactionMutexes =
+    'MineGuard-Setup-Transaction-v1,Global\MineGuard-Setup-Transaction-v1';
+  ProductTransactionLocalMutex = 'MineGuard-Setup-Transaction-v1';
+  ProductTransactionGlobalMutex = 'Global\MineGuard-Setup-Transaction-v1';
 
 var
   RuntimeRemovalCompleted: Boolean;
@@ -114,7 +117,12 @@ var
   ProductTransactionPrepared: Boolean;
   WrapperTransactionSucceeded: Boolean;
   ProductTransactionId: String;
-  TrustedBootstrapStage: String;
+  ReleaseAuthorizationCaptured: Boolean;
+  WrapperOriginalStateCaptured: Boolean;
+  WrapperInstallRootPreexisted: Boolean;
+  WrapperShortcutGroupPreexisted: Boolean;
+  WrapperOriginalInstallRoot: String;
+  WrapperOriginalExistingInstallAncestor: String;
 #ifdef EnableSigning
   SignerInputPage: TInputQueryWizardPage;
   SignerFilePage: TInputFileWizardPage;
@@ -129,29 +137,9 @@ var
 #endif
 #endif
 
-function GetTrustedBootstrapStage(Param: String): String;
-var
-  UniqueSeed: String;
+function IsWrapperTransactionConfirmed(): Boolean;
 begin
-  if TrustedBootstrapStage = '' then
-  begin
-    UniqueSeed := GetTempFileName(ExpandConstant('{tmp}'));
-    DeleteFile(UniqueSeed);
-    TrustedBootstrapStage := ExpandConstant(
-      '{commonappdata}\MineGuard\InstallerBootstrap\agent-' +
-      ExtractFileName(UniqueSeed));
-  end;
-  Result := TrustedBootstrapStage;
-end;
-
-procedure CleanupTrustedBootstrapStage();
-begin
-  if (TrustedBootstrapStage <> '') and DirExists(TrustedBootstrapStage) then
-  begin
-    if not DelTree(TrustedBootstrapStage, True, True, True) then
-      Log('WARNING: protected trusted bootstrap stage could not be removed: ' +
-        TrustedBootstrapStage);
-  end;
+  Result := WrapperTransactionSucceeded and (not ProductInstallFailed);
 end;
 
 function NormalizeSignerThumbprint(const Value: String; var Normalized: String): Boolean;
@@ -377,7 +365,10 @@ begin
       Result := False;
     end
     else
+    begin
       ApprovedSignerThumbprint := ResolvedValue;
+      ReleaseAuthorizationCaptured := True;
+    end;
   end;
 #else
 #ifdef InternalUnsignedRelease
@@ -388,7 +379,10 @@ begin
     Result := False;
   end
   else if CurPageID = InternalUnsignedConfirmationPage.ID then
+  begin
     ApprovedInstallerSha256 := ResolvedValue;
+    ReleaseAuthorizationCaptured := True;
+  end;
 #else
   if (CurPageID = UnsignedTestPage.ID) and
       (not IsUnsignedTestMediaAuthorized()) then
@@ -439,6 +433,59 @@ begin
   Result := Value;
   StringChangeEx(Result, '''', '''''', True);
   Result := '''' + Result + '''';
+end;
+
+procedure CaptureWrapperOriginalState();
+var
+  Cursor: String;
+  Parent: String;
+begin
+  if WrapperOriginalStateCaptured then
+  begin
+    if CompareText(ExpandConstant('{app}'), WrapperOriginalInstallRoot) <> 0 then
+      RaiseException(
+        'The install directory changed after its original state was captured. Close Setup and restart it to use a different directory.');
+    Exit;
+  end;
+  WrapperOriginalInstallRoot := ExpandConstant('{app}');
+  WrapperInstallRootPreexisted := DirExists(ExpandConstant('{app}'));
+  WrapperShortcutGroupPreexisted := DirExists(
+    ExpandConstant('{commonprograms}\MineGuard'));
+  Cursor := WrapperOriginalInstallRoot;
+  while not DirExists(Cursor) do
+  begin
+    Parent := ExtractFileDir(Cursor);
+    if (Parent = '') or (CompareText(Parent, Cursor) = 0) then
+      Break;
+    Cursor := Parent;
+  end;
+  WrapperOriginalExistingInstallAncestor := Cursor;
+  WrapperOriginalStateCaptured := True;
+end;
+
+procedure CleanupWrapperCreatedEmptyInstallChain();
+var
+  Cursor: String;
+  Parent: String;
+begin
+  if (not WrapperOriginalStateCaptured) or
+      WrapperInstallRootPreexisted then
+    Exit;
+  Cursor := WrapperOriginalInstallRoot;
+  while CompareText(Cursor, WrapperOriginalExistingInstallAncestor) <> 0 do
+  begin
+    if DirExists(Cursor) then
+    begin
+      if not RemoveDir(Cursor) then
+        Exit;
+    end
+    else if FileExists(Cursor) then
+      Exit;
+    Parent := ExtractFileDir(Cursor);
+    if (Parent = '') or (CompareText(Parent, Cursor) = 0) then
+      Exit;
+    Cursor := Parent;
+  end;
 end;
 
 function HasActiveEnterpriseAgentRuntime(): Boolean;
@@ -653,17 +700,30 @@ var
   PreflightError: String;
 begin
   Result := '';
+  CaptureWrapperOriginalState();
 #ifdef EnableSigning
-  if not TryResolveApprovedSigner(ResolvedApproval, ApprovalError) then
-    Result := ApprovalError
-  else
-    ApprovedSignerThumbprint := ResolvedApproval;
+  if not ReleaseAuthorizationCaptured then
+  begin
+    if not TryResolveApprovedSigner(ResolvedApproval, ApprovalError) then
+      Result := ApprovalError
+    else
+    begin
+      ApprovedSignerThumbprint := ResolvedApproval;
+      ReleaseAuthorizationCaptured := True;
+    end;
+  end;
 #else
 #ifdef InternalUnsignedRelease
-  if not TryAuthorizeUnsignedInternalRelease(ResolvedApproval, ApprovalError) then
-    Result := ApprovalError
-  else
-    ApprovedInstallerSha256 := ResolvedApproval;
+  if not ReleaseAuthorizationCaptured then
+  begin
+    if not TryAuthorizeUnsignedInternalRelease(ResolvedApproval, ApprovalError) then
+      Result := ApprovalError
+    else
+    begin
+      ApprovedInstallerSha256 := ResolvedApproval;
+      ReleaseAuthorizationCaptured := True;
+    end;
+  end;
 #else
   if not IsUnsignedTestMediaAuthorized() then
     Result := 'Unsigned internal-test media was not explicitly authorized. Formal installation is unavailable for this build.';
@@ -693,6 +753,14 @@ begin
       UniqueSeed + '|' + ExpandConstant('{app}')), 1, 32));
   end;
   Result := ProductTransactionId;
+end;
+
+function BooleanFlag(const Value: Boolean): String;
+begin
+  if Value then
+    Result := '1'
+  else
+    Result := '0';
 end;
 
 function GetExtractedAgentReleaseRoot(): String;
@@ -744,9 +812,14 @@ begin
       PowerShellSingleQuoted('{#ChildReleaseManifestSha256}') +
     ' -InstallRoot ' + PowerShellSingleQuoted(ExpandConstant('{app}')) +
     ' -StateRoot ' + PowerShellSingleQuoted(ExpandConstant(
-      '{param:STATE_ROOT|{commonappdata}\MineGuard\EnterpriseAgent\instances}'));
+      '{param:STATE_ROOT|{commonappdata}\MineGuard\EnterpriseAgent\instances}')) +
+    ' -WrapperInstallRootPreexisted ' + PowerShellSingleQuoted(
+      BooleanFlag(WrapperInstallRootPreexisted)) +
+    ' -WrapperShortcutGroupPreexisted ' + PowerShellSingleQuoted(
+      BooleanFlag(WrapperShortcutGroupPreexisted));
 #ifdef EnableSigning
-  if Length(ApprovedSignerThumbprint) <> 40 then
+  if (not ReleaseAuthorizationCaptured) or
+      (Length(ApprovedSignerThumbprint) <> 40) then
   begin
     Log('The independently approved signer thumbprint was not resolved.');
     Exit;
@@ -756,9 +829,10 @@ begin
     PowerShellSingleQuoted(ApprovedSignerThumbprint);
 #else
 #ifdef InternalUnsignedRelease
-  if not TryAuthorizeUnsignedInternalRelease(ApprovedInstallerSha256, ApprovalError) then
+  if (not ReleaseAuthorizationCaptured) or
+      (Length(ApprovedInstallerSha256) <> 64) then
   begin
-    Log(ApprovalError);
+    Log('The locked INTERNAL-UNSIGNED authorization is unavailable.');
     Exit;
   end;
   BootstrapArguments := BootstrapArguments +
@@ -832,16 +906,6 @@ begin
   ProductTransactionPrepared := True;
 end;
 
-function AllowPostFilesFailureProbe(): Boolean;
-begin
-#ifdef FailureAfterFilesProbe
-  ProductInstallFailed := True;
-  RaiseException(
-    'Release audit fault injection after persistent Files and before Icons.');
-#endif
-  Result := True;
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
@@ -850,6 +914,14 @@ begin
     PrepareAndCommitProductRuntime()
   else if CurStep = ssPostInstall then
   begin
+#ifdef FailureAfterWrapperPersistenceProbe
+    { Compile-only release audit: PerformInstall has completed Files, Icons,
+      ARP and uninstaller persistence, but the wrapper success marker is
+      deliberately withheld so DeinitializeSetup must restore both engines. }
+    ProductInstallFailed := True;
+    Log('Release audit fault injection after wrapper persistence.');
+    Exit;
+#endif
     if not ProductTransactionPrepared then
     begin
       ProductInstallFailed := True;
@@ -879,7 +951,8 @@ begin
         'ERROR: Agent retained transaction rollback failed with exit code %d.',
         [ResultCode]));
   end;
-  CleanupTrustedBootstrapStage();
+  if not WrapperTransactionSucceeded then
+    CleanupWrapperCreatedEmptyInstallChain();
 end;
 
 function GetCustomSetupExitCode: Integer;
@@ -958,6 +1031,18 @@ end;
 function InitializeUninstall(): Boolean;
 begin
   Result := True;
+  if CheckForMutexes(ProductTransactionMutexes) then
+  begin
+    SuppressibleMsgBox(
+      'Another MineGuard installation or uninstall transaction is running. ' +
+      'Wait for it to finish before uninstalling.', mbError, MB_OK, IDOK);
+    Result := False;
+    Exit;
+  end;
+  { SetupMutex is a Setup-only directive. Hold the same two names throughout
+    uninstall so Platform and Agent cannot mutate their shared parent at once. }
+  CreateMutex(ProductTransactionLocalMutex);
+  CreateMutex(ProductTransactionGlobalMutex);
   if HasEnterpriseAgentService() then
   begin
     SuppressibleMsgBox('A MineGuard Enterprise Agent Windows service is still registered.' + #13#10 +
