@@ -1070,8 +1070,8 @@ if ($binaryMode) {
     $previousLeafPattern = `
         '^\.(?:runtime|service|launcher|release-metadata)\.previous\.[a-f0-9]{32}$'
     $transactionError = $null
-    $rollbackErrors = New-Object System.Collections.Generic.List[string]
-    $cleanupErrors = New-Object System.Collections.Generic.List[string]
+    $rollbackErrors = [System.Collections.Generic.List[string]]::new()
+    $cleanupErrors = [System.Collections.Generic.List[string]]::new()
     try {
         New-Item -ItemType Directory -Path $runtimeIncoming | Out-Null
         New-Item -ItemType Directory -Path $serviceIncoming | Out-Null
@@ -1539,7 +1539,7 @@ if ($binaryMode) {
         }
     }
     if ($null -ne $transactionError) {
-        $allRecoveryErrors = @($rollbackErrors) + @($cleanupErrors)
+        $allRecoveryErrors = $rollbackErrors.ToArray() + $cleanupErrors.ToArray()
         if ($allRecoveryErrors.Count -gt 0) {
             $message = (
                 'Platform 安装失败且回滚不完整。原始错误：{0}；回滚错误：{1}' -f `

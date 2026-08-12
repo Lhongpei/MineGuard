@@ -822,7 +822,7 @@ function Test-OneUninstallMutexExclusion {
         }
     }
 
-    $Failures = New-Object System.Collections.Generic.List[string]
+    $Failures = [System.Collections.Generic.List[string]]::new()
     if ($null -eq $BlockedExit -or [int]$BlockedExit -eq 0) {
         $Failures.Add("the blocked uninstaller did not return a nonzero exit code")
     }
@@ -847,7 +847,7 @@ function Test-OneUninstallMutexExclusion {
         Write-FailureProbeLog -Product $Product -LogPath $MutexLog
         throw (
             "$Product uninstall SetupMutex exclusion failed: " +
-            (@($Failures) -join "; ")
+            ($Failures.ToArray() -join "; ")
         )
     }
     Write-Host (
@@ -911,7 +911,7 @@ function Test-AgentStateRootMarkerRollback {
             -FilePath $FailureInstaller -ArgumentList $InstallArguments `
             -TimeoutSeconds 120
 
-        $Failures = New-Object System.Collections.Generic.List[string]
+        $Failures = [System.Collections.Generic.List[string]]::new()
         if ($FailureExit -ne 1001) {
             $Failures.Add(
                 "wrapper fault returned $FailureExit instead of exit code 1001")
@@ -978,7 +978,7 @@ function Test-AgentStateRootMarkerRollback {
                 -LogPath $FailureLog
             throw (
                 "Agent StateRoot marker rollback probe failed: " +
-                (@($Failures) -join "; ")
+                ($Failures.ToArray() -join "; ")
             )
         }
         Write-Host (

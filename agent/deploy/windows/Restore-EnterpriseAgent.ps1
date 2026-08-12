@@ -456,7 +456,7 @@ if ($PSCmdlet.ShouldProcess(
     }
     catch {
         $OriginalError = $_
-        $RollbackErrors = New-Object System.Collections.Generic.List[string]
+        $RollbackErrors = [System.Collections.Generic.List[string]]::new()
         if ($DatabaseSwitchAttempted) {
             try {
                 $FailedRestoredDatabase = Join-Path $RecoveryMaterialRoot `
@@ -544,7 +544,7 @@ if ($PSCmdlet.ShouldProcess(
             $FailureText = (
                 "Original restore error: " + $OriginalError.Exception.Message + "`r`n" +
                 "Automatic rollback errors:`r`n- " +
-                (@($RollbackErrors) -join "`r`n- ") + "`r`n"
+                ($RollbackErrors.ToArray() -join "`r`n- ") + "`r`n"
             )
             [IO.File]::WriteAllText(
                 $FailureDetailsPath, $FailureText,
@@ -565,7 +565,8 @@ if ($PSCmdlet.ShouldProcess(
         throw (
             "Restore failed before commit and automatic rollback was incomplete. " +
             "The instance is fail-closed by $RecoveryMarkerPath. Recovery material: " +
-            "$RecoveryMaterialRoot. Errors: " + (@($RollbackErrors) -join "; ")
+            "$RecoveryMaterialRoot. Errors: " +
+            ($RollbackErrors.ToArray() -join "; ")
         )
     }
     if (-not $Committed) {

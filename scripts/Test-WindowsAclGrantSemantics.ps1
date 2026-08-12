@@ -20,6 +20,35 @@ if ($CurrentUserSid -notmatch '^S-1-[0-9]+(?:-[0-9]+)+$') {
     throw "The current Windows user SID has an unexpected format."
 }
 
+# FileSystemRights.Write and Modify are composite enums whose numeric values
+# overlap ReadAndExecute. Security filters must use only atomic mutation bits.
+$MutationRights = [Security.AccessControl.FileSystemRights]::WriteData -bor
+    [Security.AccessControl.FileSystemRights]::AppendData -bor
+    [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+    [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+    [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+    [Security.AccessControl.FileSystemRights]::Delete -bor
+    [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+    [Security.AccessControl.FileSystemRights]::TakeOwnership
+foreach ($ReadOnlyRights in @(
+        [Security.AccessControl.FileSystemRights]::Read,
+        [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    )) {
+    if (($ReadOnlyRights -band $MutationRights) -ne 0) {
+        throw "The ACL mutation mask overlaps a read-only permission."
+    }
+}
+foreach ($WritableRights in @(
+        [Security.AccessControl.FileSystemRights]::Write,
+        [Security.AccessControl.FileSystemRights]::Modify,
+        [Security.AccessControl.FileSystemRights]::FullControl
+    )) {
+    if (($WritableRights -band $MutationRights) -eq 0) {
+        throw "The ACL mutation mask misses a writable permission."
+    }
+}
+Write-Host "MineGuard ACL mutation-mask semantics passed."
+
 function Invoke-IcaclsChecked {
     param([object[]]$ArgumentList, [string]$Label)
     & "$env:SystemRoot\System32\icacls.exe" @ArgumentList | Out-Host

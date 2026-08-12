@@ -552,6 +552,30 @@ def test_inno_scripts() -> None:
                 "write/delete exemption"
             )
         assert "$trusted[$identity.User.Value]=$true" in trusted_write_exemptions
+        danger_start = preflight.index("$danger=", trusted_end)
+        danger_end = preflight.index(
+            "function Assert-SafeSecurity", danger_start
+        )
+        danger_mask = preflight[danger_start:danger_end]
+        for mutation_right in (
+            "WriteData",
+            "AppendData",
+            "WriteExtendedAttributes",
+            "WriteAttributes",
+            "DeleteSubdirectoriesAndFiles",
+            "Delete",
+            "ChangePermissions",
+            "TakeOwnership",
+        ):
+            assert f"FileSystemRights]::{mutation_right}" in danger_mask, (
+                f"{name} install-root preflight mutation mask misses "
+                f"{mutation_right}"
+            )
+        for composite_right in ("Write", "Modify", "FullControl"):
+            assert f"FileSystemRights]::{composite_right}-bor" not in danger_mask, (
+                f"{name} install-root preflight must not use composite "
+                f"{composite_right} as a mutation bit mask"
+            )
         create_index = preflight.index(
             "[IO.Directory]::CreateDirectory($target,$acl)"
         )
@@ -1415,6 +1439,29 @@ def test_audit_and_lifecycle() -> None:
     assert "Remove-Item -LiteralPath $RuntimeRoot -Recurse -Force" not in (
         agent_installer
     ), "agent rollback must quarantine the active candidate before restoration"
+    agent_acl_start = agent_installer.index("function Assert-EAExistingAclSafe")
+    agent_acl_end = agent_installer.index(
+        "function Set-EAStateRootMarkerAcl", agent_acl_start
+    )
+    agent_acl = agent_installer[agent_acl_start:agent_acl_end]
+    for mutation_right in (
+        "WriteData",
+        "AppendData",
+        "WriteExtendedAttributes",
+        "WriteAttributes",
+        "DeleteSubdirectoriesAndFiles",
+        "Delete",
+        "ChangePermissions",
+        "TakeOwnership",
+    ):
+        assert f"FileSystemRights]::{mutation_right}" in agent_acl
+    for composite_right in ("Write", "Modify", "FullControl"):
+        assert f"FileSystemRights]::{composite_right} -bor" not in agent_acl
+
+    assert "@($rollbackErrors)" not in platform_installer
+    assert "@($cleanupErrors)" not in platform_installer
+    assert "@($RollbackErrors)" not in agent_installer
+    assert "@($CleanupErrors)" not in agent_installer
 
     failure_probe = read("scripts/Test-WindowsInstallerFailurePropagation.ps1")
     assert (ROOT / "scripts/Test-WindowsInstallerFailurePropagation.ps1").read_bytes().startswith(
@@ -1693,6 +1740,7 @@ def test_audit_and_lifecycle() -> None:
         "Stale explicit ACL fixture",
         "Empty directory ACL fixture",
         "Empty-tree descendant reset",
+        "MineGuard ACL mutation-mask semantics passed",
         "MineGuard canonical NTFS ACL grant semantics passed",
     ):
         assert token in acl_probe, f"Windows ACL regression probe misses: {token}"

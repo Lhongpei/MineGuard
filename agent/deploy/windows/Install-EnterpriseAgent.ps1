@@ -1158,11 +1158,14 @@ function Assert-EAExistingAclSafe {
             [Security.Principal.WindowsBuiltInRole]::Administrator)) {
         $trusted[$identity.User.Value] = $true
     }
-    $dangerous = [Security.AccessControl.FileSystemRights]::Write -bor
-        [Security.AccessControl.FileSystemRights]::Modify -bor
-        [Security.AccessControl.FileSystemRights]::FullControl -bor
-        [Security.AccessControl.FileSystemRights]::Delete -bor
+    # Use only atomic mutation bits here. Composite rights such as Modify
+    # contain ReadAndExecute and would reject a legitimate read-only ACE.
+    $dangerous = [Security.AccessControl.FileSystemRights]::WriteData -bor
+        [Security.AccessControl.FileSystemRights]::AppendData -bor
+        [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+        [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
         [Security.AccessControl.FileSystemRights]::TakeOwnership
     $security = Get-Acl -LiteralPath $item.FullName
@@ -1840,8 +1843,8 @@ if (-not $BuildFromSource) {
     $MetadataSwitched = $false
     $DeploySwitched = $false
     $TransactionError = $null
-    $RollbackErrors = New-Object System.Collections.Generic.List[string]
-    $CleanupErrors = New-Object System.Collections.Generic.List[string]
+    $RollbackErrors = [System.Collections.Generic.List[string]]::new()
+    $CleanupErrors = [System.Collections.Generic.List[string]]::new()
     try {
         New-Item -ItemType Directory -Path $StagedRuntime | Out-Null
         foreach ($Item in Get-ChildItem -LiteralPath $BinaryRuntime -Force) {
@@ -2161,7 +2164,7 @@ if (-not $BuildFromSource) {
         }
     }
     if ($null -ne $TransactionError) {
-        $AllRecoveryErrors = @($RollbackErrors) + @($CleanupErrors)
+        $AllRecoveryErrors = $RollbackErrors.ToArray() + $CleanupErrors.ToArray()
         if ($AllRecoveryErrors.Count -gt 0) {
             $Message = (
                 "Enterprise Agent installation failed and rollback was incomplete. " +
