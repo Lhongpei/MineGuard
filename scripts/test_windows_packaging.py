@@ -1399,7 +1399,8 @@ def test_audit_and_lifecycle() -> None:
         "transaction-created StateRoot ancestor directories were not removed",
         "Platform fresh wrapper persistence probe returned",
         "platform fresh wrapper persistence rollback",
-        "Platform fresh wrapper rollback changed HKLM64 ARP",
+        "Platform fresh wrapper fixture unexpectedly has HKLM64 ARP",
+        "Platform fresh wrapper rollback left HKLM64 ARP",
         "Platform fresh wrapper rollback leaked transaction",
         "FailureAfterWrapperPersistenceProbe",
         "function Get-ExactArtifactSnapshot",
@@ -1496,6 +1497,17 @@ def test_audit_and_lifecycle() -> None:
     assert wrapper_probe.index('$Product -eq "agent"') < wrapper_probe.index(
         "$BeforeFreshArtifacts = Get-ExactArtifactSnapshot"
     ) < wrapper_probe.index("$BaselineExit =")
+    fresh_platform_probe = wrapper_probe[
+        wrapper_probe.index("$BeforeFreshArtifacts = Get-ExactArtifactSnapshot") :
+        wrapper_probe.index("$BaselineExit =")
+    ]
+    assert "Get-ArpRegistrationSnapshot" not in fresh_platform_probe, (
+        "fresh wrapper rollback starts without ARP and must not use the "
+        "installed-baseline snapshot helper"
+    )
+    assert fresh_platform_probe.count(
+        '"query", $ArpKey, "/reg:64"'
+    ) == 2, "fresh wrapper rollback must prove ARP absence before and after"
     assert wrapper_probe.index("Test-OneSetupMutexExclusion `") < (
         wrapper_probe.index("$BaselineExit =")
     ), "each product's baseline must first prove SetupMutex exclusion"

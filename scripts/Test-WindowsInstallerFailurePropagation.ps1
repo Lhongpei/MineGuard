@@ -999,8 +999,10 @@ function Test-OneWrapperPersistenceRollback {
             $FreshPaths = @($InstallRoot, $ShortcutGroup) + $ShortcutPaths
             $BeforeFreshArtifacts = Get-ExactArtifactSnapshot `
                 -Paths $FreshPaths
-            $BeforeFreshArp = Get-ArpRegistrationSnapshot `
-                -Product $Product -ScratchRoot $ProbeRoot
+            if ((Invoke-RegExeForExitCode -ArgumentList @(
+                    "query", $ArpKey, "/reg:64")) -eq 0) {
+                throw "Platform fresh wrapper fixture unexpectedly has HKLM64 ARP."
+            }
             $FreshFailureLog = Join-Path $ProbeRoot `
                 "fresh-wrapper-failure.log"
             $FreshFailureExit = Invoke-ProcessTreeWithTransientAccessRetry `
@@ -1016,10 +1018,9 @@ function Test-OneWrapperPersistenceRollback {
             Assert-ExactArtifactSnapshot -Expected $BeforeFreshArtifacts `
                 -Paths $FreshPaths `
                 -Label "platform fresh wrapper persistence rollback"
-            $AfterFreshArp = Get-ArpRegistrationSnapshot `
-                -Product $Product -ScratchRoot $ProbeRoot
-            if ($AfterFreshArp -cne $BeforeFreshArp) {
-                throw "Platform fresh wrapper rollback changed HKLM64 ARP."
+            if ((Invoke-RegExeForExitCode -ArgumentList @(
+                    "query", $ArpKey, "/reg:64")) -eq 0) {
+                throw "Platform fresh wrapper rollback left HKLM64 ARP."
             }
             $FreshLeakedTransaction = Get-ChildItem -LiteralPath (
                 Split-Path -Parent $InstallRoot) -Directory -Force |
