@@ -29,6 +29,10 @@ jobs:
         shell: powershell
         run: .\scripts\Test-WindowsAclGrantSemantics.ps1
 
+      - name: Verify production uninstall ownership transactions
+        shell: powershell
+        run: .\scripts\Test-WindowsProductUninstallTransactions.ps1
+
       - name: Verify trusted bootstrap transactions with Windows PowerShell 5.1
         shell: powershell
         run: .\scripts\Test-WindowsTrustedBootstrapTransaction.ps1
