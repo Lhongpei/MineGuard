@@ -57,6 +57,10 @@ jobs:
           clean: true
           fetch-depth: 1
 
+      - name: Validate release lifecycle fixtures before compiler work
+        shell: powershell
+        run: python .\scripts\test_windows_packaging.py
+
       - name: Parse release scripts with Windows PowerShell 5.1
         shell: powershell
         run: |

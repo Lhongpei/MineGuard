@@ -2392,6 +2392,7 @@ def test_workflow() -> None:
         "A legacy Windows Server 2012 R2 test cannot also request signed production candidates",
         "trusted-bootstrap-ps51-gate",
         "Fast Windows PowerShell 5.1 installer transaction gate",
+        "Validate release lifecycle fixtures before compiler work",
         "Verify trusted bootstrap transactions with Windows PowerShell 5.1",
         "Compile both production Inno scripts with minimal release trees",
         "Verify fast real Inno install exit and uninstall flow",
@@ -2417,6 +2418,7 @@ def test_workflow() -> None:
         ".\\scripts\\Test-WindowsTrustedBootstrapTransaction.ps1",
         ".\\scripts\\Test-WindowsProductionInnoCompile.ps1",
         ".\\scripts\\Test-WindowsGuiProcessWait.ps1",
+        "python .\\scripts\\test_windows_packaging.py",
     ):
         assert token in gate_job, f"fast transaction gate missing: {token}"
     assert gate_job.index("Parse release scripts with Windows PowerShell 5.1") < (

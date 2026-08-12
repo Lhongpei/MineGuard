@@ -529,6 +529,8 @@ def test_platform_configuration_enforces_a_dedicated_transactional_state() -> No
         "AuditFailAfterFirstMutation",
         "configuration-rollback-test",
         "验证 clients/password/settings 配置事务回滚",
+        "Throw-ConfigurationValidationFailure",
+        "$detail.Length -gt 512",
     ):
         assert required in configure
     assert configure.index("Assert-StateBoundary") < configure.index(

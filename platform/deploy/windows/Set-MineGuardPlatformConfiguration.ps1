@@ -43,6 +43,31 @@ function Assert-Administrator {
     )) { throw '配置和保护秘密文件必须以管理员身份运行 Windows PowerShell。' }
 }
 
+function Throw-ConfigurationValidationFailure {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Summary,
+        [AllowNull()] [object] $CheckOutput
+    )
+    $detail = $null
+    try {
+        $failure = $CheckOutput | Out-String | ConvertFrom-Json
+        if ($null -ne $failure.error -and
+            $null -ne $failure.error.message) {
+            $detail = [string]$failure.error.message
+        }
+    } catch {
+        $detail = $null
+    }
+    if (-not [string]::IsNullOrWhiteSpace($detail)) {
+        $detail = ($detail -replace '[\r\n\x00]+', ' ').Trim()
+        if ($detail.Length -gt 512) {
+            $detail = $detail.Substring(0, 512)
+        }
+        throw ("{0} 详情：{1}" -f $Summary, $detail)
+    }
+    throw $Summary
+}
+
 function Write-ConfigurationBlockMarker {
     param(
         [Parameter(Mandatory = $true)] [string] $Path,
@@ -567,7 +592,11 @@ if (-not $DemoWithoutClientRegistry) {
             '--platform-key-id', $PlatformKeyId
         )
     $checkText = & $runtime.filePath @checkArguments
-    if ($LASTEXITCODE -ne 0) { throw '客户端注册表未通过 MineGuard 完整校验。' }
+    if ($LASTEXITCODE -ne 0) {
+        Throw-ConfigurationValidationFailure `
+            -Summary '客户端注册表未通过 MineGuard 完整校验。' `
+            -CheckOutput $checkText
+    }
     $validated = $checkText | Out-String | ConvertFrom-Json
     $validatedCount = [int]$validated.client_count
 }
@@ -751,9 +780,11 @@ try {
                 '--platform-party-id', $PlatformPartyId,
                 '--platform-key-id', $PlatformKeyId
             )
-        & $runtime.filePath @checkArguments | Out-Null
+        $stagedCheckText = & $runtime.filePath @checkArguments
         if ($LASTEXITCODE -ne 0) {
-            throw '事务暂存的客户端注册表未通过 MineGuard 完整校验。'
+            Throw-ConfigurationValidationFailure `
+                -Summary '事务暂存的客户端注册表未通过 MineGuard 完整校验。' `
+                -CheckOutput $stagedCheckText
         }
         $operations += [pscustomobject]@{
             Name = 'clients'; Target = $targetClientsPath; Stage = $stagedClients

@@ -607,6 +607,10 @@ def test_windows_configuration_and_service_templates_fail_closed() -> None:
         in configure
     )
     assert "'config-check', '--state-directory'" in configure
+    assert "function Throw-ConfigurationValidationFailure" in configure
+    assert "详情：{1}" in configure
+    assert "$detail.Length -gt 512" in configure
+    assert "$stagedCheckText = & $runtime.filePath @checkArguments" in configure
     assert "'--auth-database', $authDatabase, '--production'" in configure
     assert "正式配置禁止使用演示默认密码 123123123" in configure
     assert "正式管理员密码至少 12 个字符" in configure
