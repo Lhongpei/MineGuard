@@ -72,6 +72,7 @@ def test_layout() -> None:
         "scripts/Build-WindowsBinaryRelease.ps1",
         "scripts/Test-WindowsBinaryRelease.ps1",
         "scripts/Test-WindowsGuiProcessWait.ps1",
+        "scripts/Test-WindowsTrustedBootstrapTransaction.ps1",
         "scripts/Test-WindowsInstallerFailurePropagation.ps1",
         "scripts/Test-WindowsAclGrantSemantics.ps1",
         "scripts/Invoke-WindowsAuthenticodeSign.ps1",
@@ -748,6 +749,18 @@ def test_trusted_product_install_bootstrap() -> None:
             "Windows PowerShell 5.1 cannot reliably expand Generic.List with "
             f"@(...): {unsafe_generic_list_expansion}"
         )
+    generic_list_variables = set(
+        re.findall(
+            r"\$(\w+)\s*=\s*\[System\.Collections\.Generic\.List\[[^\]]+\]\]::new\(\)",
+            bootstrap,
+        )
+    )
+    assert generic_list_variables, "trusted bootstrap must expose typed list boundaries"
+    for variable in sorted(generic_list_variables):
+        assert not re.search(rf"@\(\s*\${re.escape(variable)}\s*\)", bootstrap), (
+            "Windows PowerShell 5.1 cannot reliably bind a Generic.List used "
+            f"directly inside @(...): ${variable}; call .ToArray()"
+        )
     assert bootstrap.count("return $records.ToArray()") == 2, (
         "both journal-record and tree-inventory Generic.List results must use "
         "the Windows PowerShell 5.1-safe conversion"
@@ -811,6 +824,18 @@ def test_trusted_product_install_bootstrap() -> None:
     assert "Set-ExactRegistrySecuritySddl -Key $key" in arp_restore
     assert "Assert-ExactRegistrySecuritySddl -Key $key" in arp_restore
     assert "Convert-ArpRegistrationToCanonicalJson" in arp_restore
+    assert "Create and flush the complete key/value tree" in arp_restore
+    assert "$securityRecords = @($records | Sort-Object" in arp_restore
+    assert "}; Descending = $true }" in arp_restore
+    first_value_flush = arp_restore.index("$key.Flush()")
+    security_records = arp_restore.index("$securityRecords = @($records")
+    acl_restore = arp_restore.index(
+        "Set-ExactRegistrySecuritySddl -Key $key", security_records
+    )
+    assert first_value_flush < security_records < acl_restore, (
+        "ARP rollback must materialize and flush the complete key/value tree "
+        "before a restrictive captured parent ACL can be restored"
+    )
     assert arp_restore.index("Set-ExactRegistrySecuritySddl -Key $key") < (
         arp_restore.index("Assert-ExactRegistrySecuritySddl -Key $key")
     ) < arp_restore.rindex("Flush-ArpRegistryParent")
@@ -1018,6 +1043,18 @@ def test_trusted_product_install_bootstrap() -> None:
         "AllowMissingInstallRoot",
     ):
         assert token in bootstrap
+    rollback_metadata = bootstrap[
+        bootstrap.index("function Get-ValidatedProductRootRollbackMetadata") :
+        bootstrap.index("function Restore-ProductRootMetadataBeforeArtifacts")
+    ]
+    assert "$expectedSpecifications = @()" in rollback_metadata
+    assert "$expectedSpecifications = if" not in rollback_metadata
+    assert rollback_metadata.index("$expectedSpecifications = @()") < (
+        rollback_metadata.index("$expectedSpecifications.Count")
+    ), (
+        "Agent rollback metadata must retain an empty array under Windows "
+        "PowerShell 5.1 StrictMode"
+    )
 
     expected_match = re.search(
         r'\$ExpectedTrustedBootstrapSha256\s*=\s*`\s*\n\s*"([a-f0-9]{64})"',
@@ -1038,6 +1075,80 @@ def test_trusted_product_install_bootstrap() -> None:
             "all release classifications must embed the trusted tree anchor: "
             f"{define}"
         )
+
+
+def test_trusted_bootstrap_transaction_probe() -> None:
+    probe = read("scripts/Test-WindowsTrustedBootstrapTransaction.ps1")
+    for token in (
+        "$PSVersionTable.PSEdition -ne 'Desktop'",
+        "$PSVersionTable.PSVersion.Major -ne 5",
+        "Trusted bootstrap transaction tests must run as Administrator",
+        "[ScriptBlock]::Create($text)",
+        "TransactionAction = $Action",
+        "Product = 'Platform'",
+        "Product = 'EnterpriseAgent'",
+        "Test-PlatformUpgradeRecovery",
+        "Test-PlatformFreshFinalize",
+        "Test-AgentMissingStateRollback",
+        "Test-AgentExistingStateRollback",
+        "Test-PrepareFailureRollback",
+        "foreach ($action in @('Begin', 'Prepare', 'Commit', 'Finalize'))",
+        "A new Begin must first roll back the unconfirmed prior commit",
+        "-Action Rollback",
+        "Set-RestrictedArpFixtureAcl",
+        "$security.SetAccessRuleProtection($true, $false)",
+        "RegistryRights]::CreateSubKey",
+        "RegistryRights]::SetValue",
+        "RegistryRights]::Delete",
+        "CreateSubKey(\n                    'Leaf'",
+        "Platform ARP root ACL was not restored exactly",
+        "Platform ARP nested ACL was not restored exactly",
+        "Platform ARP leaf ACL was not restored exactly",
+        "RegistryValueKind]::String",
+        "RegistryValueKind]::ExpandString",
+        "RegistryValueKind]::DWord",
+        "RegistryValueKind]::QWord",
+        "RegistryValueKind]::MultiString",
+        "RegistryValueKind]::Binary",
+        "RegistryValueKind]::None",
+        "missing-a",
+        "missing-b\\instances",
+        "business-data-must-survive",
+        "trusted Setup anchor",
+        "Refusing transaction tests because real $product ARP data exists",
+        "Refusing transaction tests because the MineGuard shortcut group exists",
+        "New-SecureVerificationRoot",
+        "Remove-SafeVerificationRoot",
+        "$createdShortcutPaths.ToArray()",
+        "$cleanupFailures.ToArray()",
+        "Trusted bootstrap PowerShell 5.1 transaction verification passed",
+    ):
+        assert token in probe, f"trusted transaction probe misses: {token}"
+
+    preflight_end = probe.index("$testRoot = Join-Path $commonData")
+    first_global_mutation = min(
+        probe.index("New-PlatformArpFixture", preflight_end),
+        probe.index("Test-PlatformUpgradeRecovery", preflight_end),
+    )
+    for guard in (
+        "Test-ArpRegistrationExists -Product $product",
+        "Test-Path -LiteralPath $shortcutGroup",
+        "Test-Path -LiteralPath $shortcut",
+    ):
+        assert probe.index(guard) < preflight_end < first_global_mutation, (
+            "global MineGuard ARP/shortcut identities must be proven absent "
+            f"before the transaction probe mutates them: {guard}"
+        )
+    assert "Remove-Item -LiteralPath $commonData" not in probe
+    assert "Remove-Item -LiteralPath $commonPrograms" not in probe
+    assert "Remove-Item -LiteralPath $commonDesktop" not in probe
+    for expensive_or_external in ("python", "Nuitka", "Invoke-WebRequest", "curl "):
+        assert expensive_or_external not in probe, (
+            "the PowerShell 5.1 transaction gate must remain local and fast: "
+            f"{expensive_or_external}"
+        )
+
+
 def test_root_build_orchestration() -> None:
     build = read("scripts/Build-WindowsBinaryRelease.ps1")
     required = (
@@ -2061,6 +2172,19 @@ def test_workflow() -> None:
     native_workflow = read(".github/workflows/windows-native.yml")
     assert "Verify elevated NTFS ACL grant semantics" in native_workflow
     assert ".\\scripts\\Test-WindowsAclGrantSemantics.ps1" in native_workflow
+    assert (
+        "Verify trusted bootstrap transactions with Windows PowerShell 5.1"
+        in native_workflow
+    )
+    assert (
+        ".\\scripts\\Test-WindowsTrustedBootstrapTransaction.ps1"
+        in native_workflow
+    )
+    assert native_workflow.index(
+        "Verify trusted bootstrap transactions with Windows PowerShell 5.1"
+    ) < native_workflow.index("Set up Python 3.12 x64"), (
+        "the native transaction compatibility probe must run before dependency setup"
+    )
 
     actionlint_config = read(".github/actionlint.yaml")
     for runner_label in ("signing", "mineguard-release"):
@@ -2128,6 +2252,10 @@ def test_workflow() -> None:
         "LegacyWindowsServer2012R2CompatibilityTest",
         "LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY",
         "A legacy Windows Server 2012 R2 test cannot also request signed production candidates",
+        "trusted-bootstrap-ps51-gate",
+        "Fast Windows PowerShell 5.1 installer transaction gate",
+        "Verify trusted bootstrap transactions with Windows PowerShell 5.1",
+        "Verify fast real Inno install exit and uninstall flow",
     ):
         assert token in workflow, f"release workflow missing: {token}"
     lowered = workflow.lower()
@@ -2138,7 +2266,41 @@ def test_workflow() -> None:
     assert "choco " not in lowered and "winget " not in lowered
     assert "curl " not in lowered and "invoke-webrequest" not in lowered
     assert "gh release" not in lowered and "softprops/action-gh-release" not in lowered
+    gate_job = workflow.split("trusted-bootstrap-ps51-gate:", 1)[1].split(
+        "\n  unsigned-test:", 1
+    )[0]
+    for token in (
+        "runs-on: windows-2022",
+        "timeout-minutes: 10",
+        "shell: powershell",
+        "$PSVersionTable.PSEdition -ne 'Desktop'",
+        ".\\scripts\\Test-WindowsAclGrantSemantics.ps1",
+        ".\\scripts\\Test-WindowsTrustedBootstrapTransaction.ps1",
+        ".\\scripts\\Test-WindowsGuiProcessWait.ps1",
+    ):
+        assert token in gate_job, f"fast transaction gate missing: {token}"
+    assert gate_job.index("Parse release scripts with Windows PowerShell 5.1") < (
+        gate_job.index(
+            "Verify trusted bootstrap transactions with Windows PowerShell 5.1"
+        )
+    ) < gate_job.index("Verify fast real Inno install exit and uninstall flow")
+    for expensive_token in (
+        "actions/setup-python",
+        "Nuitka",
+        "Build-WindowsBinaryRelease.ps1",
+    ):
+        assert expensive_token not in gate_job, (
+            f"fast transaction gate must not perform an expensive build: {expensive_token}"
+        )
+    assert "cancel-in-progress: false" not in workflow
+    assert "contains(github.event.head_commit.message, '[windows-build]')" in (
+        workflow.split("jobs:", 1)[0]
+    ), "obsolete main release runs must be cancelled before consuming build minutes"
     unsigned_job = workflow.split("internal-unsigned-release:", 1)[0]
+    unsigned_definition = workflow.split("  unsigned-test:", 1)[1].split(
+        "\n  internal-unsigned-release:", 1
+    )[0]
+    assert "needs: trusted-bootstrap-ps51-gate" in unsigned_definition
     build_block, _, _ = named_step_block(
         unsigned_job, "Build, audit, compile, install, health-check and uninstall"
     )
@@ -2180,6 +2342,7 @@ def test_workflow() -> None:
     internal_job = workflow.split("internal-unsigned-release:", 1)[1].split(
         "signed-production-candidate:", 1
     )[0]
+    assert "needs: trusted-bootstrap-ps51-gate" in internal_job
     assert "github.ref == 'refs/heads/main'" in internal_job, (
         "the elevated private release runner must not execute arbitrary branch refs"
     )
@@ -2362,6 +2525,7 @@ def main() -> int:
         test_child_toolchain_pins,
         test_inno_scripts,
         test_trusted_product_install_bootstrap,
+        test_trusted_bootstrap_transaction_probe,
         test_root_build_orchestration,
         test_audit_and_lifecycle,
         test_authenticode_interface,

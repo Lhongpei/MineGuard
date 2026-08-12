@@ -1028,10 +1028,15 @@ function Get-ValidatedProductRootRollbackMetadata {
     } elseif ([bool]$Snapshot.shortcutGroupPreexisted) {
         throw 'Pre-existing MineGuard shortcut group disappeared.'
     }
-    $expectedSpecifications = if ($Product -eq 'Platform') {
-        @(Get-PlatformMutableDirectorySpecifications `
-            -Root $Descriptor.InstallRoot)
-    } else { @() }
+    # Keep this as a real array under Windows PowerShell 5.1.  Assigning the
+    # output of an if statement whose Agent branch emits @() yields $null,
+    # which fails under StrictMode when Count is read below.
+    $expectedSpecifications = @()
+    if ($Product -eq 'Platform') {
+        $expectedSpecifications = @(
+            Get-PlatformMutableDirectorySpecifications `
+                -Root $Descriptor.InstallRoot)
+    }
     $records = @($Snapshot.mutableDirectories)
     if ($records.Count -ne $expectedSpecifications.Count) {
         throw 'Product-root rollback directory set is invalid.'
@@ -2028,17 +2033,49 @@ function Restore-ArpRegistration {
                         -Record $valueRecord.value -Kind $kind
                     $key.SetValue([string]$valueRecord.name, $value, $kind)
                 }
+                # Create and flush the complete key/value tree before restoring
+                # any saved DACL.  A legitimate pre-existing parent DACL may
+                # exclude Administrators; applying it here could prevent the
+                # remaining child keys from being recreated.
+                $key.Flush()
+            } finally {
+                $key.Dispose()
+            }
+        }
+        $securityRecords = @($records | Sort-Object -Property @(
+            @{ Expression = {
+                if ([string]$_.path -eq '') {
+                    0
+                } else {
+                    ([string]$_.path).Split('\').Count
+                }
+            }; Descending = $true },
+            @{ Expression = { [string]$_.path }; Descending = $true }
+        ))
+        foreach ($record in $securityRecords) {
+            $currentSubKey = if ([string]$record.path -eq '') {
+                $expectedSubKey
+            } else {
+                $expectedSubKey + '\' + [string]$record.path
+            }
+            $key = $base.OpenSubKey($currentSubKey, $true)
+            if ($null -eq $key) {
+                throw "Restored ARP registry key disappeared before ACL restore: $currentSubKey"
+            }
+            try {
+                # Children are finalized before parents.  This both preserves
+                # access needed to finish the tree and lets the final parent
+                # inheritance propagation settle to the captured descriptors.
                 Set-ExactRegistrySecuritySddl -Key $key `
                     -Sddl ([string]$record.sddl)
-                # Flush every restored key before rolledback can become
-                # durable; this covers values, security and child-key state.
                 $key.Flush()
             } finally {
                 $key.Dispose()
             }
         }
         # Verify the final ACL tree only after every parent and child has been
-        # created, so late inheritance propagation cannot escape detection.
+        # created and every descriptor has settled, so late inheritance
+        # propagation cannot escape detection.
         foreach ($record in $records) {
             $currentSubKey = if ([string]$record.path -eq '') {
                 $expectedSubKey
