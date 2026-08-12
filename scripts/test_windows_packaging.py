@@ -820,11 +820,30 @@ def test_trusted_product_install_bootstrap() -> None:
         bootstrap.index("function Restore-ArpRegistration") :
         bootstrap.index("function Capture-ManagedArtifacts")
     ]
+    arp_recreate = bootstrap[
+        bootstrap.index("function New-ArpRegistryKeyAfterDelete") :
+        bootstrap.index("function Restore-ArpRegistration")
+    ]
+    for token in (
+        "[DateTime]::UtcNow.AddSeconds(10)",
+        "[UnauthorizedAccessException]",
+        "[IO.IOException]",
+        "Start-Sleep -Milliseconds 100",
+        "ARP registry key stayed unavailable after deletion",
+    ):
+        assert token in arp_recreate, f"ARP recreate retry misses: {token}"
+    assert "New-ArpRegistryKeyAfterDelete" in arp_restore
     assert "$key.Flush()" in arp_restore
     assert "Flush-ArpRegistryParent" in arp_restore
     assert "Set-ExactRegistrySecuritySddl -Key $key" in arp_restore
     assert "Assert-ExactRegistrySecuritySddl -Key $key" in arp_restore
     assert "Convert-ArpRegistrationToCanonicalJson" in arp_restore
+    delete_index = arp_restore.index("DeleteSubKeyTree")
+    first_parent_flush = arp_restore.index("Flush-ArpRegistryParent")
+    first_recreate = arp_restore.index("New-ArpRegistryKeyAfterDelete")
+    assert delete_index < first_parent_flush < first_recreate, (
+        "ARP deletion must be flushed before bounded same-name recreation"
+    )
     assert "Create and flush the complete key/value tree" in arp_restore
     assert "$securityRecords = @($records | Sort-Object" in arp_restore
     assert "}; Descending = $true }" in arp_restore

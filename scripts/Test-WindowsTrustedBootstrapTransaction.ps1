@@ -56,6 +56,23 @@ function Assert-Condition {
     if (-not $Condition) { throw $Message }
 }
 
+function Format-TestFailure {
+    param([Parameter(Mandatory = $true)] $ErrorRecord)
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $parts.Add([string]$ErrorRecord.Exception.Message)
+    if (-not [string]::IsNullOrWhiteSpace(
+            [string]$ErrorRecord.InvocationInfo.PositionMessage)) {
+        $parts.Add('Original position:' + [Environment]::NewLine +
+            [string]$ErrorRecord.InvocationInfo.PositionMessage)
+    }
+    if (-not [string]::IsNullOrWhiteSpace(
+            [string]$ErrorRecord.ScriptStackTrace)) {
+        $parts.Add('Original script stack:' + [Environment]::NewLine +
+            [string]$ErrorRecord.ScriptStackTrace)
+    }
+    return ($parts.ToArray() -join [Environment]::NewLine)
+}
+
 function Get-RelativeTestPath {
     param(
         [Parameter(Mandatory = $true)] [string] $Root,
@@ -1395,12 +1412,13 @@ try {
 
 $cleanupMessages = $cleanupFailures.ToArray()
 if ($null -ne $testFailure) {
+    $testFailureDiagnostic = Format-TestFailure -ErrorRecord $testFailure
     if ($cleanupMessages.Count -gt 0) {
         throw (
-            $testFailure.Exception.Message + [Environment]::NewLine +
+            $testFailureDiagnostic + [Environment]::NewLine +
             'Cleanup failures: ' + ($cleanupMessages -join '; '))
     }
-    throw $testFailure
+    throw $testFailureDiagnostic
 }
 if ($cleanupMessages.Count -gt 0) {
     throw ('Transaction tests passed but cleanup failed: ' +

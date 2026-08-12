@@ -1987,6 +1987,49 @@ function Flush-ArpRegistryParent {
     }
 }
 
+function New-ArpRegistryKeyAfterDelete {
+    param(
+        [Parameter(Mandatory = $true)] $BaseKey,
+        [Parameter(Mandatory = $true)] [string] $SubKey
+    )
+    # A deleted registry key remains delete-pending until every previously
+    # opened handle is released.  Antivirus and installer inventory readers
+    # can briefly keep such a handle after DeleteSubKeyTree returns.  Retry
+    # only the two exception families Windows uses for that narrow window.
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    $lastFailure = $null
+    do {
+        try {
+            $key = $BaseKey.CreateSubKey(
+                $SubKey,
+                [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree)
+            if ($null -eq $key) {
+                throw "RegistryKey.CreateSubKey returned null: $SubKey"
+            }
+            return $key
+        } catch {
+            $candidate = $_.Exception
+            $isTransient = $false
+            while ($null -ne $candidate) {
+                if ($candidate -is [UnauthorizedAccessException] -or
+                    $candidate -is [IO.IOException]) {
+                    $isTransient = $true
+                    break
+                }
+                $candidate = $candidate.InnerException
+            }
+            if (-not $isTransient) {
+                throw "ARP registry key recreation failed: $SubKey. $($_.Exception.Message)"
+            }
+            $lastFailure = $_
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw (
+        "ARP registry key stayed unavailable after deletion: $SubKey. " +
+        $lastFailure.Exception.Message)
+}
+
 function Restore-ArpRegistration {
     param([Parameter(Mandatory = $true)] $Snapshot)
     $expectedSubKey = Get-ArpRegistrySubKey -Kind $Product
@@ -2000,8 +2043,8 @@ function Restore-ArpRegistration {
         [Microsoft.Win32.RegistryView]::Registry64)
     try {
         try { $base.DeleteSubKeyTree($expectedSubKey, $false) } catch { throw }
+        Flush-ArpRegistryParent -BaseKey $base -SubKey $expectedSubKey
         if (-not [bool]$Snapshot.existed) {
-            Flush-ArpRegistryParent -BaseKey $base -SubKey $expectedSubKey
             $actualCanonical = Convert-ArpRegistrationToCanonicalJson `
                 -Snapshot (Capture-ArpRegistration)
             if ($actualCanonical -cne $expectedCanonical) {
@@ -2028,9 +2071,8 @@ function Restore-ArpRegistration {
             } else {
                 $expectedSubKey + '\' + [string]$record.path
             }
-            $key = $base.CreateSubKey(
-                $currentSubKey,
-                [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree)
+            $key = New-ArpRegistryKeyAfterDelete `
+                -BaseKey $base -SubKey $currentSubKey
             try {
                 foreach ($valueRecord in @($record.values)) {
                     $kind = [Microsoft.Win32.RegistryValueKind][Enum]::Parse(
