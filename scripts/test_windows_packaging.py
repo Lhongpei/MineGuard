@@ -72,6 +72,7 @@ def test_layout() -> None:
         "scripts/Build-WindowsBinaryRelease.ps1",
         "scripts/Test-WindowsBinaryRelease.ps1",
         "scripts/Test-WindowsGuiProcessWait.ps1",
+        "scripts/Test-WindowsProductionInnoCompile.ps1",
         "scripts/Test-WindowsTrustedBootstrapTransaction.ps1",
         "scripts/Test-WindowsInstallerFailurePropagation.ps1",
         "scripts/Test-WindowsAclGrantSemantics.ps1",
@@ -1121,9 +1122,14 @@ def test_trusted_bootstrap_transaction_probe() -> None:
         "Remove-SafeVerificationRoot",
         "$createdShortcutPaths.ToArray()",
         "$cleanupFailures.ToArray()",
+        "[AllowEmptyCollection()]",
         "Trusted bootstrap PowerShell 5.1 transaction verification passed",
     ):
         assert token in probe, f"trusted transaction probe misses: {token}"
+    assert probe.count("[AllowEmptyCollection()]") == 2, (
+        "both initially-empty PowerShell 5.1 List tracker parameters must "
+        "explicitly allow an empty collection"
+    )
 
     preflight_end = probe.index("$testRoot = Join-Path $commonData")
     first_global_mutation = min(
@@ -1147,6 +1153,32 @@ def test_trusted_bootstrap_transaction_probe() -> None:
             "the PowerShell 5.1 transaction gate must remain local and fast: "
             f"{expensive_or_external}"
         )
+
+
+def test_fast_production_inno_compile_probe() -> None:
+    probe = read("scripts/Test-WindowsProductionInnoCompile.ps1")
+    for token in (
+        "The production Inno compile gate requires Windows PowerShell 5.1",
+        "Inno Setup 6\\ISCC.exe",
+        "MineGuardPlatform.iss",
+        "MineGuardEnterpriseAgent.iss",
+        "Uninstall-MineGuardPlatformRuntime.ps1",
+        "Uninstall-EnterpriseAgentRuntime.ps1",
+        "Invoke-MineGuardTrustedProductInstall.ps1",
+        '"/DStageRoot=$StageRoot"',
+        '"/DAssetsRoot=$assetsRoot"',
+        '"/DChildReleaseManifestSha256=$ManifestSha256"',
+        '"/DTrustedBootstrapSha256=$bootstrapSha256"',
+        "foreach ($product in @('Platform', 'EnterpriseAgent'))",
+        "ProductionInnoCompile-[a-f0-9]{32}",
+        "Refusing unsafe Inno compile cleanup",
+        "Both production Inno scripts passed the fast compile gate",
+    ):
+        assert token in probe, f"production Inno compile probe misses: {token}"
+    assert "/DEnableSigning" not in probe, (
+        "the fast hosted gate must not impersonate a production signing command"
+    )
+    assert "Invoke-WebRequest" not in probe and "curl " not in probe
 
 
 def test_root_build_orchestration() -> None:
@@ -2185,6 +2217,15 @@ def test_workflow() -> None:
     ) < native_workflow.index("Set up Python 3.12 x64"), (
         "the native transaction compatibility probe must run before dependency setup"
     )
+    assert (
+        ".\\scripts\\Test-WindowsProductionInnoCompile.ps1"
+        in native_workflow
+    )
+    assert native_workflow.index(
+        "Compile both production Inno scripts with minimal release trees"
+    ) < native_workflow.index("Set up Python 3.12 x64"), (
+        "real production Inno parsing must run before dependency setup"
+    )
 
     actionlint_config = read(".github/actionlint.yaml")
     for runner_label in ("signing", "mineguard-release"):
@@ -2255,6 +2296,7 @@ def test_workflow() -> None:
         "trusted-bootstrap-ps51-gate",
         "Fast Windows PowerShell 5.1 installer transaction gate",
         "Verify trusted bootstrap transactions with Windows PowerShell 5.1",
+        "Compile both production Inno scripts with minimal release trees",
         "Verify fast real Inno install exit and uninstall flow",
     ):
         assert token in workflow, f"release workflow missing: {token}"
@@ -2276,6 +2318,7 @@ def test_workflow() -> None:
         "$PSVersionTable.PSEdition -ne 'Desktop'",
         ".\\scripts\\Test-WindowsAclGrantSemantics.ps1",
         ".\\scripts\\Test-WindowsTrustedBootstrapTransaction.ps1",
+        ".\\scripts\\Test-WindowsProductionInnoCompile.ps1",
         ".\\scripts\\Test-WindowsGuiProcessWait.ps1",
     ):
         assert token in gate_job, f"fast transaction gate missing: {token}"
@@ -2293,6 +2336,7 @@ def test_workflow() -> None:
             f"fast transaction gate must not perform an expensive build: {expensive_token}"
         )
     assert "cancel-in-progress: false" not in workflow
+    assert "windows-release-${{ github.event_name }}-${{ github.ref }}" in workflow
     assert "contains(github.event.head_commit.message, '[windows-build]')" in (
         workflow.split("jobs:", 1)[0]
     ), "obsolete main release runs must be cancelled before consuming build minutes"
@@ -2526,6 +2570,7 @@ def main() -> int:
         test_inno_scripts,
         test_trusted_product_install_bootstrap,
         test_trusted_bootstrap_transaction_probe,
+        test_fast_production_inno_compile_probe,
         test_root_build_orchestration,
         test_audit_and_lifecycle,
         test_authenticode_interface,

@@ -46,6 +46,7 @@ $script:utf8NoBom = New-Object -TypeName Text.UTF8Encoding `
 $script:platformArpRootSddl = ''
 $script:platformArpNestedSddl = ''
 $script:platformArpLeafSddl = ''
+$script:platformArpOwnershipToken = [Guid]::NewGuid().ToString('N')
 
 function Assert-Condition {
     param(
@@ -81,7 +82,7 @@ function Write-NewOwnedUtf8NoBomText {
     param(
         [Parameter(Mandatory = $true)] [string] $Path,
         [Parameter(Mandatory = $true)] [string] $Text,
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()]
         [System.Collections.Generic.List[string]] $OwnedPaths
     )
     $stream = New-Object -TypeName IO.FileStream -ArgumentList @(
@@ -305,7 +306,8 @@ function Set-RestrictedArpFixtureAcl {
             $allow
     )
     $administratorRights = [Security.AccessControl.RegistryRights]::ReadKey `
-        -bor [Security.AccessControl.RegistryRights]::Delete
+        -bor [Security.AccessControl.RegistryRights]::Delete `
+        -bor [Security.AccessControl.RegistryRights]::ChangePermissions
     $administratorRule = New-Object -TypeName `
         Security.AccessControl.RegistryAccessRule -ArgumentList @(
             $administrators,
@@ -333,9 +335,109 @@ function Set-RestrictedArpFixtureAcl {
         ($administratorRules[0].RegistryRights -band
             [Security.AccessControl.RegistryRights]::SetValue) -ne 0 -or
         ($administratorRules[0].RegistryRights -band
-            [Security.AccessControl.RegistryRights]::Delete) -eq 0) {
+            [Security.AccessControl.RegistryRights]::Delete) -eq 0 -or
+        ($administratorRules[0].RegistryRights -band
+            [Security.AccessControl.RegistryRights]::ChangePermissions) -eq 0) {
         throw 'Restricted ARP fixture ACL did not remove administrator write access.'
     }
+}
+
+function Enable-PlatformArpFixtureCleanupAccess {
+    $subKey = Get-ArpSubKey -Product Platform
+    $base = Open-Registry64Base
+    try {
+        $root = $base.OpenSubKey($subKey, $false)
+        if ($null -eq $root) { return $false }
+        try {
+            $token = [string]$root.GetValue(
+                'MineGuardTransactionTestOwner', '',
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($token -cne $script:platformArpOwnershipToken) {
+                throw 'Refusing to relax or delete an ARP key not owned by this test.'
+            }
+            $pending = New-Object `
+                'System.Collections.Generic.Queue[string]'
+            $pending.Enqueue('')
+            $relativePaths = @()
+            while ($pending.Count -gt 0) {
+                $relative = $pending.Dequeue()
+                $relativePaths += $relative
+                $current = if ($relative -eq '') {
+                    $root
+                } else {
+                    $root.OpenSubKey($relative, $false)
+                }
+                if ($null -eq $current) {
+                    throw 'Test-owned ARP tree changed during cleanup authorization.'
+                }
+                try {
+                    foreach ($child in @($current.GetSubKeyNames())) {
+                        $pending.Enqueue($(if ($relative -eq '') {
+                            $child
+                        } else {
+                            $relative + '\' + $child
+                        }))
+                    }
+                } finally {
+                    if ($current -ne $root) { $current.Dispose() }
+                }
+            }
+        } finally {
+            $root.Dispose()
+        }
+
+        $administrators = New-Object -TypeName `
+            Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-32-544'
+        $localSystem = New-Object -TypeName `
+            Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-18'
+        $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit
+        $allow = [Security.AccessControl.AccessControlType]::Allow
+        foreach ($relative in @($relativePaths | Sort-Object {
+                    if ($_ -eq '') { 0 } else { $_.Split('\').Count }
+                } -Descending)) {
+            $currentSubKey = if ($relative -eq '') {
+                $subKey
+            } else {
+                $subKey + '\' + $relative
+            }
+            $key = $base.OpenSubKey(
+                $currentSubKey,
+                [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree,
+                [Security.AccessControl.RegistryRights]::ChangePermissions)
+            if ($null -eq $key) {
+                throw 'Test-owned ARP key denied cleanup ACL access.'
+            }
+            try {
+                $security = New-Object -TypeName `
+                    Security.AccessControl.RegistrySecurity
+                $security.SetAccessRuleProtection($true, $false)
+                $security.SetOwner($administrators)
+                foreach ($sid in @($administrators, $localSystem)) {
+                    $rule = New-Object -TypeName `
+                        Security.AccessControl.RegistryAccessRule -ArgumentList @(
+                            $sid,
+                            [Security.AccessControl.RegistryRights]::FullControl,
+                            $inheritance,
+                            [Security.AccessControl.PropagationFlags]::None,
+                            $allow
+                    )
+                    [void]$security.AddAccessRule($rule)
+                }
+                $key.SetAccessControl($security)
+                $key.Flush()
+            } finally {
+                $key.Dispose()
+            }
+        }
+        return $true
+    } finally {
+        $base.Dispose()
+    }
+}
+
+function Remove-TestOwnedPlatformArpRegistration {
+    if (-not (Enable-PlatformArpFixtureCleanupAccess)) { return }
+    Remove-ArpRegistration -Product Platform
 }
 
 function Remove-ArpRegistration {
@@ -369,6 +471,7 @@ function New-PlatformArpFixture {
         }
         throw
     }
+    $ownershipSet = $false
     $base = Open-Registry64Base
     try {
         $root = $base.OpenSubKey($subKey, $true)
@@ -376,6 +479,11 @@ function New-PlatformArpFixture {
             throw 'New Platform ARP fixture could not be reopened for writing.'
         }
         try {
+            $root.SetValue(
+                'MineGuardTransactionTestOwner',
+                $script:platformArpOwnershipToken,
+                [Microsoft.Win32.RegistryValueKind]::String)
+            $ownershipSet = $true
             $root.SetValue('', 'fixture-default',
                 [Microsoft.Win32.RegistryValueKind]::String)
             $root.SetValue('DisplayName', 'MineGuard transaction fixture',
@@ -443,7 +551,11 @@ function New-PlatformArpFixture {
     } catch {
         $fixtureFailure = $_
         try {
-            Remove-ArpRegistration -Product Platform
+            if ($ownershipSet) {
+                Remove-TestOwnedPlatformArpRegistration
+            } else {
+                Remove-ArpRegistration -Product Platform
+            }
         } catch {
             throw (
                 $fixtureFailure.Exception.Message + [Environment]::NewLine +
@@ -457,7 +569,7 @@ function New-PlatformArpFixture {
 }
 
 function Set-ChangedPlatformArpFixture {
-    Remove-ArpRegistration -Product Platform
+    Remove-TestOwnedPlatformArpRegistration
     $subKey = Get-ArpSubKey -Product Platform
     $base = Open-Registry64Base
     try {
@@ -465,6 +577,10 @@ function Set-ChangedPlatformArpFixture {
             $subKey,
             [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree)
         try {
+            $root.SetValue(
+                'MineGuardTransactionTestOwner',
+                $script:platformArpOwnershipToken,
+                [Microsoft.Win32.RegistryValueKind]::String)
             $root.SetValue('DisplayName', 'changed-after-commit',
                 [Microsoft.Win32.RegistryValueKind]::String)
             $root.SetValue('DwordValue', [int]7,
@@ -535,6 +651,9 @@ function Assert-PlatformArpFixture {
                     $script:platformArpRootSddl) {
                 throw 'Platform ARP root ACL was not restored exactly.'
             }
+            Assert-RegistryValue -Key $root `
+                -Name 'MineGuardTransactionTestOwner' -Kind String `
+                -Expected $script:platformArpOwnershipToken
             Assert-RegistryValue -Key $root -Name '' `
                 -Kind String -Expected 'fixture-default'
             Assert-RegistryValue -Key $root -Name 'DisplayName' `
@@ -834,7 +953,7 @@ function Test-PlatformUpgradeRecovery {
         [Parameter(Mandatory = $true)] [string] $ShortcutGroup,
         [Parameter(Mandatory = $true)] [string] $GroupShortcut,
         [Parameter(Mandatory = $true)] [string] $DesktopShortcut,
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()]
         [System.Collections.Generic.List[string]] $CreatedShortcutPaths,
         [Parameter(Mandatory = $true)] [ref] $ShortcutGroupOwned
     )
@@ -1182,7 +1301,7 @@ try {
         -DesktopShortcut $platformDesktopShortcut `
         -CreatedShortcutPaths $createdShortcutPaths `
         -ShortcutGroupOwned ([ref]$shortcutGroupOwned)
-    Remove-ArpRegistration -Product Platform
+    Remove-TestOwnedPlatformArpRegistration
     $platformArpOwned = $false
     Assert-Condition -Condition (-not (
         Test-ArpRegistrationExists -Product Platform)) `
@@ -1200,7 +1319,7 @@ try {
 } finally {
     if ($platformArpOwned) {
         try {
-            Remove-ArpRegistration -Product Platform
+            Remove-TestOwnedPlatformArpRegistration
         } catch {
             $cleanupFailures.Add(
                 'Platform ARP cleanup: ' + $_.Exception.Message)
