@@ -980,6 +980,18 @@ def test_trusted_product_install_bootstrap() -> None:
         set_exact_security.index("Set-Acl -LiteralPath $Path")
     ), "exact ACL restore must skip an already-identical descriptor"
     assert "-ceq $Sddl" in set_exact_security
+    restored_tree_security = bootstrap[
+        bootstrap.index("function Set-RestoredTreeSecurity") :
+        bootstrap.index("function Restore-ManagedArtifacts")
+    ]
+    assert "if ([string]$_.path -eq '.')" in restored_tree_security
+    assert "0" in restored_tree_security
+    assert "Set-ExactSecuritySddl -Path $path" in restored_tree_security
+    assert "Assert-ExactSecuritySddl -Path $path" in restored_tree_security
+    assert restored_tree_security.index("Set-ExactSecuritySddl -Path $path") < (
+        restored_tree_security.index("Assert-ExactSecuritySddl -Path $path")
+    )
+    assert "Set-Acl -LiteralPath" not in restored_tree_security
     assert "$leafPattern = '^\\.mineguard-" in bootstrap
     assert "$leafPattern = '^\\\\.mineguard-" not in bootstrap
     for token in (

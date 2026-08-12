@@ -2018,27 +2018,39 @@ function Remove-ManagedTarget {
 
 function Set-RestoredTreeSecurity {
     param([string] $Root, $Inventory)
-    $ordered = @($Inventory | Sort-Object {
-        ([string]$_.path).Split('/').Count
-    })
+    # Restore parents before children so inherited descriptors can settle
+    # naturally.  Set-ExactSecuritySddl skips an already-identical descriptor;
+    # this is essential for inherited ACLs because a no-op Set-Acl round trip
+    # may normalize Windows control flags or ACE representation.
+    $ordered = @($Inventory | Sort-Object -Property @(
+        @{ Expression = {
+            if ([string]$_.path -eq '.') {
+                0
+            } else {
+                ([string]$_.path).Split('/').Count
+            }
+        }; Ascending = $true },
+        @{ Expression = { [string]$_.path }; Ascending = $true }
+    ))
     foreach ($entry in $ordered) {
         $path = if ([string]$entry.path -eq '.') {
             $Root
         } else {
             Join-Path $Root ([string]$entry.path).Replace('/', '\')
         }
-        $acl = if ([string]$entry.kind -eq 'directory') {
-            New-Object -TypeName Security.AccessControl.DirectorySecurity
+        Set-ExactSecuritySddl -Path $path -Kind ([string]$entry.kind) `
+            -Sddl ([string]$entry.sddl)
+    }
+    # Validate the final tree only after every parent and child has settled;
+    # a later inherited-ACL propagation must never escape detection.
+    foreach ($entry in $ordered) {
+        $path = if ([string]$entry.path -eq '.') {
+            $Root
         } else {
-            New-Object -TypeName Security.AccessControl.FileSecurity
+            Join-Path $Root ([string]$entry.path).Replace('/', '\')
         }
-        $managedSections =
-            [Security.AccessControl.AccessControlSections]::Access -bor
-            [Security.AccessControl.AccessControlSections]::Owner -bor
-            [Security.AccessControl.AccessControlSections]::Group
-        $acl.SetSecurityDescriptorSddlForm(
-            [string]$entry.sddl, $managedSections)
-        Set-Acl -LiteralPath $path -AclObject $acl
+        Assert-ExactSecuritySddl -Path $path `
+            -ExpectedSddl ([string]$entry.sddl)
     }
 }
 
