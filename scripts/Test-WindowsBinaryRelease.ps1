@@ -1401,6 +1401,13 @@ function Invoke-InstallerLifecycleTest {
                     party_id = "operator-ci-mine-001"
                     mine_id = "MINE-CI-001"
                     mine_name = "Windows release audit mine"
+                    comparison_context = [ordered]@{
+                        capacity_band = "0.9-1.2Mtpa"
+                        mining_method = "underground-longwall"
+                        shift_system = "three-shift-eight-hour"
+                        coal_type = "thermal-coal"
+                        operating_regime = "normal-production"
+                    }
                     active_message_key_id = "ci-key-v1"
                     message_keys = [ordered]@{
                         "ci-key-v1" = "ci-message-secret-material-000000000001"
@@ -1416,6 +1423,13 @@ function Invoke-InstallerLifecycleTest {
                     party_id = "operator-ci-mine-001"
                     mine_id = "MINE-CI-001"
                     mine_name = "Windows release audit mine changed"
+                    comparison_context = [ordered]@{
+                        capacity_band = "0.9-1.2Mtpa"
+                        mining_method = "underground-longwall"
+                        shift_system = "three-shift-eight-hour"
+                        coal_type = "thermal-coal"
+                        operating_regime = "normal-production"
+                    }
                     active_message_key_id = "ci-key-v2"
                     message_keys = [ordered]@{
                         "ci-key-v2" = "changed-message-secret-material-000000001"
@@ -1460,6 +1474,8 @@ function Invoke-InstallerLifecycleTest {
                 "MineGuard-CI-Changed-456!" -AsPlainText -Force
             $PreviousAuditMode = $env:MINEGUARD_RELEASE_AUDIT_MODE
             $ConfigurationFailureObserved = $false
+            $ExpectedConfigurationFault = `
+                "发布审计故障注入：验证 clients/password/settings 配置事务回滚。"
             try {
                 $env:MINEGUARD_RELEASE_AUDIT_MODE = "configuration-rollback-test"
                 & $ConfigurationScript -InstallRoot $InstallRoot `
@@ -1467,6 +1483,12 @@ function Invoke-InstallerLifecycleTest {
                     -NonInteractive -AuditFailAfterFirstMutation
             }
             catch {
+                if ($_.Exception.Message -ne $ExpectedConfigurationFault) {
+                    throw (
+                        "Platform configuration failed before the expected " +
+                        "rollback fault injection: $($_.Exception.Message)"
+                    )
+                }
                 $ConfigurationFailureObserved = $true
             }
             finally {

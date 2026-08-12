@@ -1534,6 +1534,31 @@ def test_audit_and_lifecycle() -> None:
             'if ($PSCmdlet.ParameterSetName -eq "SecretAudit")'
         )
     ]
+    assert lifecycle.count("comparison_context = [ordered]@{") == 2, (
+        "both Platform lifecycle client registries must carry governed comparison "
+        "context"
+    )
+    for field, value in (
+        ("capacity_band", "0.9-1.2Mtpa"),
+        ("mining_method", "underground-longwall"),
+        ("shift_system", "three-shift-eight-hour"),
+        ("coal_type", "thermal-coal"),
+        ("operating_regime", "normal-production"),
+    ):
+        assert lifecycle.count(f'{field} = "{value}"') == 2, (
+            "both lifecycle client registries must satisfy the production "
+            f"comparison_context schema: {field}"
+        )
+    for token in (
+        "$ExpectedConfigurationFault",
+        "$_.Exception.Message -ne $ExpectedConfigurationFault",
+        "failed before the expected",
+        "rollback fault injection",
+    ):
+        assert token in lifecycle, (
+            "configuration rollback audit must reject pre-validation false positives: "
+            f"{token}"
+        )
     assert lifecycle.count("Invoke-WindowsGuiProcessAndWait") == 7, (
         "all installer, upgrade and uninstaller lifecycle launches must wait for "
         "the GUI process and read its actual exit code"
