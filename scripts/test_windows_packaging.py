@@ -92,6 +92,27 @@ def test_layout() -> None:
     )
 
 
+def test_inno_code_array_arguments_cannot_look_like_section_tags() -> None:
+    """Inno scans a leading ``[`` as a section tag before compiling Pascal code."""
+    for relative in (
+        "packaging/windows/inno/MineGuardPlatform.iss",
+        "packaging/windows/inno/MineGuardEnterpriseAgent.iss",
+    ):
+        source = read(relative)
+        code_sections = re.split(r"(?m)^\[Code\]\s*$", source, maxsplit=1)
+        assert len(code_sections) == 2, f"{relative} is missing its [Code] section"
+        code = code_sections[1]
+        ambiguous = [
+            (line_number, line)
+            for line_number, line in enumerate(code.splitlines(), start=1)
+            if line.lstrip().startswith("[")
+        ]
+        assert not ambiguous, (
+            f"{relative} has Pascal lines that Inno can parse as section tags: "
+            f"{ambiguous}"
+        )
+
+
 def test_powershell_text_encoding_is_safe_for_windows_powershell_51() -> None:
     roots = (
         ROOT / "platform/deploy/windows",
@@ -2133,6 +2154,7 @@ def test_disclosure_and_documentation() -> None:
 def main() -> int:
     tests = (
         test_layout,
+        test_inno_code_array_arguments_cannot_look_like_section_tags,
         test_powershell_text_encoding_is_safe_for_windows_powershell_51,
         test_pinned_inno_chinese_language,
         test_contract_transport_vectors_keep_lf_bytes,

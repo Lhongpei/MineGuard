@@ -686,8 +686,8 @@ begin
   if ResultCode <> 0 then
   begin
     ErrorText := Format(
-      'Enterprise Agent install-root preflight rejected the target directory (exit %d). See Setup log for details.',
-      [ResultCode]);
+      'Enterprise Agent install-root preflight rejected the target directory ' +
+      '(exit %d). See Setup log for details.', [ResultCode]);
     Exit;
   end;
   Result := True;
@@ -886,8 +886,8 @@ begin
   begin
     ProductInstallFailed := True;
     RaiseException(Format(
-      'Enterprise Agent transaction action %s failed with exit code %d.',
-      [ActionName, ResultCode]));
+      'Enterprise Agent transaction action %s failed with exit code %d.', [
+      ActionName, ResultCode]));
   end;
 end;
 
@@ -934,8 +934,8 @@ begin
     begin
       ProductInstallFailed := True;
       Log(Format(
-        'Agent wrapper success marker/finalization failed with exit code %d.',
-        [ResultCode]));
+        'Agent wrapper success marker/finalization failed with exit code %d.', [
+        ResultCode]));
     end;
   end;
 end;
@@ -948,8 +948,8 @@ begin
   begin
     if not InvokeProductTransactionAction('Rollback', False, ResultCode) then
       Log(Format(
-        'ERROR: Agent retained transaction rollback failed with exit code %d.',
-        [ResultCode]));
+        'ERROR: Agent retained transaction rollback failed with exit code %d.', [
+        ResultCode]));
   end;
   if not WrapperTransactionSucceeded then
     CleanupWrapperCreatedEmptyInstallChain();
