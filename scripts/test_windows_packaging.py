@@ -676,8 +676,40 @@ def test_trusted_product_install_bootstrap() -> None:
         "function Sync-FileTreeToDisk",
         "Compatibility with transactions created by the schema-1 implementation",
         "because it contains snapshot, candidate, or unknown data",
+        "return $records.ToArray()",
+        "mutableDirectories = $validated.ToArray()",
+        "missingAncestors = $missingAncestors.ToArray()",
+        "return $specifications.ToArray()",
+        "values = $values.ToArray()",
+        "keys = $records.ToArray()",
+        "$records = [System.Collections.Generic.List[object]]::new()",
+        "$unreadableGenerations = [System.Collections.Generic.List[long]]::new()",
+        "$missingAncestors = [System.Collections.Generic.List[string]]::new()",
+        "$pending = [System.Collections.Generic.Queue[string]]::new()",
     ):
         assert token in bootstrap, f"trusted bootstrap contract missing: {token}"
+
+    for unsafe_generic_list_expansion in (
+        "return @($records)",
+        "mutableDirectories = @($validated)",
+        "missingAncestors = @($missingAncestors)",
+        "return @($specifications)",
+        "values = @($values)",
+        "keys = @($records)",
+    ):
+        assert unsafe_generic_list_expansion not in bootstrap, (
+            "Windows PowerShell 5.1 cannot reliably expand Generic.List with "
+            f"@(...): {unsafe_generic_list_expansion}"
+        )
+    assert bootstrap.count("return $records.ToArray()") == 2, (
+        "both journal-record and tree-inventory Generic.List results must use "
+        "the Windows PowerShell 5.1-safe conversion"
+    )
+    assert "New-Object System.Collections.Generic.List" not in bootstrap, (
+        "the trusted bootstrap must not expose Windows PowerShell 5.1's "
+        "New-Object Generic.List PSObject expansion bug"
+    )
+    assert "New-Object System.Collections.Generic.Queue" not in bootstrap
 
     assert "Move-Item -LiteralPath $temporary -Destination " not in bootstrap
     assert "[IO.File]::WriteAllText($temporary" not in bootstrap
@@ -830,7 +862,7 @@ def test_trusted_product_install_bootstrap() -> None:
         "expectedMarkerRootId",
         "reserved transaction marker temporary path",
         "Assert-SafeAgentStateRootScope",
-        "missingAncestors = @($missingAncestors)",
+        "missingAncestors = $missingAncestors.ToArray()",
         "existingAncestor = $existingAncestor",
     ):
         assert token in state_capture

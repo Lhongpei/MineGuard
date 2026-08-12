@@ -707,8 +707,8 @@ function Read-TransactionJournalGeneration {
 
 function Get-ValidTransactionJournalRecords {
     param([Parameter(Mandatory = $true)] $Descriptor)
-    $records = New-Object System.Collections.Generic.List[object]
-    $unreadableGenerations = New-Object System.Collections.Generic.List[long]
+    $records = [System.Collections.Generic.List[object]]::new()
+    $unreadableGenerations = [System.Collections.Generic.List[long]]::new()
     foreach ($file in @(Get-ChildItem -LiteralPath $Descriptor.Path `
             -File -Force)) {
         if ($file.Name -cmatch '^journal-(?<generation>[0-9]{20})\.json$') {
@@ -768,7 +768,7 @@ function Get-ValidTransactionJournalRecords {
             # removes it when no snapshot/candidate or other payload exists.
         }
     }
-    return @($records)
+    return $records.ToArray()
 }
 
 function Read-TransactionJournalRecord {
@@ -1030,7 +1030,7 @@ function Get-ValidatedProductRootRollbackMetadata {
     if ($records.Count -ne $expectedSpecifications.Count) {
         throw 'Product-root rollback directory set is invalid.'
     }
-    $validated = New-Object System.Collections.Generic.List[object]
+    $validated = [System.Collections.Generic.List[object]]::new()
     for ($index = 0; $index -lt $records.Count; $index++) {
         $record = $records[$index]
         foreach ($propertyName in @('name', 'path', 'existed', 'sddl')) {
@@ -1084,7 +1084,7 @@ function Get-ValidatedProductRootRollbackMetadata {
         installRoot = $Descriptor.InstallRoot
         installRootPreexisted = [bool]$Snapshot.installRootPreexisted
         installRootSddl = [string]$Snapshot.installRootSddl
-        mutableDirectories = @($validated)
+        mutableDirectories = $validated.ToArray()
         shortcutGroup = $expectedShortcutGroup
         shortcutGroupPreexisted = [bool]$Snapshot.shortcutGroupPreexisted
     }
@@ -1300,7 +1300,7 @@ function Capture-AgentStateRootMetadata {
     if ($rootExisted) {
         $aclInventory = @(Get-AgentStateAclInventory -Root $normalizedRoot)
     }
-    $missingAncestors = New-Object System.Collections.Generic.List[string]
+    $missingAncestors = [System.Collections.Generic.List[string]]::new()
     $existingAncestor = $normalizedRoot
     if (-not $rootExisted) {
         $cursor = $normalizedRoot
@@ -1356,7 +1356,7 @@ function Capture-AgentStateRootMetadata {
             $normalizedTransactionId, 'N').ToString('D')
         marker = $markerRecord
         aclInventory = @($aclInventory)
-        missingAncestors = @($missingAncestors)
+        missingAncestors = $missingAncestors.ToArray()
         existingAncestor = $existingAncestor
     }
 }
@@ -1480,7 +1480,7 @@ function Restore-AgentStateRootMetadata {
     # Existing business descendants are deliberately absent from this record:
     # the wrapper-aware child installer only validates them and never rewrites
     # their ACLs.  Validate the one root entry before the first mutation.
-    $validatedEntries = New-Object System.Collections.Generic.List[object]
+    $validatedEntries = [System.Collections.Generic.List[object]]::new()
     if ([bool]$Snapshot.rootExisted) {
         $seenPaths = @{}
         foreach ($entry in @($Snapshot.aclInventory)) {
@@ -1587,7 +1587,7 @@ function Restore-AgentStateRootMetadata {
 function Get-TreeInventory {
     param([Parameter(Mandatory = $true)] [string] $Root)
     $rootItem = Get-Item -LiteralPath $Root -Force
-    $records = New-Object System.Collections.Generic.List[object]
+    $records = [System.Collections.Generic.List[object]]::new()
     $items = @($rootItem)
     if ($rootItem.PSIsContainer) {
         $items += @(Get-ChildItem -LiteralPath $Root -Force -Recurse |
@@ -1624,7 +1624,7 @@ function Get-TreeInventory {
             })
         }
     }
-    return @($records)
+    return $records.ToArray()
 }
 
 function Assert-InventoryContent {
@@ -1655,7 +1655,7 @@ function Assert-InventoryContent {
 
 function Get-ManagedArtifactSpecifications {
     param([string] $Root, [string] $Kind)
-    $specifications = New-Object System.Collections.Generic.List[object]
+    $specifications = [System.Collections.Generic.List[object]]::new()
     $directoryNames = if ($Kind -eq 'Platform') {
         @('runtime', 'service', 'launcher', 'release-metadata', 'docs',
           'uninstall-tools')
@@ -1719,7 +1719,7 @@ function Get-ManagedArtifactSpecifications {
             category = 'shortcut'
         })
     }
-    return @($specifications)
+    return $specifications.ToArray()
 }
 
 function Assert-ManagedArtifactTarget {
@@ -1806,9 +1806,9 @@ function Capture-ArpRegistration {
             }
         }
         $root.Dispose()
-        $pending = New-Object System.Collections.Generic.Queue[string]
+        $pending = [System.Collections.Generic.Queue[string]]::new()
         $pending.Enqueue('')
-        $records = New-Object System.Collections.Generic.List[object]
+        $records = [System.Collections.Generic.List[object]]::new()
         while ($pending.Count -gt 0) {
             $relative = $pending.Dequeue()
             $currentSubKey = if ($relative -eq '') {
@@ -1821,7 +1821,7 @@ function Capture-ArpRegistration {
                 throw "ARP registry key changed during snapshot: $currentSubKey"
             }
             try {
-                $values = New-Object System.Collections.Generic.List[object]
+                $values = [System.Collections.Generic.List[object]]::new()
                 foreach ($name in @($key.GetValueNames() | Sort-Object)) {
                     $kind = $key.GetValueKind($name)
                     $option = if ($kind -eq
@@ -1845,7 +1845,7 @@ function Capture-ArpRegistration {
                         [Security.AccessControl.AccessControlSections]::Access -bor
                         [Security.AccessControl.AccessControlSections]::Owner -bor
                         [Security.AccessControl.AccessControlSections]::Group)
-                    values = @($values)
+                    values = $values.ToArray()
                 })
                 foreach ($child in @($key.GetSubKeyNames() | Sort-Object)) {
                     $childRelative = if ($relative -eq '') {
@@ -1862,7 +1862,7 @@ function Capture-ArpRegistration {
         return [pscustomobject]@{
             subKey = $subKey
             existed = $true
-            keys = @($records)
+            keys = $records.ToArray()
         }
     } finally {
         $base.Dispose()
