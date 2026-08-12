@@ -196,6 +196,93 @@ function Remove-FileWithRetry {
     )
 }
 
+function New-SecureVerificationRoot {
+    param([Parameter(Mandatory = $true)][string]$PathValue)
+
+    $FullPath = [IO.Path]::GetFullPath($PathValue).TrimEnd('\')
+    $VolumeRoot = [IO.Path]::GetPathRoot($FullPath)
+    if ([string]::IsNullOrWhiteSpace($VolumeRoot) -or
+        $FullPath.Equals(
+            $VolumeRoot.TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Refusing unsafe verification root: $FullPath"
+    }
+    if (Test-Path -LiteralPath $FullPath) {
+        throw "Verification root already exists: $FullPath"
+    }
+    $ParentPath = Split-Path -Parent $FullPath
+    $ParentItem = Get-Item -LiteralPath $ParentPath -Force
+    if (($ParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Verification-root parent is a reparse point: $ParentPath"
+    }
+    $Drive = [IO.DriveInfo]::new($VolumeRoot)
+    if (-not $Drive.IsReady -or
+        $Drive.DriveType -ne [IO.DriveType]::Fixed -or
+        -not $Drive.DriveFormat.Equals(
+            "NTFS", [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Verification root must be on a ready local fixed NTFS volume."
+    }
+
+    $Administrators = [Security.Principal.SecurityIdentifier]::new(
+        "S-1-5-32-544"
+    )
+    $LocalSystem = [Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+    $Inheritance = (
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    )
+    $Acl = [Security.AccessControl.DirectorySecurity]::new()
+    $Acl.SetAccessRuleProtection($true, $false)
+    $Acl.SetOwner($Administrators)
+    foreach ($Sid in @($Administrators, $LocalSystem)) {
+        $Rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $Sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $Inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$Acl.AddAccessRule($Rule)
+    }
+    [void][IO.Directory]::CreateDirectory($FullPath, $Acl)
+
+    $CreatedItem = Get-Item -LiteralPath $FullPath -Force
+    if (($CreatedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Secure verification root became a reparse point: $FullPath"
+    }
+    $ActualAcl = [IO.Directory]::GetAccessControl($FullPath)
+    $ActualOwner = $ActualAcl.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+    $ActualRules = @($ActualAcl.GetAccessRules(
+            $true,
+            $false,
+            [Security.Principal.SecurityIdentifier]
+        ))
+    if (-not $ActualAcl.AreAccessRulesProtected -or
+        $ActualOwner -cne $Administrators.Value -or
+        $ActualRules.Count -ne 2) {
+        throw "Secure verification root owner or DACL protection is invalid."
+    }
+    $ExpectedSidValues = @($Administrators.Value, $LocalSystem.Value)
+    foreach ($ActualRule in $ActualRules) {
+        if (-not ($ExpectedSidValues -ccontains
+                $ActualRule.IdentityReference.Value) -or
+            $ActualRule.AccessControlType -ne
+                [Security.AccessControl.AccessControlType]::Allow -or
+            $ActualRule.FileSystemRights -ne
+                [Security.AccessControl.FileSystemRights]::FullControl -or
+            $ActualRule.InheritanceFlags -ne $Inheritance -or
+            $ActualRule.PropagationFlags -ne
+                [Security.AccessControl.PropagationFlags]::None) {
+            throw "Secure verification root has a non-canonical ACL rule."
+        }
+    }
+    return $FullPath
+}
+
 function Wait-ProcessExecutableVisible {
     param(
         [Parameter(Mandatory = $true)][int]$ProcessId,
@@ -1555,15 +1642,17 @@ function Test-OneTransactionalRollbackAndDowngrade {
 }
 
 # Wrapper install-root preflight intentionally rejects user-writable ancestors.
-# Exercise Setup beneath ProgramData, matching both production defaults and the
-# final installer lifecycle audit, while retaining a per-run isolated GUID root.
-$ProbeParent = Join-Path $env:ProgramData `
-    "MineGuardFailurePropagationVerification"
-New-Item -ItemType Directory -Path $ProbeParent -Force | Out-Null
-$ProbeRoot = Join-Path $ProbeParent (
-    "p-" + [Guid]::NewGuid().ToString("N").Substring(0, 16)
+# A normal child created beneath ProgramData inherits permissive creator rights,
+# so create a per-run direct child with a protected Administrators/SYSTEM DACL.
+$ProbeParent = [Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::CommonApplicationData
 )
-New-Item -ItemType Directory -Path $ProbeRoot | Out-Null
+if ([string]::IsNullOrWhiteSpace($ProbeParent)) {
+    throw "Windows CommonApplicationData is unavailable."
+}
+$ProbeParent = [IO.Path]::GetFullPath($ProbeParent).TrimEnd('\')
+$ProbeRoot = Join-Path $ProbeParent ([Guid]::NewGuid().ToString("N"))
+$ProbeRoot = New-SecureVerificationRoot -PathValue $ProbeRoot
 $FailurePropagationCompleted = $false
 try {
     $PlatformVersion = (Get-Content -LiteralPath (Join-Path $PlatformStage "VERSION.txt") -Raw -Encoding UTF8).Trim()
@@ -1597,7 +1686,24 @@ finally {
         if (Test-Path -LiteralPath $ProbeRoot) {
             $FullProbeRoot = [IO.Path]::GetFullPath($ProbeRoot)
             $FullProbeParent = [IO.Path]::GetFullPath($ProbeParent).TrimEnd('\') + '\'
-            if (-not $FullProbeRoot.StartsWith($FullProbeParent, [StringComparison]::OrdinalIgnoreCase)) {
+            $RelativeProbeRoot = if ($FullProbeRoot.StartsWith(
+                    $FullProbeParent,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                $FullProbeRoot.Substring($FullProbeParent.Length)
+            }
+            else {
+                ""
+            }
+            $ParsedProbeId = [Guid]::Empty
+            $IsDirectGuidChild = (
+                -not [string]::IsNullOrWhiteSpace($RelativeProbeRoot) -and
+                -not $RelativeProbeRoot.Contains('\') -and
+                [Guid]::TryParseExact(
+                    $RelativeProbeRoot, "N", [ref]$ParsedProbeId
+                )
+            )
+            if (-not $IsDirectGuidChild) {
                 throw "Refusing unsafe failure-probe cleanup path: $FullProbeRoot"
             }
             Remove-DirectoryWithRetry `

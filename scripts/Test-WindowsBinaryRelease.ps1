@@ -1032,6 +1032,93 @@ function Wait-InnoUninstallerSelfCleanup {
     throw "$Product uninstaller self-cleanup timed out with Inno files still present: $RemainingNames"
 }
 
+function New-SecureVerificationRoot {
+    param([Parameter(Mandatory = $true)][string]$PathValue)
+
+    $FullPath = [IO.Path]::GetFullPath($PathValue).TrimEnd('\')
+    $VolumeRoot = [IO.Path]::GetPathRoot($FullPath)
+    if ([string]::IsNullOrWhiteSpace($VolumeRoot) -or
+        $FullPath.Equals(
+            $VolumeRoot.TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Refusing unsafe verification root: $FullPath"
+    }
+    if (Test-Path -LiteralPath $FullPath) {
+        throw "Verification root already exists: $FullPath"
+    }
+    $ParentPath = Split-Path -Parent $FullPath
+    $ParentItem = Get-Item -LiteralPath $ParentPath -Force
+    if (($ParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Verification-root parent is a reparse point: $ParentPath"
+    }
+    $Drive = [IO.DriveInfo]::new($VolumeRoot)
+    if (-not $Drive.IsReady -or
+        $Drive.DriveType -ne [IO.DriveType]::Fixed -or
+        -not $Drive.DriveFormat.Equals(
+            "NTFS", [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Verification root must be on a ready local fixed NTFS volume."
+    }
+
+    $Administrators = [Security.Principal.SecurityIdentifier]::new(
+        "S-1-5-32-544"
+    )
+    $LocalSystem = [Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+    $Inheritance = (
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    )
+    $Acl = [Security.AccessControl.DirectorySecurity]::new()
+    $Acl.SetAccessRuleProtection($true, $false)
+    $Acl.SetOwner($Administrators)
+    foreach ($Sid in @($Administrators, $LocalSystem)) {
+        $Rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $Sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $Inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$Acl.AddAccessRule($Rule)
+    }
+    [void][IO.Directory]::CreateDirectory($FullPath, $Acl)
+
+    $CreatedItem = Get-Item -LiteralPath $FullPath -Force
+    if (($CreatedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Secure verification root became a reparse point: $FullPath"
+    }
+    $ActualAcl = [IO.Directory]::GetAccessControl($FullPath)
+    $ActualOwner = $ActualAcl.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+    $ActualRules = @($ActualAcl.GetAccessRules(
+            $true,
+            $false,
+            [Security.Principal.SecurityIdentifier]
+        ))
+    if (-not $ActualAcl.AreAccessRulesProtected -or
+        $ActualOwner -cne $Administrators.Value -or
+        $ActualRules.Count -ne 2) {
+        throw "Secure verification root owner or DACL protection is invalid."
+    }
+    $ExpectedSidValues = @($Administrators.Value, $LocalSystem.Value)
+    foreach ($ActualRule in $ActualRules) {
+        if (-not ($ExpectedSidValues -ccontains
+                $ActualRule.IdentityReference.Value) -or
+            $ActualRule.AccessControlType -ne
+                [Security.AccessControl.AccessControlType]::Allow -or
+            $ActualRule.FileSystemRights -ne
+                [Security.AccessControl.FileSystemRights]::FullControl -or
+            $ActualRule.InheritanceFlags -ne $Inheritance -or
+            $ActualRule.PropagationFlags -ne
+                [Security.AccessControl.PropagationFlags]::None) {
+            throw "Secure verification root has a non-canonical ACL rule."
+        }
+    }
+    return $FullPath
+}
+
 function Remove-VerificationRootWithRetry {
     param(
         [string]$VerificationRoot,
@@ -1124,7 +1211,15 @@ function Invoke-InstallerLifecycleTest {
     if (-not $Identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw "Installer lifecycle verification requires an elevated Administrator runner."
     }
-    $VerificationParent = Join-Path $env:ProgramData "MineGuardReleaseVerification"
+    $VerificationParent = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::CommonApplicationData
+    )
+    if ([string]::IsNullOrWhiteSpace($VerificationParent)) {
+        throw "Windows CommonApplicationData is unavailable."
+    }
+    $VerificationParent = [IO.Path]::GetFullPath(
+        $VerificationParent
+    ).TrimEnd('\')
     $VerificationRoot = Join-Path $VerificationParent ([Guid]::NewGuid().ToString("N"))
     $InstallLeaf = if ($Product -eq "platform") { "Platform" } else { "EnterpriseAgent" }
     $InstallRoot = Join-Path $VerificationRoot $InstallLeaf
@@ -1134,7 +1229,7 @@ function Invoke-InstallerLifecycleTest {
     } else {
         "MineGuardEnterpriseAgent-ci-" + [Guid]::NewGuid().ToString("N").Substring(0, 10)
     }
-    New-Item -ItemType Directory -Path $VerificationRoot -Force | Out-Null
+    $VerificationRoot = New-SecureVerificationRoot -PathValue $VerificationRoot
     $LifecycleAuditError = $null
     $ProbeService = $null
     try {
