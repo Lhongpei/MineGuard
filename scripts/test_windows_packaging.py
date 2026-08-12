@@ -113,6 +113,24 @@ def test_inno_code_array_arguments_cannot_look_like_section_tags() -> None:
         )
 
 
+def test_inno_transaction_ids_use_supported_strong_unique_names() -> None:
+    for relative in (
+        "packaging/windows/inno/MineGuardPlatform.iss",
+        "packaging/windows/inno/MineGuardEnterpriseAgent.iss",
+    ):
+        source = read(relative)
+        assert (
+            "UniqueSeed := GenerateUniqueName(ExpandConstant('{tmp}'), '.tmp');"
+            in source
+        ), f"{relative} must derive transaction IDs from Inno's unique-name API"
+        assert "GetTempFileName" not in source, (
+            f"{relative} uses a .NET API that Inno Pascal does not expose"
+        )
+        assert "DeleteFile(UniqueSeed)" not in source, (
+            f"{relative} must not delete a non-created GenerateUniqueName result"
+        )
+
+
 def test_powershell_text_encoding_is_safe_for_windows_powershell_51() -> None:
     roots = (
         ROOT / "platform/deploy/windows",
@@ -2155,6 +2173,7 @@ def main() -> int:
     tests = (
         test_layout,
         test_inno_code_array_arguments_cannot_look_like_section_tags,
+        test_inno_transaction_ids_use_supported_strong_unique_names,
         test_powershell_text_encoding_is_safe_for_windows_powershell_51,
         test_pinned_inno_chinese_language,
         test_contract_transport_vectors_keep_lf_bytes,

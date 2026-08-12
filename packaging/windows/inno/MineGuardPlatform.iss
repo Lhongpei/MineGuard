@@ -623,8 +623,7 @@ var
 begin
   if ProductTransactionId = '' then
   begin
-    UniqueSeed := GetTempFileName(ExpandConstant('{tmp}'));
-    DeleteFile(UniqueSeed);
+    UniqueSeed := GenerateUniqueName(ExpandConstant('{tmp}'), '.tmp');
     ProductTransactionId := LowerCase(Copy(GetSHA256OfString(
       UniqueSeed + '|' + ExpandConstant('{app}')), 1, 32));
   end;
