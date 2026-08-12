@@ -808,6 +808,20 @@ def test_trusted_product_install_bootstrap() -> None:
     ]
     assert "$key.Flush()" in arp_restore
     assert "Flush-ArpRegistryParent" in arp_restore
+    assert "Set-ExactRegistrySecuritySddl -Key $key" in arp_restore
+    assert "Assert-ExactRegistrySecuritySddl -Key $key" in arp_restore
+    assert "Convert-ArpRegistrationToCanonicalJson" in arp_restore
+    assert arp_restore.index("Set-ExactRegistrySecuritySddl -Key $key") < (
+        arp_restore.index("Assert-ExactRegistrySecuritySddl -Key $key")
+    ) < arp_restore.rindex("Flush-ArpRegistryParent")
+    registry_acl_restore = bootstrap[
+        bootstrap.index("function Set-ExactRegistrySecuritySddl") :
+        bootstrap.index("function Assert-ExactRegistrySecuritySddl")
+    ]
+    assert registry_acl_restore.index("Get-RegistrySecuritySddl -Key $Key") < (
+        registry_acl_restore.index("$Key.SetAccessControl($security)")
+    )
+    assert "-ceq $Sddl" in registry_acl_restore
 
     # PowerShell single-quoted strings do not escape backslashes. These exact
     # forms are required for correct Windows relative-path calculation.
@@ -1515,7 +1529,10 @@ def test_audit_and_lifecycle() -> None:
         "The uninstall SetupMutex probe must run in an elevated administrator process",
         "$Product blocked uninstall",
         "the blocked uninstaller did not return a nonzero exit code",
-        "the blocked uninstaller changed HKLM64 ARP",
+        "function Convert-ArpRegistryValueToCanonicalRecord",
+        "function Assert-ExactArpRegistrationSnapshot",
+        "$Product blocked uninstaller",
+        "did not restore HKLM64 ARP exactly",
         ".mineguard-enterprise-agent-instances.json",
         "preexisting-empty-unmarked",
         "new-state-root",
@@ -1552,6 +1569,18 @@ def test_audit_and_lifecycle() -> None:
     assert failure_probe.count("Test-OneWrapperPersistenceRollback `") == 2
     assert '-Product platform -OriginalStage $PlatformStage' in failure_probe
     assert '-Product agent -OriginalStage $AgentStage' in failure_probe
+    arp_snapshot_probe = failure_probe[
+        failure_probe.index("function Get-ArpRegistrationSnapshot") :
+        failure_probe.index("function Assert-ExactArpRegistrationSnapshot")
+    ]
+    assert "RegistryView]::Registry64" in arp_snapshot_probe
+    assert "RegistryValueOptions]::DoNotExpandEnvironmentNames" in (
+        arp_snapshot_probe
+    )
+    assert "RegistryValueKind]::MultiString" in failure_probe
+    assert "RegistryValueKind]::Binary" in failure_probe
+    assert "ConvertTo-Json -Depth 20 -Compress" in arp_snapshot_probe
+    assert 'reg.exe" export' not in arp_snapshot_probe
     mutex_probe = failure_probe[
         failure_probe.index("function Test-OneSetupMutexExclusion") :
         failure_probe.index("function Test-OneWrapperPersistenceRollback")

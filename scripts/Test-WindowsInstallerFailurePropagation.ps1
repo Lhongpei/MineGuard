@@ -555,31 +555,148 @@ function Assert-ExactArtifactSnapshot {
     }
 }
 
+function Convert-ArpRegistryValueToCanonicalRecord {
+    param($Value, [Microsoft.Win32.RegistryValueKind]$Kind)
+    if ($Kind -in @(
+            [Microsoft.Win32.RegistryValueKind]::Binary,
+            [Microsoft.Win32.RegistryValueKind]::None)) {
+        return [ordered]@{
+            encoding = "base64"
+            data = [Convert]::ToBase64String([byte[]]$Value)
+        }
+    }
+    if ($Kind -eq [Microsoft.Win32.RegistryValueKind]::MultiString) {
+        return [ordered]@{
+            encoding = "string-array"
+            data = @([string[]]$Value)
+        }
+    }
+    $Data = if ($Kind -in @(
+            [Microsoft.Win32.RegistryValueKind]::DWord,
+            [Microsoft.Win32.RegistryValueKind]::QWord)) {
+        $Value.ToString([Globalization.CultureInfo]::InvariantCulture)
+    }
+    else {
+        [string]$Value
+    }
+    return [ordered]@{
+        encoding = "scalar"
+        data = $Data
+    }
+}
+
 function Get-ArpRegistrationSnapshot {
     param(
         [ValidateSet("platform", "agent")][string]$Product,
         [string]$ScratchRoot
     )
+    # Registry values and subkeys have no defined enumeration order.  Compare
+    # a canonical Registry64 semantic snapshot instead of hashing reg.exe's
+    # order-dependent export text. ScratchRoot remains in the signature so all
+    # existing native probes retain one uniform call shape.
+    [void]$ScratchRoot
     $ApplicationId = if ($Product -eq "platform") {
         "{8B391CBD-E234-46D7-9946-E9D37F2649C1}"
     }
     else {
         "{9B73DE95-6B38-4482-A8BC-2A4FC656D05A}"
     }
-    $Key = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\${ApplicationId}_is1"
-    $ExportPath = Join-Path $ScratchRoot (
-        "arp-" + [Guid]::NewGuid().ToString("N") + ".reg")
+    $SubKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\${ApplicationId}_is1"
+    $Base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry64)
     try {
-        & "$env:SystemRoot\System32\reg.exe" export $Key $ExportPath /y `
-            /reg:64 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
+        $Root = $Base.OpenSubKey($SubKey, $false)
+        if ($null -eq $Root) {
             throw "$Product ARP registration is missing after baseline install."
         }
-        return (Get-FileHash -LiteralPath $ExportPath -Algorithm SHA256).Hash
+        $Root.Dispose()
+        $Pending = [System.Collections.Generic.Queue[string]]::new()
+        $Pending.Enqueue("")
+        $Keys = [System.Collections.Generic.List[object]]::new()
+        while ($Pending.Count -gt 0) {
+            $Relative = $Pending.Dequeue()
+            $CurrentSubKey = if ($Relative -eq "") {
+                $SubKey
+            }
+            else {
+                $SubKey + "\" + $Relative
+            }
+            $Key = $Base.OpenSubKey($CurrentSubKey, $false)
+            if ($null -eq $Key) {
+                throw "$Product ARP key changed during snapshot: $CurrentSubKey"
+            }
+            try {
+                $Values = [System.Collections.Generic.List[object]]::new()
+                foreach ($Name in @($Key.GetValueNames() |
+                        Sort-Object -CaseSensitive)) {
+                    $Kind = $Key.GetValueKind($Name)
+                    $Option = if ($Kind -eq
+                            [Microsoft.Win32.RegistryValueKind]::ExpandString) {
+                        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+                    }
+                    else {
+                        [Microsoft.Win32.RegistryValueOptions]::None
+                    }
+                    $Value = $Key.GetValue($Name, $null, $Option)
+                    $Values.Add([ordered]@{
+                        name = [string]$Name
+                        kind = [string]$Kind
+                        value = Convert-ArpRegistryValueToCanonicalRecord `
+                            -Value $Value -Kind $Kind
+                    })
+                }
+                $Security = $Key.GetAccessControl()
+                $Sections =
+                    [Security.AccessControl.AccessControlSections]::Access -bor
+                    [Security.AccessControl.AccessControlSections]::Owner -bor
+                    [Security.AccessControl.AccessControlSections]::Group
+                $Keys.Add([ordered]@{
+                    path = [string]$Relative
+                    owner = $Security.GetOwner(
+                        [Security.Principal.SecurityIdentifier]).Value
+                    group = $Security.GetGroup(
+                        [Security.Principal.SecurityIdentifier]).Value
+                    accessRulesProtected = [bool]$Security.AreAccessRulesProtected
+                    sddl = $Security.GetSecurityDescriptorSddlForm($Sections)
+                    values = $Values.ToArray()
+                })
+                foreach ($Child in @($Key.GetSubKeyNames() |
+                        Sort-Object -CaseSensitive)) {
+                    $ChildRelative = if ($Relative -eq "") {
+                        $Child
+                    }
+                    else {
+                        $Relative + "\" + $Child
+                    }
+                    $Pending.Enqueue($ChildRelative)
+                }
+            }
+            finally {
+                $Key.Dispose()
+            }
+        }
+        $Snapshot = [ordered]@{
+            subKey = $SubKey
+            keys = $Keys.ToArray()
+        }
+        return ($Snapshot | ConvertTo-Json -Depth 20 -Compress)
     }
     finally {
-        Remove-Item -LiteralPath $ExportPath -Force -ErrorAction SilentlyContinue
+        $Base.Dispose()
     }
+}
+
+function Assert-ExactArpRegistrationSnapshot {
+    param([string]$Expected, [string]$Actual, [string]$Label)
+    if ($Actual -ceq $Expected) { return }
+    # This fixture runs on an isolated release runner and ARP records contain
+    # no credentials. Emit both canonical structures so a genuine
+    # value/type/ACL regression is diagnosable without relying on registry
+    # enumeration order.
+    Write-Host "$Label expected ARP: $Expected"
+    Write-Host "$Label actual ARP: $Actual"
+    throw "$Label did not restore HKLM64 ARP exactly."
 }
 
 function Test-OneFailureProbe {
@@ -836,9 +953,8 @@ function Test-OneUninstallMutexExclusion {
     try {
         $AfterArp = Get-ArpRegistrationSnapshot `
             -Product $Product -ScratchRoot $ProbeRoot
-        if ($AfterArp -cne $BeforeArp) {
-            $Failures.Add("the blocked uninstaller changed HKLM64 ARP")
-        }
+        Assert-ExactArpRegistrationSnapshot -Expected $BeforeArp `
+            -Actual $AfterArp -Label "$Product blocked uninstaller"
     }
     catch {
         $Failures.Add($_.Exception.Message)
@@ -1202,9 +1318,9 @@ function Test-OneWrapperPersistenceRollback {
             -Label "$Product wrapper persistence rollback"
         $AfterArp = Get-ArpRegistrationSnapshot `
             -Product $Product -ScratchRoot $ProbeRoot
-        if ($AfterArp -cne $BeforeArp) {
-            throw "$Product wrapper persistence rollback did not restore HKLM64 ARP."
-        }
+        Assert-ExactArpRegistrationSnapshot -Expected $BeforeArp `
+            -Actual $AfterArp `
+            -Label "$Product wrapper persistence rollback"
         $LeakedTransaction = Get-ChildItem -LiteralPath (
             Split-Path -Parent $InstallRoot) -Directory -Force |
             Where-Object { $_.Name.StartsWith($TransactionPrefix) } |

@@ -1797,6 +1797,86 @@ function Convert-RecordToRegistryValue {
     }
 }
 
+function Convert-ArpRegistrationToCanonicalJson {
+    param([Parameter(Mandatory = $true)] $Snapshot)
+    $canonicalKeys = [System.Collections.Generic.List[object]]::new()
+    foreach ($record in @($Snapshot.keys | Sort-Object -Property @(
+            @{ Expression = { [string]$_.path }; Ascending = $true }
+        ))) {
+        $canonicalValues = [System.Collections.Generic.List[object]]::new()
+        foreach ($valueRecord in @($record.values |
+                Sort-Object -CaseSensitive -Property @(
+                    @{ Expression = { [string]$_.name }; Ascending = $true }
+                ))) {
+            $encoding = [string]$valueRecord.value.encoding
+            $data = if ($encoding -eq 'string-array') {
+                @($valueRecord.value.data | ForEach-Object { [string]$_ })
+            } else {
+                [string]$valueRecord.value.data
+            }
+            $canonicalValues.Add([ordered]@{
+                name = [string]$valueRecord.name
+                kind = [string]$valueRecord.kind
+                encoding = $encoding
+                data = $data
+            })
+        }
+        $canonicalKeys.Add([ordered]@{
+            path = [string]$record.path
+            sddl = [string]$record.sddl
+            values = $canonicalValues.ToArray()
+        })
+    }
+    $canonical = [ordered]@{
+        subKey = [string]$Snapshot.subKey
+        existed = [bool]$Snapshot.existed
+        keys = $canonicalKeys.ToArray()
+    }
+    return ($canonical | ConvertTo-Json -Depth 20 -Compress)
+}
+
+function Get-RegistrySecuritySddl {
+    param([Parameter(Mandatory = $true)]
+          [Microsoft.Win32.RegistryKey] $Key)
+    $security = $Key.GetAccessControl()
+    $managedSections =
+        [Security.AccessControl.AccessControlSections]::Access -bor
+        [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Group
+    return $security.GetSecurityDescriptorSddlForm($managedSections)
+}
+
+function Set-ExactRegistrySecuritySddl {
+    param(
+        [Parameter(Mandatory = $true)] [Microsoft.Win32.RegistryKey] $Key,
+        [Parameter(Mandatory = $true)] [string] $Sddl
+    )
+    # A recreated key normally inherits the exact saved descriptor already.
+    # Avoid an order-only SetAccessControl round trip that lets Windows
+    # normalize inherited ACE/control representation.
+    if ((Get-RegistrySecuritySddl -Key $Key) -ceq $Sddl) {
+        return
+    }
+    $security = New-Object -TypeName Security.AccessControl.RegistrySecurity
+    $managedSections =
+        [Security.AccessControl.AccessControlSections]::Access -bor
+        [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Group
+    $security.SetSecurityDescriptorSddlForm($Sddl, $managedSections)
+    $Key.SetAccessControl($security)
+}
+
+function Assert-ExactRegistrySecuritySddl {
+    param(
+        [Parameter(Mandatory = $true)] [Microsoft.Win32.RegistryKey] $Key,
+        [Parameter(Mandatory = $true)] [string] $ExpectedSddl,
+        [Parameter(Mandatory = $true)] [string] $Path
+    )
+    if ((Get-RegistrySecuritySddl -Key $Key) -cne $ExpectedSddl) {
+        throw "Restored ARP security descriptor does not match its snapshot: $Path"
+    }
+}
+
 function Capture-ArpRegistration {
     $subKey = Get-ArpRegistrySubKey -Kind $Product
     $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
@@ -1901,6 +1981,8 @@ function Restore-ArpRegistration {
     if ([string]$Snapshot.subKey -cne $expectedSubKey) {
         throw 'ARP snapshot targets an unexpected registry key.'
     }
+    $expectedCanonical = Convert-ArpRegistrationToCanonicalJson `
+        -Snapshot $Snapshot
     $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
         [Microsoft.Win32.RegistryHive]::LocalMachine,
         [Microsoft.Win32.RegistryView]::Registry64)
@@ -1908,15 +1990,23 @@ function Restore-ArpRegistration {
         try { $base.DeleteSubKeyTree($expectedSubKey, $false) } catch { throw }
         if (-not [bool]$Snapshot.existed) {
             Flush-ArpRegistryParent -BaseKey $base -SubKey $expectedSubKey
+            $actualCanonical = Convert-ArpRegistrationToCanonicalJson `
+                -Snapshot (Capture-ArpRegistration)
+            if ($actualCanonical -cne $expectedCanonical) {
+                throw 'Absent ARP registration was not restored exactly.'
+            }
             return
         }
-        $records = @($Snapshot.keys | Sort-Object {
-            if ([string]$_.path -eq '') {
-                0
-            } else {
-                ([string]$_.path).Split('\').Count
-            }
-        })
+        $records = @($Snapshot.keys | Sort-Object -Property @(
+            @{ Expression = {
+                if ([string]$_.path -eq '') {
+                    0
+                } else {
+                    ([string]$_.path).Split('\').Count
+                }
+            }; Ascending = $true },
+            @{ Expression = { [string]$_.path }; Ascending = $true }
+        ))
         if ($records.Count -eq 0 -or [string]$records[0].path -cne '') {
             throw 'ARP snapshot is missing its root key.'
         }
@@ -1938,15 +2028,8 @@ function Restore-ArpRegistration {
                         -Record $valueRecord.value -Kind $kind
                     $key.SetValue([string]$valueRecord.name, $value, $kind)
                 }
-                $security = New-Object -TypeName `
-                    Security.AccessControl.RegistrySecurity
-                $managedSections =
-                    [Security.AccessControl.AccessControlSections]::Access -bor
-                    [Security.AccessControl.AccessControlSections]::Owner -bor
-                    [Security.AccessControl.AccessControlSections]::Group
-                $security.SetSecurityDescriptorSddlForm(
-                    [string]$record.sddl, $managedSections)
-                $key.SetAccessControl($security)
+                Set-ExactRegistrySecuritySddl -Key $key `
+                    -Sddl ([string]$record.sddl)
                 # Flush every restored key before rolledback can become
                 # durable; this covers values, security and child-key state.
                 $key.Flush()
@@ -1954,7 +2037,32 @@ function Restore-ArpRegistration {
                 $key.Dispose()
             }
         }
+        # Verify the final ACL tree only after every parent and child has been
+        # created, so late inheritance propagation cannot escape detection.
+        foreach ($record in $records) {
+            $currentSubKey = if ([string]$record.path -eq '') {
+                $expectedSubKey
+            } else {
+                $expectedSubKey + '\' + [string]$record.path
+            }
+            $key = $base.OpenSubKey($currentSubKey, $false)
+            if ($null -eq $key) {
+                throw "Restored ARP registry key disappeared: $currentSubKey"
+            }
+            try {
+                Assert-ExactRegistrySecuritySddl -Key $key `
+                    -ExpectedSddl ([string]$record.sddl) `
+                    -Path $currentSubKey
+            } finally {
+                $key.Dispose()
+            }
+        }
         Flush-ArpRegistryParent -BaseKey $base -SubKey $expectedSubKey
+        $actualCanonical = Convert-ArpRegistrationToCanonicalJson `
+            -Snapshot (Capture-ArpRegistration)
+        if ($actualCanonical -cne $expectedCanonical) {
+            throw 'Restored ARP registration values, types or ACLs do not match the snapshot.'
+        }
     } finally {
         $base.Dispose()
     }
