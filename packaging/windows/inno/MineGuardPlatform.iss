@@ -640,8 +640,8 @@ end;
 
 function GetExtractedPlatformReleaseRoot(): String;
 begin
-  { ExtractTemporaryFiles maps a leading {tmp}\ DestDir to Setup's private
-    temporary root instead of preserving that token as a literal subfolder. }
+  // ExtractTemporaryFiles maps a leading {tmp}\ DestDir to Setup's private
+  // temporary root instead of preserving that token as a literal subfolder.
   Result := ExpandConstant('{tmp}\MineGuardPlatformRelease');
 end;
 

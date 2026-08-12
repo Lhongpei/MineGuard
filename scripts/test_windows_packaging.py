@@ -113,6 +113,29 @@ def test_inno_code_array_arguments_cannot_look_like_section_tags() -> None:
         )
 
 
+def test_inno_code_brace_comments_cannot_nest() -> None:
+    """Inno's brace comments close at the first ``}`` and cannot be nested."""
+
+    for relative in (
+        "packaging/windows/inno/MineGuardPlatform.iss",
+        "packaging/windows/inno/MineGuardEnterpriseAgent.iss",
+    ):
+        source = read(relative)
+        code_sections = re.split(r"(?m)^\[Code\]\s*$", source, maxsplit=1)
+        assert len(code_sections) == 2, f"{relative} is missing its [Code] section"
+        nested = [
+            (line_number, line)
+            for line_number, line in enumerate(
+                code_sections[1].splitlines(), start=1
+            )
+            if re.match(r"^\s*\{[^}]*\{", line)
+        ]
+        assert not nested, (
+            f"{relative} has nested brace comments rejected by Inno Pascal: "
+            f"{nested}"
+        )
+
+
 def test_inno_transaction_ids_use_supported_strong_unique_names() -> None:
     for relative in (
         "packaging/windows/inno/MineGuardPlatform.iss",
@@ -2233,6 +2256,7 @@ def main() -> int:
     tests = (
         test_layout,
         test_inno_code_array_arguments_cannot_look_like_section_tags,
+        test_inno_code_brace_comments_cannot_nest,
         test_inno_transaction_ids_use_supported_strong_unique_names,
         test_powershell_text_encoding_is_safe_for_windows_powershell_51,
         test_pinned_inno_chinese_language,
