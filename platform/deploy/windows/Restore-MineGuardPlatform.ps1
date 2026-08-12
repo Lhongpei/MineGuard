@@ -11,7 +11,6 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$ServiceSid = 'S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346'
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
@@ -205,10 +204,16 @@ if (Test-Path -LiteralPath $TargetStateDirectory) {
 $resolverPath = Get-SafeFixedNtfsPath `
     -Value (Join-Path $PSScriptRoot 'Resolve-MineGuardPlatformExecutable.ps1') `
     -Label '运行时解析器'
-if (-not (Test-Path -LiteralPath $resolverPath -PathType Leaf)) {
-    throw "找不到运行时解析器：$resolverPath"
+$aclHelperPath = Get-SafeFixedNtfsPath `
+    -Value (Join-Path $PSScriptRoot 'MineGuardPlatform.WindowsAcl.ps1') `
+    -Label 'Platform ACL helper'
+foreach ($requiredHelper in @($resolverPath, $aclHelperPath)) {
+    if (-not (Test-Path -LiteralPath $requiredHelper -PathType Leaf)) {
+        throw "恢复工具缺少受信 helper：$requiredHelper"
+    }
 }
 . $resolverPath
+. $aclHelperPath
 $runtime = Resolve-MineGuardPlatformExecutable -InstallRoot $InstallRoot
 $runtime.filePath = Get-SafeFixedNtfsPath `
     -Value ([string]$runtime.filePath) -Label 'MineGuard Platform 运行时'
@@ -256,20 +261,8 @@ Assert-NoReparseTree -Path $TargetStateDirectory -Label '恢复目标'
 Initialize-StateOwnership -Path $TargetStateDirectory -Root $InstallRoot
 Assert-NoReparseTree -Path $TargetStateDirectory -Label '恢复目标'
 
-$serviceGrant = ('*{0}:(OI)(CI)M' -f $ServiceSid)
-& "$env:SystemRoot\System32\icacls.exe" $TargetStateDirectory '/reset' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw '恢复成功，但重置恢复根目录 NTFS ACL 失败。' }
-& "$env:SystemRoot\System32\icacls.exe" $TargetStateDirectory '/inheritance:r' `
-    '/grant:r' '*S-1-5-18:(OI)(CI)F' `
-    '/grant:r' '*S-1-5-32-544:(OI)(CI)F' `
-    '/grant:r' $serviceGrant | Out-Null
-if ($LASTEXITCODE -ne 0) { throw '恢复成功，但设置恢复根目录 NTFS ACL 失败。' }
-$descendantPattern = Join-Path $TargetStateDirectory '*'
-& "$env:SystemRoot\System32\icacls.exe" $descendantPattern `
-    '/reset' '/T' '/C' | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw '恢复成功，但重置恢复目录子项 NTFS ACL 继承失败。'
-}
+Set-MineGuardPlatformCanonicalTreeAcl -Path $TargetStateDirectory `
+    -ServicePermission 'M'
 
 [pscustomobject]@{
     status = 'restored_to_new_directory'

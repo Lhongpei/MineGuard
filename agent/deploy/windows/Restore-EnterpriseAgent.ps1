@@ -62,13 +62,10 @@ function Write-EAProtectedRestoreRecoveryBlock {
         $Stream.Flush($true)
         $Stream.Dispose()
         $Stream = $null
-        Invoke-EAIcaclsChecked -ArgumentList @($Temporary, "/inheritance:r")
-        Invoke-EAIcaclsChecked -ArgumentList @(
-            $Temporary,
-            "/grant:r", "*S-1-5-18:F",
-            "/grant:r", "*S-1-5-32-544:F",
-            "/grant:r", "*$($Context.ServiceIdentity.Sid):RX"
-        )
+        Set-EACanonicalFileAcl -Path $Temporary `
+            -Name "Restore recovery block" `
+            -ServiceSid ([string]$Context.ServiceIdentity.Sid) `
+            -ServicePermission 'RX'
         Assert-EARestoreRecoveryBlockAcl -Context $Context -Path $Temporary
         Move-Item -LiteralPath $Temporary -Destination $PathValue
         Assert-EARestoreRecoveryBlockAcl -Context $Context -Path $PathValue
@@ -340,10 +337,7 @@ if ($PSCmdlet.ShouldProcess(
     New-Item -ItemType Directory -Path $TransactionRoot | Out-Null
     New-Item -ItemType Directory -Path $StagedQuarantine | Out-Null
     Set-EACanonicalInheritedTreeAcl -Root $TransactionRoot `
-        -Name "Agent restore transaction" -RootGrants @(
-            "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F"
-        )
+        -Name "Agent restore transaction" -ServicePermission 'None'
     foreach ($EvidenceFile in Get-ChildItem -LiteralPath $SnapshotQuarantine -File -Force) {
         Copy-Item -LiteralPath $EvidenceFile.FullName -Destination $StagedQuarantine
     }
@@ -442,6 +436,16 @@ if ($PSCmdlet.ShouldProcess(
         # ACL. Reapply the per-instance service SID after it becomes live so no
         # restored database/evidence file retains that staging ACL.
         Set-EAInstanceCanonicalAcl -Context $Context
+        Assert-EAInstanceCanonicalAcl -Context $Context
+        # The recursive instance repair deliberately resets descendants to
+        # inherited ACLs. Restore the fail-close marker's exact protected file
+        # DACL before any subsequent operation can fail.
+        Set-EACanonicalFileAcl -Path $RecoveryMarkerPath `
+            -Name "Restore recovery block" `
+            -ServiceSid ([string]$Context.ServiceIdentity.Sid) `
+            -ServicePermission 'RX'
+        Assert-EARestoreRecoveryBlockAcl -Context $Context `
+            -Path $RecoveryMarkerPath
         Invoke-EARestoreFaultInjection -Point "after-acl-repair"
         New-Item -ItemType Directory -Path $RollbackParent -Force | Out-Null
         [void](Resolve-EASafeLocalPath -Name "Restore rollback parent" `
@@ -512,7 +516,16 @@ if ($PSCmdlet.ShouldProcess(
             }
             catch { $RollbackErrors.Add("Quarantine rollback: $($_.Exception.Message)") }
         }
-        try { Set-EAInstanceCanonicalAcl -Context $Context }
+        try {
+            Set-EAInstanceCanonicalAcl -Context $Context
+            Assert-EAInstanceCanonicalAcl -Context $Context
+            Set-EACanonicalFileAcl -Path $RecoveryMarkerPath `
+                -Name "Restore recovery block" `
+                -ServiceSid ([string]$Context.ServiceIdentity.Sid) `
+                -ServicePermission 'RX'
+            Assert-EARestoreRecoveryBlockAcl -Context $Context `
+                -Path $RecoveryMarkerPath
+        }
         catch { $RollbackErrors.Add("Instance ACL rollback: $($_.Exception.Message)") }
         if ($RollbackErrors.Count -eq 0) {
             try {

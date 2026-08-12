@@ -1171,6 +1171,7 @@ if ($binaryMode) {
             'Start-MineGuardPlatformWizard.ps1',
             'Configure-MineGuardPlatformFormal.ps1',
             'Resolve-MineGuardPlatformExecutable.ps1',
+            'MineGuardPlatform.WindowsAcl.ps1',
             'Install-MineGuardPlatformService.ps1'
         )) {
             if (-not (Test-Path -LiteralPath (Join-Path $serviceIncoming $requiredScript) `
@@ -1344,6 +1345,7 @@ if ($binaryMode) {
             'Start-MineGuardPlatformWizard.ps1',
             'Configure-MineGuardPlatformFormal.ps1',
             'Resolve-MineGuardPlatformExecutable.ps1',
+            'MineGuardPlatform.WindowsAcl.ps1',
             'Install-MineGuardPlatformService.ps1'
         )) {
             if (-not (Test-Path -LiteralPath (Join-Path $serviceTarget $requiredScript) `

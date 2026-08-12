@@ -418,24 +418,15 @@ try {
 
     if (-not $SkipAcl) {
         Set-EACanonicalInheritedTreeAcl -Root $StageRoot `
-            -Name "Staged Agent instance" -RootGrants @(
-                "*S-1-5-18:(OI)(CI)F",
-                "*S-1-5-32-544:(OI)(CI)F",
-                "*$($ServiceIdentity.Sid):(OI)(CI)RX"
-            )
+            -Name "Staged Agent instance" `
+            -ServiceSid $ServiceIdentity.Sid -ServicePermission 'RX'
         foreach ($Writable in @($StageDataDirectory, $StageLogDirectory)) {
             Set-EACanonicalInheritedTreeAcl -Root $Writable `
-                -Name "Writable Agent instance directory" -RootGrants @(
-                    "*S-1-5-18:(OI)(CI)F",
-                    "*S-1-5-32-544:(OI)(CI)F",
-                    "*$($ServiceIdentity.Sid):(OI)(CI)M"
-                )
+                -Name "Writable Agent instance directory" `
+                -ServiceSid $ServiceIdentity.Sid -ServicePermission 'M'
         }
         Set-EACanonicalInheritedTreeAcl -Root $StageBackupDirectory `
-            -Name "Agent backup directory" -RootGrants @(
-                "*S-1-5-18:(OI)(CI)F",
-                "*S-1-5-32-544:(OI)(CI)F"
-            )
+            -Name "Agent backup directory" -ServicePermission 'None'
         if (-not $UsingDefaultInbox -and $GrantWatchReadAcl) {
             foreach ($WatchDirectory in $ResolvedWatchDirectories) {
                 $ExternalAclBackups[$WatchDirectory] = Get-Acl -LiteralPath $WatchDirectory
@@ -465,6 +456,9 @@ try {
     Move-Item -LiteralPath $StageRoot -Destination $InstanceRoot
     $CreatedContext = Get-EAInstanceContext -InstanceName $InstanceName `
         -InstallRoot $InstallRoot -StateRoot $StateRoot
+    if (-not $SkipAcl) {
+        Assert-EAInstanceCanonicalAcl -Context $CreatedContext
+    }
     Assert-EAInstanceGlobalIsolation -Context $CreatedContext
     if (-not $SkipAcl -and ($UsingDefaultInbox -or $GrantWatchReadAcl)) {
         Assert-EAInstanceWatchAcls -Context $CreatedContext

@@ -832,6 +832,7 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     uninstaller = (root / "Uninstall-EnterpriseAgentService.ps1").read_text(
         encoding="utf-8"
     )
+    backup = (root / "Backup-EnterpriseAgent.ps1").read_text(encoding="utf-8")
     restore = (root / "Restore-EnterpriseAgent.ps1").read_text(encoding="utf-8")
     xml = (root / "enterprise-agent-service.xml.template").read_text(encoding="utf-8")
 
@@ -849,6 +850,9 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
         "ServiceSidType -ne 1",
         "StartName",
         "Virtual service account SID does not match the derived service SID",
+        "Set-EACanonicalInheritedTreeAcl",
+        "Set-EACanonicalFileAcl",
+        "Assert-EAInheritedRawSidAcl",
         "Set-EAInstanceCanonicalAcl",
         "Assert-EAInstanceCanonicalAcl",
         "Assert-EACanonicalInstanceBoundaryAcl",
@@ -861,6 +865,44 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     ):
         assert token in helper
     assert "S-1-5-19:(OI)(CI)" not in helper
+    canonical_tree_writer = helper[
+        helper.index("function Set-EACanonicalInheritedTreeAcl") : helper.index(
+            "function Set-EACanonicalFileAcl"
+        )
+    ]
+    assert "[ValidateSet('None', 'RX', 'M')]" in canonical_tree_writer
+    assert "Security.Principal.SecurityIdentifier($ServiceSid)" in (
+        canonical_tree_writer
+    )
+    assert "Security.AccessControl.DirectorySecurity" in canonical_tree_writer
+    assert "SetAccessRuleProtection($true, $false)" in canonical_tree_writer
+    assert "SetOwner($Administrators)" in canonical_tree_writer
+    assert "[IO.Directory]::SetAccessControl" in canonical_tree_writer
+    assert "Assert-EAExactRawSidAcl" in canonical_tree_writer
+    assert "Assert-EAInheritedRawSidAcl" in canonical_tree_writer
+    assert "Get-ChildItem -LiteralPath $Root -Force -Recurse" in (
+        canonical_tree_writer
+    )
+    assert "[IO.Directory]::GetAccessControl" in canonical_tree_writer
+    assert "[IO.File]::GetAccessControl" in canonical_tree_writer
+    assert '(Join-Path $Root "*"), "/reset", "/T", "/C"' in (
+        canonical_tree_writer
+    )
+    assert '"/grant:r"' not in canonical_tree_writer
+    assert "RootGrants" not in canonical_tree_writer
+    canonical_file_writer = helper[
+        helper.index("function Set-EACanonicalFileAcl") : helper.index(
+            "function Set-EAInstanceCanonicalAcl"
+        )
+    ]
+    assert "[ValidateSet('None', 'RX')]" in canonical_file_writer
+    assert "Security.Principal.SecurityIdentifier($ServiceSid)" in (
+        canonical_file_writer
+    )
+    assert "Security.AccessControl.FileSecurity" in canonical_file_writer
+    assert "[IO.File]::SetAccessControl" in canonical_file_writer
+    assert "Assert-EAExactRawSidAcl" in canonical_file_writer
+    assert "Invoke-EAIcaclsChecked" not in canonical_file_writer
     instance_acl_verifier = helper[
         helper.index("function Assert-EACanonicalInstanceBoundaryAcl") : helper.index(
             "function Grant-EAServiceWatchReadAcl"
@@ -889,8 +931,10 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     assert "Assert-EARegisteredRuntimeServiceIdentity" in runtime
     assert "Registered service $ServiceId uses legacy/shared identity" in runtime
 
-    assert '"*$($ServiceIdentity.Sid):(OI)(CI)RX"' in creator
-    assert '"*$($ServiceIdentity.Sid):(OI)(CI)M"' in creator
+    assert "-ServiceSid $ServiceIdentity.Sid -ServicePermission 'RX'" in creator
+    assert "-ServiceSid $ServiceIdentity.Sid -ServicePermission 'M'" in creator
+    assert '-Name "Agent backup directory" -ServicePermission \'None\'' in creator
+    assert "RootGrants" not in creator
     assert "-SkipAcl requires the explicit -DevelopmentOnly" in creator
     assert "Grant-EAServiceWatchReadAcl" in creator
     assert "$ExistingContexts" in creator
@@ -904,6 +948,9 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     assert "MineId $MineId is already assigned" in creator
     assert "SystemId $SystemId is already assigned" in creator
     assert "S-1-5-19:(OI)(CI)" not in creator
+    assert creator.index("Assert-EAInstanceCanonicalAcl -Context $CreatedContext") < (
+        creator.index("$Published = $true")
+    )
 
     assert '"sidtype", $ServiceId, "unrestricted"' in service
     assert '"__SERVICE_ACCOUNT__"' in service
@@ -927,7 +974,46 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
         )
     ]
     assert '"/remove:g"' not in watch_grant
+    assert '"/grant:r"' not in watch_grant
+    assert "Invoke-EAIcaclsChecked" not in watch_grant
+    for token in (
+        "Security.Principal.SecurityIdentifier($ServiceSid)",
+        "[IO.Directory]::GetAccessControl",
+        "Get-PreservedWatchAclRules",
+        "RemoveAccessRuleSpecific",
+        "AddAccessRule",
+        "[IO.Directory]::SetAccessControl",
+        "Test-EAExactAllowRights",
+        "changed a non-Agent business ACL rule",
+        "denies the dedicated service SID",
+        "grants excessive rights to the dedicated service SID",
+    ):
+        assert token in watch_grant
+    watch_verifier = helper[
+        helper.index("function Assert-EAServiceWatchReadAcl") : helper.index(
+            "function Assert-EAInstanceWatchAcls"
+        )
+    ]
+    assert "GetAccessRules" in watch_verifier
+    assert "Security.Principal.SecurityIdentifier" in watch_verifier
+    assert "denies the dedicated instance service SID" in watch_verifier
+    assert "grants excessive rights to the dedicated instance service SID" in (
+        watch_verifier
+    )
     assert "does not remove business ACLs automatically" in helper
+
+    assert '-Name "Temporary Agent snapshot" -ServicePermission \'None\'' in backup
+    assert "RootGrants" not in backup
+    assert "Set-EACanonicalFileAcl -Path $Temporary" in restore
+    assert "-ServiceSid ([string]$Context.ServiceIdentity.Sid)" in restore
+    assert "-ServicePermission 'RX'" in restore
+    assert restore.count("Set-EACanonicalFileAcl -Path $RecoveryMarkerPath") == 2
+    assert restore.count("Assert-EAInstanceCanonicalAcl -Context $Context") >= 2
+    assert '-Name "Agent restore transaction" -ServicePermission \'None\'' in (
+        restore
+    )
+    assert '"*$($Context.ServiceIdentity.Sid):RX"' not in restore
+    assert "RootGrants" not in restore
 
     assert "AllowLegacyLocalServiceRemoval" in uninstaller
     assert 'if ($LegacySid -ne "S-1-5-19")' in uninstaller
@@ -1190,6 +1276,14 @@ def test_windows_instance_operations_share_strict_path_and_identity_context() ->
     )
     assert "blocked by an incomplete restore" in helper
     assert "manual database/quarantine recovery paths recorded" in helper
+    recovery_acl_verifier = helper[
+        helper.index("function Assert-EARestoreRecoveryBlockAcl") : helper.index(
+            "function Get-EAInstanceContext"
+        )
+    ]
+    assert "[IO.File]::GetAccessControl" in recovery_acl_verifier
+    assert "Assert-EAExactRawSidAcl" in recovery_acl_verifier
+    assert "InheritanceFlags]::None" in recovery_acl_verifier
 
     creator = operations["New-EnterpriseAgentInstance.ps1"]
     assert ".instance-staging-" in creator

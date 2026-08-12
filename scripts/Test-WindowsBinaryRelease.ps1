@@ -1450,11 +1450,22 @@ function Invoke-InstallerLifecycleTest {
                 ($ChangedRegistry | ConvertTo-Json -Depth 8),
                 $NoBom
             )
+            if ($null -ne (Get-Service -Name $ServiceName `
+                    -ErrorAction SilentlyContinue)) {
+                throw (
+                    "Platform clean-install configuration must run before " +
+                    "the service is registered."
+                )
+            }
             $InitialPassword = ConvertTo-SecureString `
                 "MineGuard-CI-Initial-123!" -AsPlainText -Force
             & $ConfigurationScript -InstallRoot $InstallRoot `
                 -ClientsFile $InitialClients -AdminPassword $InitialPassword `
                 -NonInteractive
+            if ($null -ne (Get-Service -Name $ServiceName `
+                    -ErrorAction SilentlyContinue)) {
+                throw "Platform configuration unexpectedly registered the service."
+            }
             $ConfigRoot = Join-Path $InstallRoot "config"
             $ProtectedConfiguration = @(
                 (Join-Path $ConfigRoot "clients.json"),

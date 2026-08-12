@@ -29,7 +29,6 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$ServiceSid = 'S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346'
 $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 $OutputEncoding = $utf8NoBom
 try { [Console]::OutputEncoding = $utf8NoBom } catch { }
@@ -105,54 +104,20 @@ function Write-ConfigurationBlockMarker {
 
 function Set-ConfigAcl {
     param([string] $Path)
-    $serviceGrant = ('*{0}:(OI)(CI)RX' -f $ServiceSid)
-    & "$env:SystemRoot\System32\icacls.exe" $Path '/reset' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "重置配置根目录 NTFS ACL 失败：$Path" }
-    & "$env:SystemRoot\System32\icacls.exe" $Path '/inheritance:r' `
-        '/grant:r' '*S-1-5-18:(OI)(CI)F' `
-        '/grant:r' '*S-1-5-32-544:(OI)(CI)F' `
-        '/grant:r' $serviceGrant | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "设置配置根目录 NTFS ACL 失败：$Path" }
-    $descendantPattern = Join-Path $Path '*'
-    $resetArguments = @($descendantPattern, '/reset') + @('/T', '/C')
-    & "$env:SystemRoot\System32\icacls.exe" @resetArguments | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "重置配置目录子项 NTFS ACL 继承失败：$Path"
-    }
+    Set-MineGuardPlatformCanonicalTreeAcl -Path $Path `
+        -ServicePermission 'RX'
 }
 
 function Grant-BootstrapPasswordDeleteToService {
     param([Parameter(Mandatory = $true)] [string] $Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
-    $item = Get-Item -LiteralPath $Path -Force
-    if ($item.PSIsContainer -or
-        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw '首次管理员密码必须是配置目录中的普通文件。'
-    }
-    $serviceGrant = ('*{0}:(R,D)' -f $ServiceSid)
-    & "$env:SystemRoot\System32\icacls.exe" $Path '/grant:r' `
-        $serviceGrant | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw '无法授权低权限 Platform 服务在建立密码摘要后删除首启密码文件。'
-    }
+    Grant-MineGuardPlatformBootstrapPasswordDeleteAcl -Path $Path
 }
 
 function Set-StateAcl {
     param([string] $Path)
-    $serviceGrant = ('*{0}:(OI)(CI)M' -f $ServiceSid)
-    & "$env:SystemRoot\System32\icacls.exe" $Path '/reset' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "重置状态根目录 NTFS ACL 失败：$Path" }
-    & "$env:SystemRoot\System32\icacls.exe" $Path '/inheritance:r' `
-        '/grant:r' '*S-1-5-18:(OI)(CI)F' `
-        '/grant:r' '*S-1-5-32-544:(OI)(CI)F' `
-        '/grant:r' $serviceGrant | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "设置状态根目录 NTFS ACL 失败：$Path" }
-    $descendantPattern = Join-Path $Path '*'
-    $resetArguments = @($descendantPattern, '/reset') + @('/T', '/C')
-    & "$env:SystemRoot\System32\icacls.exe" @resetArguments | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "重置状态目录子项 NTFS ACL 继承失败：$Path"
-    }
+    Set-MineGuardPlatformCanonicalTreeAcl -Path $Path `
+        -ServicePermission 'M'
 }
 
 function Test-PathEqualOrChild {
@@ -354,8 +319,11 @@ $targetProvisioningPublicKeyPath = Join-Path $configDirectory `
 $configurationBlockMarker = Join-Path $configDirectory `
     '.mineguard-configuration-blocked.json'
 $resolverPath = Join-Path $PSScriptRoot 'Resolve-MineGuardPlatformExecutable.ps1'
-if (-not (Test-Path -LiteralPath $resolverPath -PathType Leaf)) {
-    throw "找不到运行时解析器：$resolverPath。请重新安装 MineGuard Platform。"
+$aclHelperPath = Join-Path $PSScriptRoot 'MineGuardPlatform.WindowsAcl.ps1'
+foreach ($requiredHelper in @($resolverPath, $aclHelperPath)) {
+    if (-not (Test-Path -LiteralPath $requiredHelper -PathType Leaf)) {
+        throw "找不到受信 helper：$requiredHelper。请重新安装 MineGuard Platform。"
+    }
 }
 if (-not (Test-Path -LiteralPath $configDirectory -PathType Container)) {
     throw "找不到配置目录：$configDirectory。请先运行安装脚本。"
@@ -371,6 +339,7 @@ if (Test-Path -LiteralPath $configurationBlockMarker) {
     )
 }
 . $resolverPath
+. $aclHelperPath
 $runtime = Resolve-MineGuardPlatformExecutable -InstallRoot $InstallRoot
 
 $managedProvisioning = [bool]$ManagedProvisioningRequired

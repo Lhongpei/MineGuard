@@ -68,9 +68,13 @@ $coreScript = Join-Path $scriptDirectory `
     'Invoke-MineGuardPlatformProvisioning.ps1'
 $configurationScript = Join-Path $scriptDirectory `
     'Set-MineGuardPlatformConfiguration.ps1'
+$platformAclHelper = Join-Path $scriptDirectory `
+    'MineGuardPlatform.WindowsAcl.ps1'
 $resolverScript = Join-Path $scriptDirectory `
     'Resolve-MineGuardPlatformExecutable.ps1'
-foreach ($required in @($coreScript, $configurationScript, $resolverScript)) {
+foreach ($required in @(
+        $coreScript, $configurationScript, $platformAclHelper, $resolverScript
+    )) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         Show-Fatal "安装不完整，缺少文件：$required"
         exit 1

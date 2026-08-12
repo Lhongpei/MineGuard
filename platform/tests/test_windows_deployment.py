@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = ROOT / "deploy" / "windows"
 POWERSHELL_SCRIPTS = {
     "Install-MineGuardPlatform.ps1",
+    "MineGuardPlatform.WindowsAcl.ps1",
     "Set-MineGuardPlatformConfiguration.ps1",
     "Start-MineGuardPlatform.ps1",
     "Start-MineGuardPlatformWizard.ps1",
@@ -418,8 +419,24 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
     configure = (
         WINDOWS / "Set-MineGuardPlatformConfiguration.ps1"
     ).read_text(encoding="utf-8-sig")
+    platform_acl_helper = (
+        WINDOWS / "MineGuardPlatform.WindowsAcl.ps1"
+    ).read_text(encoding="utf-8-sig")
     assert "Grant-BootstrapPasswordDeleteToService" in configure
-    assert "('*{0}:(R,D)' -f $ServiceSid)" in configure
+    assert "MineGuardPlatform.WindowsAcl.ps1" in configure
+    assert "function Set-MineGuardPlatformCanonicalTreeAcl" in platform_acl_helper
+    assert "function Set-MineGuardPlatformServiceReadableFileAcl" in platform_acl_helper
+    assert (
+        "function Grant-MineGuardPlatformBootstrapPasswordDeleteAcl"
+        in platform_acl_helper
+    )
+    assert "SecurityIdentifier(" in platform_acl_helper
+    assert "SetAccessRuleProtection($true, $false)" in platform_acl_helper
+    assert "[IO.Directory]::SetAccessControl" in platform_acl_helper
+    assert "[IO.File]::SetAccessControl" in platform_acl_helper
+    assert "[Security.AccessControl.FileSystemRights]::Delete" in platform_acl_helper
+    assert "icacls.exe" not in platform_acl_helper.lower()
+    assert "('*{0}:(R,D)' -f $ServiceSid)" not in configure
     assert "Global\\MineGuardPlatform.Configuration" in configure
     assert ".mineguard-configuration-blocked.json" in configure
     assert "rollback_incomplete" in configure
@@ -623,6 +640,10 @@ def test_windows_configuration_and_service_templates_fail_closed() -> None:
     assert ".configuration-transaction." in configure
     assert "Platform 配置失败且自动回滚不完整" in configure
     assert "Set-ConfigAcl -Path $configDirectory" in configure
+    assert "Set-MineGuardPlatformCanonicalTreeAcl -Path $Path" in configure
+    assert "-ServicePermission 'RX'" in configure
+    assert "-ServicePermission 'M'" in configure
+    assert "Grant-MineGuardPlatformBootstrapPasswordDeleteAcl -Path $Path" in configure
     assert "AuditFailAfterFirstMutation" in configure
     assert "configuration-rollback-test" in configure
     assert "[string] $PlatformSystemId = 'mineguard-qinyuan'" in configure
@@ -642,6 +663,12 @@ def test_windows_configuration_and_service_templates_fail_closed() -> None:
     assert "'sidtype' 'MineGuardPlatform'" in service_install
     assert "'showsid' 'MineGuardPlatform'" in service_install
     assert "ServiceSidType" in service_install
+    assert "MineGuardPlatform.WindowsAcl.ps1" in service_install
+    assert (
+        "Set-MineGuardPlatformServiceReadableFileAcl -Path $integrityPath"
+        in service_install
+    )
+    assert "('*{0}:R' -f $ServiceSid)" not in service_install
     assert "'config-check', '--clients-file'" in service_install
     assert (
         "'config-check', '--clients-file', $configuredClientsFile, '--production'"
@@ -840,7 +867,12 @@ def test_platform_service_lifecycle_is_path_bound_and_transactional() -> None:
     assert "Join-Path $InstallRoot 'state'" not in backup
     assert "Join-Path $InstallRoot 'state'" not in restore
     assert "必须不存在或为空" in restore
-    assert "'/T' '/C'" in restore
+    assert "MineGuardPlatform.WindowsAcl.ps1" in restore
+    assert (
+        "Set-MineGuardPlatformCanonicalTreeAcl -Path $TargetStateDirectory"
+        in restore
+    )
+    assert "('*{0}:(OI)(CI)M' -f $ServiceSid)" not in restore
     for script in (backup, restore):
         for required in (
             "Get-SafeFixedNtfsPath",
@@ -859,7 +891,9 @@ def test_platform_service_lifecycle_is_path_bound_and_transactional() -> None:
     assert "人工修改 settings.json" not in restore
     assert restore.index("$restored =") < restore.index(
         "Initialize-StateOwnership -Path $TargetStateDirectory"
-    ) < restore.index("icacls.exe")
+    ) < restore.index(
+        "Set-MineGuardPlatformCanonicalTreeAcl -Path $TargetStateDirectory"
+    )
 
     example = json.loads((WINDOWS / "clients.json.example").read_text(encoding="utf-8"))
     message_secret = next(iter(example["clients"][0]["message_keys"].values()))

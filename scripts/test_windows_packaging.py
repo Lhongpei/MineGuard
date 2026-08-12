@@ -1482,6 +1482,8 @@ def test_audit_and_lifecycle() -> None:
         "AuditFailAfterFirstMutation",
         "configuration-rollback-test",
         "Platform configuration rollback changed protected content",
+        "Platform clean-install configuration must run before",
+        "Platform configuration unexpectedly registered the service",
         ".configuration-transaction.*",
         "function Get-InnoUninstallerResidue",
         "function Wait-InnoUninstallerSelfCleanup",
@@ -1657,6 +1659,15 @@ def test_audit_and_lifecycle() -> None:
 
     platform_configuration = read(
         "platform/deploy/windows/Set-MineGuardPlatformConfiguration.ps1"
+    )
+    platform_service_installer = read(
+        "platform/deploy/windows/Install-MineGuardPlatformService.ps1"
+    )
+    platform_restore = read(
+        "platform/deploy/windows/Restore-MineGuardPlatform.ps1"
+    )
+    platform_acl_helper = read(
+        "platform/deploy/windows/MineGuardPlatform.WindowsAcl.ps1"
     )
     boolean_switch = re.search(
         r"(?m)^\s*allowDemoDefaultPassword\s*=\s*(.+?)\s*$",
@@ -2030,10 +2041,72 @@ def test_audit_and_lifecycle() -> None:
         "Stale explicit ACL fixture",
         "Empty directory ACL fixture",
         "Empty-tree descendant reset",
+        "MineGuardPlatform.WindowsAcl.ps1",
+        "Set-MineGuardPlatformCanonicalTreeAcl -Path $RawConfigTree",
+        "Grant-MineGuardPlatformBootstrapPasswordDeleteAcl",
+        "Set-MineGuardPlatformServiceReadableFileAcl",
+        "EnterpriseAgent.WindowsSafety.ps1",
+        "Set-EACanonicalInheritedTreeAcl -Root $AgentRoot",
+        "Set-EACanonicalFileAcl -Path $AgentRecoveryFile",
+        "Grant-EAServiceWatchReadAcl -WatchRoot $AgentWatch",
+        "Assert-EAServiceWatchReadAcl -WatchRoot $AgentWatch",
+        "Enterprise Agent unregistered service-SID ACL semantics passed",
+        "$MineGuardPlatformServiceSid",
+        'Get-Service -Name "MineGuardPlatform"',
+        "unregistered raw service-SID ACL semantics passed",
         "MineGuard ACL mutation-mask semantics passed",
         "MineGuard canonical NTFS ACL grant semantics passed",
     ):
         assert token in acl_probe, f"Windows ACL regression probe misses: {token}"
+    for token in (
+        "function Set-MineGuardPlatformCanonicalTreeAcl",
+        "function Set-MineGuardPlatformServiceReadableFileAcl",
+        "function Grant-MineGuardPlatformBootstrapPasswordDeleteAcl",
+        "SecurityIdentifier(",
+        "SetAccessRuleProtection($true, $false)",
+        "SetOwner($administrators)",
+        "FileSystemAccessRule",
+        "GetAccessRules(",
+        "[Security.Principal.SecurityIdentifier]",
+        "AreAccessRulesProtected",
+        "AreAccessRulesCanonical",
+        "$rule.IsInherited",
+        "[Security.AccessControl.FileSystemRights]::Synchronize",
+        "ACL tree contains a reparse point",
+    ):
+        assert token in platform_acl_helper, (
+            f"Platform service-SID ACL helper misses: {token}"
+        )
+    assert "icacls.exe" not in platform_acl_helper.lower(), (
+        "the raw ACL helper must not resolve an unregistered service SID "
+        "through icacls"
+    )
+    for label, source, production_call in (
+        (
+            "configuration",
+            platform_configuration,
+            "Set-MineGuardPlatformCanonicalTreeAcl -Path $Path",
+        ),
+        (
+            "service install",
+            platform_service_installer,
+            "Set-MineGuardPlatformServiceReadableFileAcl -Path $integrityPath",
+        ),
+        (
+            "restore",
+            platform_restore,
+            "Set-MineGuardPlatformCanonicalTreeAcl -Path $TargetStateDirectory",
+        ),
+    ):
+        assert "MineGuardPlatform.WindowsAcl.ps1" in source, (
+            f"Platform {label} must load the manifest-covered ACL helper"
+        )
+        assert production_call in source, (
+            f"Platform {label} must use the production service-SID ACL helper"
+        )
+    assert "('*{0}:(R,D)' -f $ServiceSid)" not in platform_configuration
+    assert "('*{0}:(OI)(CI)M' -f $ServiceSid)" not in platform_restore
+    assert "('*{0}:R' -f $ServiceSid)" not in platform_service_installer
     platform_acl_start = platform_installer.index(
         "function Set-MineGuardDirectoryAcl"
     )

@@ -509,6 +509,9 @@ def test_platform_configuration_enforces_a_dedicated_transactional_state() -> No
     configure = (WINDOWS_DEPLOY / "Set-MineGuardPlatformConfiguration.ps1").read_text(
         encoding="utf-8-sig"
     )
+    platform_acl_helper = (
+        WINDOWS_DEPLOY / "MineGuardPlatform.WindowsAcl.ps1"
+    ).read_text(encoding="utf-8-sig")
     for required in (
         "Get-SafeLocalPath",
         "^[A-Za-z]:\\\\",
@@ -531,8 +534,21 @@ def test_platform_configuration_enforces_a_dedicated_transactional_state() -> No
         "验证 clients/password/settings 配置事务回滚",
         "Throw-ConfigurationValidationFailure",
         "$detail.Length -gt 512",
+        "MineGuardPlatform.WindowsAcl.ps1",
+        "Set-MineGuardPlatformCanonicalTreeAcl -Path $Path",
     ):
         assert required in configure
+    for required in (
+        "function Set-MineGuardPlatformCanonicalTreeAcl",
+        "function Set-MineGuardPlatformServiceReadableFileAcl",
+        "function Grant-MineGuardPlatformBootstrapPasswordDeleteAcl",
+        "SecurityIdentifier(",
+        "SetAccessRuleProtection($true, $false)",
+        "[IO.Directory]::SetAccessControl",
+        "[IO.File]::SetAccessControl",
+    ):
+        assert required in platform_acl_helper
+    assert "icacls.exe" not in platform_acl_helper.lower()
     assert configure.index("Assert-StateBoundary") < configure.index(
         "Set-StateAcl -Path $stateDirectory"
     )

@@ -200,10 +200,7 @@ try {
         $Utf8NoBom
     )
     Set-EACanonicalInheritedTreeAcl -Root $TemporarySnapshot `
-        -Name "Temporary Agent snapshot" -RootGrants @(
-            "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F"
-        )
+        -Name "Temporary Agent snapshot" -ServicePermission 'None'
     Assert-EAProtectedSnapshotAcl -SnapshotRoot $TemporarySnapshot
     Move-Item -LiteralPath $TemporarySnapshot -Destination $FinalSnapshot
     $Completed = $true

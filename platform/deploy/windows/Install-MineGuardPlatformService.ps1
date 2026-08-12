@@ -31,7 +31,6 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
         $PSVersionTable.PSVersion.Minor -lt 1)) {
     throw '需要 Windows PowerShell 5.1 或更高版本。'
 }
-
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object -TypeName Security.Principal.WindowsPrincipal `
@@ -350,6 +349,7 @@ function Assert-PlatformReleaseIdentity {
     foreach ($required in @(
             'runtime/MineGuardPlatform.exe',
             'deploy/windows/Install-MineGuardPlatformService.ps1',
+            'deploy/windows/MineGuardPlatform.WindowsAcl.ps1',
             'deploy/windows/Resolve-MineGuardPlatformExecutable.ps1',
             'deploy/windows/MineGuard.Platform.xml',
             'deploy/windows/Start-MineGuardPlatform.ps1',
@@ -618,6 +618,7 @@ Assert-NoReparseTree -Path $serviceDirectory -Label '服务目录'
 Assert-NoReparseTree -Path $configDirectory -Label '配置目录'
 $releaseIdentity = Assert-PlatformReleaseIdentity -Root $InstallRoot
 $resolverPath = Join-Path $serviceDirectory 'Resolve-MineGuardPlatformExecutable.ps1'
+$aclHelperPath = Join-Path $serviceDirectory 'MineGuardPlatform.WindowsAcl.ps1'
 $template = Join-Path $serviceDirectory 'MineGuard.Platform.xml'
 $settings = Join-Path $configDirectory 'settings.json'
 $bootstrapSecret = Join-Path $configDirectory 'bootstrap-admin-password.txt'
@@ -632,7 +633,10 @@ if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $resolverPath -PathType Leaf)) {
     throw "找不到运行时解析器：$resolverPath"
 }
+$null = Assert-OrdinaryFile -Path $aclHelperPath `
+    -Label 'Platform ACL helper' -MaximumBytes 262144
 . $resolverPath
+. $aclHelperPath
 $runtime = Resolve-MineGuardPlatformExecutable -InstallRoot $InstallRoot
 $runtimePath = Get-SafeLocalPath -Path ([string]$runtime.filePath) `
     -Label 'Platform runtime' -RequireFixedNtfs
@@ -1063,10 +1067,14 @@ try {
             $ExpectedConfigSha256.ToUpperInvariant()) {
         throw '已发布 WinSW .config 未通过批准 SHA-256。'
     }
-    $serviceRead = ('*{0}:R' -f $ServiceSid)
-    & "$env:SystemRoot\System32\icacls.exe" $integrityPath '/inheritance:r' `
-        '/grant:r' '*S-1-5-18:F' '*S-1-5-32-544:F' $serviceRead | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw '保护 WinSW 完整性记录失败；拒绝安装服务。' }
+    try {
+        Set-MineGuardPlatformServiceReadableFileAcl -Path $integrityPath
+    } catch {
+        throw (
+            '保护 WinSW 完整性记录失败；拒绝安装服务。详情：' +
+            $_.Exception.Message
+        )
+    }
 
     if ($null -ne (Get-RegisteredService)) { throw '注册服务前出现了同名服务。' }
     if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne

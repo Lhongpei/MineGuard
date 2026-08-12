@@ -395,37 +395,21 @@ function Assert-EARestoreRecoveryBlockAcl {
     Assert-EAOrdinaryLeaf -Path $Path -Name "Restore recovery block" `
         -MaximumBytes 1MB
     $ServiceSid = [string]$Context.ServiceIdentity.Sid
-    $AllowedSids = @("S-1-5-18", "S-1-5-32-544", $ServiceSid)
-    $RequiredRights = @{}
-    $RequiredRights["S-1-5-18"] = `
+    if ($ServiceSid -notmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$') {
+        throw "Restore recovery block service SID is invalid."
+    }
+    $ExpectedRights = @{}
+    $ExpectedRights["S-1-5-18"] = `
         [Security.AccessControl.FileSystemRights]::FullControl
-    $RequiredRights["S-1-5-32-544"] = `
+    $ExpectedRights["S-1-5-32-544"] = `
         [Security.AccessControl.FileSystemRights]::FullControl
-    $RequiredRights[$ServiceSid] = `
+    $ExpectedRights[$ServiceSid] = `
         [Security.AccessControl.FileSystemRights]::ReadAndExecute
-    $Satisfied = @{}
-    foreach ($Rule in (Get-Acl -LiteralPath $Path).Access) {
-        $Sid = try {
-            $Rule.IdentityReference.Translate(
-                [Security.Principal.SecurityIdentifier]
-            ).Value
-        } catch { [string]$Rule.IdentityReference }
-        if ($Rule.AccessControlType -eq
-                [Security.AccessControl.AccessControlType]::Allow) {
-            if ($AllowedSids -notcontains $Sid) {
-                throw "Restore recovery block ACL grants an unexpected identity: $Sid"
-            }
-            $Needed = $RequiredRights[$Sid]
-            if (($Rule.FileSystemRights -band $Needed) -eq $Needed) {
-                $Satisfied[$Sid] = $true
-            }
-        }
-    }
-    foreach ($Sid in $AllowedSids) {
-        if (-not $Satisfied.ContainsKey($Sid)) {
-            throw "Restore recovery block ACL is missing required access for $Sid."
-        }
-    }
+    $Security = [IO.File]::GetAccessControl($Path)
+    Assert-EAExactRawSidAcl -Security $Security `
+        -ExpectedRights $ExpectedRights `
+        -ExpectedInheritance ([Security.AccessControl.InheritanceFlags]::None) `
+        -Name "Restore recovery block"
 }
 
 function Get-EAInstanceContext {
@@ -652,42 +636,267 @@ function Invoke-EAIcaclsChecked {
     if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE" }
 }
 
+function Test-EAExactAllowRights {
+    param(
+        [Security.AccessControl.FileSystemRights]$Actual,
+        [Security.AccessControl.FileSystemRights]$Expected
+    )
+    # FileSystemAccessRule may add Synchronize to an Allow ACE. Accept that
+    # normalized representation, but no other effective right.
+    $ExpectedWithSynchronize = $Expected -bor `
+        [Security.AccessControl.FileSystemRights]::Synchronize
+    return $Actual -eq $Expected -or $Actual -eq $ExpectedWithSynchronize
+}
+
+function Assert-EAExactRawSidAcl {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Security.AccessControl.FileSystemSecurity]$Security,
+        [Parameter(Mandatory = $true)][hashtable]$ExpectedRights,
+        [Parameter(Mandatory = $true)]
+        [Security.AccessControl.InheritanceFlags]$ExpectedInheritance,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $AdministratorsSid = 'S-1-5-32-544'
+    $OwnerSid = $Security.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+    $Rules = @($Security.GetAccessRules(
+            $true, $true, [Security.Principal.SecurityIdentifier]
+        ))
+    if (-not $Security.AreAccessRulesProtected -or
+        -not $Security.AreAccessRulesCanonical -or
+        $OwnerSid -ne $AdministratorsSid -or
+        $Rules.Count -ne $ExpectedRights.Count) {
+        throw "$Name does not have the required protected canonical ACL."
+    }
+    $Allow = [Security.AccessControl.AccessControlType]::Allow
+    $None = [Security.AccessControl.PropagationFlags]::None
+    $Seen = @{}
+    foreach ($Rule in $Rules) {
+        $Sid = $Rule.IdentityReference.Value
+        if (-not $ExpectedRights.ContainsKey($Sid) -or
+            $Seen.ContainsKey($Sid) -or
+            $Rule.AccessControlType -ne $Allow -or
+            -not (Test-EAExactAllowRights -Actual $Rule.FileSystemRights `
+                -Expected $ExpectedRights[$Sid]) -or
+            $Rule.InheritanceFlags -ne $ExpectedInheritance -or
+            $Rule.PropagationFlags -ne $None -or $Rule.IsInherited) {
+            throw "$Name contains a noncanonical ACL rule for $Sid."
+        }
+        $Seen[$Sid] = $true
+    }
+    foreach ($Sid in $ExpectedRights.Keys) {
+        if (-not $Seen.ContainsKey($Sid)) {
+            throw "$Name is missing the required ACL rule for $Sid."
+        }
+    }
+}
+
+function Assert-EAInheritedRawSidAcl {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Security.AccessControl.FileSystemSecurity]$Security,
+        [Parameter(Mandatory = $true)][hashtable]$ExpectedRights,
+        [Parameter(Mandatory = $true)]
+        [Security.AccessControl.InheritanceFlags]$ExpectedInheritance,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $Rules = @($Security.GetAccessRules(
+            $true, $true, [Security.Principal.SecurityIdentifier]
+        ))
+    if ($Security.AreAccessRulesProtected -or
+        -not $Security.AreAccessRulesCanonical -or
+        $Rules.Count -ne $ExpectedRights.Count) {
+        throw "$Name does not inherit the exact canonical ACL."
+    }
+    $Allow = [Security.AccessControl.AccessControlType]::Allow
+    $None = [Security.AccessControl.PropagationFlags]::None
+    $Seen = @{}
+    foreach ($Rule in $Rules) {
+        $Sid = $Rule.IdentityReference.Value
+        if (-not $ExpectedRights.ContainsKey($Sid) -or
+            $Seen.ContainsKey($Sid) -or
+            $Rule.AccessControlType -ne $Allow -or
+            -not (Test-EAExactAllowRights -Actual $Rule.FileSystemRights `
+                -Expected $ExpectedRights[$Sid]) -or
+            $Rule.InheritanceFlags -ne $ExpectedInheritance -or
+            $Rule.PropagationFlags -ne $None -or -not $Rule.IsInherited) {
+            throw "$Name contains a noncanonical inherited ACL rule for $Sid."
+        }
+        $Seen[$Sid] = $true
+    }
+    foreach ($Sid in $ExpectedRights.Keys) {
+        if (-not $Seen.ContainsKey($Sid)) {
+            throw "$Name is missing the inherited ACL rule for $Sid."
+        }
+    }
+}
+
 function Set-EACanonicalInheritedTreeAcl {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
-        [Parameter(Mandatory = $true)][string[]]$RootGrants,
-        [string]$Name = "Protected directory tree"
+        [string]$Name = "Protected directory tree",
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('None', 'RX', 'M')][string]$ServicePermission,
+        [string]$ServiceSid = ''
     )
-    if ($RootGrants.Count -eq 0) {
-        throw "$Name must define at least one canonical root grant."
-    }
-    foreach ($Grant in $RootGrants) {
-        if ([string]::IsNullOrWhiteSpace($Grant) -or
-            $Grant -match '(?i)^/(?:T|C|Q|L)$') {
-            throw "$Name contains an invalid root ACL grant."
+    if ($ServicePermission -eq 'None') {
+        if (-not [string]::IsNullOrWhiteSpace($ServiceSid)) {
+            throw "$Name cannot define a service SID without service access."
         }
+    }
+    elseif ($ServiceSid -notmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$') {
+        throw "$Name requires a valid dedicated Windows service SID."
     }
     Assert-EAOrdinaryTree -Root $Root -Name $Name
 
-    # Canonical permissions belong only on the protected tree root. Applying
-    # inheritable (OI)(CI) entries recursively can protect a leaf while leaving
-    # it with no effective access rule. Reset each descendant instead so it
-    # inherits the root's effective ACL.
-    Invoke-EAIcaclsChecked -ArgumentList @($Root, "/reset")
-    $CanonicalArguments = @($Root, "/inheritance:r")
-    foreach ($Grant in $RootGrants) {
-        $CanonicalArguments += @("/grant:r", $Grant)
+    $RootItem = Get-Item -LiteralPath $Root -Force
+    $System = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+    $Administrators = New-Object Security.Principal.SecurityIdentifier(
+        'S-1-5-32-544'
+    )
+    $Allow = [Security.AccessControl.AccessControlType]::Allow
+    $None = [Security.AccessControl.PropagationFlags]::None
+    $ContainerAndObject = `
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $Security = New-Object Security.AccessControl.DirectorySecurity
+    $Security.SetAccessRuleProtection($true, $false)
+    $Security.SetOwner($Administrators)
+    $ExpectedRights = @{}
+    $ExpectedRights[$System.Value] = `
+        [Security.AccessControl.FileSystemRights]::FullControl
+    $ExpectedRights[$Administrators.Value] = `
+        [Security.AccessControl.FileSystemRights]::FullControl
+    foreach ($Definition in @(
+            [pscustomobject]@{
+                Sid = $System
+                Rights = [Security.AccessControl.FileSystemRights]::FullControl
+            },
+            [pscustomobject]@{
+                Sid = $Administrators
+                Rights = [Security.AccessControl.FileSystemRights]::FullControl
+            }
+        )) {
+        [void]$Security.AddAccessRule(
+            (New-Object Security.AccessControl.FileSystemAccessRule(
+                $Definition.Sid, $Definition.Rights,
+                $ContainerAndObject, $None, $Allow
+            ))
+        )
     }
-    # Removing inherited access and publishing every replacement grant must be
-    # one native ACL operation; otherwise the caller can lock itself out of the
-    # tree between commands. Each trustee deliberately receives its own
-    # /grant:r switch for Windows PowerShell 5.1/icacls argument compatibility.
-    Invoke-EAIcaclsChecked -ArgumentList $CanonicalArguments
+    if ($ServicePermission -ne 'None') {
+        $Service = New-Object Security.Principal.SecurityIdentifier($ServiceSid)
+        $ServiceRights = if ($ServicePermission -eq 'RX') {
+            [Security.AccessControl.FileSystemRights]::ReadAndExecute
+        } else {
+            [Security.AccessControl.FileSystemRights]::Modify
+        }
+        [void]$Security.AddAccessRule(
+            (New-Object Security.AccessControl.FileSystemAccessRule(
+                $Service, $ServiceRights,
+                $ContainerAndObject, $None, $Allow
+            ))
+        )
+        $ExpectedRights[$Service.Value] = $ServiceRights
+    }
+
+    # Publish the complete protected root DACL in one operation. A raw
+    # SecurityIdentifier remains valid before the named service is registered;
+    # icacls trustee parsing does not.
+    [IO.Directory]::SetAccessControl($RootItem.FullName, $Security)
+    $Applied = [IO.Directory]::GetAccessControl($RootItem.FullName)
+    Assert-EAExactRawSidAcl -Security $Applied `
+        -ExpectedRights $ExpectedRights `
+        -ExpectedInheritance $ContainerAndObject -Name $Name
+
     # Do not enumerate first: a descendant left with an empty DACL cannot be
-    # read by the caller. icacls can reset the owned wildcard tree directly.
+    # read by the caller. This reset contains no trustee, so it cannot trigger
+    # service account-name lookup; descendants inherit the protected root.
     Invoke-EAIcaclsChecked -ArgumentList @(
         (Join-Path $Root "*"), "/reset", "/T", "/C"
     )
+    Assert-EAOrdinaryTree -Root $Root -Name $Name
+    foreach ($Descendant in Get-ChildItem -LiteralPath $Root -Force -Recurse) {
+        $DescendantSecurity = if ($Descendant.PSIsContainer) {
+            [IO.Directory]::GetAccessControl($Descendant.FullName)
+        }
+        else {
+            [IO.File]::GetAccessControl($Descendant.FullName)
+        }
+        $DescendantInheritance = if ($Descendant.PSIsContainer) {
+            $ContainerAndObject
+        }
+        else {
+            [Security.AccessControl.InheritanceFlags]::None
+        }
+        Assert-EAInheritedRawSidAcl -Security $DescendantSecurity `
+            -ExpectedRights $ExpectedRights `
+            -ExpectedInheritance $DescendantInheritance `
+            -Name "$Name descendant $($Descendant.FullName)"
+    }
+}
+
+function Set-EACanonicalFileAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('None', 'RX')][string]$ServicePermission,
+        [string]$ServiceSid = ''
+    )
+    if ($ServicePermission -eq 'None') {
+        if (-not [string]::IsNullOrWhiteSpace($ServiceSid)) {
+            throw "$Name cannot define a service SID without service access."
+        }
+    }
+    elseif ($ServiceSid -notmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$') {
+        throw "$Name requires a valid dedicated Windows service SID."
+    }
+    Assert-EAOrdinaryLeaf -Path $Path -Name $Name
+    $System = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+    $Administrators = New-Object Security.Principal.SecurityIdentifier(
+        'S-1-5-32-544'
+    )
+    $Allow = [Security.AccessControl.AccessControlType]::Allow
+    $None = [Security.AccessControl.PropagationFlags]::None
+    $NoInheritance = [Security.AccessControl.InheritanceFlags]::None
+    $Security = New-Object Security.AccessControl.FileSecurity
+    $Security.SetAccessRuleProtection($true, $false)
+    $Security.SetOwner($Administrators)
+    $ExpectedRights = @{}
+    $Definitions = @(
+        [pscustomobject]@{
+            Sid = $System
+            Rights = [Security.AccessControl.FileSystemRights]::FullControl
+        },
+        [pscustomobject]@{
+            Sid = $Administrators
+            Rights = [Security.AccessControl.FileSystemRights]::FullControl
+        }
+    )
+    if ($ServicePermission -eq 'RX') {
+        $Service = New-Object Security.Principal.SecurityIdentifier($ServiceSid)
+        $Definitions += [pscustomobject]@{
+            Sid = $Service
+            Rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+        }
+    }
+    foreach ($Definition in $Definitions) {
+        [void]$Security.AddAccessRule(
+            (New-Object Security.AccessControl.FileSystemAccessRule(
+                $Definition.Sid, $Definition.Rights,
+                $NoInheritance, $None, $Allow
+            ))
+        )
+        $ExpectedRights[$Definition.Sid.Value] = $Definition.Rights
+    }
+    [IO.File]::SetAccessControl($Path, $Security)
+    $Applied = [IO.File]::GetAccessControl($Path)
+    Assert-EAExactRawSidAcl -Security $Applied `
+        -ExpectedRights $ExpectedRights -ExpectedInheritance $NoInheritance `
+        -Name $Name
 }
 
 function Set-EAInstanceCanonicalAcl {
@@ -700,24 +909,15 @@ function Set-EAInstanceCanonicalAcl {
         throw "Instance service SID is invalid."
     }
     Set-EACanonicalInheritedTreeAcl -Root $Context.InstanceRoot `
-        -Name "Agent instance boundary" -RootGrants @(
-            "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F",
-            "*${ServiceSid}:(OI)(CI)RX"
-        )
+        -Name "Agent instance boundary" -ServiceSid $ServiceSid `
+        -ServicePermission 'RX'
     foreach ($Writable in @($Context.DataDirectory, $Context.LogDirectory)) {
         Set-EACanonicalInheritedTreeAcl -Root $Writable `
-            -Name "Writable Agent instance directory" -RootGrants @(
-                "*S-1-5-18:(OI)(CI)F",
-                "*S-1-5-32-544:(OI)(CI)F",
-                "*${ServiceSid}:(OI)(CI)M"
-            )
+            -Name "Writable Agent instance directory" `
+            -ServiceSid $ServiceSid -ServicePermission 'M'
     }
     Set-EACanonicalInheritedTreeAcl -Root $Context.BackupDirectory `
-        -Name "Agent backup directory" -RootGrants @(
-            "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F"
-        )
+        -Name "Agent backup directory" -ServicePermission 'None'
 }
 
 function Assert-EACanonicalInstanceBoundaryAcl {
@@ -855,12 +1055,111 @@ function Grant-EAServiceWatchReadAcl {
     if ($ServiceSid -notmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$') {
         throw "Watch ACL service SID is invalid."
     }
+    $Item = Get-Item -LiteralPath $WatchRoot -Force -ErrorAction Stop
+    if (-not $Item.PSIsContainer -or
+        ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Watch ACL target must be an ordinary directory: $WatchRoot"
+    }
+    $Service = New-Object Security.Principal.SecurityIdentifier($ServiceSid)
+    $Allow = [Security.AccessControl.AccessControlType]::Allow
+    $Security = [IO.Directory]::GetAccessControl($Item.FullName)
+    $OwnerBefore = $Security.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+    $ProtectionBefore = $Security.AreAccessRulesProtected
+
+    function Get-PreservedWatchAclRules {
+        param(
+            [Security.AccessControl.DirectorySecurity]$Acl,
+            [string]$DedicatedSid
+        )
+        return @($Acl.GetAccessRules(
+                $true, $true, [Security.Principal.SecurityIdentifier]
+            ) | Where-Object {
+                -not ($_.IdentityReference.Value -eq $DedicatedSid -and
+                    $_.AccessControlType -eq $Allow -and -not $_.IsInherited)
+            } | ForEach-Object {
+                '{0}|{1}|{2}|{3}|{4}|{5}' -f `
+                    $_.IdentityReference.Value,
+                    [int]$_.AccessControlType,
+                    [int]$_.FileSystemRights,
+                    [int]$_.InheritanceFlags,
+                    [int]$_.PropagationFlags,
+                    [bool]$_.IsInherited
+            } | Sort-Object)
+    }
+
+    $PreservedBefore = @(Get-PreservedWatchAclRules -Acl $Security `
+        -DedicatedSid $ServiceSid)
+    foreach ($Rule in @($Security.GetAccessRules(
+                $true, $false, [Security.Principal.SecurityIdentifier]
+            ) | Where-Object {
+                $_.IdentityReference.Value -eq $ServiceSid -and
+                $_.AccessControlType -eq $Allow
+            })) {
+        [void]$Security.RemoveAccessRuleSpecific($Rule)
+    }
+    $ContainerAndObject = `
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $None = [Security.AccessControl.PropagationFlags]::None
+    $ReadAndExecute = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    [void]$Security.AddAccessRule(
+        (New-Object Security.AccessControl.FileSystemAccessRule(
+            $Service, $ReadAndExecute, $ContainerAndObject, $None, $Allow
+        ))
+    )
     # Add only the selected instance identity. Broad or legacy business ACLs
     # are never rewritten here: formal verification below fails closed and
     # tells the directory owner to remediate them at their owning boundary.
-    Invoke-EAIcaclsChecked -ArgumentList @(
-        $WatchRoot, "/grant:r", "*${ServiceSid}:(OI)(CI)RX"
-    )
+    [IO.Directory]::SetAccessControl($Item.FullName, $Security)
+    $Applied = [IO.Directory]::GetAccessControl($Item.FullName)
+    $OwnerAfter = $Applied.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+    $PreservedAfter = @(Get-PreservedWatchAclRules -Acl $Applied `
+        -DedicatedSid $ServiceSid)
+    if ($OwnerAfter -ne $OwnerBefore -or
+        $Applied.AreAccessRulesProtected -ne $ProtectionBefore -or
+        $PreservedAfter.Count -ne $PreservedBefore.Count) {
+        throw "Watch ACL update changed its owning business ACL boundary."
+    }
+    for ($Index = 0; $Index -lt $PreservedBefore.Count; $Index++) {
+        if ($PreservedAfter[$Index] -cne $PreservedBefore[$Index]) {
+            throw "Watch ACL update changed a non-Agent business ACL rule."
+        }
+    }
+    $DedicatedRules = @($Applied.GetAccessRules(
+            $true, $false, [Security.Principal.SecurityIdentifier]
+        ) | Where-Object {
+            $_.IdentityReference.Value -eq $ServiceSid -and
+            $_.AccessControlType -eq $Allow
+        })
+    if ($DedicatedRules.Count -ne 1 -or
+        -not (Test-EAExactAllowRights `
+            -Actual $DedicatedRules[0].FileSystemRights `
+            -Expected $ReadAndExecute) -or
+        $DedicatedRules[0].InheritanceFlags -ne $ContainerAndObject -or
+        $DedicatedRules[0].PropagationFlags -ne $None -or
+        $DedicatedRules[0].IsInherited) {
+        throw "Watch ACL did not persist one exact dedicated service read rule."
+    }
+    $AllowedWatchRights = $ReadAndExecute -bor `
+        [Security.AccessControl.FileSystemRights]::Synchronize
+    foreach ($Rule in $Applied.GetAccessRules(
+            $true, $true, [Security.Principal.SecurityIdentifier]
+        ) | Where-Object {
+            $_.IdentityReference.Value -eq $ServiceSid
+        }) {
+        if ($Rule.AccessControlType -ne $Allow) {
+            throw "Watch ACL denies the dedicated service SID: $WatchRoot"
+        }
+        $UnexpectedRights = ([int]$Rule.FileSystemRights) -band `
+            (-bnot ([int]$AllowedWatchRights))
+        if ($UnexpectedRights -ne 0) {
+            throw "Watch ACL grants excessive rights to the dedicated service SID: $WatchRoot"
+        }
+    }
 }
 
 function Assert-EAServiceWatchReadAcl {
@@ -868,15 +1167,28 @@ function Assert-EAServiceWatchReadAcl {
         [Parameter(Mandatory = $true)][string]$WatchRoot,
         [Parameter(Mandatory = $true)][string]$ServiceSid
     )
-    $Acl = Get-Acl -LiteralPath $WatchRoot
+    $Item = Get-Item -LiteralPath $WatchRoot -Force -ErrorAction Stop
+    if (-not $Item.PSIsContainer -or
+        ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Watch ACL target must be an ordinary directory: $WatchRoot"
+    }
+    $Acl = [IO.Directory]::GetAccessControl($Item.FullName)
     $HasDedicatedRead = $false
-    foreach ($Rule in $Acl.Access) {
-        $RuleSid = try {
-            $Rule.IdentityReference.Translate(
-                [Security.Principal.SecurityIdentifier]
-            ).Value
+    $RequiredRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    $AllowedWatchRights = $RequiredRights -bor `
+        [Security.AccessControl.FileSystemRights]::Synchronize
+    $RequiredInheritance = `
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    foreach ($Rule in $Acl.GetAccessRules(
+            $true, $true, [Security.Principal.SecurityIdentifier]
+        )) {
+        $RuleSid = $Rule.IdentityReference.Value
+        if ($RuleSid -eq $ServiceSid -and
+            $Rule.AccessControlType -ne
+                [Security.AccessControl.AccessControlType]::Allow) {
+            throw "Watch directory ACL denies the dedicated instance service SID: $WatchRoot"
         }
-        catch { [string]$Rule.IdentityReference }
         if ($Rule.AccessControlType -ne
                 [Security.AccessControl.AccessControlType]::Allow) {
             continue
@@ -898,12 +1210,13 @@ function Assert-EAServiceWatchReadAcl {
             )
         }
         if ($RuleSid -eq $ServiceSid) {
-            $RequiredRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
-            $RequiredInheritance = (
-                [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
-                [Security.AccessControl.InheritanceFlags]::ObjectInherit
-            )
-            if (($Rule.FileSystemRights -band $RequiredRights) -eq $RequiredRights -and
+            $UnexpectedRights = ([int]$Rule.FileSystemRights) -band `
+                (-bnot ([int]$AllowedWatchRights))
+            if ($UnexpectedRights -ne 0) {
+                throw "Watch directory ACL grants excessive rights to the dedicated instance service SID: $WatchRoot"
+            }
+            if ((Test-EAExactAllowRights `
+                    -Actual $Rule.FileSystemRights -Expected $RequiredRights) -and
                 ($Rule.InheritanceFlags -band $RequiredInheritance) -eq
                     $RequiredInheritance) {
                 $HasDedicatedRead = $true

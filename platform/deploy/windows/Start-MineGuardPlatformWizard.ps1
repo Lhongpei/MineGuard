@@ -108,6 +108,7 @@ $windowsPowerShell = Join-Path $env:SystemRoot `
 if ($SelfTest) {
     $requiredNames = @(
         'Set-MineGuardPlatformConfiguration.ps1',
+        'MineGuardPlatform.WindowsAcl.ps1',
         'Start-MineGuardPlatform.ps1',
         'Resolve-MineGuardPlatformExecutable.ps1',
         'Install-MineGuardPlatformService.ps1',
@@ -159,6 +160,8 @@ if (-not $isAdministrator) {
 
 $configScript = Join-Path $scriptDirectory `
     'Set-MineGuardPlatformConfiguration.ps1'
+$platformAclHelper = Join-Path $scriptDirectory `
+    'MineGuardPlatform.WindowsAcl.ps1'
 $startScript = Join-Path $scriptDirectory 'Start-MineGuardPlatform.ps1'
 $resolverScript = Join-Path $scriptDirectory `
     'Resolve-MineGuardPlatformExecutable.ps1'
@@ -167,8 +170,8 @@ $serviceInstallScript = Join-Path $scriptDirectory `
 $formalConfigHelper = Join-Path $scriptDirectory `
     'Configure-MineGuardPlatformFormal.ps1'
 foreach ($requiredPath in @(
-        $configScript, $startScript, $resolverScript, $serviceInstallScript,
-        $formalConfigHelper
+        $configScript, $platformAclHelper, $startScript, $resolverScript,
+        $serviceInstallScript, $formalConfigHelper
     )) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         Show-FatalMessage "安装不完整，缺少文件：$requiredPath"

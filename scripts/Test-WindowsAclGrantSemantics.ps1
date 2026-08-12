@@ -19,6 +19,31 @@ $CurrentUserSid = $WindowsIdentity.User.Value
 if ($CurrentUserSid -notmatch '^S-1-[0-9]+(?:-[0-9]+)+$') {
     throw "The current Windows user SID has an unexpected format."
 }
+$MineGuardPlatformServiceSid = `
+    "S-1-5-80-4217648432-3698953252-1345452052-477395953-3006768346"
+if ($null -ne (Get-Service -Name "MineGuardPlatform" `
+        -ErrorAction SilentlyContinue)) {
+    throw (
+        "The raw service-SID probe requires MineGuardPlatform to remain " +
+        "unregistered."
+    )
+}
+$PlatformAclHelper = Join-Path (Split-Path -Parent $PSScriptRoot) `
+    "platform\deploy\windows\MineGuardPlatform.WindowsAcl.ps1"
+if (-not (Test-Path -LiteralPath $PlatformAclHelper -PathType Leaf)) {
+    throw "The production Platform ACL helper is missing: $PlatformAclHelper"
+}
+. $PlatformAclHelper
+if ((Get-MineGuardPlatformAclServiceSid).Value -ne `
+        $MineGuardPlatformServiceSid) {
+    throw "The production Platform ACL helper uses an unexpected service SID."
+}
+$AgentSafetyHelper = Join-Path (Split-Path -Parent $PSScriptRoot) `
+    "agent\deploy\windows\EnterpriseAgent.WindowsSafety.ps1"
+if (-not (Test-Path -LiteralPath $AgentSafetyHelper -PathType Leaf)) {
+    throw "The production Enterprise Agent ACL helper is missing: $AgentSafetyHelper"
+}
+. $AgentSafetyHelper
 
 # FileSystemRights.Write and Modify are composite enums whose numeric values
 # overlap ReadAndExecute. Security filters must use only atomic mutation bits.
@@ -123,18 +148,124 @@ function Assert-AclContract {
     }
 }
 
+function Assert-ExplicitRawSidRule {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Sid,
+        [Parameter(Mandatory = $true)]
+        [Security.AccessControl.FileSystemRights]$Rights,
+        [Parameter(Mandatory = $true)]
+        [Security.AccessControl.InheritanceFlags]$Inheritance
+    )
+    $Item = Get-Item -LiteralPath $Path -Force
+    $Security = if ($Item.PSIsContainer) {
+        [IO.Directory]::GetAccessControl($Item.FullName)
+    } else {
+        [IO.File]::GetAccessControl($Item.FullName)
+    }
+    $Rules = @($Security.GetAccessRules(
+            $true, $false, [Security.Principal.SecurityIdentifier]
+        ) | Where-Object { $_.IdentityReference.Value -eq $Sid })
+    $RightsWithSynchronize = $Rights -bor `
+        [Security.AccessControl.FileSystemRights]::Synchronize
+    if ($Rules.Count -ne 1 -or
+        $Rules[0].AccessControlType -ne
+            [Security.AccessControl.AccessControlType]::Allow -or
+        ($Rules[0].FileSystemRights -ne $Rights -and
+            $Rules[0].FileSystemRights -ne $RightsWithSynchronize) -or
+        $Rules[0].InheritanceFlags -ne $Inheritance -or
+        $Rules[0].PropagationFlags -ne
+            [Security.AccessControl.PropagationFlags]::None) {
+        throw "Raw SID ACL rule is missing or inexact for $Sid at $Path"
+    }
+}
+
 $ProbeParent = Join-Path $env:RUNNER_TEMP "mineguard-acl-grant"
 $ProbeRoot = Join-Path $ProbeParent ([Guid]::NewGuid().ToString("N"))
 $ChildRoot = Join-Path $ProbeRoot "child"
 $EmptyChild = Join-Path $ProbeRoot "empty-child"
 $EmptyTree = Join-Path $ProbeRoot "standalone-empty-tree"
+$RawConfigTree = Join-Path $ProbeRoot "raw-service-sid-config"
+$RawStateTree = Join-Path $ProbeRoot "raw-service-sid-state"
+$RawIntegrityFile = Join-Path $ProbeRoot "winsw-integrity.json"
+$AgentRoot = Join-Path $ProbeRoot "agent-instance"
+$AgentWritable = Join-Path $AgentRoot "data"
+$AgentBackup = Join-Path $AgentRoot "backups"
+$AgentWatch = Join-Path $ProbeRoot "agent-watch"
+$AgentRecoveryFile = Join-Path $AgentRoot "restore-recovery.json"
 $Executable = Join-Path $ChildRoot "acl-probe.exe"
-New-Item -ItemType Directory -Path $ChildRoot,$EmptyChild,$EmptyTree `
+$ProbeDirectories = @(
+    $ChildRoot, $EmptyChild, $EmptyTree, $RawConfigTree, $RawStateTree,
+    $AgentWritable, $AgentBackup, $AgentWatch
+)
+New-Item -ItemType Directory -Path $ProbeDirectories `
     -Force | Out-Null
 Copy-Item -LiteralPath "$env:SystemRoot\System32\PING.EXE" `
     -Destination $Executable
+$RawConfigFile = Join-Path $RawConfigTree "clients.json"
+$RawBootstrapFile = Join-Path $RawConfigTree "bootstrap-admin-password.txt"
+$RawStateFile = Join-Path $RawStateTree "mineguard.db"
+[IO.File]::WriteAllText($RawConfigFile, "{}")
+[IO.File]::WriteAllText($RawBootstrapFile, "probe-password")
+[IO.File]::WriteAllText($RawStateFile, "state-probe")
+[IO.File]::WriteAllText($RawIntegrityFile, "{}")
+[IO.File]::WriteAllText($AgentRecoveryFile, "{}")
 
 try {
+    Set-MineGuardPlatformCanonicalTreeAcl -Path $RawConfigTree `
+        -ServicePermission "RX"
+    Grant-MineGuardPlatformBootstrapPasswordDeleteAcl `
+        -Path $RawBootstrapFile
+    Set-MineGuardPlatformCanonicalTreeAcl -Path $RawStateTree `
+        -ServicePermission "M"
+    Set-MineGuardPlatformServiceReadableFileAcl -Path $RawIntegrityFile
+    Write-Host (
+        "MineGuard unregistered raw service-SID ACL semantics passed."
+    )
+
+    $AgentServiceId = "MineGuardEnterpriseAgent-AclProbe" + `
+        ([Guid]::NewGuid().ToString("N").Substring(0, 12))
+    if ($null -ne (Get-Service -Name $AgentServiceId `
+            -ErrorAction SilentlyContinue)) {
+        throw "The Agent raw-SID probe service unexpectedly exists."
+    }
+    $AgentIdentity = Get-EAServiceIdentity -ServiceId $AgentServiceId
+    $ContainerAndObject = `
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    Set-EACanonicalInheritedTreeAcl -Root $AgentRoot `
+        -Name "Agent production RX ACL probe" `
+        -ServicePermission "RX" -ServiceSid $AgentIdentity.Sid
+    Assert-ExplicitRawSidRule -Path $AgentRoot -Sid $AgentIdentity.Sid `
+        -Rights ([Security.AccessControl.FileSystemRights]::ReadAndExecute) `
+        -Inheritance $ContainerAndObject
+    Set-EACanonicalInheritedTreeAcl -Root $AgentWritable `
+        -Name "Agent production writable ACL probe" `
+        -ServicePermission "M" -ServiceSid $AgentIdentity.Sid
+    Assert-ExplicitRawSidRule -Path $AgentWritable -Sid $AgentIdentity.Sid `
+        -Rights ([Security.AccessControl.FileSystemRights]::Modify) `
+        -Inheritance $ContainerAndObject
+    Set-EACanonicalInheritedTreeAcl -Root $AgentBackup `
+        -Name "Agent production backup ACL probe" -ServicePermission "None"
+    Set-EACanonicalFileAcl -Path $AgentRecoveryFile `
+        -Name "Agent production recovery ACL probe" `
+        -ServicePermission "RX" -ServiceSid $AgentIdentity.Sid
+    Assert-ExplicitRawSidRule -Path $AgentRecoveryFile `
+        -Sid $AgentIdentity.Sid `
+        -Rights ([Security.AccessControl.FileSystemRights]::ReadAndExecute) `
+        -Inheritance ([Security.AccessControl.InheritanceFlags]::None)
+    Set-EACanonicalInheritedTreeAcl -Root $AgentWatch `
+        -Name "Agent watch business-boundary probe" -ServicePermission "None"
+    Grant-EAServiceWatchReadAcl -WatchRoot $AgentWatch `
+        -ServiceSid $AgentIdentity.Sid
+    Assert-EAServiceWatchReadAcl -WatchRoot $AgentWatch `
+        -ServiceSid $AgentIdentity.Sid
+    if ($null -ne (Get-Service -Name $AgentServiceId `
+            -ErrorAction SilentlyContinue)) {
+        throw "The Agent ACL helper unexpectedly registered a service."
+    }
+    Write-Host "Enterprise Agent unregistered service-SID ACL semantics passed."
+
     Invoke-IcaclsChecked -Label "Empty-tree ACL reset" -ArgumentList @(
         $EmptyTree, "/reset"
     )
