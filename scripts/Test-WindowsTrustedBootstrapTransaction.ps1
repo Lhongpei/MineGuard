@@ -481,6 +481,27 @@ function Remove-TestOwnedPlatformArpRegistration {
     }
 }
 
+function New-TestOwnedPlatformArpProviderKey {
+    param([Parameter(Mandatory = $true)] [string] $ProviderPath)
+    $createdKey = $null
+    try {
+        # RegistryProvider returns the newly opened RegistryKey.  Suppressing
+        # that object with [void] leaves its native handle for GC/finalization,
+        # so a later DeleteSubKeyTree can remain delete-pending indefinitely
+        # within this long-lived test process.  Capture and deterministically
+        # dispose the create-new handle before reopening through Registry64.
+        $createdKey = New-Item -Path $ProviderPath -ErrorAction Stop
+        if ($createdKey -isnot [Microsoft.Win32.RegistryKey]) {
+            throw 'RegistryProvider returned an unexpected create-new object.'
+        }
+    } finally {
+        if ($null -ne $createdKey -and
+            $createdKey -is [Microsoft.Win32.RegistryKey]) {
+            $createdKey.Dispose()
+        }
+    }
+}
+
 function New-PlatformArpFixture {
     $subKey = Get-ArpSubKey -Product Platform
     $providerPath = 'Registry::HKEY_LOCAL_MACHINE\' + $subKey
@@ -491,7 +512,7 @@ function New-PlatformArpFixture {
     # installer wins the fixed-name race, it fails instead of opening and
     # overwriting that registration.  Until the ownership token is written,
     # no catch path deletes this fixed name merely because creation started.
-    [void](New-Item -Path $providerPath -ErrorAction Stop)
+    New-TestOwnedPlatformArpProviderKey -ProviderPath $providerPath
     $ownershipSet = $false
     $base = Open-Registry64Base
     try {
@@ -597,7 +618,7 @@ function Set-ChangedPlatformArpFixture {
     if (Test-ArpRegistrationExists -Product Platform) {
         throw 'Refusing to overwrite a Platform ARP registration created during mutation.'
     }
-    [void](New-Item -Path $providerPath -ErrorAction Stop)
+    New-TestOwnedPlatformArpProviderKey -ProviderPath $providerPath
     $base = Open-Registry64Base
     try {
         $root = $base.OpenSubKey($subKey, $true)

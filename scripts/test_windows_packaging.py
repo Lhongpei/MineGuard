@@ -1150,6 +1150,9 @@ def test_trusted_bootstrap_transaction_probe() -> None:
         "MineGuardTransactionTestOwner",
         "Enable-PlatformArpFixtureCleanupAccess",
         "Remove-TestOwnedPlatformArpRegistration",
+        "New-TestOwnedPlatformArpProviderKey",
+        "$createdKey = New-Item -Path $ProviderPath -ErrorAction Stop",
+        "$createdKey.Dispose()",
         "$security.SetAccessRuleProtection($true, $false)",
         "RegistryRights]::CreateSubKey",
         "RegistryRights]::SetValue",
@@ -1184,6 +1187,9 @@ def test_trusted_bootstrap_transaction_probe() -> None:
     assert probe.count("[AllowEmptyCollection()]") == 2, (
         "both initially-empty PowerShell 5.1 List tracker parameters must "
         "explicitly allow an empty collection"
+    )
+    assert "[void](New-Item -Path $providerPath" not in probe, (
+        "RegistryProvider create-new handles must be disposed deterministically"
     )
     cleanup_access = probe[
         probe.index("function Enable-PlatformArpFixtureCleanupAccess") :
