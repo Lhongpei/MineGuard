@@ -448,8 +448,10 @@ jobs:
             $probeSource
           if ($LASTEXITCODE -ne 0) { throw 'Nuitka dependency-cache qualification failed.' }
 
-          $nuitkaVersion = (& $probePython -c `
-            'import importlib.metadata as m; print(m.version("Nuitka"))').Trim()
+          $nuitkaVersionOutput = @(& $probePython -m nuitka --version)
+          $nuitkaVersion = if ($nuitkaVersionOutput.Count -gt 0) {
+            ([string]$nuitkaVersionOutput[0]).Trim()
+          } else { '' }
           if ($LASTEXITCODE -ne 0 -or $nuitkaVersion -notmatch '^\d+\.\d+\.\d+$') {
             throw 'Unable to identify the qualified Nuitka version.'
           }

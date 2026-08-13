@@ -2686,6 +2686,7 @@ def test_workflow() -> None:
         "path: ${{ runner.temp }}/mineguard-formal-nuitka-downloads",
         "WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_B64=",
         "WINDOWS_NUITKA_DOWNLOADS_MANIFEST_B64=",
+        "& $probePython -m nuitka --version",
         "NO INSTALLER WAS PUBLISHED",
     ):
         assert token in qualification_job, f"hosted input qualification missing: {token}"
