@@ -466,7 +466,7 @@ jobs:
             }
           ) | Select-Object -Unique
           if (@($pinnedNuitkaVersions).Count -ne 1 -or
-              $nuitkaVersion -ne [string]$pinnedNuitkaVersions[0]) {
+              $nuitkaVersion -ne ([string]$pinnedNuitkaVersions)) {
             throw 'The qualified Nuitka version does not match both source pins.'
           }
           $downloadsManifest = Join-Path $evidence 'nuitka-downloads-manifest.json'
@@ -690,7 +690,7 @@ jobs:
             }
           ) | Select-Object -Unique
           if (@($pinnedNuitkaVersions).Count -ne 1 -or
-              $nuitkaVersion -ne [string]$pinnedNuitkaVersions[0]) {
+              $nuitkaVersion -ne ([string]$pinnedNuitkaVersions)) {
             throw 'The approved downloads manifest does not match both Nuitka source pins.'
           }
           & $env:FORMAL_PYTHON scripts/test_windows_packaging.py

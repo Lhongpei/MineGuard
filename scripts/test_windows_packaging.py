@@ -2687,6 +2687,7 @@ def test_workflow() -> None:
         "WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_B64=",
         "WINDOWS_NUITKA_DOWNLOADS_MANIFEST_B64=",
         "& $probePython -m nuitka --version",
+        "$nuitkaVersion -ne ([string]$pinnedNuitkaVersions)",
         "NO INSTALLER WAS PUBLISHED",
     ):
         assert token in qualification_job, f"hosted input qualification missing: {token}"
@@ -2694,6 +2695,9 @@ def test_workflow() -> None:
         "cache paths must be identical fixed runner-temp paths in qualification and "
         "formal jobs"
     )
+    assert qualification_job.count(
+        "$nuitkaVersion -ne ([string]$pinnedNuitkaVersions)"
+    ) == 1
 
     internal_job = workflow.split("internal-unsigned-release:", 1)[1].split(
         "signed-production-candidate:", 1
@@ -2764,6 +2768,9 @@ def test_workflow() -> None:
     assert "actions/cache/save" not in internal_job, (
         "a formal job must consume approved exact caches without replacing them"
     )
+    assert internal_job.count(
+        "$nuitkaVersion -ne ([string]$pinnedNuitkaVersions)"
+    ) == 1
     assert internal_job.index("scripts/test_windows_packaging.py") < (
         internal_job.index("Build audit lifecycle-test and publish four files")
     )
