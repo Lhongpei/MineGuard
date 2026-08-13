@@ -609,7 +609,12 @@ def test_seed_v2_demo_command_creates_isolated_dashboard_data(
         )
         == 0
     )
-    payload = json.loads(capsys.readouterr().out)
+    raw_output = capsys.readouterr().out
+    # This command is parsed by the Windows PowerShell 5.1 control center.
+    # Keep its transport ASCII-only so a legacy console code page cannot
+    # corrupt Chinese values or the JSON syntax around them.
+    assert raw_output.isascii()
+    payload = json.loads(raw_output)
     assert payload["synthetic_demo"] is True
     assert payload["demo_dataset"] is True
     assert payload["contains_workbook_examples"] is True
@@ -620,7 +625,32 @@ def test_seed_v2_demo_command_creates_isolated_dashboard_data(
         "normal_candidate": 20,
         "risk": 5,
     }
+    mine_names = {scenario["mine_name"] for scenario in payload["scenarios"]}
+    assert {"太岳矿", "梗阳矿"} <= mine_names
     assert (state / "mineguard.db").is_file()
+
+    assert (
+        product_cli.main(
+            [
+                "seed-v2-demo",
+                "--state-directory",
+                str(state),
+                "--through-month",
+                "2026-07-31",
+            ]
+        )
+        == 0
+    )
+    resume_output = capsys.readouterr().out
+    assert resume_output.isascii()
+    resumed = json.loads(resume_output)
+    assert resumed["status"] == "already_seeded"
+    assert resumed["created_submission_count"] == 0
+    assert resumed["replayed_submission_count"] == 26
+    resumed_names = {
+        scenario["mine_name"] for scenario in resumed["scenarios"]
+    }
+    assert {"太岳矿", "梗阳矿"} <= resumed_names
 
 
 def test_v2_backup_verify_and_restore_round_trip(tmp_path: Path) -> None:

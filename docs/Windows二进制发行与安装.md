@@ -237,7 +237,7 @@ $ExpectedModelTrustSha256 = '<审批的生产模型信任库 SHA-256>'
 
 ```powershell
 $ExpectedSetupSha256 = '<从介质外审批记录取得的 64 位 SHA-256>'
-& '.\MineGuard-Platform-0.6.0-windows-x64-INTERNAL-UNSIGNED.exe' `
+& '.\MineGuard-Platform-0.6.1-windows-x64-INTERNAL-UNSIGNED.exe' `
   /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- `
   /ALLOWUNSIGNEDINTERNALRELEASE=1 `
   /EXPECTEDINSTALLERSHA256=$ExpectedSetupSha256
@@ -330,7 +330,7 @@ Get-Content .\SHA256SUMS.txt
 被针对性篡改的未签名程序本身不能充当自己的信任根。先对每份无签名 Setup 做显式比较：
 
 ```powershell
-$Setup = '.\MineGuard-Platform-0.6.0-windows-x64-INTERNAL-UNSIGNED.exe'
+$Setup = '.\MineGuard-Platform-0.6.1-windows-x64-INTERNAL-UNSIGNED.exe'
 $ApprovedSha256 = Read-Host '输入介质外批准的 Platform Setup SHA-256'
 $ActualSha256 = (Get-FileHash -LiteralPath $Setup -Algorithm SHA256).Hash
 if (-not $ActualSha256.Equals(

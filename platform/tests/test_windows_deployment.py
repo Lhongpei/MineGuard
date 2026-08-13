@@ -526,6 +526,22 @@ def test_windows_control_center_is_gui_first_and_secret_safe() -> None:
     assert wizard.index("& $ConfigScript @parameters", demo_worker) < wizard.index(
         "'seed-v2-demo'", demo_worker
     )
+    demo_seed = wizard.index("'seed-v2-demo'", demo_worker)
+    assert wizard.index("$env:PYTHONUTF8 = '1'", demo_worker) < demo_seed
+    assert wizard.index("$env:PYTHONIOENCODING = 'utf-8'", demo_worker) < demo_seed
+    assert wizard.index("$OutputEncoding = $utf8NoBom", demo_worker) < demo_seed
+    assert wizard.index("[Console]::OutputEncoding = $utf8NoBom", demo_worker) < (
+        demo_seed
+    )
+    operation_failure = wizard.index("if ($operationFailed)", demo_seed)
+    service_success = wizard.index(
+        "elseif ($purpose -eq 'service-install')", operation_failure
+    )
+    assert "Set-BusyState -Busy $false" in wizard[
+        operation_failure:service_success
+    ]
+    assert "详细内容已隐藏" in wizard[demo_worker:operation_failure]
+    assert '演示数据生成结果无法核验：$($_.Exception.Message)' not in wizard
     assert "formalAccessUrl = $Uri.AbsoluteUri" in wizard
     assert "Test-MineGuardHealthUrl -Url $formalHealthUrl.AbsoluteUri" in wizard
     assert "Test-Path -LiteralPath $path -PathType Leaf" in wizard

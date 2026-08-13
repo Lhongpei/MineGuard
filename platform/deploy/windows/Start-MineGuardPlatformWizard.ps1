@@ -1416,6 +1416,11 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = $utf8NoBom
+try { [Console]::OutputEncoding = $utf8NoBom } catch { }
 . $ResolverScript
 $runtime = Resolve-MineGuardPlatformExecutable -InstallRoot $InstallRoot
 if ($ConfigureFirst) {
@@ -1450,7 +1455,10 @@ try {
     $mineCount = [int]$seedResult.mine_count
     $submissionCount = [int]$seedResult.submission_count
 } catch {
-    throw "演示数据生成结果无法核验：$($_.Exception.Message)"
+    throw (
+        '演示数据生成命令已完成，但返回结果不是有效的机器可读 JSON。' +
+        '为避免把整份异常输出写入日志，详细内容已隐藏；请联系技术支持。'
+    )
 }
 if ([string]$seedResult.schema_version -ne
         'mineguard-regulatory-v2-demo-v3' -or
@@ -2236,6 +2244,7 @@ $timer.Add_Tick({
                 $script:OperationPurpose = ''
                 Refresh-ConfigurationState
                 if ($operationFailed) {
+                    Set-BusyState -Busy $false
                     $statusLabel.Text = if ($purpose -eq 'service-install') {
                         '服务安装失败'
                     } else { '配置失败' }

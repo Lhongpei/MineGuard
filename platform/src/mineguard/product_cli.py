@@ -1879,8 +1879,23 @@ def _self_check() -> dict[str, object]:
     }
 
 
-def _print(value: dict[str, object]) -> None:
-    print(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
+def _print(value: dict[str, object], *, ascii_safe: bool = False) -> None:
+    """Write one JSON document to stdout.
+
+    ``ascii_safe`` is used at native-process boundaries that may be consumed by
+    Windows PowerShell 5.1.  Escaping non-ASCII characters keeps the JSON
+    byte-for-byte safe even when a legacy console code page is selected; JSON
+    readers still recover the original Unicode strings.
+    """
+
+    print(
+        json.dumps(
+            value,
+            ensure_ascii=ascii_safe,
+            indent=2,
+            allow_nan=False,
+        )
+    )
 
 
 def _seed_demo(args: argparse.Namespace) -> dict[str, object]:
@@ -1980,7 +1995,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "bootstrap-admin":
             _print(_bootstrap_admin_once(args))
         elif args.command == "seed-v2-demo":
-            _print(_seed_demo(args))
+            # The Windows GUI invokes this command from a PowerShell 5.1
+            # background runspace.  Some Chinese Windows installations decode
+            # native stdout with the active OEM/ANSI page before
+            # ConvertFrom-Json sees it.  ASCII-safe JSON prevents that legacy
+            # decoder from corrupting Chinese text or adjacent JSON quotes.
+            _print(_seed_demo(args), ascii_safe=True)
         elif args.command == "backup":
             _print(_backup(args))
         elif args.command == "verify-backup":

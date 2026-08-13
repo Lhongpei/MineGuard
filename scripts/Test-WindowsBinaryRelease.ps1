@@ -554,6 +554,42 @@ function Assert-PlatformDemoSeed {
         [IO.Path]::GetFullPath([string]$Seed.database_path) -ne $ExpectedDatabase) {
         throw "Platform V2 demo JSON does not point to the persisted SQLite state."
     }
+
+    # Exercise the exact Windows PowerShell 5.1 native-pipeline boundary used
+    # by the GUI's background runspace.  ProcessStartInfo above deliberately
+    # decodes UTF-8, so it cannot catch a regression where a legacy Chinese
+    # console code page corrupts native stdout before ConvertFrom-Json.  The
+    # seed command's machine transport must therefore stay ASCII-only while
+    # still round-tripping its Unicode values through JSON escapes.
+    $ResumeArguments = @(
+        "seed-v2-demo", "--state-directory", $StatePath,
+        "--through-month", "2026-07-31"
+    )
+    $ResumeLines = & $Executable @ResumeArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Platform V2 demo resume command failed through the native PowerShell pipeline."
+    }
+    $ResumeText = $ResumeLines | Out-String
+    if ([string]::IsNullOrWhiteSpace($ResumeText) -or
+        $ResumeText -match '[^\x00-\x7F]') {
+        throw "Platform V2 demo machine JSON is not code-page-independent ASCII."
+    }
+    try { $Resumed = $ResumeText | ConvertFrom-Json }
+    catch {
+        throw "Platform V2 demo resume JSON was corrupted in the native PowerShell pipeline."
+    }
+    $ResumedMineNames = @($Resumed.scenarios | ForEach-Object {
+        [string]$_.mine_name
+    })
+    if ([string]$Resumed.status -ne "already_seeded" -or
+        [int]$Resumed.mine_count -ne 10 -or
+        [int]$Resumed.submission_count -ne 26 -or
+        [int]$Resumed.created_submission_count -ne 0 -or
+        [int]$Resumed.replayed_submission_count -ne 26 -or
+        "太岳矿" -notin $ResumedMineNames -or
+        "梗阳矿" -notin $ResumedMineNames) {
+        throw "Platform V2 demo resume JSON did not preserve the complete Unicode dataset."
+    }
 }
 
 function Invoke-RuntimeSmoke {
