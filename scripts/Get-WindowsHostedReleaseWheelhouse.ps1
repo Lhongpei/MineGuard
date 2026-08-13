@@ -111,14 +111,14 @@ foreach ($Relative in $Inputs) {
 }
 foreach ($Relative in $Inputs) {
     $Arguments = @(
-        '-m', 'pip', '--isolated', 'download', '--disable-pip-version-check',
-        '--no-input',
-        '--only-binary=:all:', '--dest', $Wheelhouse,
+        '-m', 'pip', '--isolated', '--no-cache-dir', 'wheel',
+        '--disable-pip-version-check', '--no-input', '--prefer-binary',
+        '--wheel-dir', $Wheelhouse,
         '--requirement', (Join-Path $RepositoryRoot $Relative)
     )
     & $PythonExecutable @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Pinned hosted release wheel download failed: $Relative"
+        throw "Pinned hosted release wheel build failed: $Relative"
     }
 }
 $Items = @((Get-Item -LiteralPath $Wheelhouse -Force)) + @(

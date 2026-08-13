@@ -2247,7 +2247,10 @@ def test_authenticode_interface() -> None:
     hosted_wheelhouse = read("scripts/Get-WindowsHostedReleaseWheelhouse.ps1")
     for token in (
         "--isolated",
-        "--only-binary=:all:",
+        "--no-cache-dir",
+        "'wheel'",
+        "--prefer-binary",
+        "--wheel-dir",
         "struct.calcsize(chr(80))*8",
         "must be an exact CPython 3.12 x64 interpreter",
         "Win32_LogicalDisk",
