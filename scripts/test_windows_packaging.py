@@ -2248,6 +2248,7 @@ def test_authenticode_interface() -> None:
     for token in (
         "--isolated",
         "--only-binary=:all:",
+        "struct.calcsize(chr(80))*8",
         "must be an exact CPython 3.12 x64 interpreter",
         "Win32_LogicalDisk",
         "FileAttributes]::ReparsePoint",

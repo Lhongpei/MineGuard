@@ -75,8 +75,8 @@ if (-not (Test-Path -LiteralPath $PythonExecutable -PathType Leaf)) {
     throw "PythonExecutable does not exist."
 }
 $PythonIdentity = & $PythonExecutable -c (
-    'import platform, struct; print(platform.python_version() + "|" + ' +
-    'str(struct.calcsize("P") * 8))'
+    'import platform,struct;print(platform.python_version()+chr(124)+' +
+    'str(struct.calcsize(chr(80))*8))'
 )
 if ($LASTEXITCODE -ne 0 -or
     ([string]$PythonIdentity).Trim() -notmatch '^3\.12\.\d+\|64$') {
