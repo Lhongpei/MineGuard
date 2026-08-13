@@ -223,6 +223,7 @@ python3 scripts/verify_two_process.py --timeout 60
 ```
 
 进一步说明先看 [十量 V3 部署与运行](docs/十量V3部署与运行.md)，再看
+[`mineguard.cn` 正式上线步骤](docs/mineguard.cn正式上线步骤.md)、
 [正式生产部署与签字说明](docs/正式生产部署与签字说明.md)、
 [自动采集与自动填报部署指南](docs/自动采集与自动填报部署指南.md)、
 [企业模型凭据签发与轮换](docs/企业模型凭据签发与轮换.md)、

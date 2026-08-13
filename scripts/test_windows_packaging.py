@@ -2457,7 +2457,6 @@ def test_workflow() -> None:
         "self-hosted, windows, x64, signing",
         "TestInstallerFailurePropagation",
         "TestInstallerLifecycle",
-        "UNSIGNED-TEST-ONLY",
         "release_mode",
         "internal-unsigned",
         "INTERNAL-UNSIGNED",
@@ -2509,7 +2508,6 @@ def test_workflow() -> None:
         "steps.nuitka_cache_ready.outputs.ready == 'true'",
         "legacy_server_2012r2_compatibility_test",
         "LegacyWindowsServer2012R2CompatibilityTest",
-        "LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY",
         "A legacy Windows Server 2012 R2 test cannot also request signed production candidates",
         "trusted-bootstrap-ps51-gate",
         "Fast Windows PowerShell 5.1 installer transaction gate",
@@ -2519,6 +2517,17 @@ def test_workflow() -> None:
         "Verify fast real Inno install exit and uninstall flow",
     ):
         assert token in workflow, f"release workflow missing: {token}"
+    dispatch_inputs = workflow.split("    inputs:", 1)[1].split("  push:", 1)[0]
+    assert "verification-only unsigned test (never published)" in dispatch_inputs
+    assert "default: internal-unsigned" in dispatch_inputs, (
+        "manual Windows releases must default to the formal INTERNAL-UNSIGNED path"
+    )
+    assert dispatch_inputs.index("- internal-unsigned") < dispatch_inputs.index(
+        "- unsigned-test"
+    ), "the formal INTERNAL-UNSIGNED choice must be presented before test media"
+    assert "sign_artifacts" not in workflow, (
+        "the ambiguous legacy signing switch must not remain in the release workflow"
+    )
     lowered = workflow.lower()
     action_refs = re.findall(r"(?m)^\s*uses:\s*[^@\s]+@([^\s#]+)", workflow)
     assert action_refs and all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in action_refs), (
@@ -2565,12 +2574,15 @@ def test_workflow() -> None:
     unsigned_definition = workflow.split("  unsigned-test:", 1)[1].split(
         "\n  internal-unsigned-release:", 1
     )[0]
+    assert (
+        "name: Verification-only unsigned build and install test (never published)"
+        in unsigned_definition
+    )
     assert "needs: trusted-bootstrap-ps51-gate" in unsigned_definition
     build_block, _, _ = named_step_block(
         unsigned_job, "Build, audit, compile, install, health-check and uninstall"
     )
     assert "'${{ inputs.release_mode }}' -eq 'signed'" in build_block
-    assert "'${{ inputs.sign_artifacts }}' -eq 'true' -or" in build_block
     assert "'${{ inputs.legacy_server_2012r2_compatibility_test }}' -eq 'true'" in (
         build_block
     )
@@ -2590,8 +2602,10 @@ def test_workflow() -> None:
     )
     cache_qualify = unsigned_job.index("Qualify complete unsigned compiler cache")
     cache_save = unsigned_job.index("Save complete unsigned Nuitka compiler cache")
-    upload = unsigned_job.index("Upload explicit unsigned test media")
-    assert cache_prepare < cache_restore < unsigned_build < cache_qualify < cache_save < upload
+    assert cache_prepare < cache_restore < unsigned_build < cache_qualify < cache_save
+    assert "actions/upload-artifact" not in unsigned_definition, (
+        "unsigned test builds must never expose downloadable workflow artifacts"
+    )
     cache_prepare_block, _, _ = named_step_block(
         unsigned_job, "Prepare isolated unsigned Nuitka compiler cache"
     )
@@ -2639,6 +2653,15 @@ def test_workflow() -> None:
         internal_job.index("Build audit lifecycle-test and publish four files")
     )
     signed_job = workflow.split("signed-production-candidate:", 1)[1]
+    upload_action = (
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+    )
+    assert workflow.count(upload_action) == 2, (
+        "only the INTERNAL-UNSIGNED and signed formal jobs may upload artifacts"
+    )
+    assert internal_job.count(upload_action) == 1
+    assert signed_job.count(upload_action) == 1
+    assert "inputs.release_mode == 'signed'" in signed_job
     assert "actions/setup-python" not in signed_job, (
         "the controlled signing runner must use its approved preinstalled python.exe"
     )

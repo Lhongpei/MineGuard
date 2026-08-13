@@ -68,9 +68,10 @@ x64 仿真尚未验证，不能作为当前验收环境。程序和 SQLite 状�
 ### 1.1 Windows Server 2012 R2 legacy 兼容测试
 
 标准发布不支持 Windows Server 2012 R2。手工触发发布工作流时可显式选择
-`legacy_server_2012r2_compatibility_test`，它只会生成名称含
-`LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY` 的未签名试验介质，不能与生产签名
-同时开启，也不表示已完成目标系统认证。
+`legacy_server_2012r2_compatibility_test`，它只在 runner 的临时工作区生成名称含
+`LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY` 的未签名试验介质并执行兼容性验证，
+不上传可下载的安装包或发行 artifact。该模式不能与生产签名同时开启，
+也不表示已完成目标系统认证。
 
 目标机至少必须满足：
 
@@ -114,12 +115,14 @@ Set-ExecutionPolicy -Scope Process Bypass
 未签名文件名一定包含大写 `UNSIGNED-TEST-ONLY`，清单分类为
 `unsigned-test-artifacts`。这种文件只供隔离功能验收，不是正式可信介质。
 
-如果仓库托管在 GitHub，提交并推送这批经过复核的文件后，可在 **Actions → Windows
-binary installer release → Run workflow** 手工触发。`sign_artifacts=false` 会在托管的
-Windows Server 2022 runner 上执行同一构建、故障注入、真实静默安装、健康检查和卸载，
-完成后从该次运行的 Artifacts 下载
-`mineguard-windows-UNSIGNED-TEST-ONLY-<commit>`。这一步产出的才是可拿到 Windows 机器
-双击的两份 EXE；Linux 工作区中的脚本本身不是 Windows 安装包。
+如果仓库托管在 GitHub，可在 **Actions → Windows binary installer release →
+Run workflow** 手工触发。工作流默认选择 `release_mode=internal-unsigned`，
+只有正式 `internal-unsigned` 和 `signed` 路径会上传可下载的 Windows 安装包。
+显式选择 `release_mode=unsigned-test` 时，托管的 Windows Server 2022 runner 仍会执行
+构建、故障注入、真实静默安装、健康检查和卸载，但只保留运行日志和
+内部构建缓存，不上传 EXE、`release-manifest.json` 或 `SHA256SUMS.txt`，因而不存在
+可从 Actions 下载的 `UNSIGNED-TEST-ONLY` 介质。Linux 工作区中的脚本本身也不是
+Windows 安装包。
 
 ## 3. 离线构建
 
@@ -248,13 +251,17 @@ Platform 和 Agent 是两份不同文件，必须分别使用各自的外部摘�
 文件自动计算后当作预期值。Windows 可能显示“未知发布者”，这是无 Authenticode 证书路径
 的预期现象；摘要不匹配时不得继续。
 
-如果使用仓库的自托管构建工作流，分支选择器必须选 `main`，并选择
-`release_mode=internal-unsigned`。runner 需同时具有 `self-hosted`、`windows`、`x64`、
+如果使用仓库的自托管构建工作流，分支选择器必须选 `main`；
+`release_mode` 默认就是 `internal-unsigned`，执行前仍应人工确认该值，不要选择
+`unsigned-test`。runner 需同时具有 `self-hosted`、`windows`、`x64`、
 `mineguard-release` 四个独立标签，受保护环境为
 `windows-internal-unsigned-release`。runner 服务账号必须在隔离构建机上以管理员权限
 运行，否则安装生命周期门禁会立即拒绝。没有 GitHub Actions 额度时，直接在受控
 Windows 构建机执行上面的命令即可；两种方式的发行分类、输入门禁和四文件布局相同，
 不承诺跨构建机逐字节一致。
+构建成功后，从该次运行的 **Artifacts** 下载
+`mineguard-windows-INTERNAL-UNSIGNED-<commit>`；它必须同时包含两份名称以
+`INTERNAL-UNSIGNED.exe` 结尾的 Setup、`release-manifest.json` 和 `SHA256SUMS.txt`。
 
 受保护环境需要配置 `WINDOWS_RELEASE_PYTHON_EXECUTABLE`、
 `WINDOWS_RELEASE_PYTHON_PATCH_VERSION`、`WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256`、
@@ -301,6 +308,9 @@ Windows 构建机执行上面的命令即可；两种方式的发行分类、输
 和时间戳。此路径的文件名不带未签名后缀，清单分类为
 `signed-production-candidate`；无证书正式路径则明确带 `INTERNAL-UNSIGNED` 后缀。签名表示
 来源和完整性，不等于自动批准上线。
+通过 GitHub Actions 构建时，必须显式选择 `release_mode=signed`；签名成功后上传的
+artifact 名为 `mineguard-windows-signed-candidate-<commit>`。签名路径不以额外的布尔开关作为
+发布授权，避免选项冲突或误将测试构建当成正式介质。
 正式签名模式还会强制拒绝 `-AllowNuitkaToolDownloads`；Nuitka 所需辅助缓存必须提前从
 审批介质预置，不能在签名构建时临时联网取得。正式自托管 runner 也不运行
 `actions/setup-python`：必须由受保护变量指定预装的 `python.exe`、精确 3.12 patch 及其
@@ -468,7 +478,9 @@ commercial-use terms、全部打包依赖许可证，以及本单位采购、密
 审计证据，不替代法律/采购审查，也不能笼统声称所有工具都可无条件免费商用。
 
 GitHub Actions 的 [windows-release.yml](../.github/workflows/windows-release.yml) 有三条互不
-混淆的路径：`windows-2022` 只产出明确标记的 unsigned test artifacts；
+混淆的路径。手工触发时默认为 `release_mode=internal-unsigned`；
+`release_mode=unsigned-test` 只在 `windows-2022` 托管 runner 上执行构建和安装生命周期验证，
+不上传任何可安装 EXE 或发行 artifact。
 `release_mode=internal-unsigned` 仅在 `main` 分支上运行，并在同时带
 `self-hosted`、`windows`、`x64`、`mineguard-release` 四个标签的受控自托管
 runner 上生成无代码签名证书的内网正式版；签名正式候选仅能在同时带
@@ -477,8 +489,8 @@ runner 上生成无代码签名证书的内网正式版；签名正式候选仅�
 wheelhouse、生产模型信任库及外部摘要，并执行完整 Windows PowerShell 5.1 解析和安装生命
 周期测试；无证书路径不会读取 SignTool 或证书配置。runner 必须是隔离构建机，不能同时承载
 真实 MineGuard 服务；生命周期门禁会创建并精确清理临时服务，且遇到同名既有服务会拒绝
-运行。runner 服务账号必须以管理员权限运行。流水线只上传工件，不自动创建公开
-Release。受保护环境还必须提供
+运行。runner 服务账号必须以管理员权限运行。只有 `internal-unsigned` 和
+`signed` 两条正式路径会上传工件，且都不自动创建公开 Release。受保护环境还必须提供
 `WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256`，其值来自清单之外的审批记录。
 此外必须配置 `WINDOWS_RELEASE_PYTHON_EXECUTABLE`、
 `WINDOWS_RELEASE_PYTHON_PATCH_VERSION`、`WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256`、

@@ -4,19 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       release_mode:
-        description: Select unsigned test, strict INTERNAL-UNSIGNED, or signed release flow
+        description: Select formal INTERNAL-UNSIGNED, verification-only unsigned test (never published), or signed release
         required: true
-        default: unsigned-test
+        default: internal-unsigned
         type: choice
         options:
-          - unsigned-test
           - internal-unsigned
+          - unsigned-test
           - signed
-      sign_artifacts:
-        description: Legacy compatibility switch; release_mode=signed is preferred
-        required: true
-        default: false
-        type: boolean
       legacy_server_2012r2_compatibility_test:
         description: Build an unsigned, target-unvalidated Windows Server 2012 R2 legacy compatibility test
         required: true
@@ -119,7 +114,7 @@ jobs:
         run: .\scripts\Test-WindowsGuiProcessWait.ps1
 
   unsigned-test:
-    name: Build and install-test unsigned artifacts
+    name: Verification-only unsigned build and install test (never published)
     needs: trusted-bootstrap-ps51-gate
     if: >-
       (github.event_name == 'workflow_dispatch' &&
@@ -313,8 +308,7 @@ jobs:
       - name: Build, audit, compile, install, health-check and uninstall
         shell: powershell
         run: |
-          if (('${{ inputs.sign_artifacts }}' -eq 'true' -or
-               '${{ inputs.release_mode }}' -eq 'signed') -and
+          if ('${{ inputs.release_mode }}' -eq 'signed' -and
               '${{ inputs.legacy_server_2012r2_compatibility_test }}' -eq 'true') {
             throw 'A legacy Windows Server 2012 R2 test cannot also request signed production candidates.'
           }
@@ -355,30 +349,6 @@ jobs:
           path: ${{ env.NUITKA_CACHE_DIR_CLCACHE }}
           key: ${{ env.MINEGUARD_NUITKA_CLCACHE_KEY }}
 
-      - name: Upload explicit unsigned test media
-        if: ${{ !inputs.legacy_server_2012r2_compatibility_test }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: mineguard-windows-UNSIGNED-TEST-ONLY-${{ github.sha }}
-          path: |
-            release/windows/*-UNSIGNED-TEST-ONLY.exe
-            release/windows/release-manifest.json
-            release/windows/SHA256SUMS.txt
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload explicit Server 2012 R2 legacy test media
-        if: ${{ inputs.legacy_server_2012r2_compatibility_test }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: mineguard-windows-LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY-${{ github.sha }}
-          path: |
-            release/windows/*-LEGACY-SERVER-2012R2-UNSIGNED-TEST-ONLY.exe
-            release/windows/release-manifest.json
-            release/windows/SHA256SUMS.txt
-          if-no-files-found: error
-          retention-days: 14
-
   internal-unsigned-release:
     name: Build strict INTERNAL-UNSIGNED release on private runner
     needs: trusted-bootstrap-ps51-gate
@@ -414,9 +384,6 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          if ('${{ inputs.sign_artifacts }}' -eq 'true') {
-            throw 'INTERNAL-UNSIGNED cannot be combined with the legacy sign_artifacts switch.'
-          }
           if ('${{ inputs.legacy_server_2012r2_compatibility_test }}' -eq 'true') {
             throw 'INTERNAL-UNSIGNED supports the standard Windows 10 / Server 2019+ profile only.'
           }
@@ -579,7 +546,7 @@ jobs:
     needs: unsigned-test
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      (inputs.sign_artifacts || inputs.release_mode == 'signed') &&
+      inputs.release_mode == 'signed' &&
       !inputs.legacy_server_2012r2_compatibility_test
     runs-on: [self-hosted, windows, x64, signing]
     environment: windows-production-signing
