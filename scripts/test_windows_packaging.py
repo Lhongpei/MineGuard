@@ -2244,6 +2244,47 @@ def test_authenticode_interface() -> None:
     ):
         assert token in evidence, f"wheelhouse evidence generator missing: {token}"
 
+    hosted_wheelhouse = read("scripts/Get-WindowsHostedReleaseWheelhouse.ps1")
+    for token in (
+        "--isolated",
+        "--only-binary=:all:",
+        "must be an exact CPython 3.12 x64 interpreter",
+        "Win32_LogicalDisk",
+        "FileAttributes]::ReparsePoint",
+        "Wheelhouse and RepositoryRoot must not overlap",
+        "Get-ChildItem -LiteralPath $Wheelhouse -File -Force -Recurse",
+    ):
+        assert token in hosted_wheelhouse, (
+            f"hosted wheelhouse qualification guard missing: {token}"
+        )
+
+    new_fileset = read("scripts/New-WindowsFileSetManifest.ps1")
+    verify_fileset = read("scripts/Test-WindowsFileSetManifest.ps1")
+    for source, name in (
+        (new_fileset, "release-input manifest generator"),
+        (verify_fileset, "release-input manifest verifier"),
+    ):
+        for token in (
+            "must not be a filesystem root",
+            "contains an unsafe or ambiguous path component",
+            "Win32_LogicalDisk",
+            "FileAttributes]::ReparsePoint",
+        ):
+            assert token in source, f"{name} missing: {token}"
+    for token in (
+        "mineguard-windows-file-set-manifest-v1",
+        "FileMode]::CreateNew",
+        "$Stream.Flush($true)",
+    ):
+        assert token in new_fileset, f"fileset manifest generator missing: {token}"
+    for token in (
+        "ExpectedManifestSha256",
+        "Root file set does not exactly match the approved manifest",
+        "case-colliding path",
+        "Release input file SHA-256 mismatch",
+    ):
+        assert token in verify_fileset, f"fileset verifier missing: {token}"
+
 
 def test_powershell_interpolation_is_ps51_unambiguous() -> None:
     ambiguous_variable_before_colon = re.compile(
@@ -2460,7 +2501,6 @@ def test_workflow() -> None:
         "release_mode",
         "internal-unsigned",
         "INTERNAL-UNSIGNED",
-        "self-hosted, windows, x64, mineguard-release",
         "windows-internal-unsigned-release",
         "-InternalUnsignedRelease",
         "WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT",
@@ -2515,6 +2555,14 @@ def test_workflow() -> None:
         "Verify trusted bootstrap transactions with Windows PowerShell 5.1",
         "Compile both production Inno scripts with minimal release trees",
         "Verify fast real Inno install exit and uninstall flow",
+        "qualify-formal-inputs",
+        "NON-FORMAL hosted input qualification",
+        "Get-WindowsHostedReleaseWheelhouse.ps1",
+        "New-WindowsFileSetManifest.ps1",
+        "Test-WindowsFileSetManifest.ps1",
+        "WINDOWS_NUITKA_DOWNLOADS_MANIFEST_SHA256",
+        "WINDOWS_NUITKA_DOWNLOADS_MANIFEST_B64",
+        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
     ):
         assert token in workflow, f"release workflow missing: {token}"
     dispatch_inputs = workflow.split("    inputs:", 1)[1].split("  push:", 1)[0]
@@ -2570,9 +2618,9 @@ def test_workflow() -> None:
     assert "contains(github.event.head_commit.message, '[windows-build]')" in (
         workflow.split("jobs:", 1)[0]
     ), "obsolete main release runs must be cancelled before consuming build minutes"
-    unsigned_job = workflow.split("internal-unsigned-release:", 1)[0]
+    unsigned_job = workflow.split("qualify-formal-inputs:", 1)[0]
     unsigned_definition = workflow.split("  unsigned-test:", 1)[1].split(
-        "\n  internal-unsigned-release:", 1
+        "\n  qualify-formal-inputs:", 1
     )[0]
     assert (
         "name: Verification-only unsigned build and install test (never published)"
@@ -2618,15 +2666,39 @@ def test_workflow() -> None:
     )[1].split("Restore unsigned Nuitka compiler cache", 1)[0], (
         "the cache key must use GITHUB_SHA at runtime, not an unavailable expression context"
     )
+    qualification_job = workflow.split("qualify-formal-inputs:", 1)[1].split(
+        "internal-unsigned-release:", 1
+    )[0]
+    assert "actions/upload-artifact" not in qualification_job, (
+        "non-formal qualification must never create a downloadable artifact"
+    )
+    for token in (
+        "runs-on: windows-2022",
+        "Save candidate wheelhouse under its manifest digest",
+        "Save candidate Nuitka dependency cache under its manifest digest",
+        "$wheelhouse = Join-Path $env:RUNNER_TEMP 'mineguard-formal-wheelhouse'",
+        "$downloads = Join-Path $env:RUNNER_TEMP 'mineguard-formal-nuitka-downloads'",
+        "path: ${{ runner.temp }}/mineguard-formal-wheelhouse",
+        "path: ${{ runner.temp }}/mineguard-formal-nuitka-downloads",
+        "WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_B64=",
+        "WINDOWS_NUITKA_DOWNLOADS_MANIFEST_B64=",
+        "NO INSTALLER WAS PUBLISHED",
+    ):
+        assert token in qualification_job, f"hosted input qualification missing: {token}"
+    assert "path: ${{ steps.qualify_inputs.outputs." not in qualification_job, (
+        "cache paths must be identical fixed runner-temp paths in qualification and "
+        "formal jobs"
+    )
+
     internal_job = workflow.split("internal-unsigned-release:", 1)[1].split(
         "signed-production-candidate:", 1
     )[0]
     assert "needs: trusted-bootstrap-ps51-gate" in internal_job
     assert "github.ref == 'refs/heads/main'" in internal_job, (
-        "the elevated private release runner must not execute arbitrary branch refs"
+        "the protected hosted release must not execute arbitrary branch refs"
     )
     for token in (
-        "Validate controlled offline release inputs",
+        "Materialize and validate externally approved hosted release inputs",
         "Parse release PowerShell with Windows PowerShell 5.1",
         "Preflight release text safety scanner",
         "-InternalUnsignedRelease",
@@ -2643,12 +2715,50 @@ def test_workflow() -> None:
         "WINDOWS_SIGNTOOL_PATH",
         "WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT",
         "-RequireSigned",
-        "actions/setup-python",
         "AllowNuitkaToolDownloads",
+        "restore-keys:",
     ):
         assert forbidden not in internal_job, (
             f"internal-unsigned workflow must not depend on signing/network mode: {forbidden}"
         )
+    for token in (
+        "runs-on: windows-2022",
+        "Set up externally approved exact CPython x64",
+        "WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_B64",
+        "WINDOWS_NUITKA_DOWNLOADS_MANIFEST_B64",
+        "WINDOWS_MODEL_ISSUER_TRUST_STORE_B64",
+        "Restore exact approved wheelhouse cache",
+        "Restore exact approved Nuitka dependency cache",
+        "path: ${{ runner.temp }}/mineguard-formal-wheelhouse",
+        "path: ${{ runner.temp }}/mineguard-formal-nuitka-downloads",
+        "fail-on-cache-miss: true",
+        "Verify approved Nuitka dependency cache before formal build",
+        "Verify approved Nuitka dependency cache after formal build",
+        "HTTP_PROXY: http://127.0.0.1:9",
+        "PIP_NO_INDEX: \"1\"",
+        "NUITKA_CACHE_DIR_CLCACHE",
+        "id-token: write",
+        "attestations: write",
+        "Attest the four formal release files",
+    ):
+        assert token in internal_job, f"hosted formal release gate missing: {token}"
+    assert internal_job.index("Attest the four formal release files") < (
+        internal_job.index("Upload strict INTERNAL-UNSIGNED release")
+    )
+    assert internal_job.index(
+        "Build audit lifecycle-test and publish four files"
+    ) < internal_job.index(
+        "Verify approved Nuitka dependency cache after formal build"
+    ) < internal_job.index("Attest the four formal release files"), (
+        "the approved Nuitka download cache must remain byte-for-byte unchanged "
+        "through the offline formal build"
+    )
+    assert internal_job.count(
+        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"
+    ) == 1
+    assert "actions/cache/save" not in internal_job, (
+        "a formal job must consume approved exact caches without replacing them"
+    )
     assert internal_job.index("scripts/test_windows_packaging.py") < (
         internal_job.index("Build audit lifecycle-test and publish four files")
     )
@@ -2707,6 +2817,7 @@ def test_workflow_context_availability() -> None:
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
         "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
         "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
     }
     actual_official_actions = {
         match.group(1)

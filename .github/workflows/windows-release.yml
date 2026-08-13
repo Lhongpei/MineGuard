@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       release_mode:
-        description: Select formal INTERNAL-UNSIGNED, verification-only unsigned test (never published), or signed release
+        description: Select formal INTERNAL-UNSIGNED, input qualification (no EXE), verification-only unsigned test (never published), or signed release
         required: true
         default: internal-unsigned
         type: choice
         options:
           - internal-unsigned
+          - qualify-formal-inputs
           - unsigned-test
           - signed
       legacy_server_2012r2_compatibility_test:
@@ -17,6 +18,11 @@ on:
         required: true
         default: false
         type: boolean
+      qualification_python_patch:
+        description: Exact CPython patch used only to qualify hosted formal inputs
+        required: true
+        default: "3.12.10"
+        type: string
   push:
     branches:
       - "main"
@@ -118,7 +124,8 @@ jobs:
     needs: trusted-bootstrap-ps51-gate
     if: >-
       (github.event_name == 'workflow_dispatch' &&
-       inputs.release_mode != 'internal-unsigned') ||
+       (inputs.release_mode == 'unsigned-test' ||
+        inputs.release_mode == 'signed')) ||
       (github.event_name == 'push' &&
        (startsWith(github.ref, 'refs/tags/windows-v') ||
         (github.ref == 'refs/heads/main' &&
@@ -349,39 +356,214 @@ jobs:
           path: ${{ env.NUITKA_CACHE_DIR_CLCACHE }}
           key: ${{ env.MINEGUARD_NUITKA_CLCACHE_KEY }}
 
-  internal-unsigned-release:
-    name: Build strict INTERNAL-UNSIGNED release on private runner
+  qualify-formal-inputs:
+    name: NON-FORMAL hosted input qualification (manifests only; no EXE)
     needs: trusted-bootstrap-ps51-gate
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
-      inputs.release_mode == 'internal-unsigned'
-    runs-on: [self-hosted, windows, x64, mineguard-release]
-    environment: windows-internal-unsigned-release
-    timeout-minutes: 180
+      inputs.release_mode == 'qualify-formal-inputs'
+    runs-on: windows-2022
+    timeout-minutes: 60
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
-      WINDOWS_RELEASE_PYTHON_EXECUTABLE: ${{ vars.WINDOWS_RELEASE_PYTHON_EXECUTABLE }}
-      WINDOWS_RELEASE_PYTHON_PATCH_VERSION: ${{ vars.WINDOWS_RELEASE_PYTHON_PATCH_VERSION }}
-      WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256: ${{ vars.WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256 }}
-      WINDOWS_RELEASE_WHEELHOUSE: ${{ vars.WINDOWS_RELEASE_WHEELHOUSE }}
-      WINDOWS_RELEASE_WHEELHOUSE_MANIFEST: ${{ vars.WINDOWS_RELEASE_WHEELHOUSE_MANIFEST }}
-      WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256: ${{ vars.WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256 }}
-      WINDOWS_MODEL_ISSUER_TRUST_STORE: ${{ vars.WINDOWS_MODEL_ISSUER_TRUST_STORE }}
-      WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256: ${{ vars.WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256 }}
-      INNO_COMPILER: ${{ vars.WINDOWS_INNO_COMPILER }}
-      INNO_COMPILER_SHA256: ${{ vars.WINDOWS_INNO_COMPILER_SHA256 }}
 
     steps:
-      - name: Check out exact private source
+      - name: Check out exact source for non-formal qualification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           clean: true
           fetch-depth: 1
 
-      - name: Validate controlled offline release inputs
+      - name: Set up exact qualification CPython x64
+        id: qualification_python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.qualification_python_patch }}
+          architecture: "x64"
+
+      - name: Generate non-formal candidate manifests for independent approval
+        id: qualify_inputs
         shell: powershell
+        env:
+          QUALIFICATION_PYTHON: ${{ steps.qualification_python.outputs.python-path }}
+          QUALIFICATION_PYTHON_PATCH: ${{ inputs.qualification_python_patch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ inputs.legacy_server_2012r2_compatibility_test }}' -eq 'true') {
+            throw 'Formal-input qualification supports Windows 10 / Server 2019+ only.'
+          }
+          if ($env:QUALIFICATION_PYTHON_PATCH -notmatch '^3\.12\.\d+$') {
+            throw 'qualification_python_patch must be an exact CPython 3.12 patch.'
+          }
+          $candidateRoot = Join-Path $env:RUNNER_TEMP (
+            "mineguard-NON-FORMAL-input-candidate-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          )
+          $wheelhouse = Join-Path $env:RUNNER_TEMP 'mineguard-formal-wheelhouse'
+          $downloads = Join-Path $env:RUNNER_TEMP 'mineguard-formal-nuitka-downloads'
+          $evidence = Join-Path $candidateRoot 'approval-candidate'
+          $probeRoot = Join-Path $candidateRoot 'nuitka-probe'
+          foreach ($path in @($candidateRoot,$downloads,$evidence,$probeRoot)) {
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+          }
+          $innoCandidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          $inno = $innoCandidates | Where-Object {
+            Test-Path -LiteralPath $_ -PathType Leaf
+          } | Select-Object -First 1
+          if (-not $inno) {
+            throw 'The hosted image has no preinstalled Inno Setup 6 compiler.'
+          }
+          .\scripts\Get-WindowsHostedReleaseWheelhouse.ps1 `
+            -PythonExecutable $env:QUALIFICATION_PYTHON `
+            -RepositoryRoot $pwd.Path -Wheelhouse $wheelhouse
+          $wheelManifest = Join-Path $evidence 'wheelhouse-manifest.json'
+          .\scripts\New-WindowsWheelhouseManifest.ps1 `
+            -Wheelhouse $wheelhouse -OutputPath $wheelManifest `
+            -PythonVersion $env:QUALIFICATION_PYTHON_PATCH -Architecture x64
+
+          $probeVenv = Join-Path $probeRoot 'venv'
+          & $env:QUALIFICATION_PYTHON -m venv $probeVenv
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to create the qualification probe venv.' }
+          $probePython = Join-Path $probeVenv 'Scripts\python.exe'
+          & $probePython -m pip --isolated install --disable-pip-version-check `
+            --no-index --find-links $wheelhouse `
+            --requirement 'platform\packaging\windows\requirements-build.txt'
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to install the pinned Nuitka probe tools.' }
+          $probeSource = Join-Path $probeRoot 'probe.py'
+          [IO.File]::WriteAllText(
+            $probeSource,
+            "print('MineGuard formal input qualification probe')`r`n",
+            (New-Object Text.UTF8Encoding($false))
+          )
+          $env:NUITKA_CACHE_DIR_DOWNLOADS = $downloads
+          $env:NUITKA_CACHE_DIR_CLCACHE = Join-Path $probeRoot 'clcache-disposable'
+          $env:NUITKA_CACHE_DIR_BYTECODE = Join-Path $probeRoot 'bytecode-disposable'
+          $env:NUITKA_CACHE_DIR_DLL_DEPENDENCIES = Join-Path $probeRoot 'dll-disposable'
+          & $probePython -m nuitka --mode=standalone --msvc=latest `
+            --assume-yes-for-downloads --output-dir=$probeRoot --remove-output `
+            $probeSource
+          if ($LASTEXITCODE -ne 0) { throw 'Nuitka dependency-cache qualification failed.' }
+
+          $nuitkaVersion = (& $probePython -c `
+            'import importlib.metadata as m; print(m.version("Nuitka"))').Trim()
+          if ($LASTEXITCODE -ne 0 -or $nuitkaVersion -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'Unable to identify the qualified Nuitka version.'
+          }
+          $pinnedNuitkaVersions = @(
+            foreach ($requirements in @(
+              'platform\packaging\windows\requirements-build.txt',
+              'agent\packaging\windows\build-requirements.txt'
+            )) {
+              foreach ($line in Get-Content -LiteralPath $requirements -Encoding UTF8) {
+                if ($line -match '^Nuitka==(\d+\.\d+\.\d+)$') { $Matches[1] }
+              }
+            }
+          ) | Select-Object -Unique
+          if (@($pinnedNuitkaVersions).Count -ne 1 -or
+              $nuitkaVersion -ne [string]$pinnedNuitkaVersions[0]) {
+            throw 'The qualified Nuitka version does not match both source pins.'
+          }
+          $downloadsManifest = Join-Path $evidence 'nuitka-downloads-manifest.json'
+          .\scripts\New-WindowsFileSetManifest.ps1 `
+            -Root $downloads -OutputPath $downloadsManifest `
+            -Purpose 'nuitka-dependency-downloads' `
+            -PythonVersion $env:QUALIFICATION_PYTHON_PATCH `
+            -ToolVersion $nuitkaVersion
+          $pythonHash = (Get-FileHash -LiteralPath $env:QUALIFICATION_PYTHON `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          $innoHash = (Get-FileHash -LiteralPath $inno `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          $wheelManifestHash = (Get-FileHash -LiteralPath $wheelManifest `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          $downloadsManifestHash = (Get-FileHash -LiteralPath $downloadsManifest `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          $wheelManifestB64 = [Convert]::ToBase64String(
+            [IO.File]::ReadAllBytes($wheelManifest)
+          )
+          $downloadsManifestB64 = [Convert]::ToBase64String(
+            [IO.File]::ReadAllBytes($downloadsManifest)
+          )
+          foreach ($entry in @(
+            "wheelhouse_cache=$wheelhouse",
+            "wheelhouse_manifest_sha256=$wheelManifestHash",
+            "downloads_cache=$downloads",
+            "downloads_manifest_sha256=$downloadsManifestHash"
+          )) {
+            $entry | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+          Write-Host '----- NON-FORMAL CANDIDATE: COPY ONLY AFTER INDEPENDENT REVIEW -----'
+          Write-Host "WINDOWS_RELEASE_PYTHON_PATCH_VERSION=$env:QUALIFICATION_PYTHON_PATCH"
+          Write-Host "WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256=$pythonHash"
+          Write-Host "WINDOWS_INNO_COMPILER_SHA256=$innoHash"
+          Write-Host "WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256=$wheelManifestHash"
+          Write-Host "WINDOWS_NUITKA_DOWNLOADS_MANIFEST_SHA256=$downloadsManifestHash"
+          Write-Host "WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_B64=$wheelManifestB64"
+          Write-Host "WINDOWS_NUITKA_DOWNLOADS_MANIFEST_B64=$downloadsManifestB64"
+          Write-Host 'WINDOWS_MODEL_ISSUER_TRUST_STORE_B64=<separately approved production public-key trust store>'
+          Write-Host 'WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256=<separately approved SHA-256>'
+          Write-Host '----- END NON-FORMAL CANDIDATE; NO INSTALLER WAS PUBLISHED -----'
+
+      - name: Save candidate Nuitka dependency cache under its manifest digest
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/mineguard-formal-nuitka-downloads
+          key: mineguard-formal-nuitka-downloads-v1-${{ steps.qualify_inputs.outputs.downloads_manifest_sha256 }}
+
+      - name: Save candidate wheelhouse under its manifest digest
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/mineguard-formal-wheelhouse
+          key: mineguard-formal-wheelhouse-v1-${{ steps.qualify_inputs.outputs.wheelhouse_manifest_sha256 }}
+
+  internal-unsigned-release:
+    name: Build attested formal INTERNAL-UNSIGNED release on hosted Windows
+    needs: trusted-bootstrap-ps51-gate
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.release_mode == 'internal-unsigned'
+    runs-on: windows-2022
+    environment: windows-internal-unsigned-release
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      WINDOWS_RELEASE_PYTHON_PATCH_VERSION: ${{ vars.WINDOWS_RELEASE_PYTHON_PATCH_VERSION }}
+      WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256: ${{ vars.WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256 }}
+      WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256: ${{ vars.WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256 }}
+      WINDOWS_NUITKA_DOWNLOADS_MANIFEST_SHA256: ${{ vars.WINDOWS_NUITKA_DOWNLOADS_MANIFEST_SHA256 }}
+      WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256: ${{ vars.WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256 }}
+      INNO_COMPILER_SHA256: ${{ vars.WINDOWS_INNO_COMPILER_SHA256 }}
+      WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_B64: ${{ secrets.WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_B64 }}
+      WINDOWS_NUITKA_DOWNLOADS_MANIFEST_B64: ${{ secrets.WINDOWS_NUITKA_DOWNLOADS_MANIFEST_B64 }}
+      WINDOWS_MODEL_ISSUER_TRUST_STORE_B64: ${{ secrets.WINDOWS_MODEL_ISSUER_TRUST_STORE_B64 }}
+
+    steps:
+      - name: Check out exact approved source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
+          fetch-depth: 1
+
+      - name: Set up externally approved exact CPython x64
+        id: formal_python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ vars.WINDOWS_RELEASE_PYTHON_PATCH_VERSION }}
+          architecture: "x64"
+
+      - name: Materialize and validate externally approved hosted release inputs
+        shell: powershell
+        env:
+          FORMAL_PYTHON: ${{ steps.formal_python.outputs.python-path }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ('${{ inputs.legacy_server_2012r2_compatibility_test }}' -eq 'true') {
@@ -392,41 +574,28 @@ jobs:
           )
           if (-not $identity.IsInRole(
               [Security.Principal.WindowsBuiltInRole]::Administrator)) {
-            throw 'The private INTERNAL-UNSIGNED runner must be elevated for installer lifecycle tests.'
+            throw 'The hosted INTERNAL-UNSIGNED runner must be elevated for installer lifecycle tests.'
           }
           foreach ($required in @(
-            $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE,
             $env:WINDOWS_RELEASE_PYTHON_PATCH_VERSION,
             $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256,
-            $env:WINDOWS_RELEASE_WHEELHOUSE,
-            $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST,
             $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256,
-            $env:WINDOWS_MODEL_ISSUER_TRUST_STORE,
+            $env:WINDOWS_NUITKA_DOWNLOADS_MANIFEST_SHA256,
             $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256,
-            $env:INNO_COMPILER,
-            $env:INNO_COMPILER_SHA256
+            $env:INNO_COMPILER_SHA256,
+            $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_B64,
+            $env:WINDOWS_NUITKA_DOWNLOADS_MANIFEST_B64,
+            $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_B64,
+            $env:FORMAL_PYTHON
           )) {
             if ([string]::IsNullOrWhiteSpace($required)) {
-              throw 'The private release environment is missing a required controlled input.'
+              throw 'The protected hosted release environment is missing an approved input.'
             }
-          }
-          foreach ($leaf in @(
-            $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE,
-            $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST,
-            $env:WINDOWS_MODEL_ISSUER_TRUST_STORE,
-            $env:INNO_COMPILER
-          )) {
-            if (-not (Test-Path -LiteralPath $leaf -PathType Leaf)) {
-              throw "Controlled release file is unavailable: $leaf"
-            }
-          }
-          if (-not (Test-Path -LiteralPath $env:WINDOWS_RELEASE_WHEELHOUSE `
-              -PathType Container)) {
-            throw 'The approved offline wheelhouse is unavailable.'
           }
           foreach ($expectedHash in @(
             $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256,
             $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256,
+            $env:WINDOWS_NUITKA_DOWNLOADS_MANIFEST_SHA256,
             $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256,
             $env:INNO_COMPILER_SHA256
           )) {
@@ -437,43 +606,150 @@ jobs:
           if ($env:WINDOWS_RELEASE_PYTHON_PATCH_VERSION -notmatch '^3\.12\.\d+$') {
             throw 'The protected Python version must be an exact CPython 3.12 patch.'
           }
+
+          $formalRoot = Join-Path $env:RUNNER_TEMP (
+            "mineguard-hosted-formal-inputs-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          )
+          $evidence = Join-Path $formalRoot 'evidence'
+          $wheelhouse = Join-Path $env:RUNNER_TEMP 'mineguard-formal-wheelhouse'
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $wheelManifest = Join-Path $evidence 'wheelhouse-manifest.json'
+          $downloadsManifest = Join-Path $evidence 'nuitka-downloads-manifest.json'
+          $modelTrust = Join-Path $evidence 'model-credential-trust.json'
           foreach ($definition in @(
             [pscustomobject]@{
-              path = $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE
-              expected = $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256
+              value = $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_B64
+              path = $wheelManifest
             },
             [pscustomobject]@{
-              path = $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST
-              expected = $env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256
+              value = $env:WINDOWS_NUITKA_DOWNLOADS_MANIFEST_B64
+              path = $downloadsManifest
             },
             [pscustomobject]@{
-              path = $env:WINDOWS_MODEL_ISSUER_TRUST_STORE
-              expected = $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256
-            },
-            [pscustomobject]@{
-              path = $env:INNO_COMPILER
-              expected = $env:INNO_COMPILER_SHA256
+              value = $env:WINDOWS_MODEL_ISSUER_TRUST_STORE_B64
+              path = $modelTrust
             }
+          )) {
+            try {
+              [IO.File]::WriteAllBytes(
+                $definition.path,
+                [Convert]::FromBase64String([string]$definition.value)
+              )
+            }
+            catch {
+              throw "A protected hosted release input is not valid base64: $($definition.path)"
+            }
+          }
+          foreach ($definition in @(
+            [pscustomobject]@{ path=$wheelManifest; expected=$env:WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256 },
+            [pscustomobject]@{ path=$downloadsManifest; expected=$env:WINDOWS_NUITKA_DOWNLOADS_MANIFEST_SHA256 },
+            [pscustomobject]@{ path=$modelTrust; expected=$env:WINDOWS_MODEL_ISSUER_TRUST_STORE_SHA256 },
+            [pscustomobject]@{ path=$env:FORMAL_PYTHON; expected=$env:WINDOWS_RELEASE_PYTHON_EXECUTABLE_SHA256 }
           )) {
             $actual = (Get-FileHash -LiteralPath $definition.path `
               -Algorithm SHA256).Hash
-            if (-not $actual.Equals(
-                [string]$definition.expected,
+            if (-not $actual.Equals([string]$definition.expected,
                 [StringComparison]::OrdinalIgnoreCase)) {
-              throw "Controlled release input SHA-256 mismatch: $($definition.path)"
+              throw "Externally approved release input SHA-256 mismatch: $($definition.path)"
             }
           }
-          $actualPythonVersion = (& $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE `
+          $actualPythonVersion = (& $env:FORMAL_PYTHON `
             -c 'import platform; print(platform.python_version())' |
             Select-Object -Last 1).Trim()
           if ($LASTEXITCODE -ne 0 -or
               $actualPythonVersion -ne $env:WINDOWS_RELEASE_PYTHON_PATCH_VERSION) {
             throw 'The controlled python.exe does not match its protected patch version.'
           }
-          & $env:WINDOWS_RELEASE_PYTHON_EXECUTABLE scripts/test_windows_packaging.py
+
+          $inno = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
+          if (-not $inno -or -not (Get-FileHash -LiteralPath $inno `
+              -Algorithm SHA256).Hash.Equals($env:INNO_COMPILER_SHA256,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Hosted Inno Setup does not match its independently approved SHA-256.'
+          }
+          $downloadsDocument = Get-Content -LiteralPath $downloadsManifest `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+          $nuitkaVersion = [string]$downloadsDocument.tool
+          if ($nuitkaVersion -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'Approved Nuitka downloads manifest has no valid tool version.'
+          }
+          $pinnedNuitkaVersions = @(
+            foreach ($requirements in @(
+              'platform\packaging\windows\requirements-build.txt',
+              'agent\packaging\windows\build-requirements.txt'
+            )) {
+              foreach ($line in Get-Content -LiteralPath $requirements -Encoding UTF8) {
+                if ($line -match '^Nuitka==(\d+\.\d+\.\d+)$') { $Matches[1] }
+              }
+            }
+          ) | Select-Object -Unique
+          if (@($pinnedNuitkaVersions).Count -ne 1 -or
+              $nuitkaVersion -ne [string]$pinnedNuitkaVersions[0]) {
+            throw 'The approved downloads manifest does not match both Nuitka source pins.'
+          }
+          & $env:FORMAL_PYTHON scripts/test_windows_packaging.py
           if ($LASTEXITCODE -ne 0) {
             throw 'Windows packaging static checks failed.'
           }
+          $downloadsCache = Join-Path $env:RUNNER_TEMP 'mineguard-formal-nuitka-downloads'
+          $clcache = Join-Path $formalRoot 'clcache-empty'
+          $bytecodeCache = Join-Path $formalRoot 'bytecode-empty'
+          $dllDependenciesCache = Join-Path $formalRoot 'dll-dependencies-empty'
+          $releaseOutput = Join-Path $env:RUNNER_TEMP `
+            "mineguard-internal-unsigned-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          foreach ($entry in @(
+            "WINDOWS_RELEASE_PYTHON_EXECUTABLE=$env:FORMAL_PYTHON",
+            "WINDOWS_RELEASE_WHEELHOUSE=$wheelhouse",
+            "WINDOWS_RELEASE_WHEELHOUSE_MANIFEST=$wheelManifest",
+            "WINDOWS_MODEL_ISSUER_TRUST_STORE=$modelTrust",
+            "INNO_COMPILER=$inno",
+            "NUITKA_CACHE_DIR_DOWNLOADS=$downloadsCache",
+            "NUITKA_CACHE_DIR_CLCACHE=$clcache",
+            "NUITKA_CACHE_DIR_BYTECODE=$bytecodeCache",
+            "NUITKA_CACHE_DIR_DLL_DEPENDENCIES=$dllDependenciesCache",
+            "MINEGUARD_NUITKA_DOWNLOADS_MANIFEST=$downloadsManifest",
+            "MINEGUARD_FORMAL_NUITKA_VERSION=$nuitkaVersion",
+            "WINDOWS_RELEASE_OUTPUT=$releaseOutput"
+          )) {
+            $entry | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
+      - name: Restore exact approved wheelhouse cache
+        id: formal_wheelhouse
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/mineguard-formal-wheelhouse
+          key: mineguard-formal-wheelhouse-v1-${{ env.WINDOWS_RELEASE_WHEELHOUSE_MANIFEST_SHA256 }}
+          fail-on-cache-miss: true
+
+      - name: Restore exact approved Nuitka dependency cache
+        id: formal_nuitka_downloads
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/mineguard-formal-nuitka-downloads
+          key: mineguard-formal-nuitka-downloads-v1-${{ env.WINDOWS_NUITKA_DOWNLOADS_MANIFEST_SHA256 }}
+          fail-on-cache-miss: true
+
+      - name: Verify approved Nuitka dependency cache before formal build
+        shell: powershell
+        run: |
+          if ('${{ steps.formal_wheelhouse.outputs.cache-hit }}' -ne 'true') {
+            throw 'The exact approved wheelhouse cache was not restored.'
+          }
+          if ('${{ steps.formal_nuitka_downloads.outputs.cache-hit }}' -ne 'true') {
+            throw 'The exact approved Nuitka dependency cache was not restored.'
+          }
+          .\scripts\Test-WindowsFileSetManifest.ps1 `
+            -Root $env:NUITKA_CACHE_DIR_DOWNLOADS `
+            -ManifestPath $env:MINEGUARD_NUITKA_DOWNLOADS_MANIFEST `
+            -ExpectedManifestSha256 $env:WINDOWS_NUITKA_DOWNLOADS_MANIFEST_SHA256 `
+            -ExpectedPurpose 'nuitka-dependency-downloads' `
+            -ExpectedPythonVersion $env:WINDOWS_RELEASE_PYTHON_PATCH_VERSION `
+            -ExpectedToolVersion $env:MINEGUARD_FORMAL_NUITKA_VERSION
 
       - name: Parse release PowerShell with Windows PowerShell 5.1
         shell: powershell
@@ -508,10 +784,24 @@ jobs:
       - name: Build audit lifecycle-test and publish four files
         shell: powershell
         env:
-          WINDOWS_RELEASE_OUTPUT: ${{ runner.temp }}\mineguard-internal-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+          NO_PROXY: 127.0.0.1,localhost
+          PIP_NO_INDEX: "1"
         run: |
           if (Test-Path -LiteralPath $env:WINDOWS_RELEASE_OUTPUT) {
             throw 'The atomic INTERNAL-UNSIGNED output directory already exists.'
+          }
+          foreach ($isolatedCache in @(
+            $env:NUITKA_CACHE_DIR_CLCACHE,
+            $env:NUITKA_CACHE_DIR_BYTECODE,
+            $env:NUITKA_CACHE_DIR_DLL_DEPENDENCIES
+          )) {
+            if (Test-Path -LiteralPath $isolatedCache) {
+              throw "A formal disposable compiler cache already exists: $isolatedCache"
+            }
+            New-Item -ItemType Directory -Path $isolatedCache | Out-Null
           }
           .\scripts\Build-WindowsBinaryRelease.ps1 `
             -OutputDirectory $env:WINDOWS_RELEASE_OUTPUT `
@@ -529,15 +819,35 @@ jobs:
             -TestInstallerFailurePropagation `
             -TestInstallerLifecycle
 
+      - name: Verify approved Nuitka dependency cache after formal build
+        shell: powershell
+        run: |
+          .\scripts\Test-WindowsFileSetManifest.ps1 `
+            -Root $env:NUITKA_CACHE_DIR_DOWNLOADS `
+            -ManifestPath $env:MINEGUARD_NUITKA_DOWNLOADS_MANIFEST `
+            -ExpectedManifestSha256 $env:WINDOWS_NUITKA_DOWNLOADS_MANIFEST_SHA256 `
+            -ExpectedPurpose 'nuitka-dependency-downloads' `
+            -ExpectedPythonVersion $env:WINDOWS_RELEASE_PYTHON_PATCH_VERSION `
+            -ExpectedToolVersion $env:MINEGUARD_FORMAL_NUITKA_VERSION
+
+      - name: Attest the four formal release files
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ env.WINDOWS_RELEASE_OUTPUT }}/MineGuard-Platform-*-INTERNAL-UNSIGNED.exe
+            ${{ env.WINDOWS_RELEASE_OUTPUT }}/MineGuard-EnterpriseAgent-*-INTERNAL-UNSIGNED.exe
+            ${{ env.WINDOWS_RELEASE_OUTPUT }}/release-manifest.json
+            ${{ env.WINDOWS_RELEASE_OUTPUT }}/SHA256SUMS.txt
+
       - name: Upload strict INTERNAL-UNSIGNED release
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mineguard-windows-INTERNAL-UNSIGNED-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/mineguard-internal-unsigned-${{ github.run_id }}-${{ github.run_attempt }}/MineGuard-Platform-*-INTERNAL-UNSIGNED.exe
-            ${{ runner.temp }}/mineguard-internal-unsigned-${{ github.run_id }}-${{ github.run_attempt }}/MineGuard-EnterpriseAgent-*-INTERNAL-UNSIGNED.exe
-            ${{ runner.temp }}/mineguard-internal-unsigned-${{ github.run_id }}-${{ github.run_attempt }}/release-manifest.json
-            ${{ runner.temp }}/mineguard-internal-unsigned-${{ github.run_id }}-${{ github.run_attempt }}/SHA256SUMS.txt
+            ${{ env.WINDOWS_RELEASE_OUTPUT }}/MineGuard-Platform-*-INTERNAL-UNSIGNED.exe
+            ${{ env.WINDOWS_RELEASE_OUTPUT }}/MineGuard-EnterpriseAgent-*-INTERNAL-UNSIGNED.exe
+            ${{ env.WINDOWS_RELEASE_OUTPUT }}/release-manifest.json
+            ${{ env.WINDOWS_RELEASE_OUTPUT }}/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
 

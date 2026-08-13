@@ -106,7 +106,6 @@ if ($Files.Count -eq 0) {
 
 $Manifest = [ordered]@{
     format = "mineguard-wheelhouse-manifest-v1"
-    generated_utc = [DateTime]::UtcNow.ToString("o")
     python = $PythonVersion
     architecture = $Architecture
     files = $Files
