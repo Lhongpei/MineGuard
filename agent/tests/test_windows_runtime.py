@@ -913,8 +913,10 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     assert "-ServicePermission 'None'" in instance_acl_verifier
     assert "$trustedOwners" in instance_acl_verifier
     trusted_owners = instance_acl_verifier[
-        instance_acl_verifier.index("$trustedOwners = @(") : instance_acl_verifier.index(
-            "$identity =", instance_acl_verifier.index("$trustedOwners = @(")
+        instance_acl_verifier.index("$trustedOwners = @(") :
+        instance_acl_verifier.index(
+            "$identity =",
+            instance_acl_verifier.index("$trustedOwners = @("),
         )
     ]
     assert "$ServiceSid" not in trusted_owners
@@ -1115,7 +1117,9 @@ def test_windows_unsigned_internal_is_a_distinct_production_trust_mode() -> None
     )
 
     assert "[switch]$InternalUnsignedRelease" in build
-    assert "$FormalCandidate = $RequireSignedBinary -or $InternalUnsignedRelease" in build
+    assert (
+        "$FormalCandidate = $RequireSignedBinary -or $InternalUnsignedRelease" in build
+    )
     assert "$FormalCandidate -and $AllowNuitkaToolDownloads" in build
     assert "$FormalCandidate -and [string]::IsNullOrWhiteSpace($Wheelhouse)" in build
     assert "$FormalCandidate -and $SkipSmokeTest" in build
@@ -1127,16 +1131,23 @@ def test_windows_unsigned_internal_is_a_distinct_production_trust_mode() -> None
     assert "release_classification = $ReleaseClassification" in build
 
     assert "[switch]$AllowUnsignedInternalRelease" in runtime
-    assert "-AllowUnsignedTestMedia and -AllowUnsignedInternalRelease are mutually exclusive" in runtime
     assert (
-        "-AllowUnsignedInternalRelease requires metadata explicitly classified as unsigned-internal-release"
+        "-AllowUnsignedTestMedia and -AllowUnsignedInternalRelease are "
+        "mutually exclusive" in runtime
+    )
+    assert (
+        "-AllowUnsignedInternalRelease requires metadata explicitly "
+        "classified as unsigned-internal-release"
         in runtime
     )
     assert "Status.ToString() -ne \"NotSigned\"" in runtime
 
     assert "[switch]$AllowUnsignedInternalRelease" in service
     assert "[string]$ExpectedReleaseManifestSha256" in service
-    assert "-ExpectedReleaseManifestSha256 from independently approved offline material" in service
+    assert (
+        "-ExpectedReleaseManifestSha256 from independently approved offline material"
+        in service
+    )
     assert "-ExpectInternalUnsignedRelease" in service
     assert "Assert-InternalUnsignedRuntime" in service
     assert service.count("Assert-InternalUnsignedRuntime -ExecutablePath") >= 2
@@ -1255,6 +1266,8 @@ def test_windows_instance_operations_share_strict_path_and_identity_context() ->
     assert "must use an NTFS filesystem" in helper
     assert "reparse-point component" in helper
     assert "Assert-EAStateRootMarker" in helper
+    assert "@($Result.PSObject.Properties).Count -eq 0" in helper
+    assert "$Result.PSObject.Properties.Count" not in helper
     assert "Assert-EAExactProperties" in helper
     assert "Instance configuration identity does not match instance.json" in helper
     assert "Windows service points outside the selected Agent instance" in helper
@@ -1379,6 +1392,18 @@ def test_windows_instance_operations_share_strict_path_and_identity_context() ->
     assert "must be delivered independently, outside SnapshotPath" in restore
     assert "Unauthenticated v1 snapshots are refused by default" in restore
     assert "Snapshot HMAC-SHA256 authentication failed" in restore
+
+
+def test_windows_psobject_property_collections_are_materialized_before_count() -> None:
+    root = Path(__file__).resolve().parents[1] / "deploy" / "windows"
+    scripts = (
+        root / "EnterpriseAgent.WindowsSafety.ps1",
+        root / "Install-EnterpriseAgent.ps1",
+    )
+    for path in scripts:
+        source = path.read_text(encoding="utf-8")
+        assert "$Result.PSObject.Properties.Count" not in source, path.name
+        assert "@($Result.PSObject.Properties).Count -eq 0" in source, path.name
 
 
 def test_frozen_executable_directory_is_the_first_frontend_location(

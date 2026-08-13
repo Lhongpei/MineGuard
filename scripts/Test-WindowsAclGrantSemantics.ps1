@@ -45,6 +45,47 @@ if (-not (Test-Path -LiteralPath $AgentSafetyHelper -PathType Leaf)) {
 }
 . $AgentSafetyHelper
 
+# Windows PowerShell 5.1 exposes PSObject.Properties as an enumerable
+# collection without a Count property under StrictMode. Exercise the real
+# shared JSON reader so provisioning cannot regress to direct .Count access.
+$JsonProbeRoot = Join-Path ([IO.Path]::GetTempPath()) `
+    ("MineGuard-PS51-JsonProbe-" + [Guid]::NewGuid().ToString("N"))
+$ValidJsonPath = Join-Path $JsonProbeRoot "valid.json"
+$EmptyJsonPath = Join-Path $JsonProbeRoot "empty.json"
+try {
+    [void](New-Item -ItemType Directory -Path $JsonProbeRoot)
+    $Utf8NoBom = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($ValidJsonPath, '{"format":"probe"}', $Utf8NoBom)
+    [IO.File]::WriteAllText($EmptyJsonPath, '{}', $Utf8NoBom)
+
+    $ValidJson = Read-EAJsonFile -Path $ValidJsonPath -Name "PS51 JSON probe"
+    if ([string](Get-EARequiredProperty -Object $ValidJson -Name "format" `
+            -Context "PS51 JSON probe") -ne "probe") {
+        throw "The Windows PowerShell 5.1 JSON object probe returned bad data."
+    }
+
+    $EmptyObjectRejected = $false
+    try {
+        [void](Read-EAJsonFile -Path $EmptyJsonPath -Name "Empty JSON probe")
+    }
+    catch {
+        if ($_.Exception.Message -notlike `
+            "Empty JSON probe must contain one JSON object:*") {
+            throw
+        }
+        $EmptyObjectRejected = $true
+    }
+    if (-not $EmptyObjectRejected) {
+        throw "The Windows PowerShell 5.1 JSON reader accepted an empty object."
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $JsonProbeRoot) {
+        Remove-Item -LiteralPath $JsonProbeRoot -Recurse -Force
+    }
+}
+Write-Host "MineGuard PowerShell 5.1 JSON collection semantics passed."
+
 # FileSystemRights.Write and Modify are composite enums whose numeric values
 # overlap ReadAndExecute. Security filters must use only atomic mutation bits.
 $MutationRights = [Security.AccessControl.FileSystemRights]::WriteData -bor

@@ -1390,7 +1390,7 @@ function Invoke-EACandidateModelLockTrustCheck {
         try { $Result = $Stdout | ConvertFrom-Json }
         catch { throw "Candidate model trust check did not return valid JSON." }
         if ($null -eq $Result -or $Result -is [Array] -or
-            $Result.PSObject.Properties.Count -eq 0) {
+            @($Result.PSObject.Properties).Count -eq 0) {
             throw "Candidate model trust check did not return one JSON object."
         }
         return $Result

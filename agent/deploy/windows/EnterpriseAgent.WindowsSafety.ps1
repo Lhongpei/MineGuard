@@ -273,7 +273,7 @@ function Read-EAJsonFile {
     try { $Result = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json }
     catch { throw "$Name is not valid JSON: $Path" }
     if ($null -eq $Result -or $Result -is [Array] -or
-        $Result.PSObject.Properties.Count -eq 0) {
+        @($Result.PSObject.Properties).Count -eq 0) {
         throw "$Name must contain one JSON object: $Path"
     }
     return $Result
