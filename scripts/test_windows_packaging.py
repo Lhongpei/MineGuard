@@ -1339,6 +1339,7 @@ def test_root_build_orchestration() -> None:
         "Win32_LogicalDisk",
         "FileAttributes]::ReparsePoint",
         "must use a local fixed NTFS disk",
+        "Get-GitSourceState",
         "Assert-CleanGitSnapshot",
         "A strict child binary does not identify the clean root source revision",
         "A formal release cannot allow Nuitka tool downloads",
@@ -1384,6 +1385,29 @@ def test_root_build_orchestration() -> None:
     assert not re.search(
         r"(?m)^\s*&\s*\$FilePath\s+@ArgumentList\s*$", native_checked
     ), "Invoke-NativeChecked must not leak native stdout into the success pipeline"
+    git_snapshot = build[
+        build.index("function Get-GitSourceState") : build.index(
+            "function Get-SafeLocalNtfsPath"
+        )
+    ]
+    assert "rev-parse --verify HEAD" in git_snapshot
+    assert "$RevisionExitCode = $LASTEXITCODE" in git_snapshot
+    assert "$RevisionOutput.Count -ne 1" in git_snapshot
+    assert "Select-Object -First" not in git_snapshot, (
+        "a native git process must not be truncated by Select-Object because "
+        "Windows PowerShell can then report a spurious LASTEXITCODE"
+    )
+    agent_git_probe = read(
+        "agent/packaging/windows/Build-EnterpriseAgentBinary.ps1"
+    )
+    revision_probe = agent_git_probe[
+        agent_git_probe.index("$SourceRevision = $null") : agent_git_probe.index(
+            "$ProjectFile = Join-Path $SourceRoot"
+        )
+    ]
+    assert "$RevisionOutput = @(& $GitCommand.Source" in revision_probe
+    assert "$RevisionExitCode = $LASTEXITCODE" in revision_probe
+    assert "Select-Object -First" not in revision_probe
     inno_version_probe = build[
         build.index("function Get-InnoCompilerVersion") : build.index(
             "function Get-SemanticVersionFromStage"

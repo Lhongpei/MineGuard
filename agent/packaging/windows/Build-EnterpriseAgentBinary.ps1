@@ -362,8 +362,14 @@ $SourceRevision = $null
 $SourceDirty = $null
 $GitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
 if ($null -ne $GitCommand) {
-    $SourceRevision = (& $GitCommand.Source -C $SourceRoot rev-parse HEAD 2>$null | Select-Object -First 1)
-    if ($LASTEXITCODE -eq 0 -and $SourceRevision -match '^[A-Fa-f0-9]{40,64}$') {
+    $RevisionOutput = @(& $GitCommand.Source -C $SourceRoot `
+        rev-parse --verify HEAD 2>$null)
+    $RevisionExitCode = $LASTEXITCODE
+    if ($RevisionExitCode -eq 0 -and $RevisionOutput.Count -eq 1) {
+        $SourceRevision = ([string]$RevisionOutput[0]).Trim()
+    }
+    if ($RevisionExitCode -eq 0 -and
+        $SourceRevision -match '^[A-Fa-f0-9]{40,64}$') {
         $DirtyLines = @(& $GitCommand.Source -C $SourceRoot status --porcelain --untracked-files=normal 2>$null)
         if ($LASTEXITCODE -ne 0) {
             $SourceRevision = $null

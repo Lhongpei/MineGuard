@@ -55,20 +55,60 @@ function Invoke-NativeChecked {
     }
 }
 
+function Get-GitSourceState {
+    param([string]$GitPath, [string]$Root)
+
+    # Do not truncate native process output through a PowerShell first-item
+    # pipeline. It can stop the producer early and report a spurious non-zero
+    # LASTEXITCODE even when git emitted the expected SHA.
+    $RevisionOutput = @(& $GitPath -C $Root rev-parse --verify HEAD 2>$null)
+    $RevisionExitCode = $LASTEXITCODE
+    if ($RevisionExitCode -ne 0) {
+        throw "Unable to determine the Git source revision (exit code $RevisionExitCode)."
+    }
+    if ($RevisionOutput.Count -ne 1) {
+        throw "Git revision probe returned $($RevisionOutput.Count) lines; expected exactly one."
+    }
+    $Revision = ([string]$RevisionOutput[0]).Trim()
+    if ($Revision -notmatch '^[A-Fa-f0-9]{40,64}$') {
+        throw "Git revision probe returned an invalid object ID: $Revision"
+    }
+
+    $WorkingTreeOutput = @(& $GitPath -C $Root diff --quiet --no-ext-diff 2>&1)
+    $WorkingTreeExitCode = $LASTEXITCODE
+    if ($WorkingTreeExitCode -notin @(0, 1)) {
+        throw "Unable to inspect tracked Git changes (exit code $WorkingTreeExitCode)."
+    }
+    $IndexOutput = @(& $GitPath -C $Root diff --cached --quiet --no-ext-diff 2>&1)
+    $IndexExitCode = $LASTEXITCODE
+    if ($IndexExitCode -notin @(0, 1)) {
+        throw "Unable to inspect staged Git changes (exit code $IndexExitCode)."
+    }
+    $Untracked = @(& $GitPath -C $Root ls-files --others --exclude-standard 2>$null)
+    $UntrackedExitCode = $LASTEXITCODE
+    if ($UntrackedExitCode -ne 0) {
+        throw "Unable to inspect untracked Git files (exit code $UntrackedExitCode)."
+    }
+    return [pscustomobject]@{
+        revision = $Revision
+        dirty = [bool](
+            $WorkingTreeExitCode -eq 1 -or
+            $IndexExitCode -eq 1 -or
+            $Untracked.Count -ne 0
+        )
+    }
+}
+
 function Assert-CleanGitSnapshot {
     param([string]$GitPath, [string]$Root, [string]$ExpectedRevision)
-    $ActualRevision = (& $GitPath -C $Root rev-parse HEAD |
-        Select-Object -First 1).Trim()
-    if ($LASTEXITCODE -ne 0 -or $ActualRevision -ne $ExpectedRevision) {
-        throw "The source revision changed during the strict release build."
+    $Snapshot = Get-GitSourceState -GitPath $GitPath -Root $Root
+    if ($Snapshot.revision -ne $ExpectedRevision) {
+        throw (
+            "The source revision changed during the strict release build: " +
+            "expected $ExpectedRevision, actual $($Snapshot.revision)."
+        )
     }
-    & $GitPath -C $Root diff --quiet
-    $WorkingTreeDirty = $LASTEXITCODE -ne 0
-    & $GitPath -C $Root diff --cached --quiet
-    $IndexDirty = $LASTEXITCODE -ne 0
-    $Untracked = @(& $GitPath -C $Root ls-files --others --exclude-standard)
-    if ($LASTEXITCODE -ne 0 -or $WorkingTreeDirty -or $IndexDirty -or
-        $Untracked.Count -ne 0) {
+    if ($Snapshot.dirty) {
         throw "The source tree changed during the strict release build."
     }
 }
@@ -558,15 +598,10 @@ $Git = Get-Command "git.exe" -ErrorAction SilentlyContinue
 $SourceRevision = $null
 $SourceDirty = $null
 if ($null -ne $Git -and (Test-Path -LiteralPath (Join-Path $RepositoryRoot ".git"))) {
-    $SourceRevision = (& $Git.Source -C $RepositoryRoot rev-parse HEAD | Select-Object -First 1).Trim()
-    if ($LASTEXITCODE -ne 0) { throw "Unable to determine the Git source revision." }
-    & $Git.Source -C $RepositoryRoot diff --quiet
-    $WorkingTreeDirty = $LASTEXITCODE -ne 0
-    & $Git.Source -C $RepositoryRoot diff --cached --quiet
-    $IndexDirty = $LASTEXITCODE -ne 0
-    $Untracked = @(& $Git.Source -C $RepositoryRoot ls-files --others --exclude-standard)
-    if ($LASTEXITCODE -ne 0) { throw "Unable to inspect untracked files." }
-    $SourceDirty = $WorkingTreeDirty -or $IndexDirty -or $Untracked.Count -gt 0
+    $InitialSourceState = Get-GitSourceState `
+        -GitPath $Git.Source -Root $RepositoryRoot
+    $SourceRevision = $InitialSourceState.revision
+    $SourceDirty = $InitialSourceState.dirty
     if ($SourceDirty -and -not $AllowDirtySource) {
         throw "The source tree is dirty. Commit/review the exact release source or pass -AllowDirtySource for a clearly marked internal build."
     }
