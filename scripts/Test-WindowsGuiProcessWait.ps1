@@ -26,6 +26,8 @@ if ($ParseErrors.Count -ne 0) {
 }
 foreach ($FunctionName in @(
     "ConvertTo-QuotedNativeArgument",
+    "Get-WindowsDiagnosticLogTail",
+    "Stop-WindowsProcessTree",
     "Invoke-WindowsGuiProcessAndWait"
 )) {
     $Matches = @($Ast.FindAll({
@@ -48,11 +50,13 @@ $CustomExitInstallRoot = $null
 $FixtureInstallRoot = $null
 $CustomExitLog = $null
 $FixtureLog = $null
+$HangProcessIds = @()
 try {
     $ProbeExecutable = Join-Path $ProbeRoot "GuiWaitProbe.exe"
     $MarkerPath = Join-Path $ProbeRoot "completed marker.txt"
     $Source = @'
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 
@@ -61,6 +65,26 @@ internal static class MineGuardGuiWaitProbe
     [STAThread]
     public static int Main(string[] args)
     {
+        if (args.Length == 3 && args[0] == "--hang")
+        {
+            string pingPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "ping.exe");
+            var childInfo = new ProcessStartInfo(pingPath, "-t 127.0.0.1");
+            childInfo.UseShellExecute = false;
+            childInfo.CreateNoWindow = true;
+            Process child = Process.Start(childInfo);
+            if (child == null)
+            {
+                return 39;
+            }
+            File.WriteAllText(
+                args[1],
+                Process.GetCurrentProcess().Id + Environment.NewLine +
+                child.Id + Environment.NewLine);
+            Thread.Sleep(Timeout.Infinite);
+            return 0;
+        }
         Thread.Sleep(1200);
         if (args.Length != 3 || args[1] != "argument with spaces" ||
             args[2] != "trailing\\")
@@ -91,6 +115,88 @@ internal static class MineGuardGuiWaitProbe
         throw "GUI process helper did not wait for the completion marker."
     }
     Write-Host "Windows GUI process wait and argument round-trip probe passed."
+
+    $HangPidPath = Join-Path $ProbeRoot "hung process ids.txt"
+    $HangDiagnosticLog = Join-Path $ProbeRoot "hung process diagnostic.log"
+    $HangDiagnosticMarker = "MINEGUARD_GUI_TIMEOUT_LOG_TAIL_MARKER"
+    $SensitiveArgument = "MINEGUARD_SENSITIVE_ARGV_SENTINEL"
+    [IO.File]::WriteAllText(
+        $HangDiagnosticLog,
+        ($HangDiagnosticMarker + [Environment]::NewLine),
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $HangStopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $HangFailure = $null
+    try {
+        [void](Invoke-WindowsGuiProcessAndWait `
+            -FilePath $ProbeExecutable `
+            -ArgumentList @("--hang", $HangPidPath, $SensitiveArgument) `
+            -TimeoutSeconds 2 `
+            -OperationLabel "hung GUI process-tree probe" `
+            -DiagnosticLogPath $HangDiagnosticLog)
+    }
+    catch {
+        $HangFailure = $_.Exception.Message
+    }
+    finally {
+        $HangStopwatch.Stop()
+    }
+    if ([string]::IsNullOrWhiteSpace($HangFailure)) {
+        throw "GUI process timeout probe unexpectedly completed."
+    }
+    foreach ($ExpectedDiagnostic in @(
+        "hung GUI process-tree probe",
+        "did not finish within 2 seconds",
+        $HangDiagnosticMarker,
+        "taskkill_exit=",
+        "root_exited="
+    )) {
+        if ($HangFailure -notlike "*$ExpectedDiagnostic*") {
+            throw "GUI process timeout diagnostic is missing: $ExpectedDiagnostic"
+        }
+    }
+    if ($HangFailure -like "*$SensitiveArgument*") {
+        throw "GUI process timeout diagnostic leaked a command-line argument."
+    }
+    if ($HangStopwatch.ElapsedMilliseconds -lt 1000 -or
+        $HangStopwatch.ElapsedMilliseconds -gt 30000) {
+        throw (
+            "GUI process timeout was not bounded as expected: " +
+            "$($HangStopwatch.ElapsedMilliseconds) ms"
+        )
+    }
+    if (-not (Test-Path -LiteralPath $HangPidPath -PathType Leaf)) {
+        throw "GUI process timeout fixture did not report its process IDs."
+    }
+    $HangProcessIds = @(
+        Get-Content -LiteralPath $HangPidPath | ForEach-Object {
+            if ([string]$_ -notmatch '^[1-9][0-9]*$') {
+                throw "GUI process timeout fixture emitted an invalid process ID."
+            }
+            [int]$_
+        }
+    )
+    if ($HangProcessIds.Count -ne 2) {
+        throw "GUI process timeout fixture must report its parent and child IDs."
+    }
+    foreach ($HangProcessId in $HangProcessIds) {
+        $ExitDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            $ResidualProcess = Get-Process -Id $HangProcessId `
+                -ErrorAction SilentlyContinue
+            if ($null -eq $ResidualProcess) { break }
+            Start-Sleep -Milliseconds 200
+        } while ([DateTime]::UtcNow -lt $ExitDeadline)
+        if ($null -ne $ResidualProcess) {
+            throw "GUI process timeout left process $HangProcessId running."
+        }
+    }
+    # Do not retain exited numeric IDs while later Inno fixtures run; Windows
+    # may reuse a PID before the outer cleanup block is reached.
+    $HangProcessIds = @()
+    Write-Host (
+        "Windows GUI timeout, diagnostic-tail and process-tree cleanup probe passed."
+    )
 
     $InnoCompiler = Join-Path ${env:ProgramFiles(x86)} `
         "Inno Setup 6\ISCC.exe"
@@ -320,6 +426,9 @@ catch {
     throw
 }
 finally {
+    foreach ($HangProcessId in $HangProcessIds) {
+        Stop-Process -Id $HangProcessId -Force -ErrorAction SilentlyContinue
+    }
     foreach ($ResidualRoot in @($CustomExitInstallRoot, $FixtureInstallRoot)) {
         if ($null -ne $ResidualRoot -and
             (Test-Path -LiteralPath $ResidualRoot -PathType Container)) {

@@ -40,16 +40,46 @@ $platformScript = Join-Path $repositoryRoot `
     'packaging\windows\inno\MineGuardPlatform.iss'
 $agentScript = Join-Path $repositoryRoot `
     'packaging\windows\inno\MineGuardEnterpriseAgent.iss'
+$auditScript = Join-Path $repositoryRoot `
+    'scripts\Test-WindowsBinaryRelease.ps1'
 foreach ($required in @(
         $bootstrapPath,
         $platformScript,
         $agentScript,
+        $auditScript,
         (Join-Path $assetsRoot 'Windows-binary-release-guide.html'),
         (Join-Path $assetsRoot 'RELEASE-NOTICE.txt'),
         (Join-Path $assetsRoot 'Open-MineGuardPlatformControlCenter.ps1'))) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Production Inno compile input is missing: $required"
     }
+}
+
+$auditTokens = $null
+$auditParseErrors = $null
+$auditAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $auditScript,
+    [ref]$auditTokens,
+    [ref]$auditParseErrors
+)
+if ($auditParseErrors.Count -ne 0) {
+    throw 'The release audit cannot be parsed for the production Inno gate.'
+}
+foreach ($functionName in @(
+        'ConvertTo-QuotedNativeArgument',
+        'Get-WindowsDiagnosticLogTail',
+        'Stop-WindowsProcessTree',
+        'Invoke-WindowsGuiProcessAndWait')) {
+    $matches = @($auditAst.FindAll({
+        param($node)
+        $node -is `
+            [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $functionName
+    }, $true))
+    if ($matches.Count -ne 1) {
+        throw "Expected one $functionName definition, found $($matches.Count)."
+    }
+    . ([scriptblock]::Create($matches[0].Extent.Text))
 }
 
 function New-MinimalStage {
@@ -98,14 +128,23 @@ function Invoke-ProductionInnoCompile {
         [ValidateSet('Platform', 'EnterpriseAgent')] [string] $Product,
         [Parameter(Mandatory = $true)] [string] $StageRoot,
         [Parameter(Mandatory = $true)] [string] $OutputRoot,
-        [Parameter(Mandatory = $true)] [string] $ManifestSha256
+        [Parameter(Mandatory = $true)] [string] $ManifestSha256,
+        [switch] $InternalUnsignedRelease
     )
     $scriptPath = if ($Product -eq 'Platform') {
         $platformScript
     } else {
         $agentScript
     }
-    $artifactName = 'MineGuard-' + $Product + '-Production-Iss-Compile-Gate'
+    $classification = if ($InternalUnsignedRelease) {
+        'InternalUnsigned'
+    } else {
+        'UnsignedTest'
+    }
+    $artifactName = (
+        'MineGuard-' + $Product + '-Production-Iss-Compile-Gate-' +
+        $classification
+    )
     $bootstrapSha256 = (Get-FileHash -LiteralPath $bootstrapPath `
         -Algorithm SHA256).Hash.ToLowerInvariant()
     $arguments = @(
@@ -118,10 +157,13 @@ function Invoke-ProductionInnoCompile {
         "/DArtifactFileName=$artifactName",
         '/DMinimumWindowsVersion=10.0.17763',
         "/DChildReleaseManifestSha256=$ManifestSha256",
-        "/DTrustedBootstrapSha256=$bootstrapSha256",
-        $scriptPath
+        "/DTrustedBootstrapSha256=$bootstrapSha256"
     )
-    & $InnoCompiler @arguments
+    if ($InternalUnsignedRelease) {
+        $arguments += '/DInternalUnsignedRelease=1'
+    }
+    $arguments += $scriptPath
+    & $InnoCompiler @arguments | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "$Product production Inno script failed with exit code $LASTEXITCODE."
     }
@@ -130,7 +172,51 @@ function Invoke-ProductionInnoCompile {
         (Get-Item -LiteralPath $artifact).Length -le 0) {
         throw "$Product production Inno script created no installer."
     }
-    Write-Host "$Product production Inno script compiled successfully."
+    Write-Host (
+        "$Product $classification production Inno script compiled successfully."
+    )
+    return $artifact
+}
+
+function Test-InternalUnsignedAuthorizationRejection {
+    param(
+        [ValidateSet('Platform', 'EnterpriseAgent')] [string] $Product,
+        [Parameter(Mandatory = $true)] [string] $Installer,
+        [Parameter(Mandatory = $true)] [string] $ProbeRoot
+    )
+    $installRoot = Join-Path $ProbeRoot ('negative-install-' + $Product)
+    $logPath = Join-Path $ProbeRoot ('negative-authorization-' + $Product + '.log')
+    $exitCode = Invoke-WindowsGuiProcessAndWait `
+        -FilePath $Installer `
+        -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-',
+            "/DIR=$installRoot", "/LOG=$logPath"
+        ) -TimeoutSeconds 30 `
+        -OperationLabel "$Product production Inno missing-authorization gate" `
+        -DiagnosticLogPath $logPath
+    if ($exitCode -ne 7) {
+        throw (
+            "$Product INTERNAL-UNSIGNED missing-authorization Setup returned " +
+            "$exitCode instead of deterministic PrepareToInstall exit code 7."
+        )
+    }
+    if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+        throw "$Product missing-authorization probe created no Inno log."
+    }
+    $logText = Get-Content -LiteralPath $logPath -Raw
+    if ($logText -notmatch 'ALLOWUNSIGNEDINTERNALRELEASE=1') {
+        throw (
+            "$Product missing-authorization Setup did not reach its " +
+            'deterministic PrepareToInstall rejection.'
+        )
+    }
+    if (Test-Path -LiteralPath $installRoot) {
+        throw "$Product missing-authorization probe created the install root."
+    }
+    Write-Host (
+        "$Product INTERNAL-UNSIGNED missing-authorization Setup exited " +
+        "non-interactively with deterministic code $exitCode."
+    )
 }
 
 $temporaryParent = [Environment]::GetEnvironmentVariable('RUNNER_TEMP')
@@ -152,9 +238,14 @@ try {
         $stageRoot = Join-Path $temporaryRoot ('stage-' + $product)
         $manifestSha256 = New-MinimalStage `
             -Product $product -Root $stageRoot
-        Invoke-ProductionInnoCompile -Product $product `
+        [void](Invoke-ProductionInnoCompile -Product $product `
             -StageRoot $stageRoot -OutputRoot $outputRoot `
-            -ManifestSha256 $manifestSha256
+            -ManifestSha256 $manifestSha256)
+        $internalInstaller = Invoke-ProductionInnoCompile -Product $product `
+            -StageRoot $stageRoot -OutputRoot $outputRoot `
+            -ManifestSha256 $manifestSha256 -InternalUnsignedRelease
+        Test-InternalUnsignedAuthorizationRejection -Product $product `
+            -Installer $internalInstaller -ProbeRoot $temporaryRoot
     }
 } finally {
     $full = [IO.Path]::GetFullPath($temporaryRoot).TrimEnd('\')
@@ -177,4 +268,7 @@ try {
     }
 }
 
-Write-Host 'Both production Inno scripts passed the fast compile gate.'
+Write-Host (
+    'Both production Inno scripts passed unsigned-test compilation and ' +
+    'INTERNAL-UNSIGNED noninteractive authorization gates.'
+)

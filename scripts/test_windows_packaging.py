@@ -466,6 +466,24 @@ def test_inno_scripts() -> None:
             assert token in script, (
                 f"{name} internal-unsigned release gate missing: {token}"
             )
+        assert not re.search(r"\bMsgBox\(", script), (
+            f"{name} must use SuppressibleMsgBox for every scripted dialog so "
+            "silent installer validation cannot wait for an operator"
+        )
+        expected_suppressible_dialogs = 5 if name == "platform" else 6
+        assert script.count("SuppressibleMsgBox(") == expected_suppressible_dialogs, (
+            f"{name} scripted dialog inventory changed without updating the "
+            "silent-install regression guard"
+        )
+        next_button = script[
+            script.index("function NextButtonClick") : script.index(
+                "function Has", script.index("function NextButtonClick")
+            )
+        ]
+        assert "if WizardSilent then\n    Exit;" in next_button, (
+            f"{name} silent Setup must reach PrepareToInstall instead of being "
+            "left on a hidden custom authorization page"
+        )
         prepare = script[
             script.index("function PrepareToInstall") : script.index(
                 "function GetProductTransactionId"
@@ -1253,10 +1271,24 @@ def test_fast_production_inno_compile_probe() -> None:
         '"/DAssetsRoot=$assetsRoot"',
         '"/DChildReleaseManifestSha256=$ManifestSha256"',
         '"/DTrustedBootstrapSha256=$bootstrapSha256"',
+        "'/DInternalUnsignedRelease=1'",
+        "Test-InternalUnsignedAuthorizationRejection",
+        "Invoke-WindowsGuiProcessAndWait",
+        "Get-WindowsDiagnosticLogTail",
+        "Stop-WindowsProcessTree",
+        "'/VERYSILENT', '/SUPPRESSMSGBOXES'",
+        "-TimeoutSeconds 30",
+        "ALLOWUNSIGNEDINTERNALRELEASE=1",
+        "$exitCode -ne 7",
+        "deterministic PrepareToInstall exit code 7",
+        "missing-authorization probe created the install root",
+        "did not reach its",
+        "deterministic PrepareToInstall rejection",
         "foreach ($product in @('Platform', 'EnterpriseAgent'))",
         "ProductionInnoCompile-[a-f0-9]{32}",
         "Refusing unsafe Inno compile cleanup",
-        "Both production Inno scripts passed the fast compile gate",
+        "Both production Inno scripts passed unsigned-test compilation",
+        "INTERNAL-UNSIGNED noninteractive authorization gates",
     ):
         assert token in probe, f"production Inno compile probe misses: {token}"
     assert "/DEnableSigning" not in probe, (
@@ -1605,6 +1637,19 @@ def test_audit_and_lifecycle() -> None:
         "all installer, upgrade and uninstaller lifecycle launches must wait for "
         "the GUI process and read its actual exit code"
     )
+    assert lifecycle.count("-OperationLabel") == 7
+    assert lifecycle.count("-DiagnosticLogPath") == 7
+    for diagnostic_log in (
+        "negative-missing.log",
+        "negative-wrong.log",
+        "install.log",
+        "running-upgrade-rejection.log",
+        "registered-service-uninstall-rejection.log",
+        "foreground-upgrade-rejection.log",
+        "foreground-uninstall-rejection.log",
+        "final-uninstall.log",
+    ):
+        assert diagnostic_log in lifecycle
     for negative_gate in (
         "missing authorization and digest",
         "incorrect externally approved digest",
@@ -1627,12 +1672,33 @@ def test_audit_and_lifecycle() -> None:
     assert '"/ALLOW_UNSIGNED_TEST_MEDIA=1"' in platform_unsigned_gate
     assert "-UnsignedPlatformTestMedia:$ExpectUnsignedTestOnly" in audit
     gui_wait = audit[
-        audit.index("function Invoke-WindowsGuiProcessAndWait") : audit.index(
+        audit.index("function Get-WindowsDiagnosticLogTail") : audit.index(
             "function Invoke-ExecutableChecked"
         )
     ]
-    for token in ("Start-Process", "-Wait", "-PassThru", ".ExitCode"):
+    for token in (
+        "function Stop-WindowsProcessTree",
+        "taskkill.exe",
+        '"/PID $ProcessId /T /F"',
+        "Start-Process",
+        "-PassThru",
+        ".WaitForExit(",
+        ".ExitCode",
+        "TimeoutSeconds",
+        "OperationLabel",
+        "DiagnosticLogPath",
+        "MaximumCharacters = 32768",
+        "[installer-lifecycle] START",
+        "[installer-lifecycle] END",
+        "[installer-lifecycle] TIMEOUT",
+    ):
         assert token in gui_wait, f"GUI wait helper contract missing: {token}"
+    invoke_gui_wait = gui_wait[gui_wait.index(
+        "function Invoke-WindowsGuiProcessAndWait"
+    ) :]
+    assert not re.search(
+        r"Start-Process[\s\S]{0,180}-Wait\b", invoke_gui_wait
+    ), "GUI lifecycle wait must be bounded instead of using unbounded -Wait"
     wait_probe = read("scripts/Test-WindowsGuiProcessWait.ps1")
     for token in (
         "WindowsApplication",
@@ -1641,6 +1707,17 @@ def test_audit_and_lifecycle() -> None:
         "$ExitCode -ne 37",
         "$Stopwatch.ElapsedMilliseconds -lt 900",
         "completed marker.txt",
+        "--hang",
+        "Timeout.Infinite",
+        "ping.exe",
+        "MINEGUARD_GUI_TIMEOUT_LOG_TAIL_MARKER",
+        "MINEGUARD_SENSITIVE_ARGV_SENTINEL",
+        '-TimeoutSeconds 2',
+        '-OperationLabel "hung GUI process-tree probe"',
+        "did not finish within 2 seconds",
+        "timeout diagnostic leaked a command-line argument",
+        "timeout left process $HangProcessId running",
+        "timeout, diagnostic-tail and process-tree cleanup probe passed",
         "fixture-gui-wait.iss",
         "MineGuard GUI wait probe fixture",
         '"/DFixturePayload=$ProbeExecutable"',
@@ -1658,6 +1735,10 @@ def test_audit_and_lifecycle() -> None:
         assert token in wait_probe, f"fast GUI wait probe contract missing: {token}"
     assert "Intentional dedicated Inno fixture failure" not in wait_probe
     assert "FixtureInstallFailed" not in wait_probe
+    assert wait_probe.count("$HangProcessIds = @()") == 2, (
+        "the timeout probe must discard exited PIDs before later fixtures can "
+        "reuse those numeric process IDs"
+    )
     for production_token in (
         "MineGuardPlatform.iss",
         "ChildReleaseManifestSha256",

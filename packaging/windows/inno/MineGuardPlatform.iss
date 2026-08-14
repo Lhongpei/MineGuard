@@ -271,12 +271,17 @@ var
   ResolvedHash: String;
 begin
   Result := True;
+  { Silent installs have no operator who can correct a custom wizard page.
+    Defer their authorization decision to PrepareToInstall, which returns a
+    deterministic Setup error instead of leaving the hidden wizard on a page. }
+  if WizardSilent then
+    Exit;
 #ifndef EnableSigning
 #ifdef InternalUnsignedRelease
   if (CurPageID = InternalUnsignedConfirmationPage.ID) and
       (not TryAuthorizeUnsignedInternalRelease(ResolvedHash, ErrorText)) then
   begin
-    MsgBox(ErrorText, mbError, MB_OK);
+    SuppressibleMsgBox(ErrorText, mbError, MB_OK, IDOK);
     Result := False;
   end
   else if CurPageID = InternalUnsignedConfirmationPage.ID then
@@ -288,7 +293,9 @@ begin
   if (CurPageID = UnsignedTestPage.ID) and
       (not IsUnsignedTestMediaAuthorized()) then
   begin
-    MsgBox('Unsigned Platform test media requires explicit test authorization.', mbError, MB_OK);
+    SuppressibleMsgBox(
+      'Unsigned Platform test media requires explicit test authorization.',
+      mbError, MB_OK, IDOK);
     Result := False;
   end;
 #endif

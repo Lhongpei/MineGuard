@@ -361,12 +361,107 @@ function ConvertTo-QuotedNativeArgument {
     return $Builder.ToString()
 }
 
+function Get-WindowsDiagnosticLogTail {
+    param(
+        [string]$PathValue,
+        [ValidateRange(1, 500)][int]$MaximumLines = 120,
+        [ValidateRange(1024, 65536)][int]$MaximumCharacters = 32768
+    )
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return ""
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $PathValue -PathType Leaf)) {
+            return "[diagnostic log was not created]"
+        }
+        $Tail = (@(Get-Content -LiteralPath $PathValue -Tail $MaximumLines `
+            -ErrorAction Stop) -join [Environment]::NewLine)
+        if ($Tail.Length -gt $MaximumCharacters) {
+            $Tail = $Tail.Substring($Tail.Length - $MaximumCharacters)
+        }
+        return $Tail
+    }
+    catch {
+        return "[diagnostic log could not be read: $($_.Exception.Message)]"
+    }
+}
+
+function Stop-WindowsProcessTree {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Diagnostics.Process]$Process
+    )
+    $ProcessId = [int]$Process.Id
+    $TaskkillExitCode = $null
+    $TaskkillPath = Join-Path $env:SystemRoot "System32\taskkill.exe"
+    $TaskkillProcess = $null
+    try {
+        if (-not (Test-Path -LiteralPath $TaskkillPath -PathType Leaf)) {
+            throw "taskkill.exe is unavailable"
+        }
+        $TaskkillInfo = New-Object Diagnostics.ProcessStartInfo
+        $TaskkillInfo.FileName = $TaskkillPath
+        $TaskkillInfo.Arguments = "/PID $ProcessId /T /F"
+        $TaskkillInfo.UseShellExecute = $false
+        $TaskkillInfo.CreateNoWindow = $true
+        $TaskkillInfo.RedirectStandardOutput = $true
+        $TaskkillInfo.RedirectStandardError = $true
+        $TaskkillProcess = New-Object Diagnostics.Process
+        $TaskkillProcess.StartInfo = $TaskkillInfo
+        if (-not $TaskkillProcess.Start()) {
+            throw "taskkill.exe did not start"
+        }
+        $TaskkillOutput = $TaskkillProcess.StandardOutput.ReadToEndAsync()
+        $TaskkillError = $TaskkillProcess.StandardError.ReadToEndAsync()
+        if (-not $TaskkillProcess.WaitForExit(10000)) {
+            $TaskkillProcess.Kill()
+            [void]$TaskkillProcess.WaitForExit(5000)
+            $TaskkillExitCode = "timeout"
+        }
+        else {
+            $TaskkillProcess.WaitForExit()
+            $TaskkillExitCode = [int]$TaskkillProcess.ExitCode
+        }
+        [void]$TaskkillOutput.Wait(1000)
+        [void]$TaskkillError.Wait(1000)
+    }
+    catch {
+        $TaskkillExitCode = "error: $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $TaskkillProcess) {
+            $TaskkillProcess.Dispose()
+        }
+    }
+
+    $RootExited = $false
+    try {
+        $RootExited = $Process.HasExited
+        if (-not $RootExited) {
+            $RootExited = $Process.WaitForExit(5000)
+        }
+        if (-not $RootExited) {
+            $Process.Kill()
+            $RootExited = $Process.WaitForExit(5000)
+        }
+    }
+    catch {
+        $RootExited = $false
+    }
+    return "taskkill_exit=$TaskkillExitCode; root_exited=$RootExited"
+}
+
 function Invoke-WindowsGuiProcessAndWait {
     param(
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
         [string]$FilePath,
-        [object[]]$ArgumentList = @()
+        [object[]]$ArgumentList = @(),
+        [ValidateRange(1, 3600)]
+        [int]$TimeoutSeconds = 120,
+        [ValidateNotNullOrEmpty()]
+        [string]$OperationLabel = "Windows GUI process",
+        [string]$DiagnosticLogPath = ""
     )
     if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
         throw "GUI executable does not exist: $FilePath"
@@ -377,12 +472,52 @@ function Invoke-WindowsGuiProcessAndWait {
         }
         ConvertTo-QuotedNativeArgument -Value ([string]$Argument)
     }) -join " "
+    Write-Host (
+        "[installer-lifecycle] START $OperationLabel " +
+        "timeout=${TimeoutSeconds}s"
+    )
+    $Stopwatch = [Diagnostics.Stopwatch]::StartNew()
     $Process = Start-Process -FilePath $FilePath `
-        -ArgumentList $SerializedArguments -Wait -PassThru -ErrorAction Stop
+        -ArgumentList $SerializedArguments -PassThru -ErrorAction Stop
     try {
-        return [int]$Process.ExitCode
+        if (-not $Process.WaitForExit([int]($TimeoutSeconds * 1000))) {
+            $TimedOutProcessId = [int]$Process.Id
+            Write-Host (
+                "[installer-lifecycle] TIMEOUT $OperationLabel " +
+                "pid=$TimedOutProcessId"
+            )
+            $Termination = Stop-WindowsProcessTree -Process $Process
+            $DiagnosticTail = Get-WindowsDiagnosticLogTail `
+                -PathValue $DiagnosticLogPath
+            $TimeoutMessage = (
+                "$OperationLabel did not finish within $TimeoutSeconds seconds " +
+                "(executable=$([IO.Path]::GetFileName($FilePath)); " +
+                "pid=$TimedOutProcessId; $Termination)."
+            )
+            if (-not [string]::IsNullOrWhiteSpace($DiagnosticTail)) {
+                $TimeoutMessage += (
+                    [Environment]::NewLine +
+                    "--- diagnostic log tail ---" +
+                    [Environment]::NewLine + $DiagnosticTail
+                )
+            }
+            throw $TimeoutMessage
+        }
+        # Refresh the native exit-code handle after the bounded wait. Inno's
+        # bootstrap process waits for its temporary child before it exits.
+        $Process.WaitForExit()
+        $ExitCode = [int]$Process.ExitCode
+        $Stopwatch.Stop()
+        Write-Host (
+            "[installer-lifecycle] END $OperationLabel " +
+            "exit=$ExitCode elapsed_ms=$($Stopwatch.ElapsedMilliseconds)"
+        )
+        return $ExitCode
     }
     finally {
+        if ($Stopwatch.IsRunning) {
+            $Stopwatch.Stop()
+        }
         $Process.Dispose()
     }
 }
@@ -1281,6 +1416,7 @@ function Invoke-InstallerLifecycleTest {
             $NegativeCases = @(
                 [pscustomobject]@{
                     name = 'missing authorization and digest'
+                    log = Join-Path $VerificationRoot 'negative-missing.log'
                     arguments = @(
                         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
                         "/SP-", "/DIR=$InstallRoot",
@@ -1289,6 +1425,7 @@ function Invoke-InstallerLifecycleTest {
                 },
                 [pscustomobject]@{
                     name = 'incorrect externally approved digest'
+                    log = Join-Path $VerificationRoot 'negative-wrong.log'
                     arguments = @(
                         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
                         "/SP-", "/DIR=$InstallRoot",
@@ -1300,7 +1437,11 @@ function Invoke-InstallerLifecycleTest {
             )
             foreach ($NegativeCase in $NegativeCases) {
                 $NegativeExitCode = Invoke-WindowsGuiProcessAndWait `
-                    -FilePath $Installer -ArgumentList $NegativeCase.arguments
+                    -FilePath $Installer -ArgumentList $NegativeCase.arguments `
+                    -TimeoutSeconds 300 `
+                    -OperationLabel (
+                        "$Product INTERNAL-UNSIGNED gate: $($NegativeCase.name)"
+                    ) -DiagnosticLogPath $NegativeCase.log
                 if ($NegativeExitCode -eq 0) {
                     throw "$Product INTERNAL-UNSIGNED installer accepted $($NegativeCase.name)."
                 }
@@ -1351,7 +1492,10 @@ function Invoke-InstallerLifecycleTest {
             }
         }
         $InstallExitCode = Invoke-WindowsGuiProcessAndWait `
-            -FilePath $Installer -ArgumentList $InstallArguments
+            -FilePath $Installer -ArgumentList $InstallArguments `
+            -TimeoutSeconds 600 `
+            -OperationLabel "$Product clean install" `
+            -DiagnosticLogPath (Join-Path $VerificationRoot 'install.log')
         if ($InstallExitCode -ne 0) {
             throw "$Product clean installer returned exit code $InstallExitCode."
         }
@@ -1583,7 +1727,11 @@ function Invoke-InstallerLifecycleTest {
         $RunningUpgradeArguments = @($InstallArguments | Where-Object { $_ -notlike "/LOG=*" })
         $RunningUpgradeArguments += "/LOG=$(Join-Path $VerificationRoot 'running-upgrade-rejection.log')"
         $RunningUpgradeExitCode = Invoke-WindowsGuiProcessAndWait `
-            -FilePath $Installer -ArgumentList $RunningUpgradeArguments
+            -FilePath $Installer -ArgumentList $RunningUpgradeArguments `
+            -TimeoutSeconds 300 `
+            -OperationLabel "$Product running-service upgrade rejection" `
+            -DiagnosticLogPath (Join-Path $VerificationRoot `
+                'running-upgrade-rejection.log')
         if ($RunningUpgradeExitCode -eq 0) {
             throw "$Product installer accepted an upgrade while its service was Running."
         }
@@ -1591,9 +1739,16 @@ function Invoke-InstallerLifecycleTest {
         $ProbeService.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(20))
         $ProbeService.Dispose()
 
+        $RegisteredServiceUninstallLog = Join-Path $VerificationRoot `
+            'registered-service-uninstall-rejection.log'
         $RegisteredServiceUninstallExitCode = Invoke-WindowsGuiProcessAndWait `
             -FilePath $Uninstallers[0].FullName `
-            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+            -ArgumentList @(
+                "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                "/LOG=$RegisteredServiceUninstallLog"
+            ) -TimeoutSeconds 300 `
+            -OperationLabel "$Product registered-service uninstall rejection" `
+            -DiagnosticLogPath $RegisteredServiceUninstallLog
         if ($RegisteredServiceUninstallExitCode -eq 0) {
             throw "$Product uninstaller accepted a still-registered service."
         }
@@ -1659,13 +1814,24 @@ function Invoke-InstallerLifecycleTest {
             $ForegroundUpgradeArguments = @($InstallArguments | Where-Object { $_ -notlike "/LOG=*" })
             $ForegroundUpgradeArguments += "/LOG=$(Join-Path $VerificationRoot 'foreground-upgrade-rejection.log')"
             $ForegroundUpgradeExitCode = Invoke-WindowsGuiProcessAndWait `
-                -FilePath $Installer -ArgumentList $ForegroundUpgradeArguments
+                -FilePath $Installer -ArgumentList $ForegroundUpgradeArguments `
+                -TimeoutSeconds 300 `
+                -OperationLabel "$Product foreground-runtime upgrade rejection" `
+                -DiagnosticLogPath (Join-Path $VerificationRoot `
+                    'foreground-upgrade-rejection.log')
             if ($ForegroundUpgradeExitCode -eq 0) {
                 throw "$Product installer accepted an upgrade while its exact foreground runtime was active."
             }
+            $ForegroundUninstallLog = Join-Path $VerificationRoot `
+                'foreground-uninstall-rejection.log'
             $ForegroundUninstallExitCode = Invoke-WindowsGuiProcessAndWait `
                 -FilePath $Uninstallers[0].FullName `
-                -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+                -ArgumentList @(
+                    "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                    "/LOG=$ForegroundUninstallLog"
+                ) -TimeoutSeconds 300 `
+                -OperationLabel "$Product foreground-runtime uninstall rejection" `
+                -DiagnosticLogPath $ForegroundUninstallLog
             if ($ForegroundUninstallExitCode -eq 0) {
                 throw "$Product uninstaller accepted an active foreground runtime."
             }
@@ -1684,9 +1850,15 @@ function Invoke-InstallerLifecycleTest {
             }
             $ForegroundProcess.Dispose()
         }
+        $FinalUninstallLog = Join-Path $VerificationRoot 'final-uninstall.log'
         $FinalUninstallExitCode = Invoke-WindowsGuiProcessAndWait `
             -FilePath $Uninstallers[0].FullName `
-            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+            -ArgumentList @(
+                "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                "/LOG=$FinalUninstallLog"
+            ) -TimeoutSeconds 300 `
+            -OperationLabel "$Product final uninstall" `
+            -DiagnosticLogPath $FinalUninstallLog
         if ($FinalUninstallExitCode -ne 0) {
             throw "$Product uninstaller returned $FinalUninstallExitCode."
         }
