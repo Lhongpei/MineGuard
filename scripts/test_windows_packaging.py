@@ -67,6 +67,7 @@ def test_layout() -> None:
         "packaging/windows/inno/languages/README.md",
         "packaging/windows/assets/RELEASE-NOTICE.txt",
         "packaging/windows/assets/Invoke-MineGuardTrustedProductInstall.ps1",
+        "packaging/windows/assets/Open-MineGuardEnterpriseAgentControlCenter.ps1",
         "packaging/windows/assets/Open-MineGuardPlatformControlCenter.ps1",
         "packaging/windows/assets/Windows-binary-release-guide.html",
         "scripts/Build-WindowsBinaryRelease.ps1",
@@ -281,6 +282,9 @@ def test_inno_scripts() -> None:
     launcher = read(
         "packaging/windows/assets/Open-MineGuardPlatformControlCenter.ps1"
     )
+    agent_launcher = read(
+        "packaging/windows/assets/Open-MineGuardEnterpriseAgentControlCenter.ps1"
+    )
     for token in (
         "Verb = 'runas'",
         "Start-MineGuardPlatformWizard.ps1",
@@ -298,6 +302,25 @@ def test_inno_scripts() -> None:
         "MINEGUARD_ADMIN_PASSWORD",
     ):
         assert forbidden not in launcher
+    for token in (
+        "Verb = 'runas'",
+        "Start-EnterpriseAgentProvisioningWizard.ps1",
+        "Start-EnterpriseAgentModelCredentialWizard.ps1",
+        "[Parameter(Mandatory = $true)]",
+        "-InstallRoot",
+        "-STA",
+        "[switch] $ModelCredentials",
+        "[switch] $Elevated",
+        "WindowsBuiltInRole]::Administrator",
+    ):
+        assert token in agent_launcher
+    for forbidden in (
+        "clients.json",
+        "settings.json",
+        "123123123",
+        "MINEGUARD_ADMIN_PASSWORD",
+    ):
+        assert forbidden not in agent_launcher
     assert '#define ApplicationId "{{8B391CBD-E234-46D7-9946-E9D37F2649C1}"' in (
         platform
     ), "the production Platform AppId default must remain stable"
@@ -311,6 +334,7 @@ def test_inno_scripts() -> None:
         assert match, f"{name} installer lacks stable AppId"
         app_ids.append(match.group(1))
         required = (
+            "DisableDirPage=no",
             "ArchitecturesAllowed=x64compatible and not arm64",
             "ArchitecturesInstallIn64BitMode=x64compatible",
             '#define MinimumWindowsVersion "10.0.17763"',
@@ -400,7 +424,7 @@ def test_inno_scripts() -> None:
             f"{name} start-menu paths must not be mutable through /GROUP or "
             "a previous installation"
         )
-        expected_shortcut_count = 3 if name == "platform" else 4
+        expected_shortcut_count = 3
         assert icons.count('Name: "{commonprograms}\\MineGuard\\') == (
             expected_shortcut_count
         ), f"{name} start-menu shortcuts must use the fixed audited group"
@@ -447,6 +471,25 @@ def test_inno_scripts() -> None:
     temporary_transaction = platform.index('{#StageRoot}\\*"; DestDir: "{tmp}')
     assert temporary_transaction < launcher_copy
     assert "MineGuardEnterpriseAgent-*" in agent
+    agent_icons_section = agent.split("[Icons]", 1)[1].split("[Run]", 1)[0]
+    for token in (
+        "MineGuard 企业接入配置向导",
+        "MineGuard 模型授权导入向导",
+        "MineGuard 企业端使用说明",
+        "Open-MineGuardEnterpriseAgentControlCenter.ps1",
+        (
+            'Name: "{app}\\launcher"; Permissions: users-readexec; '
+            'Flags: uninsalwaysuninstall'
+        ),
+        (
+            'Name: "{app}\\docs"; Permissions: users-readexec; '
+            'Flags: uninsalwaysuninstall'
+        ),
+    ):
+        assert token in agent
+    assert "Enterprise Agent operations console" not in agent_icons_section
+    assert "Start-EnterpriseAgentProvisioningWizard.ps1" not in agent_icons_section
+    assert "Start-EnterpriseAgentModelCredentialWizard.ps1" not in agent_icons_section
     assert "Status -ne ''Stopped''" in platform
     assert "Status -ne ''Stopped''" in agent
     for name, script in (("platform", platform), ("agent", agent)):
@@ -2953,6 +2996,18 @@ def test_workflow_context_availability() -> None:
     assert "package-manager-cache: false" in native, (
         "setup-node must not infer an implicit dependency cache from package metadata"
     )
+    dom_runtime_block, _, _ = named_step_block(
+        native, "Install pinned DOM test runtime"
+    )
+    for token in (
+        "npm install",
+        "--no-save",
+        "--no-package-lock",
+        "--ignore-scripts",
+        "--no-audit",
+        "jsdom@26.1.0",
+    ):
+        assert token in dom_runtime_block, f"DOM test runtime gate missing: {token}"
     initializer = "Define isolated runtime paths after runner allocation"
     installer = "Install both independent products and verification tools"
     init_block, _, init_end = named_step_block(native, initializer)

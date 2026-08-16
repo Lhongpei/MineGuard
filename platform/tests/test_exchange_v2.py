@@ -105,7 +105,9 @@ def test_platform_wire_mapper_verifies_neutral_fixed_vectors(
 
 
 def test_application_signature_rejects_changed_payload() -> None:
-    document = json.loads((EXAMPLES / "five-quantity-submission-v2.json").read_text())
+    document = json.loads(
+        (EXAMPLES / "five-quantity-submission-v2.json").read_text(encoding="utf-8")
+    )
     document["payload"]["mine"]["mine_name"] = "被改动的名称"
     body = json.dumps(document, ensure_ascii=False).encode()
     message = parse_inbound_message(body)
@@ -122,7 +124,9 @@ def test_application_signature_rejects_changed_payload() -> None:
 
 
 def test_application_signature_uses_raw_lexical_payload_not_model_dump() -> None:
-    document = json.loads((EXAMPLES / "five-quantity-submission-v2.json").read_text())
+    document = json.loads(
+        (EXAMPLES / "five-quantity-submission-v2.json").read_text(encoding="utf-8")
+    )
     document["payload"]["closed_at"] = "2026-08-01T00:00:00+00:00"
     document["payload"]["days"][0]["reported_quantity"]["shifts"]["zero_shift"][
         "start_at"
@@ -151,7 +155,9 @@ def test_application_signature_uses_raw_lexical_payload_not_model_dump() -> None
 
 
 def test_signature_verifier_refuses_to_reconstruct_missing_wire_document() -> None:
-    document = json.loads((EXAMPLES / "risk-delivery-ack-v2.json").read_text())
+    document = json.loads(
+        (EXAMPLES / "risk-delivery-ack-v2.json").read_text(encoding="utf-8")
+    )
     parsed = parse_inbound_message(json.dumps(document).encode())
     reconstructed_only = type(parsed).model_validate(document)
     client = ExchangeClient(
@@ -169,7 +175,9 @@ def test_signature_verifier_refuses_to_reconstruct_missing_wire_document() -> No
 def test_application_key_id_selects_exact_rotation_key() -> None:
     current_secret = b"current-application-key-material-0000000001"
     previous_secret = b"previous-application-key-material-000000001"
-    document = json.loads((EXAMPLES / "risk-delivery-ack-v2.json").read_text())
+    document = json.loads(
+        (EXAMPLES / "risk-delivery-ack-v2.json").read_text(encoding="utf-8")
+    )
     document["signature_envelope"]["key_id"] = "enterprise-key-old"
     sign_exchange_message(document, previous_secret)
     decoded = decode_inbound_message(json.dumps(document).encode())
@@ -470,7 +478,9 @@ def test_production_platform_identity_accepts_defaults_and_rejects_collisions() 
 
 
 def test_multi_finding_response_is_not_silently_truncated() -> None:
-    document = json.loads((EXAMPLES / "enterprise-risk-response-v2.json").read_text())
+    document = json.loads(
+        (EXAMPLES / "enterprise-risk-response-v2.json").read_text(encoding="utf-8")
+    )
     second = dict(document["payload"]["finding_responses"][0])
     second["finding_id"] = "33333333-3333-4333-8333-333333333339"
     second["facts"] = "第二项风险的独立事实说明。"
@@ -508,14 +518,20 @@ def test_multi_finding_response_is_not_silently_truncated() -> None:
 )
 def test_inbound_models_reject_schema_invalid_members(case: str) -> None:
     if case in {"ack_revision", "delivery_cursor", "ack_revision_boolean"}:
-        document = json.loads((EXAMPLES / "risk-delivery-ack-v2.json").read_text())
+        document = json.loads(
+            (EXAMPLES / "risk-delivery-ack-v2.json").read_text(encoding="utf-8")
+        )
     elif case == "response_uuid":
         document = json.loads(
-            (EXAMPLES / "enterprise-risk-response-v2.json").read_text()
+            (EXAMPLES / "enterprise-risk-response-v2.json").read_text(
+                encoding="utf-8"
+            )
         )
     else:
         document = json.loads(
-            (EXAMPLES / "five-quantity-submission-v2.json").read_text()
+            (EXAMPLES / "five-quantity-submission-v2.json").read_text(
+                encoding="utf-8"
+            )
         )
 
     if case == "ack_revision":
@@ -563,7 +579,9 @@ def test_inbound_models_reject_schema_invalid_members(case: str) -> None:
 
 
 def test_three_shift_validation_allows_dst_adjusted_absolute_duration() -> None:
-    document = json.loads((EXAMPLES / "five-quantity-submission-v2.json").read_text())
+    document = json.loads(
+        (EXAMPLES / "five-quantity-submission-v2.json").read_text(encoding="utf-8")
+    )
     document["payload"]["reporting_month"] = "2026-03"
     document["payload"]["timezone"] = "America/New_York"
     document["payload"]["period_start"] = "2026-03-08"
@@ -606,7 +624,7 @@ def test_three_shift_validation_allows_dst_adjusted_absolute_duration() -> None:
 
 
 def test_duplicate_members_and_non_json_numbers_are_rejected() -> None:
-    body = (EXAMPLES / "risk-delivery-ack-v2.json").read_text()
+    body = (EXAMPLES / "risk-delivery-ack-v2.json").read_text(encoding="utf-8")
     duplicate = body.replace(
         '"message_type": "risk_delivery_ack",',
         '"message_type": "risk_delivery_ack",\n  "message_type": "risk_delivery_ack",',
@@ -623,7 +641,7 @@ def test_duplicate_members_and_non_json_numbers_are_rejected() -> None:
 
 def _revised_submission_document() -> tuple[dict[str, object], dict[str, object]]:
     predecessor = json.loads(
-        (EXAMPLES / "five-quantity-submission-v2.json").read_text()
+        (EXAMPLES / "five-quantity-submission-v2.json").read_text(encoding="utf-8")
     )
     current = deepcopy(predecessor)
     current["message_id"] = "66666666-6666-4666-8666-666666666666"
@@ -677,7 +695,9 @@ def test_strict_lineage_rejects_broken_workflow(case: str) -> None:
 
 
 def test_lineage_binds_initial_ack_to_report_workflow_and_mine() -> None:
-    report = json.loads((EXAMPLES / "analysis-report-v2.json").read_text())
+    report = json.loads(
+        (EXAMPLES / "analysis-report-v2.json").read_text(encoding="utf-8")
+    )
     ack = parse_inbound_message((EXAMPLES / "risk-delivery-ack-v2.json").read_bytes())
 
     validate_exchange_lineage(ack, allowed_causes=(report,))
@@ -690,9 +710,11 @@ def test_lineage_binds_initial_ack_to_report_workflow_and_mine() -> None:
 
 def test_lineage_supports_revised_response_with_report_as_direct_cause() -> None:
     predecessor = json.loads(
-        (EXAMPLES / "enterprise-risk-response-v2.json").read_text()
+        (EXAMPLES / "enterprise-risk-response-v2.json").read_text(encoding="utf-8")
     )
-    report = json.loads((EXAMPLES / "analysis-report-v2.json").read_text())
+    report = json.loads(
+        (EXAMPLES / "analysis-report-v2.json").read_text(encoding="utf-8")
+    )
     current = deepcopy(predecessor)
     current["message_id"] = "77777777-7777-4777-8777-777777777777"
     current["idempotency_key"] = "risk-response.33333333.r2"

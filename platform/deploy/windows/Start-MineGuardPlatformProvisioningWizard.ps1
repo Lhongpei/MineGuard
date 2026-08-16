@@ -72,15 +72,14 @@ $platformAclHelper = Join-Path $scriptDirectory `
     'MineGuardPlatform.WindowsAcl.ps1'
 $resolverScript = Join-Path $scriptDirectory `
     'Resolve-MineGuardPlatformExecutable.ps1'
-foreach ($required in @(
-        $coreScript, $configurationScript, $platformAclHelper, $resolverScript
-    )) {
-    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        Show-Fatal "安装不完整，缺少文件：$required"
-        exit 1
-    }
-}
 if ($SelfTest) {
+    foreach ($required in @(
+            $coreScript, $configurationScript, $platformAclHelper, $resolverScript
+        )) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "安装不完整，缺少文件：$required"
+        }
+    }
     [ordered]@{
         status = 'ok'
         component = 'mineguard-platform-provisioning-wizard'
@@ -109,6 +108,18 @@ if (-not $principal.IsInRole(
         [void][Diagnostics.Process]::Start($start)
     } catch { Show-Fatal ('UAC 提权未完成：' + $_.Exception.Message); exit 1 }
     exit 0
+}
+
+# The installed service tree is intentionally unreadable to a normal desktop
+# token. Validate its protected components only after UAC elevation; otherwise
+# the wizard would fail before it ever had a chance to request elevation.
+foreach ($required in @(
+        $coreScript, $configurationScript, $platformAclHelper, $resolverScript
+    )) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        Show-Fatal "安装不完整，缺少文件：$required"
+        exit 1
+    }
 }
 
 function New-SecureValue {
@@ -336,29 +347,17 @@ $issuerTable = New-InputTable
 $issuerPage.Controls.Add($issuerTable)
 $issuerFields = @{}
 $authorityDefault = Join-Path $InstallRoot 'provisioning-authority'
-$authorityBox = Add-InputRow $issuerTable $issuerFields 'directory' `
-    '管理员专用密钥目录' $authorityDefault -Browse folder
-$privateBox = Add-InputRow $issuerTable $issuerFields 'private' `
-    '签发私钥文件' (Join-Path $authorityDefault 'issuer-private.pem')
-$publicBox = Add-InputRow $issuerTable $issuerFields 'public' `
-    '签发公钥文件' (Join-Path $authorityDefault 'issuer-public.pem')
+$authorityBox = New-Object Windows.Forms.TextBox
+$authorityBox.Text = $authorityDefault
+$privateBox = New-Object Windows.Forms.TextBox
+$privateBox.Text = Join-Path $authorityDefault 'issuer-private.pem'
+$publicBox = New-Object Windows.Forms.TextBox
+$publicBox.Text = Join-Path $authorityDefault 'issuer-public.pem'
 $issuerPass = Add-InputRow $issuerTable $issuerFields 'passphrase' `
     '私钥口令（至少14位）' '' -Password
 $issuerConfirm = Add-InputRow $issuerTable $issuerFields 'confirmation' `
     '再次输入私钥口令' '' -Password
 Add-NoteRow $issuerTable '私钥目录只授权 SYSTEM/Administrators。请另做离线加密备份；私钥绝不能交给企业。'
-$authorityBox.ReadOnly = $true
-if ($authorityBox.Tag -is [Windows.Forms.Button]) {
-    $authorityBox.Tag.Enabled = $false
-}
-$authorityBox.Add_TextChanged({
-        if ($privateBox.Text -match 'issuer-private\.pem$') {
-            $privateBox.Text = Join-Path $authorityBox.Text 'issuer-private.pem'
-        }
-        if ($publicBox.Text -match 'issuer-public\.pem$') {
-            $publicBox.Text = Join-Path $authorityBox.Text 'issuer-public.pem'
-        }
-    })
 $null = Add-ActionRow $issuerTable '初始化签发密钥' {
     $secure = $null; $confirm = $null
     try {
@@ -374,6 +373,7 @@ $null = Add-ActionRow $issuerTable '初始化签发密钥' {
                 "SPKI-DER SHA-256：{1}`r`n`r`n" +
                 '请把该指纹通过独立审批渠道登记；不要只从接入 U 盘抄录。'
             ) -f $result.public_key, $result.public_key_sha256)
+        $tabs.SelectedTab = $createPage
     } catch { Show-OperationError '初始化签发密钥' $_ }
     finally {
         if ($null -ne $secure) { $secure.Dispose() }
@@ -381,8 +381,9 @@ $null = Add-ActionRow $issuerTable '初始化签发密钥' {
     }
 }
 
-# Page 2: first package generation (version 1 is prominent; update fields are
-# available at the bottom without complicating the normal workflow).
+# Page 2: create a new current-version package. Fixed authority identity,
+# protected government storage paths and profile version are not operator
+# choices, so the GUI does not expose them.
 $createPage = New-Object Windows.Forms.TabPage
 $createPage.Text = '2. 生成企业接入包'
 $createPage.AutoScroll = $true
@@ -390,22 +391,34 @@ $tabs.TabPages.Add($createPage)
 $createTable = New-InputTable
 $createPage.Controls.Add($createTable)
 $create = @{}
-Add-InputRow $createTable $create 'private' '签发私钥' `
-    (Join-Path $authorityDefault 'issuer-private.pem') -Browse file `
-    -Filter 'PEM 私钥 (*.pem)|*.pem|全部文件 (*.*)|*.*' | Out-Null
-Add-InputRow $createTable $create 'public' '签发公钥（交付企业）' `
-    (Join-Path $authorityDefault 'issuer-public.pem') -Browse file `
-    -Filter 'PEM 公钥 (*.pem)|*.pem|全部文件 (*.*)|*.*' | Out-Null
+$create.private = New-Object Windows.Forms.TextBox
+$create.private.Text = Join-Path $authorityDefault 'issuer-private.pem'
+$create.public = New-Object Windows.Forms.TextBox
+$create.public.Text = Join-Path $authorityDefault 'issuer-public.pem'
+$create.issuer_id = New-Object Windows.Forms.TextBox
+$create.issuer_id.Text = 'qinyuan-regulator'
+$create.issuer_key_id = New-Object Windows.Forms.TextBox
+$create.issuer_key_id.Text = 'qinyuan-provisioning-key-v1'
+$create.party_id = New-Object Windows.Forms.TextBox
+$create.system_id = New-Object Windows.Forms.TextBox
+$create.platform_system = New-Object Windows.Forms.TextBox
+$create.platform_system.Text = 'mineguard-qinyuan'
+$create.platform_party = New-Object Windows.Forms.TextBox
+$create.platform_party.Text = 'regulator-qinyuan'
+$create.platform_key = New-Object Windows.Forms.TextBox
+$create.platform_key.Text = 'regulator-key-v3'
+$create.instance = New-Object Windows.Forms.TextBox
+$create.registration_output = New-Object Windows.Forms.TextBox
+$create.registration_output.Text = Join-Path $InstallRoot `
+    'provisioning-registrations'
+$create.activations = New-Object Windows.Forms.TextBox
+$create.activations.Text = Join-Path $InstallRoot 'provisioning-activations'
 Add-InputRow $createTable $create 'ca_source' '政府 HTTPS CA PEM' '' `
     -Browse file -Filter 'PEM/CRT 证书 (*.pem;*.crt)|*.pem;*.crt|全部文件 (*.*)|*.*' | Out-Null
 Add-InputRow $createTable $create 'passphrase' '签发私钥口令' '' -Password | Out-Null
-Add-InputRow $createTable $create 'issuer_id' '签发机构 ID' 'qinyuan-regulator' | Out-Null
-Add-InputRow $createTable $create 'issuer_key_id' '签发 key ID' 'qinyuan-provisioning-key-v1' | Out-Null
 Add-InputRow $createTable $create 'mine_id' '煤矿 ID' '' | Out-Null
 Add-InputRow $createTable $create 'mine_name' '煤矿名称' '' | Out-Null
-Add-InputRow $createTable $create 'party_id' '企业主体 ID' '' | Out-Null
 Add-InputRow $createTable $create 'party_name' '企业名称' '' | Out-Null
-Add-InputRow $createTable $create 'system_id' '企业系统 ID' '' | Out-Null
 Add-InputRow $createTable $create 'capacity' '核定产能区间' '' | Out-Null
 Add-InputRow $createTable $create 'method' '开采方式' '' | Out-Null
 Add-InputRow $createTable $create 'shift' '班次制度' '' | Out-Null
@@ -413,29 +426,7 @@ Add-InputRow $createTable $create 'coal' '主要煤种' '' | Out-Null
 Add-InputRow $createTable $create 'regime' '生产制度' '' | Out-Null
 Add-InputRow $createTable $create 'agent_origin' '企业端 HTTPS 地址' '' | Out-Null
 Add-InputRow $createTable $create 'platform_url' '监管端 HTTPS 地址' '' | Out-Null
-Add-InputRow $createTable $create 'instance' '企业本机实例名' '' | Out-Null
-Add-InputRow $createTable $create 'platform_system' '监管系统 ID' 'mineguard-qinyuan' | Out-Null
-Add-InputRow $createTable $create 'platform_party' '监管主体 ID' 'regulator-qinyuan' | Out-Null
-Add-InputRow $createTable $create 'platform_key' '监管应用 key ID' 'regulator-key-v3' | Out-Null
-Add-InputRow $createTable $create 'days' '安装有效窗口（天）' '14' | Out-Null
 Add-InputRow $createTable $create 'output' '企业交付根目录（可选U盘）' '' -Browse folder | Out-Null
-Add-InputRow $createTable $create 'registration_output' '政府注册包保管根目录' `
-    (Join-Path $InstallRoot 'provisioning-registrations') -Browse folder | Out-Null
-Add-InputRow $createTable $create 'activations' '激活码保管目录' `
-    (Join-Path $InstallRoot 'provisioning-activations') -Browse folder | Out-Null
-Add-InputRow $createTable $create 'version' '配置版本（首次=1）' '1' | Out-Null
-Add-InputRow $createTable $create 'previous_bundle' '升级：上一版 .mgreg' '' `
-    -Browse file -Filter 'MineGuard 注册包 (*.mgreg)|*.mgreg|全部文件 (*.*)|*.*' | Out-Null
-Add-InputRow $createTable $create 'previous_activation' '升级：上一版激活码' '' `
-    -Browse file -Filter 'MineGuard 激活码 (*.activation)|*.activation|全部文件 (*.*)|*.*' | Out-Null
-foreach ($protectedRootField in @(
-        $create.registration_output, $create.activations
-    )) {
-    $protectedRootField.ReadOnly = $true
-    if ($protectedRootField.Tag -is [Windows.Forms.Button]) {
-        $protectedRootField.Tag.Enabled = $false
-    }
-}
 
 function Set-AuthorityPolicyFieldsLocked {
     param([bool] $Locked)
@@ -815,21 +806,43 @@ if (Test-Path -LiteralPath $defaultAuthorityPolicyPending) {
     try {
         $null = Import-AuthorityPolicy -Path $defaultAuthorityPolicy -LoadFields
         Set-Status '已加载并锁定监管固定项 authority-policy.json；本页只需逐矿填写矿企字段。'
+        $tabs.SelectedTab = $createPage
     } catch {
         Set-Status ('监管固定项加载失败：' + $_.Exception.Message)
     }
+} elseif ((Test-Path -LiteralPath $privateBox.Text -PathType Leaf) -and
+    (Test-Path -LiteralPath $publicBox.Text -PathType Leaf)) {
+    Set-Status '已检测到本机签发密钥；请继续生成第一家企业的专属接入包。'
+    $tabs.SelectedTab = $createPage
 }
 
-Add-NoteRow $createTable '首次保持版本 1、升级两项留空。输出目录可选 U 盘；激活码目录必须是监管机固定 NTFS 目录。'
+function Set-CurrentEnterpriseIdentifiers {
+    $mineId = $create.mine_id.Text.Trim()
+    $stem = ($mineId.ToLowerInvariant() -replace
+        '[^a-z0-9-]+', '-').Trim('-')
+    if ([string]::IsNullOrWhiteSpace($stem)) {
+        throw '煤矿 ID 必须至少包含一个字母或数字。'
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $suffix = ([BitConverter]::ToString(
+                $sha.ComputeHash($utf8NoBom.GetBytes($mineId))
+            )).Replace('-', '').ToLowerInvariant().Substring(0, 8)
+    } finally { $sha.Dispose() }
+    if ($stem.Length -gt 39) { $stem = $stem.Substring(0, 39).TrimEnd('-') }
+    $stem = $stem + '-' + $suffix
+    $create.instance.Text = $stem
+    $create.party_id.Text = 'enterprise-' + $stem
+    $create.system_id.Text = 'agent-' + $stem
+}
+
+Add-NoteRow $createTable '当前版只生成全新配置（版本 1）。企业交付目录可选 U 盘；政府注册包和两端激活码自动保存到监管机受保护目录。'
 $null = Add-ActionRow $createTable '生成这一家企业的专属接入包' {
     $secure = $null
     $pendingTransactionId = $null
     try {
-        $days = 0; $version = 0
-        if (-not [int]::TryParse($create.days.Text, [ref]$days) -or
-            $days -lt 1 -or $days -gt 90) { throw '安装有效窗口必须为 1-90 天。' }
-        if (-not [int]::TryParse($create.version.Text, [ref]$version) -or
-            $version -lt 1) { throw '配置版本必须是正整数。' }
+        $days = 14
+        Set-CurrentEnterpriseIdentifiers
         $secure = New-SecureValue $create.passphrase
         $create.passphrase.Clear()
         $policyPath = Get-AuthorityPolicyPath
@@ -866,18 +879,16 @@ $null = Add-ActionRow $createTable '生成这一家企业的专属接入包' {
             BundleOutputDirectory = $create.output.Text
             PlatformRegistrationDirectory = $create.registration_output.Text
             ActivationDirectory = $create.activations.Text
-            ProfileVersion = $version
-        }
-        if (-not [string]::IsNullOrWhiteSpace($create.previous_bundle.Text) -or
-            -not [string]::IsNullOrWhiteSpace(
-                $create.previous_activation.Text)) {
-            $parameters.PreviousRegistrationBundle = $create.previous_bundle.Text
-            $parameters.PreviousRegistrationActivationFile = `
-                $create.previous_activation.Text
+            ProfileVersion = 1
         }
         $result = & $coreScript @parameters
         Save-AuthorityPolicy -Result $result `
             -PendingTransactionId $pendingTransactionId
+        $import.bundle.Text = [string]$result.platform_registration_bundle
+        $import.activation.Text = [string]$result.platform_activation_file
+        $import.public.Text = $create.public.Text
+        $import.hash.Text = [string]$result.issuer_public_key_sha256
+        $import.issuer_key.Text = $create.issuer_key_id.Text
         Set-Status ((
                 "生成成功（{0}，版本 {1}；企业实例名 {8}）。`r`n企业交付目录：{2}`r`n" +
                 "政府注册包：{3}`r`n企业激活码：{4}`r`n" +
@@ -897,6 +908,7 @@ $null = Add-ActionRow $createTable '生成这一家企业的专属接入包' {
                 $result.agent_instance_name, $result.platform_ca_sha256,
                 $result.independent_handover_check_code,
                 $result.independent_handover_record)
+        $tabs.SelectedTab = $importPage
     } catch { Show-OperationError '生成企业接入包' $_ }
     finally { if ($null -ne $secure) { $secure.Dispose() } }
 }
@@ -904,7 +916,7 @@ $null = Add-ActionRow $createTable '生成这一家企业的专属接入包' {
 # Page 3: import the matching registration retained by government and atomically make
 # the Platform formal configuration managed by the issuer trust anchor.
 $importPage = New-Object Windows.Forms.TabPage
-$importPage.Text = '3. 导入监管注册包'
+$importPage.Text = '3. 完成监管端配置'
 $importPage.AutoScroll = $true
 $tabs.TabPages.Add($importPage)
 $importTable = New-InputTable
@@ -914,26 +926,18 @@ Add-InputRow $importTable $import 'bundle' '政府本机留存 .mgreg' '' -Brows
     -Filter 'MineGuard 注册包 (*.mgreg)|*.mgreg|全部文件 (*.*)|*.*' | Out-Null
 Add-InputRow $importTable $import 'activation' 'Platform 激活码' '' -Browse file `
     -Filter 'MineGuard 激活码 (*.activation)|*.activation|全部文件 (*.*)|*.*' | Out-Null
-Add-InputRow $importTable $import 'public' '签发公钥 PEM' `
-    (Join-Path $authorityDefault 'issuer-public.pem') -Browse file `
-    -Filter 'PEM 公钥 (*.pem)|*.pem|全部文件 (*.*)|*.*' | Out-Null
-Add-InputRow $importTable $import 'hash' '独立审批 SPKI SHA-256' '' | Out-Null
-Add-InputRow $importTable $import 'issuer_key' '独立审批 issuer key ID' 'qinyuan-provisioning-key-v1' | Out-Null
-Add-InputRow $importTable $import 'state' '正式状态目录' `
-    (Join-Path $InstallRoot 'state') -Browse folder | Out-Null
+$import.public = New-Object Windows.Forms.TextBox
+$import.public.Text = Join-Path $authorityDefault 'issuer-public.pem'
+$import.hash = New-Object Windows.Forms.TextBox
+$import.issuer_key = New-Object Windows.Forms.TextBox
+$import.issuer_key.Text = 'qinyuan-provisioning-key-v1'
+$import.state = New-Object Windows.Forms.TextBox
+$import.state.Text = Join-Path $InstallRoot 'state'
 Add-InputRow $importTable $import 'port' '本机监听端口' '8080' | Out-Null
 Add-InputRow $importTable $import 'admin' '领导端管理员账号' 'admin' | Out-Null
 Add-InputRow $importTable $import 'admin_password' '首次管理员密码' '' -Password | Out-Null
 Add-InputRow $importTable $import 'admin_confirm' '再次输入管理员密码' '' -Password | Out-Null
-$updateCheck = New-Object Windows.Forms.CheckBox
-$updateCheck.Text = '这是同一家煤矿的更高版本更新（允许替换旧注册）'
-$updateCheck.AutoSize = $true
-$updateRow = $importTable.RowCount; $importTable.RowCount++
-$importTable.RowStyles.Add((New-Object Windows.Forms.RowStyle(
-            [Windows.Forms.SizeType]::Absolute, 36)))
-$importTable.Controls.Add($updateCheck, 1, $updateRow)
-$importTable.SetColumnSpan($updateCheck, 2)
-Add-NoteRow $importTable '第一次导入须设置强密码（至少12位、四类中三类）；已有正式 auth.db 时密码可留空。指纹必须来自独立审批记录。'
+Add-NoteRow $importTable '生成成功后，本页会自动带入政府注册包、Platform 激活码和签发信任。第一次配置只需设置强密码；以后新增煤矿无需重设密码。'
 $script:ExistingFormalImportConfiguration = $false
 $installedSettingsPath = Join-Path (Join-Path $InstallRoot 'config') `
     'settings.json'
@@ -987,6 +991,10 @@ $null = Add-ActionRow $importTable '验签、导入并完成正式配置' {
         $port = 0
         if (-not [int]::TryParse($import.port.Text, [ref]$port) -or
             $port -lt 1 -or $port -gt 65535) { throw '监听端口必须为 1-65535。' }
+        if ([string]::IsNullOrWhiteSpace($import.hash.Text)) {
+            $import.hash.Text = Get-GuiSpkiSha256FromPem `
+                -Path $import.public.Text
+        }
         $passwordSupplied = -not [string]::IsNullOrEmpty(
             $import.admin_password.Text
         ) -or -not [string]::IsNullOrEmpty($import.admin_confirm.Text)
@@ -1037,7 +1045,6 @@ $null = Add-ActionRow $importTable '验签、导入并完成正式配置' {
             StateDirectory = $import.state.Text; Port = $port
             AdminUsername = $import.admin.Text
         }
-        if ($updateCheck.Checked) { $parameters.AllowUpdate = $true }
         if ($manageService) { $parameters.ManageServiceLifecycle = $true }
         if ($null -ne $adminSecure) { $parameters.AdminPassword = $adminSecure }
         $result = & $coreScript @parameters

@@ -253,6 +253,9 @@ def test_foreground_server_prints_actionable_banner_and_ctrl_c_is_clean(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        creationflags=(
+            subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        ),
     )
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
@@ -264,10 +267,18 @@ def test_foreground_server_prints_actionable_banner_and_ctrl_c_is_clean(
                 break
             time.sleep(0.05)
     assert process.poll() is None
-    process.send_signal(signal.SIGINT)
+    process.send_signal(
+        signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT
+    )
     stdout, stderr = process.communicate(timeout=5)
 
-    assert process.returncode == 0
+    expected_return_codes = {0}
+    if os.name == "nt":
+        # A Windows venv redirector receives the console control event along
+        # with its interpreter child and reports STATUS_CONTROL_C_EXIT even
+        # when the child catches KeyboardInterrupt and shuts down cleanly.
+        expected_return_codes.add(0xC000013A)
+    assert process.returncode in expected_return_codes
     assert "企业可信数据填报智能体已启动" in stdout
     assert f"http://127.0.0.1:{port}/" in stdout
     assert "ssh -N -L" in stdout
@@ -298,7 +309,8 @@ def test_port_conflict_and_corrupt_database_fail_without_traceback(
         )
     assert result == 1
     error = capsys.readouterr().err
-    assert f"端口 {port} 已被占用" in error
+    assert f"端口 {port}" in error
+    assert "已被占用" in error or "无法监听" in error
     assert "Traceback" not in error
 
     corrupt = tmp_path / "corrupt.db"

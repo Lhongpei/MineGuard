@@ -345,7 +345,9 @@ def test_production_v2_submission_is_authenticated_but_read_only(
     tmp_path: Path,
 ) -> None:
     document = json.loads(
-        (CONTRACTS / "examples" / "five-quantity-submission-v2.json").read_text()
+        (CONTRACTS / "examples" / "five-quantity-submission-v2.json").read_text(
+            encoding="utf-8"
+        )
     )
     document["payload"]["mine"]["mine_name"] = "沁源一号煤矿"
     document["payload"]["comparison_context"] = PRODUCTION_COMPARISON_CONTEXT
@@ -1148,13 +1150,15 @@ def test_v3_report_discloses_every_evaluated_business_chain_relationship() -> No
 def _schema_registry() -> Registry:
     resources = []
     for path in (CONTRACTS / "schemas").glob("*.json"):
-        schema = json.loads(path.read_text())
+        schema = json.loads(path.read_text(encoding="utf-8"))
         resources.append((schema["$id"], Resource.from_contents(schema)))
     return Registry().with_resources(resources)
 
 
 def _assert_contract(document: dict[str, Any], schema_name: str) -> None:
-    schema = json.loads((CONTRACTS / "schemas" / schema_name).read_text())
+    schema = json.loads(
+        (CONTRACTS / "schemas" / schema_name).read_text(encoding="utf-8")
+    )
     errors = list(
         Draft202012Validator(
             schema,
@@ -1167,7 +1171,9 @@ def _assert_contract(document: dict[str, Any], schema_name: str) -> None:
 
 def _assert_problem(document: dict[str, Any]) -> None:
     openapi = json.loads(
-        (CONTRACTS / "openapi" / "five-quantity-exchange-v2.openapi.json").read_text()
+        (
+            CONTRACTS / "openapi" / "five-quantity-exchange-v2.openapi.json"
+        ).read_text(encoding="utf-8")
     )
     Draft202012Validator(openapi["components"]["schemas"]["Problem"]).validate(document)
 
@@ -1487,7 +1493,9 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
 
         ack = deepcopy(
             json.loads(
-                (CONTRACTS / "examples" / "risk-delivery-ack-v2.json").read_text()
+                (
+                    CONTRACTS / "examples" / "risk-delivery-ack-v2.json"
+                ).read_text(encoding="utf-8")
             )
         )
         ack["message_id"] = str(uuid4())
@@ -1541,7 +1549,7 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
             json.loads(
                 (
                     CONTRACTS / "examples" / "enterprise-risk-response-v2.json"
-                ).read_text()
+                ).read_text(encoding="utf-8")
             )
         )
         response_message["message_id"] = str(uuid4())
@@ -1701,7 +1709,9 @@ def test_overview_attention_and_business_events_respect_mine_scope(
     tmp_path: Path,
 ) -> None:
     document = json.loads(
-        (CONTRACTS / "examples" / "five-quantity-submission-v2.json").read_text()
+        (CONTRACTS / "examples" / "five-quantity-submission-v2.json").read_text(
+            encoding="utf-8"
+        )
     )
     first = FiveQuantitySubmissionMessage.model_validate(
         document

@@ -2,16 +2,16 @@
 param(
     [Parameter(Mandatory = $true)]
     [string] $InstallRoot,
-    [switch] $Provisioning,
+    [switch] $ModelCredentials,
     [switch] $Elevated
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-$script:LauncherTitle = if ($Provisioning) {
-    'MineGuard 企业接入包与注册向导'
+$script:LauncherTitle = if ($ModelCredentials) {
+    'MineGuard 模型授权导入向导'
 } else {
-    'MineGuard Platform 控制中心'
+    'MineGuard 企业接入配置向导'
 }
 
 function Show-LauncherError {
@@ -33,11 +33,11 @@ try {
     if ($PSVersionTable.PSVersion.Major -lt 5 -or
         ($PSVersionTable.PSVersion.Major -eq 5 -and
             $PSVersionTable.PSVersion.Minor -lt 1)) {
-        throw '需要 Windows PowerShell 5.1。请先安装 WMF 5.1 并重启服务器。'
+        throw '需要 Windows PowerShell 5.1。'
     }
     if ([string]::IsNullOrWhiteSpace($InstallRoot) -or
         $InstallRoot -notmatch '^[A-Za-z]:\\') {
-        throw '安装目录无效，请重新安装 MineGuard Platform。'
+        throw '安装目录无效，请重新安装 MineGuard Enterprise Agent。'
     }
     if ($InstallRoot.IndexOf([char]0) -ge 0 -or
         $InstallRoot.IndexOf([char]10) -ge 0 -or
@@ -46,16 +46,14 @@ try {
         throw '安装目录包含不允许的字符。'
     }
 
-    $resolvedRoot = [System.IO.Path]::GetFullPath($InstallRoot)
-    $launcherPath = [System.IO.Path]::GetFullPath(
-        $MyInvocation.MyCommand.Path
-    )
-    $wizardRelativePath = if ($Provisioning) {
-        'service\Start-MineGuardPlatformProvisioningWizard.ps1'
+    $resolvedRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+    $launcherPath = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
+    $wizardName = if ($ModelCredentials) {
+        'Start-EnterpriseAgentModelCredentialWizard.ps1'
     } else {
-        'service\Start-MineGuardPlatformWizard.ps1'
+        'Start-EnterpriseAgentProvisioningWizard.ps1'
     }
-    $wizardPath = Join-Path $resolvedRoot $wizardRelativePath
+    $wizardPath = Join-Path $resolvedRoot ('deploy\windows\' + $wizardName)
     $powershellPath = Join-Path $env:SystemRoot `
         'System32\WindowsPowerShell\v1.0\powershell.exe'
     if (-not (Test-Path -LiteralPath $powershellPath -PathType Leaf)) {
@@ -64,12 +62,9 @@ try {
 
     if ($Elevated) {
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-        $principal = New-Object `
-            -TypeName Security.Principal.WindowsPrincipal `
-            -ArgumentList $identity
+        $principal = New-Object Security.Principal.WindowsPrincipal $identity
         if (-not $principal.IsInRole(
-                [Security.Principal.WindowsBuiltInRole]::Administrator
-            )) {
+                [Security.Principal.WindowsBuiltInRole]::Administrator)) {
             throw "$script:LauncherTitle 没有获得管理员权限。"
         }
         if (-not (Test-Path -LiteralPath $wizardPath -PathType Leaf)) {
@@ -79,28 +74,26 @@ try {
         return
     }
 
-    # The protected Platform tree is intentionally unreadable to an ordinary
-    # desktop token. Ask UAC first by elevating this tiny public launcher; the
-    # elevated branch can then verify the protected wizard and show any error
-    # in a message box. Windows paths cannot contain a double quote, so quoting
-    # these normalized absolute paths is unambiguous.
-    $modeArgument = if ($Provisioning) { ' -Provisioning' } else { '' }
+    # Ordinary users can read only this tiny launcher. Request UAC before
+    # inspecting the protected deploy tree so a clean installation opens
+    # reliably without leaking deployment scripts to desktop users.
+    $modeArgument = if ($ModelCredentials) { ' -ModelCredentials' } else { '' }
     $arguments = (
         '-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -InstallRoot "{1}"{2} -Elevated' -f
             $launcherPath, $resolvedRoot, $modeArgument
     )
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $powershellPath
     $startInfo.Arguments = $arguments
     $startInfo.UseShellExecute = $true
     $startInfo.Verb = 'runas'
-    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $process = [Diagnostics.Process]::Start($startInfo)
     if ($null -eq $process) {
         throw "$script:LauncherTitle 未能启动。"
     }
 } catch {
     $message = $_.Exception.Message
-    if ($_.Exception -is [System.ComponentModel.Win32Exception] -and
+    if ($_.Exception -is [ComponentModel.Win32Exception] -and
         $_.Exception.NativeErrorCode -eq 1223) {
         $message = "管理员授权已取消，$script:LauncherTitle 没有启动。"
     }

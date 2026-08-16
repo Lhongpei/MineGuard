@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -17,6 +18,9 @@ from enterprise_agent.model_issuer_cli import main
 
 API_KEY = "sk-enterprise-cli-test-000000000000"
 PASSPHRASE = "MineGuard-cli-passphrase-2026"
+TEST_SECRET_PROTECTION = (
+    "dpapi-local-machine" if os.name == "nt" else "posix-0600"
+)
 
 
 def _secret_file(path: Path, value: str) -> Path:
@@ -149,7 +153,7 @@ def test_offline_cli_issues_and_installs_without_printing_secrets(
         lock_environment_path=lock,
         secret_store_output_path=store,
         secret_store_environment_path=store,
-        secret_protection="posix-0600",
+        secret_protection=TEST_SECRET_PROTECTION,
         expected_subject=profile_document["subject"],
         now=now,
     )

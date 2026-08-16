@@ -125,7 +125,10 @@ def backup_database(
     try:
         temporary.unlink()
         schema_version = _copy_sqlite(source, temporary)
-        with temporary.open("rb") as stream:
+        # Windows' CRT rejects fsync/_commit on a read-only descriptor even
+        # though POSIX accepts it.  Open the completed SQLite copy read/write
+        # solely for the durability barrier before the atomic replace.
+        with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
         size = temporary.stat().st_size
         digest = _sha256(temporary)

@@ -3175,6 +3175,11 @@ def serve(
             raise ValueError(
                 f"端口 {port} 已被占用；请停止旧进程或使用 --port 更换端口"
             ) from error
+        if error.errno in {13, 10013}:
+            raise ValueError(
+                f"端口 {port} 无法监听（可能已被占用、被系统保留或权限不足）；"
+                "请停止旧进程或使用 --port 更换端口"
+            ) from error
         raise
     try:
         try:

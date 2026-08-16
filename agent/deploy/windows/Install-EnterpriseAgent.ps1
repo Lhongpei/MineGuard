@@ -1911,6 +1911,7 @@ if (-not $BuildFromSource) {
         foreach ($PublicTree in @(
             $StagedDeploy,
             $DeployTarget,
+            (Join-Path $InstallRoot "launcher"),
             (Join-Path $InstallRoot "docs")
         )) {
             if (Test-Path -LiteralPath $PublicTree -PathType Container) {

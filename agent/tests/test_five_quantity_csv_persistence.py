@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -107,8 +108,9 @@ def test_preview_retains_inert_evidence_and_consumes_only_into_draft(
     )
     assert len(evidence_files) == 1
     assert evidence_files[0].read_bytes() == content
-    assert evidence_files[0].stat().st_mode & 0o111 == 0
-    assert evidence_files[0].stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        assert evidence_files[0].stat().st_mode & 0o111 == 0
+        assert evidence_files[0].stat().st_mode & 0o077 == 0
 
     consumed = subject.csv_persistence.consume_preview(
         preview["preview_id"],

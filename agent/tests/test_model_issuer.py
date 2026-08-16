@@ -36,6 +36,9 @@ SUBJECT = {
     "party_id": "operator-qy-001",
     "pair_id": "11111111-1111-4111-8111-111111111111",
 }
+TEST_SECRET_PROTECTION = (
+    "dpapi-local-machine" if os.name == "nt" else "posix-0600"
+)
 CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222"
 
 
@@ -108,7 +111,10 @@ def test_issuer_init_creates_encrypted_create_new_material_without_secret_output
     assert trust["format"] == "mineguard-model-issuer-trust-store-v1"
     assert trust["issuers"][0]["issuer_key_id"] == "model-ed25519-2026q3"
     assert trust["issuers"][0]["issuer_key_epoch"] == 1
-    assert all(_mode(path) == 0o600 for path in (private_key, public_key, trust_store))
+    if os.name != "nt":
+        assert all(
+            _mode(path) == 0o600 for path in (private_key, public_key, trust_store)
+        )
 
     hashes = {
         path: path.read_bytes() for path in (private_key, public_key, trust_store)
@@ -163,8 +169,9 @@ def test_created_bundle_round_trips_through_runtime_without_disclosing_secrets(
     assert PASSPHRASE.decode("utf-8") not in rendered
     assert read_activation_code_file(activation).decode("ascii") not in rendered
     assert API_KEY_V1 not in bundle.read_text(encoding="utf-8")
-    assert _mode(bundle) == 0o600
-    assert _mode(activation) == 0o600
+    if os.name != "nt":
+        assert _mode(bundle) == 0o600
+        assert _mode(activation) == 0o600
 
 
 def test_profile_cannot_smuggle_api_key_and_output_transaction_rolls_back(
@@ -477,7 +484,7 @@ def test_key_rotation_epoch_cannot_roll_back_at_issuer_or_import(
         lock_environment_path=current_lock,
         secret_store_output_path=tmp_path / "current.secret.json",
         secret_store_environment_path=tmp_path / "current.secret.json",
-        secret_protection="posix-0600",
+        secret_protection=TEST_SECRET_PROTECTION,
         expected_subject=SUBJECT,
         now=now,
     )
@@ -490,7 +497,7 @@ def test_key_rotation_epoch_cannot_roll_back_at_issuer_or_import(
             lock_environment_path=tmp_path / "must-not-exist.lock.json",
             secret_store_output_path=tmp_path / "must-not-exist.secret.json",
             secret_store_environment_path=tmp_path / "must-not-exist.secret.json",
-            secret_protection="posix-0600",
+            secret_protection=TEST_SECRET_PROTECTION,
             expected_subject=SUBJECT,
             current_lock_path=current_lock,
             now=now,
@@ -539,7 +546,7 @@ def test_cli_rotation_accepts_sanitized_windows_environment_when_old_credential_
         lock_environment_path=final_lock,
         secret_store_output_path=final_store,
         secret_store_environment_path=final_store,
-        secret_protection="posix-0600",
+        secret_protection=TEST_SECRET_PROTECTION,
         expected_subject=SUBJECT,
         now=old_now,
     )
@@ -603,7 +610,7 @@ def test_cli_rotation_accepts_sanitized_windows_environment_when_old_credential_
             "--secret-store-env-path",
             str(final_store),
             "--secret-protection",
-            "posix-0600",
+            TEST_SECRET_PROTECTION,
             "--expected-mine-id",
             SUBJECT["mine_id"],
             "--expected-system-id",

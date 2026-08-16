@@ -41,6 +41,30 @@ def _wait_for_port(process: subprocess.Popen[bytes], port: int) -> None:
     raise AssertionError("Agent did not start")
 
 
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Stop the real Agent and any Windows venv-launcher child process."""
+
+    if process.poll() is not None:
+        process.communicate(timeout=2)
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+    else:
+        process.terminate()
+    try:
+        process.communicate(timeout=8)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate(timeout=5)
+
+
 def test_connector_writes_and_revises_one_real_v3_monthly_draft(
     tmp_path: Path,
     source_db: Path,
@@ -186,12 +210,7 @@ def test_connector_writes_and_revises_one_real_v3_monthly_draft(
         assert tuple(local_observation) == tuple(contribution)
         local.close()
     finally:
-        process.terminate()
-        try:
-            process.communicate(timeout=8)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate(timeout=5)
+        _terminate_process_tree(process)
 
 
 def test_error_before_autofill_then_same_content_health_recovery_is_fresh(
@@ -365,9 +384,4 @@ print(json.dumps(result))
     finally:
         if service is not None:
             service.close()
-        process.terminate()
-        try:
-            process.communicate(timeout=8)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate(timeout=5)
+        _terminate_process_tree(process)

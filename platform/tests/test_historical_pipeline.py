@@ -21,7 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _request(day_offset: int) -> ProductionAnalysisRequest:
     raw = json.loads(
-        (ROOT / "examples" / "production_consistent.json").read_text()
+        (ROOT / "examples" / "production_consistent.json").read_text(
+            encoding="utf-8"
+        )
     )
     raw["mine_id"] = "M001"
     request = ProductionAnalysisRequest.model_validate(raw)

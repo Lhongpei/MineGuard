@@ -226,7 +226,7 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         "System.Windows.Forms",
         "1. 初始化签发密钥",
         "2. 生成企业接入包",
-        "3. 导入监管注册包",
+        "3. 完成监管端配置",
         "*.activation",
         "SPKI SHA-256",
         "不要长期同盘保存",
@@ -251,6 +251,25 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         "监管固定策略和 CA 固定副本已原子发布",
     ):
         assert required in provisioning_wizard
+    for removed_legacy_control in (
+        "previous_bundle",
+        "previous_activation",
+        "$updateCheck",
+        "PreviousRegistrationBundle",
+        "PreviousRegistrationActivationFile",
+    ):
+        assert removed_legacy_control not in provisioning_wizard
+    assert "ProfileVersion = 1" in provisioning_wizard
+    assert "Set-CurrentEnterpriseIdentifiers" in provisioning_wizard
+    self_test = provisioning_wizard.index("if ($SelfTest)")
+    elevation_check = provisioning_wizard.index(
+        "$identity = [Security.Principal.WindowsIdentity]::GetCurrent()"
+    )
+    protected_component_check = provisioning_wizard.index(
+        "# The installed service tree is intentionally unreadable",
+        elevation_check,
+    )
+    assert self_test < elevation_check < protected_component_check
     assert "$policyWarning" not in provisioning_wizard
     assert "注意：监管固定项未能保存" not in provisioning_wizard
     pending_create = provisioning_wizard.index(
@@ -305,7 +324,9 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         "provisioning-authority\\platform-ca.pem",
         "authority-policy.pending.json",
         "不会显示“生成成功”",
-        "不会静默复制或改写",
+        "profile_version=1",
+        "不显示旧版升级",
+        "同一个 HTTPS FQDN",
     ):
         assert required in provisioning_readme
 

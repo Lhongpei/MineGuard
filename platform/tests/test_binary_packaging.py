@@ -171,6 +171,39 @@ def test_unsigned_platform_setup_requires_explicit_test_authorization() -> None:
     ]
 
 
+def test_platform_start_menu_wizards_use_the_public_uac_launcher() -> None:
+    installer = PLATFORM_INNO.read_text(encoding="utf-8")
+    launcher = (
+        ROOT.parent
+        / "packaging"
+        / "windows"
+        / "assets"
+        / "Open-MineGuardPlatformControlCenter.ps1"
+    ).read_text(encoding="utf-8-sig")
+    provisioning_shortcut = next(
+        line
+        for line in installer.splitlines()
+        if "MineGuard 企业接入包与注册向导" in line
+    )
+
+    assert "{app}\\launcher\\Open-MineGuardPlatformControlCenter.ps1" in (
+        provisioning_shortcut
+    )
+    assert 'WorkingDir: "{app}\\launcher"' in provisioning_shortcut
+    assert "-Provisioning" in provisioning_shortcut
+    assert "{app}\\service\\Start-MineGuardPlatformProvisioningWizard.ps1" not in (
+        provisioning_shortcut
+    )
+    for required in (
+        "[switch] $Provisioning",
+        "Start-MineGuardPlatformProvisioningWizard.ps1",
+        "$modeArgument = if ($Provisioning)",
+        "Verb = 'runas'",
+        "$wizardPath -InstallRoot $resolvedRoot",
+    ):
+        assert required in launcher
+
+
 def test_windows_delivery_docs_keep_setup_as_the_formal_trust_root() -> None:
     operations = (ROOT / "docs" / "Windows原生部署与运维.md").read_text(
         encoding="utf-8"

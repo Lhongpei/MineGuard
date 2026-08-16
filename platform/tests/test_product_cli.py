@@ -197,7 +197,12 @@ def test_short_bootstrap_rejects_password_file_symlink(
     target = tmp_path / "secret-target.txt"
     target.write_text("Symlink-Admin-Password-2026!", encoding="utf-8")
     password_file = tmp_path / "bootstrap-admin-password.txt"
-    password_file.symlink_to(target)
+    try:
+        password_file.symlink_to(target)
+    except OSError as error:
+        if os.name == "nt" and error.winerror == 1314:
+            pytest.skip("Windows symbolic-link privilege is unavailable")
+        raise
     assert product_cli.main(
         [
             "bootstrap-admin",
