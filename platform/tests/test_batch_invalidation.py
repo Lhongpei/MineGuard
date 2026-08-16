@@ -19,7 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _request(batch_id: str) -> dict[str, Any]:
     analysis = json.loads(
-        (ROOT / "examples" / "production_inconsistent.json").read_text()
+        (ROOT / "examples" / "production_inconsistent.json").read_text(
+            encoding="utf-8"
+        )
     )
     analysis["mine_id"] = "M001"
     return {

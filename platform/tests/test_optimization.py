@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_request(name: str) -> ProductionAnalysisRequest:
-    payload = json.loads((ROOT / "examples" / name).read_text())
+    payload = json.loads((ROOT / "examples" / name).read_text(encoding="utf-8"))
     return ProductionAnalysisRequest.model_validate(payload)
 
 

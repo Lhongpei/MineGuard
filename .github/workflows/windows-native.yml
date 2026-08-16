@@ -61,6 +61,10 @@ jobs:
           node-version: "22"
           package-manager-cache: false
 
+      - name: Install pinned DOM test runtime
+        shell: pwsh
+        run: npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund jsdom@26.1.0
+
       - name: Define isolated runtime paths after runner allocation
         shell: pwsh
         run: |

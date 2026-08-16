@@ -31,6 +31,10 @@ from enterprise_agent.provisioning import (
 from enterprise_agent.settings import Settings
 from enterprise_agent.util import canonical_json
 
+TEST_SECRET_PROTECTION = (
+    "dpapi-local-machine" if os.name == "nt" else "posix-0600"
+)
+
 
 def _b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
@@ -316,7 +320,7 @@ def _install(
         secret_store_environment_path=store,
         ca_source_path=fixture["ca"],
         expected_ca_sha256=str(fixture["ca_sha256"]),
-        secret_protection="posix-0600",
+        secret_protection=TEST_SECRET_PROTECTION,
         expected_mine_id=str(fixture["mine_id"]),
         expected_system_id="agent-mine-qy-001",
         current_lock_path=current_lock,
@@ -336,7 +340,8 @@ def test_import_hides_secrets_and_runtime_lock_restores_them(tmp_path: Path) -> 
     assert "PLATFORM_BASE_URL=" not in encoded_env
     assert result.summary["production_ready"] is True
     assert result.summary["mine_id"] == "MINE-QY-001"
-    assert stat_mode(store) == 0o600
+    if os.name != "nt":
+        assert stat_mode(store) == 0o600
 
     environment = parse_environment_file(env)
     status = apply_provisioning_lock(environment)
@@ -750,7 +755,7 @@ def test_cli_import_outputs_only_non_secret_summary(
             "--secret-store-env-path",
             str(store),
             "--secret-protection",
-            "posix-0600",
+            TEST_SECRET_PROTECTION,
             "--expected-mine-id",
             "MINE-QY-001",
             "--expected-system-id",

@@ -41,6 +41,7 @@ AppVersion={#AppVersion}
 AppVerName={#ProductName} {#AppVersion}
 AppPublisher={#ProductPublisher}
 DefaultDirName={autopf}\MineGuard\EnterpriseAgent
+DisableDirPage=no
 DefaultGroupName=MineGuard
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
@@ -74,6 +75,13 @@ SignedUninstaller=no
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
 
+[Dirs]
+; Keep only the small UAC launcher and documentation desktop-readable. The
+; runtime, deployment scripts and instance data remain administrator/service
+; protected.
+Name: "{app}\launcher"; Permissions: users-readexec; Flags: uninsalwaysuninstall
+Name: "{app}\docs"; Permissions: users-readexec; Flags: uninsalwaysuninstall
+
 [Files]
 ; These temporary transaction inputs are deliberately first for solid-compression
 ; extraction. CurStepChanged(ssInstall) extracts them before Inno writes any
@@ -83,18 +91,17 @@ Source: "{#StageRoot}\*"; DestDir: "{tmp}\MineGuardEnterpriseAgentRelease"; Flag
 ; Keep the uninstall transaction runner outside every product-owned directory
 ; that it atomically quarantines. Inno owns and removes this protected copy.
 Source: "{#StageRoot}\deploy\windows\Uninstall-EnterpriseAgentRuntime.ps1"; DestDir: "{app}\uninstall-tools"; Flags: ignoreversion
-Source: "{#AssetsRoot}\Windows-binary-release-guide.html"; DestDir: "{app}\docs"; Flags: ignoreversion
-Source: "{#AssetsRoot}\RELEASE-NOTICE.txt"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "{#AssetsRoot}\Windows-binary-release-guide.html"; DestDir: "{app}\docs"; Flags: ignoreversion; Permissions: users-readexec
+Source: "{#AssetsRoot}\RELEASE-NOTICE.txt"; DestDir: "{app}\docs"; Flags: ignoreversion; Permissions: users-readexec
+Source: "{#AssetsRoot}\Open-MineGuardEnterpriseAgentControlCenter.ps1"; DestDir: "{app}\launcher"; Flags: ignoreversion; Permissions: users-readexec
 
 [Icons]
-Name: "{commonprograms}\MineGuard\MineGuard Enterprise Agent deployment guide"; Filename: "{app}\docs\Windows-binary-release-guide.html"
-Name: "{commonprograms}\MineGuard\MineGuard 企业接入配置向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File ""{app}\deploy\windows\Start-EnterpriseAgentProvisioningWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\deploy\windows"
-Name: "{commonprograms}\MineGuard\MineGuard 模型授权导入向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File ""{app}\deploy\windows\Start-EnterpriseAgentModelCredentialWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\deploy\windows"
-Name: "{commonprograms}\MineGuard\Enterprise Agent operations console"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -Command ""Set-Location -LiteralPath '{app}\deploy\windows'; Get-Content -LiteralPath '.\README.md' -TotalCount 45"""; WorkingDir: "{app}\deploy\windows"
+Name: "{commonprograms}\MineGuard\MineGuard 企业接入配置向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardEnterpriseAgentControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"
+Name: "{commonprograms}\MineGuard\MineGuard 模型授权导入向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardEnterpriseAgentControlCenter.ps1"" -InstallRoot ""{app}"" -ModelCredentials"; WorkingDir: "{app}\launcher"
+Name: "{commonprograms}\MineGuard\MineGuard 企业端使用说明"; Filename: "{app}\docs\Windows-binary-release-guide.html"
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File ""{app}\deploy\windows\Start-EnterpriseAgentProvisioningWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\deploy\windows"; Description: "立即打开 MineGuard 企业接入配置向导"; Flags: postinstall skipifsilent nowait; Check: IsWrapperTransactionConfirmed
-Filename: "{app}\docs\Windows-binary-release-guide.html"; Description: "Open the deployment guide"; Flags: postinstall shellexec skipifsilent nowait; Check: IsWrapperTransactionConfirmed
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardEnterpriseAgentControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"; Description: "立即打开 MineGuard 企业接入配置向导"; Flags: postinstall skipifsilent nowait; Check: IsWrapperTransactionConfirmed
 
 [UninstallDelete]
 ; Product-owned immutable directories are removed only by the guarded
@@ -639,7 +646,7 @@ begin
       'if([string]::IsNullOrWhiteSpace($next)-or($next-eq$cursor)){break};' +
       '$cursor=$next}};' +
     'function Assert-CodeSecurity([string]$p){' +
-      '$roots=@(''runtime'',''deploy'',''release-metadata'',''uninstall-tools'');' +
+      '$roots=@(''runtime'',''deploy'',''launcher'',''release-metadata'',''uninstall-tools'');' +
       'foreach($leaf in $roots){$cr=[IO.Path]::Combine($p,$leaf);' +
       'if([IO.Directory]::Exists($cr)){$q=[Collections.Generic.Queue[string]]::new();' +
       '$q.Enqueue($cr);while($q.Count-gt 0){$d=$q.Dequeue();' +

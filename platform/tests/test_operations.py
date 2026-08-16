@@ -100,7 +100,7 @@ def test_manifest_tampering_and_wrong_key_are_rejected(tmp_path: Path) -> None:
         wrong_key.verify("signed")
 
     manifest_path = tmp_path / "backups" / "signed" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["app_version"] = "forged"
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -127,7 +127,7 @@ def test_backup_and_restore_reject_traversal_and_existing_content(
     (occupied / "keep.txt").write_text("must remain")
     with pytest.raises(RestoreTargetError):
         manager.restore("safe", occupied)
-    assert (occupied / "keep.txt").read_text() == "must remain"
+    assert (occupied / "keep.txt").read_text(encoding="utf-8") == "must remain"
     with pytest.raises(RestoreTargetError):
         manager.restore("safe", ".")
 

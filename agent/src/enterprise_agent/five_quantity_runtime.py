@@ -4451,7 +4451,12 @@ class FiveQuantityRuntime:
 
     @staticmethod
     def _write_quarantine_file(path: Path, content: bytes) -> None:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+        )
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
@@ -4905,7 +4910,7 @@ class FiveQuantityRuntime:
 
     @staticmethod
     def _read_no_follow(path: Path) -> bytes:
-        flags = os.O_RDONLY
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         descriptor = os.open(path, flags)

@@ -131,7 +131,7 @@ def auth_headers(cookie: str, csrf: str | None = None) -> dict[str, str]:
 
 
 def production(name: str, mine_id: str) -> dict[str, Any]:
-    payload = json.loads((ROOT / "examples" / name).read_text())
+    payload = json.loads((ROOT / "examples" / name).read_text(encoding="utf-8"))
     payload["mine_id"] = mine_id
     return payload
 

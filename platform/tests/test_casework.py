@@ -23,7 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _trial_batch() -> tuple[PortfolioAnalysisRequest, object]:
     inconsistent = json.loads(
-        (ROOT / "examples" / "production_inconsistent.json").read_text()
+        (ROOT / "examples" / "production_inconsistent.json").read_text(
+            encoding="utf-8"
+        )
     )
     inconsistent["mine_id"] = "M001"
     request = PortfolioAnalysisRequest(

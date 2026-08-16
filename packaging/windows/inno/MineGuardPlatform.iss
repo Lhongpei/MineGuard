@@ -44,6 +44,7 @@ AppVersion={#AppVersion}
 AppVerName={#ProductName} {#AppVersion}
 AppPublisher={#ProductPublisher}
 DefaultDirName={commonappdata}\MineGuard\Platform
+DisableDirPage=no
 DefaultGroupName=MineGuard
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
@@ -105,7 +106,7 @@ Source: "{#AssetsRoot}\Open-MineGuardPlatformControlCenter.ps1"; DestDir: "{app}
 
 [Icons]
 Name: "{commonprograms}\MineGuard\MineGuard Platform 控制中心"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"; IconFilename: "{app}\runtime\MineGuardPlatform.exe"
-Name: "{commonprograms}\MineGuard\MineGuard 企业接入包与注册向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\service\Start-MineGuardPlatformProvisioningWizard.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\service"; IconFilename: "{app}\runtime\MineGuardPlatform.exe"
+Name: "{commonprograms}\MineGuard\MineGuard 企业接入包与注册向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"" -Provisioning"; WorkingDir: "{app}\launcher"; IconFilename: "{app}\runtime\MineGuardPlatform.exe"
 Name: "{commondesktop}\MineGuard Platform 控制中心"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardPlatformControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"; IconFilename: "{app}\runtime\MineGuardPlatform.exe"; Tasks: desktopicon
 Name: "{commonprograms}\MineGuard\MineGuard Platform 使用与部署说明"; Filename: "{app}\docs\Windows-binary-release-guide.html"
 

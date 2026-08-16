@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -573,14 +574,14 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     assert "$Preparer" not in updater
     assert "$Reviewer" not in updater
     assert "--allow-unanchored-test-key" not in updater
-    assert '"Update-EnterpriseAgentAccessPackage.ps1"' in wizard
-    assert "安全更新现有实例" in wizard
     assert "enterprise-install-manifest.json" in wizard
-    assert "加载企业交付目录" in wizard
+    assert "企业交付目录" in wizard
     assert "12 位" in wizard
-    assert "事务切换" in wizard
-    assert "原子切换" not in wizard
-    assert "当前尚未启动" in wizard
+    assert "profile_version 必须为 1" in wizard
+    assert "导入配置并继续安装服务" in wizard
+    assert '"Update-EnterpriseAgentAccessPackage.ps1"' not in wizard
+    assert "手工填写" not in wizard
+    assert "安全更新现有实例" not in wizard
     assert "批准的 WinSW" in wizard
     for token in (
         '"--env-file", $ImportEnvironment',
@@ -697,8 +698,45 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         / "inno"
         / "MineGuardEnterpriseAgent.iss"
     ).read_text(encoding="utf-8")
+    launcher_path = (
+        root.parents[2]
+        / "packaging"
+        / "windows"
+        / "assets"
+        / "Open-MineGuardEnterpriseAgentControlCenter.ps1"
+    )
+    assert launcher_path.read_bytes().startswith(b"\xef\xbb\xbf")
+    launcher = launcher_path.read_text(encoding="utf-8-sig")
+    product_installer = (root / "Install-EnterpriseAgent.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    trusted_bootstrap = (
+        root.parents[2]
+        / "packaging"
+        / "windows"
+        / "assets"
+        / "Invoke-MineGuardTrustedProductInstall.ps1"
+    ).read_text(encoding="utf-8-sig")
     assert "MineGuard 模型授权导入向导" in inno
-    assert "Start-EnterpriseAgentModelCredentialWizard.ps1" in inno
+    assert "Open-MineGuardEnterpriseAgentControlCenter.ps1" in inno
+    assert 'Permissions: users-readexec' in inno
+    assert 'Name: "{app}\\launcher"; Permissions: users-readexec' in inno
+    assert "(Join-Path $InstallRoot \"launcher\")" in product_installer
+    assert "@('runtime', 'deploy', 'launcher', 'release-metadata'" in (
+        trusted_bootstrap
+    )
+    assert 'WorkingDir: "{app}\\launcher"' in inno
+    assert "Enterprise Agent operations console" not in inno
+    assert "Start-EnterpriseAgentProvisioningWizard.ps1" not in inno
+    assert "Start-EnterpriseAgentModelCredentialWizard.ps1" not in inno
+    for token in (
+        "Start-EnterpriseAgentProvisioningWizard.ps1",
+        "Start-EnterpriseAgentModelCredentialWizard.ps1",
+        "[switch] $ModelCredentials",
+        "Verb = 'runas'",
+        "if ($Elevated)",
+    ):
+        assert token in launcher
     assert (
         'Source: "{#StageRoot}\\*"; '
         'DestDir: "{tmp}\\MineGuardEnterpriseAgentRelease"' in inno
@@ -707,7 +745,7 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     for token in (
         '"Install-EnterpriseAgentService.ps1"',
         '"EnterpriseAgent.WindowsSafety.ps1"',
-        "安装并启动正式服务…",
+        "仅安装或修复正式服务…",
         "Show-FormalServiceInstallDialog",
         "Get-EAInstanceContext",
         "介质外 WinSW SHA-256",
@@ -730,22 +768,16 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     assert wizard.index("$WinSWHashBox.Clear()", service_invocation) > (
         service_invocation
     )
-    update_mode = wizard.index("function Update-OperationModeUi")
-    update_branch = wizard.index("if ($IsUpdate)", update_mode)
-    update_password_clear = wizard.index("$PreparerPasswordBox.Clear()", update_branch)
-    disable_controls = wizard.index("$Control.Enabled = -not $IsUpdate", update_mode)
-    assert disable_controls < update_branch < update_password_clear
     finalizer = wizard.index("finally {", wizard.index("$ImportButton.Add_Click"))
     assert wizard.index("$PreparerPasswordBox.Clear()", finalizer) > finalizer
 
     deployment_readme = (root / "README.md").read_text(encoding="utf-8")
     for token in (
-        "加载企业交付目录",
+        "完整企业交付目录",
         "12 位独立核验码",
-        "安全更新现有实例",
-        "不重建 SQLite 数据库",
-        "失败自动回滚",
-        "安装并启动正式服务…",
+        "profile_version=1",
+        "不提供旧版升级",
+        "仅安装或修复正式服务…",
         "介质外审批记录中的 WinSW SHA-256",
         "核验值不写日志",
     ):
@@ -1187,7 +1219,7 @@ def test_windows_powershell_parses_when_native_parser_is_available() -> None:
     parser = (
         "$tokens=$null; $errors=$null; "
         "[System.Management.Automation.Language.Parser]::ParseFile("
-        "$args[0],[ref]$tokens,[ref]$errors) | Out-Null; "
+        "$env:MINEGUARD_PS_PARSE_PATH,[ref]$tokens,[ref]$errors) | Out-Null; "
         "if ($errors.Count -ne 0) { $errors | ForEach-Object { "
         "[Console]::Error.WriteLine($_.Message) }; exit 1 }"
     )
@@ -1199,11 +1231,11 @@ def test_windows_powershell_parses_when_native_parser_is_available() -> None:
                 "-NonInteractive",
                 "-Command",
                 parser,
-                str(path),
             ],
             check=False,
             capture_output=True,
             text=True,
+            env={**os.environ, "MINEGUARD_PS_PARSE_PATH": str(path)},
         )
         assert completed.returncode == 0, (
             f"PowerShell parser rejected {path.name}: {completed.stderr}"
@@ -1777,13 +1809,16 @@ def test_database_backup_restore_manifest_rollback_and_instance_lock(
         {"draft_id": "draft-later-002", "mine_name": "later"},
         actor="tester",
     )
+    repository.close()
     restored = restore_database(
         database,
         backup,
         rollback_directory=tmp_path / "rollback",
     )
     assert restored["rollback_backup"] is not None
-    drafts = Repository(database).list_drafts(limit=20)
+    restored_repository = Repository(database)
+    drafts = restored_repository.list_drafts(limit=20)
+    restored_repository.close()
     assert len(drafts) == 1
     assert drafts[0]["draft_id"] == original["draft_id"]
 
@@ -1800,7 +1835,8 @@ def test_cli_restore_refuses_when_service_lock_is_held(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "state.db"
-    Repository(database)
+    repository = Repository(database)
+    repository.close()
     backup = tmp_path / "backup.db"
     backup_database(database, backup)
 
@@ -1825,7 +1861,8 @@ def test_restore_preserves_corrupt_current_database_as_raw_evidence(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "state.db"
-    Repository(database)
+    repository = Repository(database)
+    repository.close()
     backup = tmp_path / "backup.db"
     backup_database(database, backup)
     database.write_bytes(b"corrupt live database")
@@ -1839,4 +1876,5 @@ def test_restore_preserves_corrupt_current_database_as_raw_evidence(
     raw = Path(str(restored["rollback_backup"]))
     assert raw.read_bytes() == b"corrupt live database"
     assert Path(f"{raw}.notice.txt").is_file()
-    Repository(database)
+    repository = Repository(database)
+    repository.close()

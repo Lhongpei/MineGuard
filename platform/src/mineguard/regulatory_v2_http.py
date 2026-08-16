@@ -574,6 +574,12 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
             for request_socket in lingering_sockets:
                 with suppress(OSError):
                     request_socket.shutdown(socket.SHUT_RDWR)
+                # On Windows a buffered ``socket.makefile()`` request-body
+                # read can remain blocked after shutdown alone.  Closing the
+                # already timed-out connection releases that read so the
+                # handler reaches ``end_request`` before SQLite is closed.
+                with suppress(OSError):
+                    request_socket.close()
             self.store.interrupt()
             forced_deadline = monotonic() + _FORCED_DRAIN_GRACE_SECONDS
             with self.request_condition:
@@ -3531,7 +3537,38 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             raise ValueError("invalid Content-Length") from error
         if length < 0 or length > limit:
             raise ValueError("request body is too large")
-        return self.rfile.read(length)
+        if length == 0:
+            return b""
+
+        # ``BufferedReader.read(length)`` may wait for the whole body.  On
+        # Windows that pending makefile/socket read is not reliably cancelled
+        # by shutdown from the drain thread.  Poll in bounded chunks so a
+        # service stop can release the handler before SQLite resources close.
+        deadline = monotonic() + self.server.request_io_timeout_seconds
+        original_timeout = self.connection.gettimeout()
+        chunks: list[bytes] = []
+        remaining = length
+        reader = getattr(self.rfile, "read1", self.rfile.read)
+        try:
+            while remaining:
+                if self.server.draining:
+                    raise ConnectionResetError("service is draining")
+                time_left = deadline - monotonic()
+                if time_left <= 0:
+                    raise TimeoutError("request body read timed out")
+                self.connection.settimeout(min(0.25, time_left))
+                try:
+                    chunk = reader(min(64 * 1024, remaining))
+                except TimeoutError:
+                    continue
+                if not chunk:
+                    raise ValueError("request body ended before Content-Length")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+        finally:
+            with suppress(OSError):
+                self.connection.settimeout(original_timeout)
 
     def _local_control_shutdown(self) -> None:
         """Stop a GUI-owned loopback instance without killing SQLite mid-write."""

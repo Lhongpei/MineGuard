@@ -572,7 +572,7 @@ class FiveQuantityCsvPersistence:
 
     @staticmethod
     def _read_regular_file(path: Path) -> bytes:
-        flags = os.O_RDONLY
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         descriptor = os.open(path, flags)
@@ -600,7 +600,12 @@ class FiveQuantityCsvPersistence:
 
     def _store_evidence(self, content: bytes, digest: str) -> str:
         path = self._evidence_path(digest)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+        )
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:

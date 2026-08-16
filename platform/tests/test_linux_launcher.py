@@ -6,6 +6,8 @@ import re
 import shutil
 import subprocess
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "deploy" / "mineguard-linux.sh"
@@ -17,6 +19,7 @@ def _source() -> str:
     return LAUNCHER.read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires a native POSIX bash")
 def test_linux_launcher_is_valid_strict_bash() -> None:
     for script in (LAUNCHER, SHORT_LAUNCHER):
         result = subprocess.run(
@@ -92,6 +95,7 @@ def test_linux_systemd_template_requests_a_bounded_graceful_stop() -> None:
     assert "TimeoutStopSec=30s" in source
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires a native POSIX bash")
 def test_linux_launcher_maps_menu_to_quickstart_commands_with_safe_paths(
     tmp_path: Path,
 ) -> None:

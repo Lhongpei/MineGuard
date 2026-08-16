@@ -582,8 +582,8 @@ def test_enterprise_v2_discard_requires_write_permission(tmp_path: Path) -> None
 
 
 def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
-    html = (ROOT / "web" / "index.html").read_text()
-    script = (ROOT / "web" / "v2-app.js").read_text()
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    script = (ROOT / "web" / "v2-app.js").read_text(encoding="utf-8")
     for label in (
         "数据收件箱",
         "规范化复核与报送",

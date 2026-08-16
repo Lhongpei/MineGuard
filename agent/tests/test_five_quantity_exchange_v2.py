@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import threading
 from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -303,7 +304,12 @@ def test_custom_ca_must_be_a_real_non_symlink_file(tmp_path) -> None:
     bundle = tmp_path / "ca.pem"
     bundle.write_text("not a certificate")
     link = tmp_path / "link.pem"
-    link.symlink_to(bundle)
+    try:
+        link.symlink_to(bundle)
+    except OSError as error:
+        if os.name == "nt" and error.winerror == 1314:
+            pytest.skip("Windows symbolic-link privilege is unavailable")
+        raise
     with pytest.raises(ValueError, match="符号链接"):
         FiveQuantityPlatformConfig(
             base_url="https://regulator.example",

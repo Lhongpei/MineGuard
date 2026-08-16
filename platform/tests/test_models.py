@@ -17,13 +17,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def production_payload() -> dict[str, object]:
     return json.loads(
-        (ROOT / "examples" / "production_consistent.json").read_text()
+        (ROOT / "examples" / "production_consistent.json").read_text(
+            encoding="utf-8"
+        )
     )
 
 
 def personnel_payload() -> dict[str, object]:
     return json.loads(
-        (ROOT / "examples" / "personnel_session.json").read_text()
+        (ROOT / "examples" / "personnel_session.json").read_text(encoding="utf-8")
     )
 
 
@@ -82,7 +84,9 @@ def test_numerically_unsafe_solver_scales_are_rejected(
 
 
 def test_documented_source_registration_example_is_executable() -> None:
-    document = (ROOT / "docs" / "可信数据接入说明.md").read_text()
+    document = (ROOT / "docs" / "可信数据接入说明.md").read_text(
+        encoding="utf-8"
+    )
     section = document.split("### 3.1 来源", maxsplit=1)[1]
     match = re.search(r"```json\n(.*?)\n```", section, re.DOTALL)
 

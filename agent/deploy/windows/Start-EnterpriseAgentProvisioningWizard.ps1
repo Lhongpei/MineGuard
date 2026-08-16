@@ -82,18 +82,16 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
 $ImportScript = Join-Path $ScriptDirectory `
     "Import-EnterpriseAgentAccessPackage.ps1"
-$UpdateScript = Join-Path $ScriptDirectory `
-    "Update-EnterpriseAgentAccessPackage.ps1"
 $ServiceInstallScript = Join-Path $ScriptDirectory `
     "Install-EnterpriseAgentService.ps1"
 $SafetyHelper = Join-Path $ScriptDirectory `
     "EnterpriseAgent.WindowsSafety.ps1"
 if ($SelfTest) {
     foreach ($RequiredScript in @(
-            $ImportScript, $UpdateScript, $ServiceInstallScript, $SafetyHelper
+            $ImportScript, $ServiceInstallScript, $SafetyHelper
         )) {
         if (-not (Test-Path -LiteralPath $RequiredScript -PathType Leaf)) {
-            throw "配置向导缺少接入、更新或正式服务安装组件。"
+            throw "配置向导缺少接入或正式服务安装组件。"
         }
     }
     [ordered]@{
@@ -136,10 +134,10 @@ if (-not $Principal.IsInRole(
 }
 
 foreach ($RequiredScript in @(
-        $ImportScript, $UpdateScript, $ServiceInstallScript, $SafetyHelper
+        $ImportScript, $ServiceInstallScript, $SafetyHelper
     )) {
     if (-not (Test-Path -LiteralPath $RequiredScript -PathType Leaf)) {
-        Show-FatalMessage "安装不完整，缺少接入、更新或正式服务安装组件。"
+        Show-FatalMessage "安装不完整，缺少接入或正式服务安装组件。"
         exit 1
     }
 }
@@ -161,14 +159,14 @@ $Red = [Drawing.Color]::FromArgb(188, 45, 45)
 
 $Form = New-Object Windows.Forms.Form
 $Form.Text = "MineGuard 企业接入配置向导"
-$Form.ClientSize = New-Object Drawing.Size(900, 750)
+$Form.ClientSize = New-Object Drawing.Size(900, 680)
 $Form.StartPosition = "CenterScreen"
-$Form.MinimumSize = New-Object Drawing.Size(916, 788)
+$Form.MinimumSize = New-Object Drawing.Size(916, 718)
 $Form.Font = $NormalFont
 $Form.AutoScaleMode = [Windows.Forms.AutoScaleMode]::Dpi
 
 $Title = New-Object Windows.Forms.Label
-$Title.Text = "导入本矿企业接入包"
+$Title.Text = "企业端一次配置并启动"
 $Title.Font = $TitleFont
 $Title.Location = New-Object Drawing.Point(24, 16)
 $Title.Size = New-Object Drawing.Size(500, 38)
@@ -176,7 +174,7 @@ $Form.Controls.Add($Title)
 
 $Subtitle = New-Object Windows.Forms.Label
 $Subtitle.Text = (
-    "只需选择获批材料并设置两个本地账号。矿井身份、政府接口和逐矿密钥由签名包锁定。"
+    "选择监管端交付目录和独立激活码，设置两名本地账号；其余身份与信任参数自动读取。"
 )
 $Subtitle.ForeColor = $Muted
 $Subtitle.Location = New-Object Drawing.Point(27, 56)
@@ -184,15 +182,10 @@ $Subtitle.Size = New-Object Drawing.Size(840, 24)
 $Form.Controls.Add($Subtitle)
 
 $LoadHandoverButton = New-Object Windows.Forms.Button
-$LoadHandoverButton.Text = "加载企业交付目录"
-$LoadHandoverButton.Location = New-Object Drawing.Point(584, 17)
-$LoadHandoverButton.Size = New-Object Drawing.Size(184, 32)
+$LoadHandoverButton.Text = "选择..."
+$LoadHandoverButton.Location = New-Object Drawing.Point(798, 114)
+$LoadHandoverButton.Size = New-Object Drawing.Size(72, 29)
 $Form.Controls.Add($LoadHandoverButton)
-$ManualEntryButton = New-Object Windows.Forms.Button
-$ManualEntryButton.Text = "手工填写"
-$ManualEntryButton.Location = New-Object Drawing.Point(778, 17)
-$ManualEntryButton.Size = New-Object Drawing.Size(92, 32)
-$Form.Controls.Add($ManualEntryButton)
 
 function Add-SectionLabel {
     param([string]$Text, [int]$Y)
@@ -247,95 +240,84 @@ function Add-FileField {
     return $Box
 }
 
-Add-SectionLabel -Text "一、选择离线审批材料" -Y 88
-$BundleBox = Add-FileField -LabelText "企业接入包（.mgprov）" -Y 115 `
-    -Filter "MineGuard 接入包 (*.mgprov)|*.mgprov|所有文件 (*.*)|*.*"
-$ActivationBox = Add-FileField -LabelText "独立交付的激活码文件" -Y 148 `
+Add-SectionLabel -Text "一、选择监管交付材料" -Y 88
+$HandoverDirectoryBox = Add-TextField -LabelText "企业交付目录" -Y 115 `
+    -Width 600
+$HandoverDirectoryBox.ReadOnly = $true
+$ActivationBox = Add-FileField -LabelText "独立激活码文件" -Y 148 `
     -Filter "MineGuard 激活码 (*.activation)|*.activation|文本文件 (*.txt;*.code)|*.txt;*.code|所有文件 (*.*)|*.*"
-$TrustKeyBox = Add-FileField -LabelText "签发公钥 PEM" -Y 181 `
-    -Filter "PEM 公钥 (*.pem)|*.pem|所有文件 (*.*)|*.*"
-$TrustHashBox = Add-TextField -LabelText "介质外公钥 SHA-256" -Y 214 -Width 330
-$IssuerKeyIdLabel = New-Object Windows.Forms.Label
-$IssuerKeyIdLabel.Text = "issuer key ID"
-$IssuerKeyIdLabel.Location = New-Object Drawing.Point(526, 218)
-$IssuerKeyIdLabel.Size = New-Object Drawing.Size(100, 24)
-$Form.Controls.Add($IssuerKeyIdLabel)
-$IssuerKeyIdBox = New-Object Windows.Forms.TextBox
-$IssuerKeyIdBox.Location = New-Object Drawing.Point(630, 214)
-$IssuerKeyIdBox.Size = New-Object Drawing.Size(240, 25)
-$Form.Controls.Add($IssuerKeyIdBox)
-$CaBox = Add-FileField -LabelText "政府 HTTPS CA PEM" -Y 247 `
-    -Filter "PEM 证书 (*.pem;*.crt)|*.pem;*.crt|所有文件 (*.*)|*.*"
-$CaHashBox = Add-TextField -LabelText "介质外 CA 文件 SHA-256" -Y 280 -Width 682
+$HandoverSummaryBox = New-Object Windows.Forms.TextBox
+$HandoverSummaryBox.Location = New-Object Drawing.Point(28, 181)
+$HandoverSummaryBox.Size = New-Object Drawing.Size(842, 46)
+$HandoverSummaryBox.Multiline = $true
+$HandoverSummaryBox.ReadOnly = $true
+$HandoverSummaryBox.Text = "尚未选择企业交付目录。"
+$Form.Controls.Add($HandoverSummaryBox)
 
-Add-SectionLabel -Text "二、设置本机实例" -Y 320
-$InstanceBox = Add-TextField -LabelText "实例名（英文小写）" -Y 347 -Width 250
-$InstanceBox.Text = "mine-001"
-$PortBox = Add-TextField -LabelText "本机端口" -Y 380 -Width 120
+# Technical paths and fingerprints are populated only from the signed handover
+# manifest. They deliberately have no manual-entry controls in the current
+# clean-install workflow.
+$BundleBox = New-Object Windows.Forms.TextBox
+$TrustKeyBox = New-Object Windows.Forms.TextBox
+$TrustHashBox = New-Object Windows.Forms.TextBox
+$IssuerKeyIdBox = New-Object Windows.Forms.TextBox
+$CaBox = New-Object Windows.Forms.TextBox
+$CaHashBox = New-Object Windows.Forms.TextBox
+
+Add-SectionLabel -Text "二、确认本机实例" -Y 240
+$InstanceBox = Add-TextField -LabelText "实例名（交付包指定）" -Y 267 -Width 250
+$InstanceBox.ReadOnly = $true
+$PortBox = Add-TextField -LabelText "本机端口" -Y 300 -Width 120
 $PortBox.Text = "8090"
 
-$ModeLabel = New-Object Windows.Forms.Label
-$ModeLabel.Text = "操作模式"
-$ModeLabel.Location = New-Object Drawing.Point(468, 351)
-$ModeLabel.Size = New-Object Drawing.Size(110, 24)
-$Form.Controls.Add($ModeLabel)
-$ModeBox = New-Object Windows.Forms.ComboBox
-$ModeBox.Location = New-Object Drawing.Point(585, 347)
-$ModeBox.Size = New-Object Drawing.Size(285, 25)
-$ModeBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
-[void]$ModeBox.Items.Add("首次创建新实例")
-[void]$ModeBox.Items.Add("安全更新现有实例")
-$ModeBox.SelectedIndex = 0
-$Form.Controls.Add($ModeBox)
-
-Add-SectionLabel -Text "三、设置四眼复核账号" -Y 420
-$PreparerIdBox = Add-TextField -LabelText "经办人登录名" -Y 447 -Width 250
+Add-SectionLabel -Text "三、设置四眼复核账号" -Y 340
+$PreparerIdBox = Add-TextField -LabelText "经办人登录名" -Y 367 -Width 250
 $PreparerIdBox.Text = "preparer"
-$PreparerNameBox = Add-TextField -LabelText "经办人姓名" -Y 480 -Width 250
-$PreparerPasswordBox = Add-TextField -LabelText "经办人密码" -Y 513 `
+$PreparerNameBox = Add-TextField -LabelText "经办人姓名" -Y 400 -Width 250
+$PreparerPasswordBox = Add-TextField -LabelText "经办人密码" -Y 433 `
     -Width 250 -Password
-$PreparerConfirmBox = Add-TextField -LabelText "再次输入" -Y 546 `
+$PreparerConfirmBox = Add-TextField -LabelText "再次输入" -Y 466 `
     -Width 250 -Password
 
 $ReviewerIdLabel = New-Object Windows.Forms.Label
 $ReviewerIdLabel.Text = "复核人登录名"
-$ReviewerIdLabel.Location = New-Object Drawing.Point(468, 451)
+$ReviewerIdLabel.Location = New-Object Drawing.Point(468, 371)
 $ReviewerIdLabel.Size = New-Object Drawing.Size(110, 24)
 $Form.Controls.Add($ReviewerIdLabel)
 $ReviewerIdBox = New-Object Windows.Forms.TextBox
-$ReviewerIdBox.Location = New-Object Drawing.Point(585, 447)
+$ReviewerIdBox.Location = New-Object Drawing.Point(585, 367)
 $ReviewerIdBox.Size = New-Object Drawing.Size(285, 25)
 $ReviewerIdBox.Text = "reviewer"
 $Form.Controls.Add($ReviewerIdBox)
 
 $ReviewerNameLabel = New-Object Windows.Forms.Label
 $ReviewerNameLabel.Text = "复核人姓名"
-$ReviewerNameLabel.Location = New-Object Drawing.Point(468, 484)
+$ReviewerNameLabel.Location = New-Object Drawing.Point(468, 404)
 $ReviewerNameLabel.Size = New-Object Drawing.Size(110, 24)
 $Form.Controls.Add($ReviewerNameLabel)
 $ReviewerNameBox = New-Object Windows.Forms.TextBox
-$ReviewerNameBox.Location = New-Object Drawing.Point(585, 480)
+$ReviewerNameBox.Location = New-Object Drawing.Point(585, 400)
 $ReviewerNameBox.Size = New-Object Drawing.Size(285, 25)
 $Form.Controls.Add($ReviewerNameBox)
 
 $ReviewerPasswordLabel = New-Object Windows.Forms.Label
 $ReviewerPasswordLabel.Text = "复核人密码"
-$ReviewerPasswordLabel.Location = New-Object Drawing.Point(468, 517)
+$ReviewerPasswordLabel.Location = New-Object Drawing.Point(468, 437)
 $ReviewerPasswordLabel.Size = New-Object Drawing.Size(110, 24)
 $Form.Controls.Add($ReviewerPasswordLabel)
 $ReviewerPasswordBox = New-Object Windows.Forms.TextBox
-$ReviewerPasswordBox.Location = New-Object Drawing.Point(585, 513)
+$ReviewerPasswordBox.Location = New-Object Drawing.Point(585, 433)
 $ReviewerPasswordBox.Size = New-Object Drawing.Size(285, 25)
 $ReviewerPasswordBox.UseSystemPasswordChar = $true
 $Form.Controls.Add($ReviewerPasswordBox)
 
 $ReviewerConfirmLabel = New-Object Windows.Forms.Label
 $ReviewerConfirmLabel.Text = "再次输入"
-$ReviewerConfirmLabel.Location = New-Object Drawing.Point(468, 550)
+$ReviewerConfirmLabel.Location = New-Object Drawing.Point(468, 470)
 $ReviewerConfirmLabel.Size = New-Object Drawing.Size(110, 24)
 $Form.Controls.Add($ReviewerConfirmLabel)
 $ReviewerConfirmBox = New-Object Windows.Forms.TextBox
-$ReviewerConfirmBox.Location = New-Object Drawing.Point(585, 546)
+$ReviewerConfirmBox.Location = New-Object Drawing.Point(585, 466)
 $ReviewerConfirmBox.Size = New-Object Drawing.Size(285, 25)
 $ReviewerConfirmBox.UseSystemPasswordChar = $true
 $Form.Controls.Add($ReviewerConfirmBox)
@@ -343,49 +325,49 @@ $Form.Controls.Add($ReviewerConfirmBox)
 $PasswordHint = New-Object Windows.Forms.Label
 $PasswordHint.Text = "正式密码至少 12 位，并至少包含大写、小写、数字、符号中的三类；两人密码必须不同。"
 $PasswordHint.ForeColor = $Muted
-$PasswordHint.Location = New-Object Drawing.Point(28, 580)
+$PasswordHint.Location = New-Object Drawing.Point(28, 500)
 $PasswordHint.Size = New-Object Drawing.Size(840, 24)
 $Form.Controls.Add($PasswordHint)
 
 $VerificationCodeLabel = New-Object Windows.Forms.Label
 $VerificationCodeLabel.Text = "独立核验码"
-$VerificationCodeLabel.Location = New-Object Drawing.Point(28, 608)
+$VerificationCodeLabel.Location = New-Object Drawing.Point(28, 528)
 $VerificationCodeLabel.Size = New-Object Drawing.Size(90, 24)
 $Form.Controls.Add($VerificationCodeLabel)
 $VerificationCodeBox = New-Object Windows.Forms.TextBox
-$VerificationCodeBox.Location = New-Object Drawing.Point(122, 604)
+$VerificationCodeBox.Location = New-Object Drawing.Point(122, 524)
 $VerificationCodeBox.Size = New-Object Drawing.Size(125, 25)
 $VerificationCodeBox.MaxLength = 12
 $Form.Controls.Add($VerificationCodeBox)
-$IndependentApprovalCheck = New-Object Windows.Forms.CheckBox
-$IndependentApprovalCheck.Text = "核验码来自企业交付介质之外的监管方渠道"
-$IndependentApprovalCheck.Location = New-Object Drawing.Point(260, 604)
-$IndependentApprovalCheck.Size = New-Object Drawing.Size(610, 27)
-$IndependentApprovalCheck.ForeColor = $Red
-$Form.Controls.Add($IndependentApprovalCheck)
+$VerificationHint = New-Object Windows.Forms.Label
+$VerificationHint.Text = "从电话、纸质审批单等交付介质之外的渠道取得"
+$VerificationHint.Location = New-Object Drawing.Point(260, 528)
+$VerificationHint.Size = New-Object Drawing.Size(610, 24)
+$VerificationHint.ForeColor = $Muted
+$Form.Controls.Add($VerificationHint)
 
 $StatusBox = New-Object Windows.Forms.TextBox
-$StatusBox.Location = New-Object Drawing.Point(28, 632)
-$StatusBox.Size = New-Object Drawing.Size(842, 45)
+$StatusBox.Location = New-Object Drawing.Point(28, 552)
+$StatusBox.Size = New-Object Drawing.Size(842, 58)
 $StatusBox.Multiline = $true
 $StatusBox.ReadOnly = $true
 $StatusBox.ScrollBars = "Vertical"
-$StatusBox.Text = "尚未导入。首次创建不覆盖实例；已有实例只能在显式更新模式中事务更新。"
+$StatusBox.Text = "先选择监管端生成的完整企业交付目录。当前向导只创建新实例，不提供旧版升级入口。"
 $Form.Controls.Add($StatusBox)
 
 $ImportButton = New-Object Windows.Forms.Button
-$ImportButton.Text = "导入、锁定配置并执行正式预检"
-$ImportButton.Location = New-Object Drawing.Point(568, 690)
-$ImportButton.Size = New-Object Drawing.Size(302, 38)
+$ImportButton.Text = "导入配置并继续安装服务"
+$ImportButton.Location = New-Object Drawing.Point(452, 624)
+$ImportButton.Size = New-Object Drawing.Size(418, 38)
 $ImportButton.BackColor = $Green
 $ImportButton.ForeColor = [Drawing.Color]::White
 $ImportButton.FlatStyle = "Flat"
 $Form.Controls.Add($ImportButton)
 
 $ServiceInstallButton = New-Object Windows.Forms.Button
-$ServiceInstallButton.Text = "安装并启动正式服务…"
-$ServiceInstallButton.Location = New-Object Drawing.Point(28, 690)
-$ServiceInstallButton.Size = New-Object Drawing.Size(410, 38)
+$ServiceInstallButton.Text = "仅安装或修复正式服务…"
+$ServiceInstallButton.Location = New-Object Drawing.Point(28, 624)
+$ServiceInstallButton.Size = New-Object Drawing.Size(300, 38)
 $ServiceInstallButton.BackColor = [Drawing.Color]::FromArgb(43, 93, 152)
 $ServiceInstallButton.ForeColor = [Drawing.Color]::White
 $ServiceInstallButton.FlatStyle = "Flat"
@@ -393,47 +375,10 @@ $Form.Controls.Add($ServiceInstallButton)
 
 $CloseButton = New-Object Windows.Forms.Button
 $CloseButton.Text = "关闭"
-$CloseButton.Location = New-Object Drawing.Point(455, 690)
+$CloseButton.Location = New-Object Drawing.Point(340, 624)
 $CloseButton.Size = New-Object Drawing.Size(100, 38)
 $CloseButton.Add_Click({ $Form.Close() })
 $Form.Controls.Add($CloseButton)
-
-function Update-OperationModeUi {
-    $IsUpdate = $ModeBox.SelectedIndex -eq 1
-    foreach ($Control in @(
-            $PortBox, $PreparerIdBox, $PreparerNameBox,
-            $PreparerPasswordBox, $PreparerConfirmBox,
-            $ReviewerIdBox, $ReviewerNameBox,
-            $ReviewerPasswordBox, $ReviewerConfirmBox
-        )) { $Control.Enabled = -not $IsUpdate }
-    if ($IsUpdate) {
-        $PreparerPasswordBox.Clear()
-        $PreparerConfirmBox.Clear()
-        $ReviewerPasswordBox.Clear()
-        $ReviewerConfirmBox.Clear()
-        $ImportButton.Text = "安全更新实例并执行正式预检"
-        $PasswordHint.Text = "更新只替换受管通信配置和 CA，不重建账号、数据库、端口或业务数据；失败自动回滚。"
-    }
-    else {
-        $ImportButton.Text = "导入、锁定配置并执行正式预检"
-        $PasswordHint.Text = "正式密码至少 12 位，并至少包含大写、小写、数字、符号中的三类；两人密码必须不同。"
-    }
-}
-$ModeBox.Add_SelectedIndexChanged({ Update-OperationModeUi })
-Update-OperationModeUi
-
-function Set-HandoverFieldsReadOnly {
-    param([bool]$Locked)
-    foreach ($Box in @(
-            $BundleBox, $TrustKeyBox, $TrustHashBox, $IssuerKeyIdBox,
-            $CaBox, $CaHashBox, $InstanceBox
-        )) {
-        $Box.ReadOnly = $Locked
-        if ($Box.Tag -is [Windows.Forms.Button]) {
-            $Box.Tag.Enabled = -not $Locked
-        }
-    }
-}
 
 function Resolve-HandoverArtifact {
     param([string]$Directory, [string]$FileName, [string]$Label)
@@ -506,32 +451,6 @@ function Test-FixedTimeCode {
     return $Difference -eq 0
 }
 
-function Get-ManualHandoverCheckCode {
-    if (-not (Test-Path -LiteralPath $BundleBox.Text -PathType Leaf)) {
-        throw "企业接入包不存在，无法核验独立码。"
-    }
-    $Item = Get-Item -LiteralPath $BundleBox.Text -Force
-    if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        $Item.Length -le 0 -or $Item.Length -gt 4194304) {
-        throw "企业接入包必须是 1-4 MiB 的普通文件。"
-    }
-    try {
-        $Bundle = Get-Content -LiteralPath $BundleBox.Text -Raw `
-            -Encoding UTF8 | ConvertFrom-Json
-    }
-    catch { throw "企业接入包不是有效 JSON，无法核验独立码。" }
-    $PairId = [string]$Bundle.protected.pair_id
-    $BundleIssuerKeyId = [string]$Bundle.protected.issuer_key_id
-    if (-not [string]::Equals(
-            $BundleIssuerKeyId, $IssuerKeyIdBox.Text,
-            [StringComparison]::Ordinal)) {
-        throw "接入包 issuer key ID 与输入值不一致。"
-    }
-    return Get-HandoverCheckCode -PairId $PairId `
-        -IssuerKeyId $BundleIssuerKeyId -SpkiSha256 $TrustHashBox.Text `
-        -CaSha256 $CaHashBox.Text
-}
-
 function Import-EnterpriseHandoverDirectory {
     param([string]$Directory)
     if ([string]::IsNullOrWhiteSpace($Directory) -or
@@ -569,6 +488,9 @@ function Import-EnterpriseHandoverDirectory {
         [bool]$Manifest.secrets_disclosed) {
         throw "企业安装交接清单版本或无秘密声明无效。"
     }
+    if ([int]$Manifest.profile_version -ne 1) {
+        throw "当前向导只接受新装配置（profile_version 必须为 1）。"
+    }
     $TrustHash = ([string]$Manifest.issuer_public_key_sha256).ToLowerInvariant()
     $CaHash = ([string]$Manifest.platform_ca_sha256).ToLowerInvariant()
     $IssuerKeyId = [string]$Manifest.issuer_key_id
@@ -595,22 +517,17 @@ function Import-EnterpriseHandoverDirectory {
     $CaBox.Text = $CaPath
     $CaHashBox.Text = $CaHash
     $InstanceBox.Text = $InstanceName
+    $HandoverDirectoryBox.Text = $Directory
     $script:ExpectedHandoverCheckCode = Get-HandoverCheckCode `
         -PairId ([string]$Manifest.pair_id) -IssuerKeyId $IssuerKeyId `
         -SpkiSha256 $TrustHash -CaSha256 $CaHash
-    $ExistingInstancePath = Join-Path $StateRoot $InstanceName
-    if ([int]$Manifest.profile_version -gt 1 -or
-        (Test-Path -LiteralPath $ExistingInstancePath -PathType Container)) {
-        $ModeBox.SelectedIndex = 1
-    }
-    else { $ModeBox.SelectedIndex = 0 }
-    Set-HandoverFieldsReadOnly -Locked $true
-    $IndependentApprovalCheck.Checked = $false
     $StatusBox.ForeColor = $Muted
+    $HandoverSummaryBox.Text = (
+        "已读取：$($Manifest.mine_name)（$($Manifest.mine_id)）`r`n" +
+        "实例：$InstanceName；签发 key ID：$IssuerKeyId"
+    )
     $StatusBox.Text = (
-        "已自动加载企业交付清单：$ManifestPath`r`n" +
-        "pair_id=$($Manifest.pair_id)，profile_version=$($Manifest.profile_version)。" +
-        "仍须从交付介质之外取得监管方 12 位独立核验码；激活码也必须从另一渠道另选。"
+        "企业交付材料已自动核对并加载。请另选激活码，填写账号和监管方 12 位独立核验码。"
     )
 }
 
@@ -634,14 +551,6 @@ $LoadHandoverButton.Add_Click({
     }
     finally { $Dialog.Dispose() }
 })
-$ManualEntryButton.Add_Click({
-    Set-HandoverFieldsReadOnly -Locked $false
-    $script:ExpectedHandoverCheckCode = ""
-    $IndependentApprovalCheck.Checked = $false
-    $StatusBox.ForeColor = $Muted
-    $StatusBox.Text = "已切换为手工填写。仍须从交付介质之外取得监管方独立核验码；激活码另渠道选择。"
-})
-
 function Get-InstalledAgentServiceTrustMode {
     $MetadataRoot = Join-Path $InstallRoot "release-metadata"
     $ManifestPath = Join-Path $MetadataRoot "release-manifest.json"
@@ -705,7 +614,7 @@ function Show-FormalServiceInstallDialog {
 
     $ServiceDialog = New-Object Windows.Forms.Form
     $ServiceDialog.Text = "安装并启动 MineGuard 正式服务"
-    $ServiceDialog.ClientSize = New-Object Drawing.Size(720, 370)
+    $ServiceDialog.ClientSize = New-Object Drawing.Size(720, 325)
     $ServiceDialog.StartPosition = "CenterParent"
     $ServiceDialog.FormBorderStyle = `
         [Windows.Forms.FormBorderStyle]::FixedDialog
@@ -787,26 +696,15 @@ function Show-FormalServiceInstallDialog {
     $ServiceNote.Size = New-Object Drawing.Size(660, 48)
     $ServiceDialog.Controls.Add($ServiceNote)
 
-    $ServiceApprovalCheck = New-Object Windows.Forms.CheckBox
-    $ServiceApprovalCheck.Text = if ($InternalUnsignedMode) {
-        "确认两个 SHA-256 已通过独立渠道核对，理解无发布者签名风险，并立即启动和健康检查"
-    } else {
-        "确认两个核验值来自介质外审批记录，并同意安装后立即启动和健康检查"
-    }
-    $ServiceApprovalCheck.ForeColor = $Red
-    $ServiceApprovalCheck.Location = New-Object Drawing.Point(26, 270)
-    $ServiceApprovalCheck.Size = New-Object Drawing.Size(658, 27)
-    $ServiceDialog.Controls.Add($ServiceApprovalCheck)
-
     $ServiceCancelButton = New-Object Windows.Forms.Button
     $ServiceCancelButton.Text = "取消"
-    $ServiceCancelButton.Location = New-Object Drawing.Point(400, 316)
+    $ServiceCancelButton.Location = New-Object Drawing.Point(400, 276)
     $ServiceCancelButton.Size = New-Object Drawing.Size(90, 34)
     $ServiceCancelButton.DialogResult = [Windows.Forms.DialogResult]::Cancel
     $ServiceDialog.Controls.Add($ServiceCancelButton)
     $InstallServiceNowButton = New-Object Windows.Forms.Button
     $InstallServiceNowButton.Text = "安装、启动并健康检查"
-    $InstallServiceNowButton.Location = New-Object Drawing.Point(502, 316)
+    $InstallServiceNowButton.Location = New-Object Drawing.Point(502, 276)
     $InstallServiceNowButton.Size = New-Object Drawing.Size(182, 34)
     $InstallServiceNowButton.BackColor = $Green
     $InstallServiceNowButton.ForeColor = [Drawing.Color]::White
@@ -835,9 +733,6 @@ function Show-FormalServiceInstallDialog {
         $InstallServiceNowButton.Enabled = $false
         $ServiceDialog.UseWaitCursor = $true
         try {
-            if (-not $ServiceApprovalCheck.Checked) {
-                throw "必须确认两个核验值来自介质外审批记录并接受当前发行模式。"
-            }
             if (-not (Test-Path -LiteralPath $WinSWBox.Text -PathType Leaf)) {
                 throw "请选择已复制到本机固定 NTFS 目录的 WinSW 可执行文件。"
             }
@@ -957,127 +852,97 @@ $ImportButton.Add_Click({
     $ImportButton.Enabled = $false
     $Form.UseWaitCursor = $true
     $StatusBox.ForeColor = $Muted
-    $IsUpdate = $ModeBox.SelectedIndex -eq 1
-    $StatusBox.Text = if ($IsUpdate) {
-        "正在离线验签、停止本实例服务并执行可回滚配置更新，请稍候..."
-    } else {
-        "正在离线验签、解密、创建实例并执行正式配置预检，请稍候..."
-    }
+    $StatusBox.Text = "正在离线验签、解密、创建实例并执行正式配置预检，请稍候..."
     $Form.Refresh()
     $PreparerSecure = $null
     $PreparerConfirmSecure = $null
     $ReviewerSecure = $null
     $ReviewerConfirmSecure = $null
     try {
-        if (-not $IndependentApprovalCheck.Checked) {
-            throw "必须确认独立核验码来自企业交付介质之外的监管方渠道。"
+        if ([string]::IsNullOrWhiteSpace(
+                $script:ExpectedHandoverCheckCode)) {
+            throw "请先选择监管端生成的完整企业交付目录。"
         }
         $ActualCheckCode = $VerificationCodeBox.Text.Trim().ToLowerInvariant()
         $VerificationCodeBox.Clear()
         if ($ActualCheckCode -notmatch '^[a-f0-9]{12}$') {
             throw "独立核验码必须是监管方另行告知的 12 位小写十六进制。"
         }
-        $ExpectedCheckCode = if (
-            [string]::IsNullOrWhiteSpace($script:ExpectedHandoverCheckCode)
-        ) { Get-ManualHandoverCheckCode } else {
-            $script:ExpectedHandoverCheckCode
-        }
+        $ExpectedCheckCode = $script:ExpectedHandoverCheckCode
         if (-not (Test-FixedTimeCode -Actual $ActualCheckCode `
                 -Expected $ExpectedCheckCode)) {
             $ActualCheckCode = $null
             throw "独立核验码不匹配；请停止导入并联系监管方重新核对交付材料。"
         }
         $ActualCheckCode = $null
-        if ($IsUpdate) {
-            $Result = & $UpdateScript `
-                -BundlePath $BundleBox.Text `
-                -ActivationCodeFile $ActivationBox.Text `
-                -TrustKeyPath $TrustKeyBox.Text `
-                -ExpectedTrustKeySha256 $TrustHashBox.Text `
-                -ExpectedIssuerKeyId $IssuerKeyIdBox.Text `
-                -CaSourcePath $CaBox.Text `
-                -ExpectedCaSha256 $CaHashBox.Text `
-                -InstanceName $InstanceBox.Text `
-                -InstallRoot $InstallRoot `
-                -StateRoot $StateRoot
+        if ([string]::IsNullOrWhiteSpace($PreparerPasswordBox.Text) -or
+            [string]::IsNullOrWhiteSpace($ReviewerPasswordBox.Text)) {
+            throw "请填写经办人和复核人密码。"
         }
-        else {
-            if ([string]::IsNullOrWhiteSpace($PreparerPasswordBox.Text) -or
-                [string]::IsNullOrWhiteSpace($ReviewerPasswordBox.Text)) {
-                throw "请填写经办人和复核人密码。"
-            }
-            $PreparerSecure = ConvertTo-SecureString $PreparerPasswordBox.Text `
-                -AsPlainText -Force
-            $PreparerConfirmSecure = ConvertTo-SecureString $PreparerConfirmBox.Text `
-                -AsPlainText -Force
-            $ReviewerSecure = ConvertTo-SecureString $ReviewerPasswordBox.Text `
-                -AsPlainText -Force
-            $ReviewerConfirmSecure = ConvertTo-SecureString $ReviewerConfirmBox.Text `
-                -AsPlainText -Force
-            $PreparerPasswordBox.Clear()
-            $PreparerConfirmBox.Clear()
-            $ReviewerPasswordBox.Clear()
-            $ReviewerConfirmBox.Clear()
-            $Result = & $ImportScript `
-                -BundlePath $BundleBox.Text `
-                -ActivationCodeFile $ActivationBox.Text `
-                -TrustKeyPath $TrustKeyBox.Text `
-                -ExpectedTrustKeySha256 $TrustHashBox.Text `
-                -ExpectedIssuerKeyId $IssuerKeyIdBox.Text `
-                -CaSourcePath $CaBox.Text `
-                -ExpectedCaSha256 $CaHashBox.Text `
-                -InstanceName $InstanceBox.Text `
-                -Port ([int]$PortBox.Text) `
-                -PreparerActorId $PreparerIdBox.Text `
-                -PreparerName $PreparerNameBox.Text `
-                -PreparerPassword $PreparerSecure `
-                -PreparerPasswordConfirmation $PreparerConfirmSecure `
-                -ReviewerActorId $ReviewerIdBox.Text `
-                -ReviewerName $ReviewerNameBox.Text `
-                -ReviewerPassword $ReviewerSecure `
-                -ReviewerPasswordConfirmation $ReviewerConfirmSecure `
-                -InstallRoot $InstallRoot `
-                -StateRoot $StateRoot
+        $Port = 0
+        if (-not [int]::TryParse($PortBox.Text, [ref]$Port) -or
+            $Port -lt 1 -or $Port -gt 65535) {
+            throw "本机端口必须是 1-65535 的整数。"
         }
-        $Summary = @($Result | ForEach-Object { [string]$_ }) -join `
-            [Environment]::NewLine
-        $StatusBox.Text = if ([string]::IsNullOrWhiteSpace($Summary)) {
-            if ($IsUpdate) {
-                "现有实例已安全更新，账号、数据库和业务数据未改动。"
-            } else { "企业接入包已导入并通过正式预检。" }
-        } else { $Summary }
-        if (-not $IsUpdate) {
-            $StatusBox.Text += (
-                "`r`n当前只完成实例配置和正式预检，尚未启动或安装 Windows 服务。" +
-                "准备好批准材料后，可点击左下角安装并启动正式服务。"
-            )
-        }
-        $StatusBox.ForeColor = $Green
-        $SuccessMessage = if ($IsUpdate) {
-            "更新完成。受管配置已事务切换并通过正式预检；原服务状态已恢复。"
-        } else {
-            "配置完成，接入包身份已锁定且正式预检通过；当前尚未启动。准备好批准材料后，可点击左下角安装并启动正式服务。"
-        }
-        [void][Windows.Forms.MessageBox]::Show(
-            $SuccessMessage,
-            "MineGuard 企业接入配置向导",
-            [Windows.Forms.MessageBoxButtons]::OK,
-            [Windows.Forms.MessageBoxIcon]::Information
-        )
-    }
-    catch {
-        $VerificationCodeBox.Clear()
-        $IndependentApprovalCheck.Checked = $false
+        $PreparerSecure = ConvertTo-SecureString $PreparerPasswordBox.Text `
+            -AsPlainText -Force
+        $PreparerConfirmSecure = ConvertTo-SecureString $PreparerConfirmBox.Text `
+            -AsPlainText -Force
+        $ReviewerSecure = ConvertTo-SecureString $ReviewerPasswordBox.Text `
+            -AsPlainText -Force
+        $ReviewerConfirmSecure = ConvertTo-SecureString $ReviewerConfirmBox.Text `
+            -AsPlainText -Force
         $PreparerPasswordBox.Clear()
         $PreparerConfirmBox.Clear()
         $ReviewerPasswordBox.Clear()
         $ReviewerConfirmBox.Clear()
-        $StatusBox.Text = if ($IsUpdate) {
-            "更新失败；安全脚本已尝试回滚并恢复原服务状态。`r`n" +
-                $_.Exception.Message
-        } else {
-            "导入失败，未覆盖任何现有实例。`r`n" + $_.Exception.Message
+        $Result = & $ImportScript `
+            -BundlePath $BundleBox.Text `
+            -ActivationCodeFile $ActivationBox.Text `
+            -TrustKeyPath $TrustKeyBox.Text `
+            -ExpectedTrustKeySha256 $TrustHashBox.Text `
+            -ExpectedIssuerKeyId $IssuerKeyIdBox.Text `
+            -CaSourcePath $CaBox.Text `
+            -ExpectedCaSha256 $CaHashBox.Text `
+            -InstanceName $InstanceBox.Text `
+            -Port $Port `
+            -PreparerActorId $PreparerIdBox.Text `
+            -PreparerName $PreparerNameBox.Text `
+            -PreparerPassword $PreparerSecure `
+            -PreparerPasswordConfirmation $PreparerConfirmSecure `
+            -ReviewerActorId $ReviewerIdBox.Text `
+            -ReviewerName $ReviewerNameBox.Text `
+            -ReviewerPassword $ReviewerSecure `
+            -ReviewerPasswordConfirmation $ReviewerConfirmSecure `
+            -InstallRoot $InstallRoot `
+            -StateRoot $StateRoot
+        $Summary = @($Result | ForEach-Object { [string]$_ }) -join `
+            [Environment]::NewLine
+        $StatusBox.Text = if ([string]::IsNullOrWhiteSpace($Summary)) {
+            "企业接入包已导入并通过正式预检。"
+        } else { $Summary }
+        $StatusBox.Text += "`r`n配置完成；正在继续打开正式服务安装。"
+        $StatusBox.ForeColor = $Green
+        $Form.UseWaitCursor = $false
+        try {
+            Show-FormalServiceInstallDialog -InstanceName $InstanceBox.Text
         }
+        catch {
+            $StatusBox.Text += (
+                "`r`n配置已完成，但正式服务安装窗口未能打开：" +
+                $_.Exception.Message
+            )
+            $StatusBox.ForeColor = $Red
+        }
+    }
+    catch {
+        $VerificationCodeBox.Clear()
+        $PreparerPasswordBox.Clear()
+        $PreparerConfirmBox.Clear()
+        $ReviewerPasswordBox.Clear()
+        $ReviewerConfirmBox.Clear()
+        $StatusBox.Text = "导入失败，未覆盖任何现有实例。`r`n" + `
+            $_.Exception.Message
         $StatusBox.ForeColor = $Red
         [void][Windows.Forms.MessageBox]::Show(
             $StatusBox.Text,

@@ -100,7 +100,10 @@ def _sha256_file(path: Path) -> tuple[str, int]:
 
 
 def _fsync_file(path: Path) -> None:
-    with path.open("rb") as stream:
+    # Windows' CRT rejects fsync/_commit on a read-only descriptor.  The file
+    # is already complete; open it read/write only to issue the durability
+    # barrier before publishing the backup generation.
+    with path.open("r+b") as stream:
         os.fsync(stream.fileno())
 
 

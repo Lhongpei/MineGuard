@@ -51,13 +51,15 @@
     <p>演示账号是 <code>admin</code>，密码是 <code>123123123</code>。它只监听本机、只供展示，
       不得用于正式运行、企业报送或监管认定。Internet Explorer 不受支持；未安装 Edge/Chrome
       时，控制中心会显示地址和提示，而不会用 IE 打开空白页面。</p>
-    <h3>配置正式内网环境</h3>
-    <p>选择“正式内网配置”，依次选择经批准的 <code>clients.json</code>、专用状态数据目录和
-      本机端口，填写管理员账号及两遍密码；<strong>INTERNAL-UNSIGNED</strong> 安装正式服务时，还要准备介质外取得的 Platform 子发行清单 SHA-256 和 WinSW SHA-256。单位 HTTPS 反向代理已就绪时，再填写领导端 HTTPS
-      地址；地址必须以 <code>https://</code> 开头，且不能包含账号口令、查询参数或片段。
-      该地址只用于本次安全打开浏览器，不会替管理员配置反向代理，也不会持久保存。
-      正式密码不能使用 <code>123123123</code>。控制中心不会把密码写进命令行或运行日志；
-      非敏感运行记录保存在受保护的 <code>logs\control-center-*.log</code>。</p>
+    <h3>配置正式环境（内网和公网）</h3>
+    <p>从开始菜单打开“MineGuard 企业接入包与注册向导”：首次只设置签发密钥口令；然后填写
+      煤矿、企业、比较组、企业端 HTTPS 地址、监管端 HTTPS 地址并选择企业交付根目录。技术
+      ID、实例名、版本号和政府保管目录自动生成。生成后向导会自动切到监管导入页并带入
+      <code>.mgreg</code>、Platform 激活码和签发信任，只需设置首次管理员密码。</p>
+    <p>内网与公网应使用同一个 HTTPS FQDN：公网 DNS 指向公网入口/NAT，内网 DNS 把同一域名
+      解析到私网入口。当前单实例不支持用两个不同 Host/Origin 分别代表内外网。
+      <strong>INTERNAL-UNSIGNED</strong> 安装正式服务时，还要准备介质外取得的 Platform 子发行
+      清单 SHA-256 和 WinSW SHA-256。正式密码不能使用 <code>123123123</code>；密码不会写进命令行或日志。</p>
     <p>控制中心启动的是前台验收进程：窗口保持打开才会继续运行，关闭窗口会先询问并停止本次
       启动。正式长期运行仍应由管理员使用单位批准并核验过的 WinSW 安装 Windows 服务。</p>
     <details>
@@ -76,13 +78,13 @@
   <section class="card">
     <h2>企业侧 Agent（一矿一智能体）</h2>
     <ol>
-      <li>从开始菜单打开“MineGuard 企业接入配置向导”，加载监管端为本矿生成的完整企业交付目录。</li>
-      <li>从另一受控渠道选择激活码，核对独立审批摘要，填写实例名、空闲端口及经办/复核两个具名账号。</li>
+      <li>从开始菜单打开“MineGuard 企业接入配置向导”，选择监管端为本矿生成的完整企业交付目录。</li>
+      <li>从另一受控渠道选择激活码，输入监管方另行告知的 12 位核验码，再填写空闲端口及经办/复核两个具名账号；实例名和信任参数自动读取。</li>
       <li>向导验签、解密并原子发布矿井身份、政府地址和两把不同的交换密钥；现场人员不手写这些值。</li>
-      <li>配置通过后，在同一向导中选择已批准的 WinSW。签名版输入介质外取得的 Agent 签名者指纹；<strong>INTERNAL-UNSIGNED</strong> 版输入介质外取得的 Agent 子发行清单 SHA-256。两种模式都必须输入 WinSW SHA-256，向导会自动显示正确字段。</li>
+      <li>配置通过后会自动进入正式服务安装，在同一向导中选择已批准的 WinSW。签名版输入介质外取得的 Agent 签名者指纹；<strong>INTERNAL-UNSIGNED</strong> 版输入介质外取得的 Agent 子发行清单 SHA-256。两种模式都必须输入 WinSW SHA-256，向导会自动显示正确字段。</li>
       <li>需要模型能力时，另开“MineGuard 模型授权导入向导”，分别选择本矿 <code>.mgllm</code> 和另一渠道交付的激活码。正式实例禁止在 <code>agent.env</code> 中填写 API Key、模型地址或信任库；未导入模型授权不影响核心报送与监管算法。</li>
     </ol>
-    <p>以下命令只作为高级兼容入口；普通现场部署应使用上述图形向导：</p>
+    <p>以下命令只作为高级自动化入口；普通现场部署应使用上述图形向导：</p>
     <pre>Set-Location 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
 .\New-EnterpriseAgentInstance.ps1 `
   -InstanceName qinyuan-001 -MineId MINE-QY-001 `
