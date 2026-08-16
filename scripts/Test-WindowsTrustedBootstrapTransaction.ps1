@@ -1303,12 +1303,9 @@ $fixedShortcutPaths = @(
     $platformGroupShortcut,
     (Join-Path $shortcutGroup 'MineGuard 企业接入包与注册向导.lnk'),
     (Join-Path $shortcutGroup 'MineGuard Platform 使用与部署说明.lnk'),
-    (Join-Path $shortcutGroup `
-        'MineGuard Enterprise Agent deployment guide.lnk'),
     (Join-Path $shortcutGroup 'MineGuard 企业接入配置向导.lnk'),
     (Join-Path $shortcutGroup 'MineGuard 模型授权导入向导.lnk'),
-    (Join-Path $shortcutGroup `
-        'Enterprise Agent operations console.lnk'),
+    (Join-Path $shortcutGroup 'MineGuard 企业端使用说明.lnk'),
     $platformDesktopShortcut
 )
 

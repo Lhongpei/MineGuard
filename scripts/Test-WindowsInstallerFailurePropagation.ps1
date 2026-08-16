@@ -484,10 +484,9 @@ function Get-WrapperShortcutPaths {
     }
     else {
         @(
-            "MineGuard Enterprise Agent deployment guide.lnk",
             "MineGuard 企业接入配置向导.lnk",
             "MineGuard 模型授权导入向导.lnk",
-            "Enterprise Agent operations console.lnk"
+            "MineGuard 企业端使用说明.lnk"
         )
     }
     $Paths = @($Names | ForEach-Object { Join-Path $Group $_ })
