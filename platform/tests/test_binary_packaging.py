@@ -132,6 +132,13 @@ def test_platform_nuitka_build_surface_has_a_pinned_traceable_contract() -> None
     assert "--mode=onefile" not in build
     assert "Invoke-WebRequest" not in build
 
+    # PowerShell 5.1 Copy-Item still hits MAX_PATH. Transaction directories
+    # must not repeat the long product/release name before the atomic rename.
+    assert "('.in-{0}' -f $publishToken)" in build
+    assert "('.prev-{0}' -f $publishToken)" in build
+    assert "'.fail-{0}' -f [Guid]::NewGuid().ToString('N')" in build
+    assert ".incoming.{1}" not in build
+
 
 def test_unsigned_platform_setup_requires_explicit_test_authorization() -> None:
     installer = PLATFORM_INNO.read_text(encoding="utf-8")

@@ -67,9 +67,7 @@ def _profile(
             "operating_regime": "normal-production",
         },
         "agent": {
-            "public_origin": f"https://agent-{mine_number:03d}.mine.internal",
             "platform_base_url": "https://mineguard.qinyuan.gov.cn",
-            "platform_ca_bundle": "C:\\MineGuardCertificates\\regulator-ca.pem",
             "reporting_timezone": "Asia/Shanghai",
         },
         "platform_identity": {
@@ -186,12 +184,21 @@ def test_registration_requires_external_spki_fingerprint_and_key_id(
         manifest["artifacts"]["issuer_public_key"]["spki_sha256"]
         == issuer["fingerprint"]
     )
-    handover = json.loads(
-        Path(str(pair["enterprise_handover_manifest"])).read_text(encoding="utf-8")
+    enterprise_package = json.loads(
+        Path(str(pair["agent_bundle"])).read_text(encoding="utf-8")
     )
-    assert set(handover["artifacts"]) == {"agent_bundle", "issuer_public_key"}
-    assert ".mgreg" not in json.dumps(handover).casefold()
-    assert "activation" not in json.dumps(handover).casefold()
+    assert enterprise_package["format"] == "mineguard-enterprise-access-package-v1"
+    assert set(enterprise_package) == {
+        "activation_code",
+        "agent_bundle",
+        "format",
+        "issuer_key_id",
+        "issuer_public_key_pem",
+        "issuer_public_key_sha256",
+    }
+    assert list(Path(str(pair["agent_bundle"])).parent.iterdir()) == [
+        Path(str(pair["agent_bundle"]))
+    ]
     assert pair["layout"] == "split-delivery-v1"
     assert pair["legacy_shared_layout"] is False
     delivery_parents = {
@@ -323,7 +330,7 @@ def test_product_cli_create_pair_uses_the_four_directory_interface(
     assert result["layout"] == "split-delivery-v1"
     assert result["legacy_shared_layout"] is False
     assert Path(result["issuer_public_key_file"]).parent == directories[
-        "--enterprise-bundle-directory"
+        "--platform-registration-directory"
     ]
     assert Path(result["platform_registration_bundle"]).parent == directories[
         "--platform-registration-directory"
@@ -413,14 +420,15 @@ def test_update_keeps_pair_and_subject_and_retains_immediately_prior_keys(
     )
     assert len(second_payload["client"]["message_keys"]) == 2
     assert len(second_payload["client"]["transport_secrets"]) == 2
+    enterprise_package = json.loads(
+        Path(str(second["agent_bundle"])).read_text(encoding="utf-8")
+    )
     _, agent_payload = decrypt_bundle(
-        json.loads(
-            Path(str(second["agent_bundle"])).read_text(encoding="utf-8")
+        enterprise_package["agent_bundle"],
+        activation_code=enterprise_package["activation_code"].encode("ascii"),
+        issuer_public_key=load_public_key(
+            enterprise_package["issuer_public_key_pem"].encode("ascii")
         ),
-        activation_code=read_secret_file(
-            str(second["agent_activation_file"]), label="activation"
-        ),
-        issuer_public_key=public_key,
         expected_kind=AGENT_BUNDLE_KIND,
     )
     assert (
@@ -490,9 +498,7 @@ def test_concurrent_registration_imports_do_not_lose_clients(
     ("mutation", "message"),
     [
         ("context_control", "governed non-placeholder"),
-        ("origin_control", "HTTPS URL"),
         ("invalid_port", "invalid port"),
-        ("ca_too_long", "absolute path"),
         ("placeholder_identity", "placeholder identifier"),
         ("placeholder_context", "governed non-placeholder"),
     ],
@@ -506,12 +512,8 @@ def test_profile_validation_fails_closed_before_writing_bundles(
     profile = _profile()
     if mutation == "context_control":
         profile["comparison_context"]["capacity_band"] = "band\nEVIL=value"
-    elif mutation == "origin_control":
-        profile["agent"]["public_origin"] = "https://agent.internal\nEVIL=value"
     elif mutation == "invalid_port":
         profile["agent"]["platform_base_url"] = "https://platform.internal:abc"
-    elif mutation == "ca_too_long":
-        profile["agent"]["platform_ca_bundle"] = "C:\\" + "a" * 1023
     elif mutation == "placeholder_identity":
         profile["subject"]["mine_id"] = "demo-mine-001"
     else:
@@ -533,19 +535,12 @@ def test_profile_validation_fails_closed_before_writing_bundles(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("public_origin", "https://AGENT-001.mine.internal"),
         ("platform_base_url", "https://mineguard.qinyuan.gov.cn:443"),
-        ("public_origin", "https://agent-001.mine.internal/%20"),
         ("platform_base_url", "https://mineguard.qinyuan.gov.cn/with path"),
-        ("public_origin", "https://agent-001.example.com"),
-        ("public_origin", "https://example.com"),
         ("platform_base_url", "https://service.example.net"),
         ("platform_base_url", "https://platform.example"),
-        ("public_origin", "https://224.0.0.1"),
         ("platform_base_url", "https://169.254.10.20"),
-        ("public_origin", "https://[ff02::1]"),
         ("platform_base_url", "https://0.0.0.0"),
-        ("public_origin", "https://agent-001.mine.internal:0"),
         ("platform_base_url", "https://[malformed"),
     ],
 )
@@ -561,25 +556,22 @@ def test_profile_rejects_noncanonical_or_unroutable_origins_before_signing(
         _create(tmp_path, issuer, profile, label=f"invalid-origin-{field}")
 
 
-def test_trailing_slash_origins_are_canonicalized_for_agent_import(
+def test_trailing_slash_platform_origin_is_canonicalized_for_agent_import(
     tmp_path: Path, issuer: dict[str, object]
 ) -> None:
     profile = _profile()
-    profile["agent"]["public_origin"] += "/"
     profile["agent"]["platform_base_url"] += "/"
     pair = _create(tmp_path, issuer, profile, label="canonical-origin")
+    package = json.loads(
+        Path(str(pair["agent_bundle"])).read_text(encoding="utf-8")
+    )
     _, payload = decrypt_bundle(
-        json.loads(Path(str(pair["agent_bundle"])).read_text(encoding="utf-8")),
-        activation_code=read_secret_file(
-            str(pair["agent_activation_file"]), label="activation"
-        ),
+        package["agent_bundle"],
+        activation_code=package["activation_code"].encode("ascii"),
         issuer_public_key=load_public_key(
-            Path(str(pair["issuer_public_key_file"])).read_bytes()
+            package["issuer_public_key_pem"].encode("ascii")
         ),
         expected_kind=AGENT_BUNDLE_KIND,
-    )
-    assert payload["config"]["ENTERPRISE_AGENT_PUBLIC_ORIGIN"] == (
-        "https://agent-001.mine.internal"
     )
     assert payload["config"]["PLATFORM_V3_BASE_URL"] == (
         "https://mineguard.qinyuan.gov.cn"
@@ -610,7 +602,7 @@ def test_contract_datetime_profile_version_and_ciphertext_boundaries(
     )
     fractional_envelope = json.loads(
         Path(str(fractional_pair["agent_bundle"])).read_text(encoding="utf-8")
-    )
+    )["agent_bundle"]
     assert fractional_envelope["protected"]["expires_at"].endswith(".123456Z")
 
     pair = _create(tmp_path, issuer, _profile(), label="contract-boundaries")

@@ -97,7 +97,6 @@ Source: "{#AssetsRoot}\Open-MineGuardEnterpriseAgentControlCenter.ps1"; DestDir:
 
 [Icons]
 Name: "{commonprograms}\MineGuard\MineGuard 企业接入配置向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardEnterpriseAgentControlCenter.ps1"" -InstallRoot ""{app}"""; WorkingDir: "{app}\launcher"
-Name: "{commonprograms}\MineGuard\MineGuard 模型授权导入向导"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\launcher\Open-MineGuardEnterpriseAgentControlCenter.ps1"" -InstallRoot ""{app}"" -ModelCredentials"; WorkingDir: "{app}\launcher"
 Name: "{commonprograms}\MineGuard\MineGuard 企业端使用说明"; Filename: "{app}\docs\Windows-binary-release-guide.html"
 
 [Run]

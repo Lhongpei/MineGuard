@@ -231,6 +231,29 @@ class OpenAICompatibleProvider:
         if capability not in self._allowed_capabilities:
             raise ProviderError("当前受管模型凭据未授权此项能力")
 
+    def test_connection(self) -> dict[str, str]:
+        """Perform one minimal authenticated request without exposing secrets."""
+
+        message = self._chat_message(
+            {
+                "model": self.config.model,
+                "temperature": 0,
+                "max_tokens": 4,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Reply with OK only.",
+                    }
+                ],
+            },
+            timeout_seconds=min(self.config.timeout_seconds, 15.0),
+            max_retries=0,
+        )
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ProviderError("模型连接测试返回了空内容")
+        return {"status": "ok", "model": self.config.model}
+
     def suggest_fields(
         self,
         *,

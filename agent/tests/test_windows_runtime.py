@@ -464,10 +464,7 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         "Install-EnterpriseAgent.ps1",
         "New-EnterpriseAgentInstance.ps1",
         "Import-EnterpriseAgentAccessPackage.ps1",
-        "Update-EnterpriseAgentAccessPackage.ps1",
         "Start-EnterpriseAgentProvisioningWizard.ps1",
-        "Import-EnterpriseAgentModelCredential.ps1",
-        "Start-EnterpriseAgentModelCredentialWizard.ps1",
         "Start-EnterpriseAgent.ps1",
         "Test-EnterpriseAgentHealth.ps1",
         "Install-EnterpriseAgentService.ps1",
@@ -486,16 +483,7 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         encoding="utf-8"
     )
     environment_template = (root / "agent.env.template").read_text(encoding="utf-8")
-    for name in (
-        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
-        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
-    ):
-        assert f"{name}=" in environment_template
-    for name in (
-        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
-        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
-    ):
-        assert f"{name}=\n" in environment_template
+    assert "ENTERPRISE_AGENT_MODEL_CONFIG_FILE=" in environment_template
     for name in (
         "MINEGUARD_AGENT_API_KEY",
         "MINEGUARD_AGENT_BASE_URL",
@@ -503,6 +491,8 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         "MINEGUARD_AGENT_TIMEOUT_SECONDS",
         "MINEGUARD_AGENT_MAX_RETRIES",
         "MINEGUARD_AGENT_MODEL_TRUST_STORE",
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
+        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
     ):
         assert f"{name}=" not in environment_template
     assert "DEEPSEEK_API_KEY=" not in environment_template
@@ -528,37 +518,34 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     wizard = (root / "Start-EnterpriseAgentProvisioningWizard.ps1").read_text(
         encoding="utf-8-sig"
     )
-    updater = (root / "Update-EnterpriseAgentAccessPackage.ps1").read_text(
-        encoding="utf-8-sig"
-    )
-    model_importer = (
-        root / "Import-EnterpriseAgentModelCredential.ps1"
-    ).read_text(encoding="utf-8-sig")
-    model_wizard = (
-        root / "Start-EnterpriseAgentModelCredentialWizard.ps1"
-    ).read_text(encoding="utf-8-sig")
-    cli_source = (
-        root.parents[1] / "src" / "enterprise_agent" / "cli.py"
-    ).read_text(encoding="utf-8")
     for token in (
-        "--expected-public-key-sha256",
-        "--expected-ca-sha256",
         '"dpapi-local-machine"',
         "Security.SecureString",
         "SecureStringToBSTR",
         "ZeroFreeBSTR",
         "ProvisionedEnvironmentFile",
         "ProvisioningSecretStoreFile",
+        "ENTERPRISE_AGENT_MODEL_CONFIG_FILE",
+        "BusinessAdminActorId",
+        "ApiAdminPassword",
         "实例已存在，接入包导入绝不会覆盖",
     ):
         assert token in importer
-    assert "PreparerPassword $PreparerPassword" not in importer
-    assert "ReviewerPassword $ReviewerPassword" not in importer
+    for removed in (
+        "--activation-code-file",
+        "--issuer-public-key",
+        "--expected-public-key-sha256",
+        "--expected-ca-sha256",
+        "PlatformCa",
+        "PreparerPassword",
+        "ReviewerPassword",
+    ):
+        assert removed not in importer
     assert "--allow-unanchored-test-key" not in importer
     assert "Windows.Forms" in wizard
     assert "ConvertTo-SecureString" in wizard
-    assert "-PreparerPassword $PreparerSecure" in wizard
-    assert "-ReviewerPassword $ReviewerSecure" in wizard
+    assert "-BusinessAdminPassword $BusinessAdminSecure" in wizard
+    assert "-ApiAdminPassword $ApiAdminSecure" in wizard
     assert "runas" in wizard
     assert "controls_constructed = $true" in wizard
     assert wizard.index("$SelfTestResult = [ordered]@{") < wizard.index(
@@ -566,143 +553,20 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     ) < wizard.index(
         "$SelfTestResult | ConvertTo-Json -Compress | Write-Output"
     )
-    assert '"--current-lock", $FinalLockPath' in updater
-    assert '"--expected-issuer-key-id", $ExpectedIssuerKeyId' in updater
-    assert '"dpapi-local-machine"' in updater
-    assert "mineguard-enterprise-agent-provisioning-update-block-v1" in updater
-    assert "Stop-SelectedService" in updater
-    assert "Set-EAInstanceCanonicalAcl" in updater
-    assert "旧配置回滚自检" in updater
-    assert "MINEGUARD_INTERNAL_PROVISIONING_UPDATE_TRANSACTION_ID" in updater
-    assert "ENTERPRISE_AGENT_DB" in updater
-    assert "ENTERPRISE_AGENT_PORT" in updater
-    assert "Remove-EAOwnedTemporaryTree" in updater
-    assert "$Preparer" not in updater
-    assert "$Reviewer" not in updater
-    assert "--allow-unanchored-test-key" not in updater
-    assert "enterprise-install-manifest.json" in wizard
-    assert "企业交付目录" in wizard
-    assert "12 位" in wizard
-    assert "profile_version 必须为 1" in wizard
+    assert "*.mgprov" in wizard
+    assert "Get-FileHash" in wizard
     assert "导入配置并继续安装服务" in wizard
     assert '"Update-EnterpriseAgentAccessPackage.ps1"' not in wizard
-    assert "手工填写" not in wizard
-    assert "安全更新现有实例" not in wizard
-    assert "批准的 WinSW" in wizard
-    for token in (
-        '"--env-file", $ImportEnvironment',
-        '"--authoritative-env-file"',
-        '"model-credential-import"',
-        '"--activation-code-file", $PreparedActivation',
-        '"--trust-store", $TrustStorePath',
-        '"--lock-output", $NewLock',
-        '"--lock-env-path", $FinalLockPath',
-        '"--secret-store-env-path", $FinalSecretStorePath',
-        '"--secret-protection", "dpapi-local-machine"',
-        '"--expected-mine-id", $Context.MineId',
-        '"--expected-system-id", $Context.SystemId',
-        '"--expected-party-id", $ExpectedPartyId',
-        '"--current-lock", $FinalLockPath',
-        "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
-        "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
-        "MINEGUARD_AGENT_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "Stop-SelectedService",
-        "Set-EAInstanceCanonicalAcl",
-        "MINEGUARD_INTERNAL_PROVISIONING_UPDATE_TRANSACTION_ID",
-        "mineguard-enterprise-agent-provisioning-update-block-v1",
-        "Assert-EANoRestoreRecoveryBlock -Context $Context",
-        "$ImportResult.managed",
-        "$ImportResult.party_id",
-        "$ImportResult.pair_id",
-        "$LockEntryExists",
-        "$StoreEntryExists",
-        "$StateEntryExists",
-        "$HasExistingState",
-        "$FinalAntiRollbackStatePath",
-        "$NewAntiRollbackState",
-        'Name = "model-credential-lock.state.json"',
-        "$ImportResult.anti_rollback_state_path",
-        "固定路径已被非文件对象占用",
-        "BackupCreated",
-        "Published",
-        "Move aside only files that this transaction",
-        'RequiredPrefix ".instance-staging-"',
-        "旧配置回滚自检",
-        "Test-EnterpriseAgentHealth.ps1",
-    ):
-        assert token in model_importer
-    assert "$ApiKey" not in model_importer
-    assert (
-        model_importer.count('"--secret-protection", "dpapi-local-machine"')
-        == 1
-    )
-    assert 'Name = "MINEGUARD_AGENT_MODEL_TRUST_STORE"' not in model_importer
-    assert "MINEGUARD_AGENT_MODEL_CREDENTIAL_STATE" not in model_importer
-    assert model_importer.count(
-        'Name = "model-credential-lock.state.json"'
-    ) == 1
-    state_file = model_importer.index(
-        'Name = "model-credential-lock.state.json"'
-    )
-    lock_file = model_importer.index('Name = "model-credential-lock.json"')
-    environment_file = model_importer.index('Name = "agent.env"', state_file)
-    assert state_file < lock_file < environment_file
-    assert "Get-Content -LiteralPath $ActivationCodeFile" not in model_importer
-    sanitize_start = model_importer.index(
-        "$ImportEnvironmentContent = $EnvironmentContent"
-    )
-    sanitize_end = model_importer.index(
-        "Write-NewUtf8File -PathValue $ImportEnvironment", sanitize_start
-    )
-    invoke_import = model_importer.index(
-        "$ImportResult = Invoke-AgentJson", sanitize_end
-    )
-    assert sanitize_start < sanitize_end < invoke_import
-    sanitized_block = model_importer[sanitize_start:sanitize_end]
-    assert "foreach ($Binding in $ManagedBindings)" in sanitized_block
-    assert "Remove-EnvironmentRecord" in sanitized_block
-    assert "if (-not $HasExistingLock)" not in sanitized_block
-    assert "expired but cryptographically intact active model" in sanitized_block
-    cli_import = cli_source[
-        cli_source.index('if args.command == "model-credential-import":') :
-        cli_source.index('if args.command == "model-credential-status":')
-    ]
-    for token in (
-        "expired (but still cryptographically intact) credential",
-        "final_lock_exists = args.lock_env_path.exists()",
-        "final_store_exists = args.secret_store_env_path.exists()",
-        "args.current_lock.resolve() != args.lock_env_path.resolve()",
-        "current_lock_path=args.current_lock",
-    ):
-        assert token in cli_import
-    assert "settings.model_credential_status.managed" not in cli_import
-    assert "$LASTEXITCODE" not in model_wizard
-    for token in (
-        "Windows.Forms",
-        '"Import-EnterpriseAgentModelCredential.ps1"',
-        "模型授权包（.mgllm）",
-        "独立交付的激活码",
-        "runas",
-        "trust_store_present = $true",
-        "api_configuration_editable = $false",
-        "trust_store_editable = $false",
-    ):
-        assert token in model_wizard
-    assert "controls_constructed = $true" in model_wizard
-    assert model_wizard.index("$SelfTestResult = [ordered]@{") < model_wizard.index(
-        "$Form = New-Object Windows.Forms.Form"
-    ) < model_wizard.index(
-        "$SelfTestResult | ConvertTo-Json -Compress | Write-Output"
-    )
-    for forbidden in (
-        "API KeyBox",
-        "BaseUrlBox",
-        "ModelBox",
+    for removed in (
+        "enterprise-install-manifest.json",
+        "政府 HTTPS CA",
+        "独立核验码",
         "TrustKeyBox",
-        "ExpectedTrustKeySha256",
+        "Preparer",
+        "Reviewer",
     ):
-        assert forbidden not in model_wizard
+        assert removed not in wizard
+    assert "批准的 WinSW" in wizard
     inno = (
         root.parents[2]
         / "packaging"
@@ -729,7 +593,7 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         / "assets"
         / "Invoke-MineGuardTrustedProductInstall.ps1"
     ).read_text(encoding="utf-8-sig")
-    assert "MineGuard 模型授权导入向导" in inno
+    assert "MineGuard 模型授权导入向导" not in inno
     assert "Open-MineGuardEnterpriseAgentControlCenter.ps1" in inno
     assert 'Permissions: users-readexec' in inno
     assert 'Name: "{app}\\launcher"; Permissions: users-readexec' in inno
@@ -743,12 +607,12 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     assert "Start-EnterpriseAgentModelCredentialWizard.ps1" not in inno
     for token in (
         "Start-EnterpriseAgentProvisioningWizard.ps1",
-        "Start-EnterpriseAgentModelCredentialWizard.ps1",
-        "[switch] $ModelCredentials",
         "Verb = 'runas'",
         "if ($Elevated)",
     ):
         assert token in launcher
+    assert "ModelCredentials" not in launcher
+    assert "Start-EnterpriseAgentModelCredentialWizard.ps1" not in launcher
     assert (
         'Source: "{#StageRoot}\\*"; '
         'DestDir: "{tmp}\\MineGuardEnterpriseAgentRelease"' in inno
@@ -772,7 +636,6 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     ):
         assert token in wizard
     assert wizard.count("Get-EAInstanceContext") >= 2
-    assert "Get-FileHash" not in wizard
     assert "Invoke-WebRequest" not in wizard
     assert "thumbprint: $ApprovedSignerThumbprint" not in installer
     assert "matched the independently approved thumbprint" in installer
@@ -781,17 +644,16 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         service_invocation
     )
     finalizer = wizard.index("finally {", wizard.index("$ImportButton.Add_Click"))
-    assert wizard.index("$PreparerPasswordBox.Clear()", finalizer) > finalizer
+    assert wizard.index("$BusinessAdminPasswordBox.Clear()", finalizer) > finalizer
 
     deployment_readme = (root / "README.md").read_text(encoding="utf-8")
     for token in (
-        "完整企业交付目录",
-        "12 位独立核验码",
-        "profile_version=1",
+        "单个 `.mgprov`",
+        "api_admin",
+        "业务管理员",
         "不提供旧版升级",
         "仅安装或修复正式服务…",
         "介质外审批记录中的 WinSW SHA-256",
-        "核验值不写日志",
     ):
         assert token in deployment_readme
 
@@ -1559,6 +1421,11 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     assert "Assert-OrdinaryDirectoryTree -Root $Wheelhouse" in build
     assert 'Assert-SafeLocalFixedPath -Name "WorkRoot"' in build
     assert 'Assert-SafeLocalFixedPath -Name "StageRoot"' in build
+    assert "Join-Path ([IO.Path]::GetTempPath())" in build
+    assert '("mga-" + [Guid]::NewGuid().ToString("N"))' in build
+    assert '(".s-" + [Guid]::NewGuid().ToString("N"))' in build
+    assert ".agent-binary-work-" not in build
+    assert ".agent-binary-stage-" not in build
 
     deploy_root = project_root / "deploy" / "windows"
     installer = (deploy_root / "Install-EnterpriseAgent.ps1").read_text(

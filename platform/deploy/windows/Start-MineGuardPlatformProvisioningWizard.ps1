@@ -415,8 +415,6 @@ $create.registration_output.Text = Join-Path $InstallRoot `
     'provisioning-registrations'
 $create.activations = New-Object Windows.Forms.TextBox
 $create.activations.Text = Join-Path $InstallRoot 'provisioning-activations'
-Add-InputRow $createTable $create 'ca_source' '政府 HTTPS CA PEM' '' `
-    -Browse file -Filter 'PEM/CRT 证书 (*.pem;*.crt)|*.pem;*.crt|全部文件 (*.*)|*.*' | Out-Null
 Add-InputRow $createTable $create 'passphrase' '签发私钥口令' '' -Password | Out-Null
 Add-InputRow $createTable $create 'mine_id' '煤矿 ID' '' | Out-Null
 Add-InputRow $createTable $create 'mine_name' '煤矿名称' '' | Out-Null
@@ -426,7 +424,6 @@ Add-InputRow $createTable $create 'method' '开采方式' '' | Out-Null
 Add-InputRow $createTable $create 'shift' '班次制度' '' | Out-Null
 Add-InputRow $createTable $create 'coal' '主要煤种' '' | Out-Null
 Add-InputRow $createTable $create 'regime' '生产制度' '' | Out-Null
-Add-InputRow $createTable $create 'agent_origin' '企业端 HTTPS 地址' '' | Out-Null
 Add-InputRow $createTable $create 'platform_url' '监管端 HTTPS 地址' '' | Out-Null
 Add-InputRow $createTable $create 'output' '企业交付根目录（可选U盘）' '' -Browse folder | Out-Null
 
@@ -434,7 +431,7 @@ function Set-AuthorityPolicyFieldsLocked {
     param([bool] $Locked)
     foreach ($field in @(
             $create.private, $create.public, $create.issuer_id,
-            $create.issuer_key_id, $create.ca_source,
+            $create.issuer_key_id,
             $create.platform_url, $create.platform_system,
             $create.platform_party, $create.platform_key
         )) {
@@ -458,17 +455,12 @@ function Get-AuthorityPolicyPendingPath {
         'authority-policy.pending.json'
 }
 
-function Get-AuthorityPolicyFixedCaPath {
-    return Join-Path $authorityDefault 'platform-ca.pem'
-}
-
 function Get-AuthorityPolicyValues {
     return [ordered]@{
         issuer_private_key_file = $create.private.Text
         issuer_public_key_file = $create.public.Text
         issuer_id = $create.issuer_id.Text
         issuer_key_id = $create.issuer_key_id.Text
-        platform_ca_source_file = $create.ca_source.Text
         platform_base_url = $create.platform_url.Text
         platform_system_id = $create.platform_system.Text
         platform_party_id = $create.platform_party.Text
@@ -535,7 +527,7 @@ function Assert-NoAuthorityPolicyPending {
         (Test-Path -LiteralPath $pendingPath)) {
         throw (
             '检测到未完成的监管固定策略事务 authority-policy.pending.json；' +
-            '后续签发已闭锁。请停止签发，核对固定 CA、四区输出和审计记录，' +
+            '后续签发已闭锁。请停止签发，核对输出和审计记录，' +
             '再按批准的恢复或迁移流程处理；本向导不会自动删除或覆盖该标记。'
         )
     }
@@ -544,7 +536,6 @@ function Assert-NoAuthorityPolicyPending {
 function New-AuthorityPolicyPending {
     $policyPath = Get-AuthorityPolicyPath
     $pendingPath = Get-AuthorityPolicyPendingPath
-    $fixedCaPath = Get-AuthorityPolicyFixedCaPath
     $expectedPolicyPath = Join-Path $authorityDefault 'authority-policy.json'
     if ([string]::IsNullOrWhiteSpace($policyPath) -or
         [string]::IsNullOrWhiteSpace($pendingPath)) {
@@ -559,19 +550,12 @@ function New-AuthorityPolicyPending {
         throw 'authority-policy.json 已存在，不能创建首次策略事务。'
     }
     Assert-NoAuthorityPolicyPending
-    if (Test-Path -LiteralPath $fixedCaPath) {
-        throw (
-            '固定 CA 已存在但 authority-policy.json 缺失，可能是上次事务残留；' +
-            '拒绝静默接管。请核验备份和审计记录后执行显式恢复或迁移。'
-        )
-    }
     $transactionId = [Guid]::NewGuid().ToString('N')
     $document = [ordered]@{
         schema_version = 'mineguard-authority-policy-pending-v1'
         transaction_id = $transactionId
         created_utc = [DateTime]::UtcNow.ToString('o')
         authority_policy_file = $policyPath
-        platform_ca_file = $fixedCaPath
         contains_secrets = $false
     }
     $bytes = $utf8NoBom.GetBytes(($document | ConvertTo-Json -Depth 3))
@@ -609,10 +593,7 @@ function Read-AuthorityPolicyPending {
             [string]$pending.authority_policy_file,
             (Get-AuthorityPolicyPath),
             [StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals(
-            [string]$pending.platform_ca_file,
-            (Get-AuthorityPolicyFixedCaPath),
-            [StringComparison]::OrdinalIgnoreCase)) {
+        [string]::IsNullOrWhiteSpace([string]$pending.authority_policy_file)) {
         throw 'authority-policy pending 标记身份或边界不匹配。'
     }
     return $pending
@@ -627,33 +608,13 @@ function Assert-AuthorityPolicyMaterial {
         throw 'authority-policy.json 必须明确标记 contains_secrets=false。'
     }
     $storedSpki = [string]$Policy.issuer_public_key_sha256
-    $storedCa = [string]$Policy.platform_ca_sha256
-    if ($storedSpki -cnotmatch '^[0-9a-f]{64}$' -or
-        $storedCa -cnotmatch '^[0-9a-f]{64}$') {
-        throw 'authority-policy.json 中的公钥/CA SHA-256 格式无效。'
-    }
-    $fixedCaPath = Get-AuthorityPolicyFixedCaPath
-    if (-not [string]::Equals(
-            [string]$Policy.platform_ca_source_file, $fixedCaPath,
-            [StringComparison]::OrdinalIgnoreCase)) {
-        throw (
-            '现有 authority-policy.json 引用了外部或可移动路径的旧版 CA；' +
-            '当前版本拒绝静默替换。请停止签发，核对旧策略摘要和审批记录，' +
-            '再执行显式 CA 策略迁移到固定路径：' + $fixedCaPath
-        )
+    if ($storedSpki -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'authority-policy.json 中的签发公钥 SHA-256 格式无效。'
     }
     $actualSpki = Get-GuiSpkiSha256FromPem `
         -Path ([string]$Policy.issuer_public_key_file)
-    Assert-GuiOrdinaryFile -Path ([string]$Policy.platform_ca_source_file) `
-        -Label '固定政府 HTTPS CA' -MaximumBytes 1048576
-    $actualCa = (Get-FileHash `
-        -LiteralPath ([string]$Policy.platform_ca_source_file) `
-        -Algorithm SHA256).Hash.ToLowerInvariant()
     if (-not (Test-FixedTimeText -Left $actualSpki -Right $storedSpki)) {
         throw '固定签发公钥已变化；拒绝继续批量签发，请走显式签发机构迁移。'
-    }
-    if (-not (Test-FixedTimeText -Left $actualCa -Right $storedCa)) {
-        throw '固定政府 HTTPS CA 已变化；拒绝继续批量签发，请走显式 CA 迁移。'
     }
 }
 
@@ -674,7 +635,7 @@ function Import-AuthorityPolicy {
         $policy = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 |
             ConvertFrom-Json
     } catch { throw 'authority-policy.json 无法解析。' }
-    if ([string]$policy.schema_version -ne 'mineguard-authority-policy-v1') {
+    if ([string]$policy.schema_version -ne 'mineguard-authority-policy-v2') {
         throw 'authority-policy.json 版本不受支持。'
     }
     $mapping = [ordered]@{
@@ -682,7 +643,6 @@ function Import-AuthorityPolicy {
         issuer_public_key_file = $create.public
         issuer_id = $create.issuer_id
         issuer_key_id = $create.issuer_key_id
-        platform_ca_source_file = $create.ca_source
         platform_base_url = $create.platform_url
         platform_system_id = $create.platform_system
         platform_party_id = $create.platform_party
@@ -698,8 +658,7 @@ function Import-AuthorityPolicy {
         } else {
             $comparison = if ($entry.Key -in @(
                     'issuer_private_key_file',
-                    'issuer_public_key_file',
-                    'platform_ca_source_file'
+                    'issuer_public_key_file'
                 )) {
                 [StringComparison]::OrdinalIgnoreCase
             } else { [StringComparison]::Ordinal }
@@ -740,22 +699,14 @@ function Save-AuthorityPolicy {
     $null = Read-AuthorityPolicyPending `
         -ExpectedTransactionId $PendingTransactionId
     $values = Get-AuthorityPolicyValues
-    $fixedCaPath = Get-AuthorityPolicyFixedCaPath
-    if (-not [string]::Equals(
-            [string]$Result.authority_platform_ca_file, $fixedCaPath,
-            [StringComparison]::OrdinalIgnoreCase)) {
-        throw '生成器未返回安装目录中的固定政府 HTTPS CA，策略拒绝发布。'
-    }
     $document = [ordered]@{
-        schema_version = 'mineguard-authority-policy-v1'
+        schema_version = 'mineguard-authority-policy-v2'
         created_utc = [DateTime]::UtcNow.ToString('o')
         issuer_private_key_file = $values.issuer_private_key_file
         issuer_public_key_file = $values.issuer_public_key_file
         issuer_id = $values.issuer_id
         issuer_key_id = $values.issuer_key_id
         issuer_public_key_sha256 = [string]$Result.issuer_public_key_sha256
-        platform_ca_source_file = $fixedCaPath
-        platform_ca_sha256 = [string]$Result.platform_ca_sha256
         platform_base_url = $values.platform_base_url
         platform_system_id = $values.platform_system_id
         platform_party_id = $values.platform_party_id
@@ -780,7 +731,6 @@ function Save-AuthorityPolicy {
             throw '无法保护 authority-policy.json 候选文件 ACL。'
         }
         Move-Item -LiteralPath $temporaryPath -Destination $path
-        $create.ca_source.Text = $fixedCaPath
         $published = Import-AuthorityPolicy -Path $path `
             -AllowMatchingPending
         if ($null -eq $published) {
@@ -802,7 +752,7 @@ $defaultAuthorityPolicyPending = Join-Path $authorityDefault `
 if (Test-Path -LiteralPath $defaultAuthorityPolicyPending) {
     Set-Status (
         '检测到未完成的 authority-policy pending 事务；后续签发已闭锁。' +
-        '请核对固定 CA、四区输出和审计记录后执行批准的恢复流程。'
+        '请核对输出和审计记录后执行批准的恢复流程。'
     )
 } elseif (Test-Path -LiteralPath $defaultAuthorityPolicy -PathType Leaf) {
     try {
@@ -859,7 +809,6 @@ $null = Add-ActionRow $createTable '生成这一家企业的专属接入包' {
             Action = 'CreatePair'; InstallRoot = $InstallRoot
             PrivateKeyPath = $create.private.Text
             PublicKeyPath = $create.public.Text
-            PlatformCaSourcePath = $create.ca_source.Text
             Passphrase = $secure
             IssuerId = $create.issuer_id.Text
             IssuerKeyId = $create.issuer_key_id.Text
@@ -871,7 +820,6 @@ $null = Add-ActionRow $createTable '生成这一家企业的专属接入包' {
             MiningMethod = $create.method.Text
             ShiftSystem = $create.shift.Text; CoalType = $create.coal.Text
             OperatingRegime = $create.regime.Text
-            AgentPublicOrigin = $create.agent_origin.Text
             PlatformBaseUrl = $create.platform_url.Text
             AgentInstanceName = $create.instance.Text
             PlatformSystemId = $create.platform_system.Text
@@ -892,24 +840,17 @@ $null = Add-ActionRow $createTable '生成这一家企业的专属接入包' {
         $import.hash.Text = [string]$result.issuer_public_key_sha256
         $import.issuer_key.Text = $create.issuer_key_id.Text
         Set-Status ((
-                "生成成功（{0}，版本 {1}；企业实例名 {8}）。`r`n企业交付目录：{2}`r`n" +
-                "政府注册包：{3}`r`n企业激活码：{4}`r`n" +
-                "政府激活码：{5}`r`n公钥 SPKI SHA-256：{6}`r`n" +
-                "CA 文件 SHA-256：{9}`r`n签发 key ID：{7}`r`n" +
-                "独立核验码（另渠道告知企业）：{10}`r`n" +
-                "监管核验记录：{11}`r`n`r`n" +
-                '交付要求：.mgprov 与企业激活码不要长期同盘保存，' +
-                '应使用两个独立渠道交付。政府 .mgreg 与 Platform 激活码留在监管机；' +
-                '私钥和 .mgreg 不得交给企业。监管固定策略和 CA 固定副本已原子发布。'
+                "生成成功（{0}，版本 {1}；企业实例名 {6}）。`r`n" +
+                "交给企业的唯一文件：{2}`r`n文件 SHA-256：{3}`r`n" +
+                "政府注册包：{4}`r`n政府注册激活文件：{5}`r`n`r`n" +
+                '企业只需选择这个 .mgprov 文件；无需再填写 CA、激活码、公钥或指纹。' +
+                '政府 .mgreg、注册激活文件和签发私钥只留在监管机。'
             ) -f $result.pair_id, $result.profile_version,
-                $result.enterprise_delivery_directory,
+                $result.enterprise_agent_bundle,
+                $result.enterprise_package_sha256,
                 $result.platform_registration_bundle,
-                $result.agent_activation_file,
                 $result.platform_activation_file,
-                $result.issuer_public_key_sha256, $create.issuer_key_id.Text,
-                $result.agent_instance_name, $result.platform_ca_sha256,
-                $result.independent_handover_check_code,
-                $result.independent_handover_record)
+                $result.agent_instance_name)
         $tabs.SelectedTab = $importPage
     } catch { Show-OperationError '生成企业接入包' $_ }
     finally { if ($null -ne $secure) { $secure.Dispose() } }

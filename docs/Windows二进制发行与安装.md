@@ -1,5 +1,9 @@
 # MineGuard Windows 二进制发行与安装
 
+> 企业现场配置以当前 [Agent Windows 部署说明](../agent/deploy/windows/README.md)
+> 为准：单个 `.mgprov`、单业务管理员、固定 `api_admin`，不再使用旧 CA/激活码/
+> 公钥/指纹或 `.mgllm` 现场向导。本文后续保留的相关内容仅作历史发行设计参考。
+
 本发行链当前交付十量 V3。现场字段与配置以
 [十量 V3 部署与运行](十量V3部署与运行.md)为准；五量 V2 只用于历史只读审计。
 

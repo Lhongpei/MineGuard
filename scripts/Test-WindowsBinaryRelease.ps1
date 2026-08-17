@@ -1571,19 +1571,9 @@ function Invoke-InstallerLifecycleTest {
         else {
             $ProvisioningWizard = Join-Path $OperationsDirectory `
                 "Start-EnterpriseAgentProvisioningWizard.ps1"
-            $ModelCredentialWizard = Join-Path $OperationsDirectory `
-                "Start-EnterpriseAgentModelCredentialWizard.ps1"
-            $InstalledModelTrustStore = Join-Path $InstallRoot `
-                "release-metadata\model-credential-trust.json"
-            foreach ($RequiredAgentModelFile in @(
-                $ProvisioningWizard,
-                $ModelCredentialWizard,
-                $InstalledModelTrustStore
-            )) {
-                if (-not (Test-Path -LiteralPath $RequiredAgentModelFile `
-                        -PathType Leaf)) {
-                    throw "Agent managed model credential file is missing: $RequiredAgentModelFile"
-                }
+            if (-not (Test-Path -LiteralPath $ProvisioningWizard `
+                    -PathType Leaf)) {
+                throw "Agent provisioning wizard is missing: $ProvisioningWizard"
             }
             $ProvisioningProbe = Invoke-InstalledWizardConstructionSelfTest `
                 -Name "Agent provisioning wizard" `
@@ -1597,26 +1587,6 @@ function Invoke-InstallerLifecycleTest {
                     "enterprise-agent-provisioning-wizard" -or
                 -not [bool]$ProvisioningProbe.controls_constructed) {
                 throw "Agent provisioning wizard GUI construction self-test failed."
-            }
-            $ModelWizardProbe = Invoke-InstalledWizardConstructionSelfTest `
-                -Name "Agent model credential wizard" `
-                -ScriptPath $ModelCredentialWizard -ScriptArguments @(
-                    "-InstallRoot", $InstallRoot,
-                    "-StateRoot", $AgentStateRoot,
-                    "-SelfTest"
-                )
-            if ([string]$ModelWizardProbe.status -ne "ok" -or
-                [string]$ModelWizardProbe.component -ne
-                    "enterprise-agent-model-credential-wizard" -or
-                -not [bool]$ModelWizardProbe.controls_constructed -or
-                -not [bool]$ModelWizardProbe.trust_store_present -or
-                [bool]$ModelWizardProbe.trust_store_editable -or
-                [bool]$ModelWizardProbe.api_configuration_editable -or
-                -not ([string]$ModelWizardProbe.trust_store).Equals(
-                    $InstalledModelTrustStore,
-                    [StringComparison]::OrdinalIgnoreCase
-                )) {
-                throw "Agent model credential wizard headless self-test failed."
             }
         }
         $PreservationRoot = if ($Product -eq "platform") { $InstallRoot } else { Join-Path $AgentStateRoot "ci-preservation" }

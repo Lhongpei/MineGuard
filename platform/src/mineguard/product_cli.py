@@ -8,25 +8,25 @@ stack while old source remains available only for controlled data migration.
 from __future__ import annotations
 
 import argparse
-from datetime import date
 import getpass
-from hashlib import sha256
 import json
 import os
-from pathlib import Path
 import re
 import secrets
 import shutil
 import sqlite3
 import stat
 import sys
-from typing import Sequence
+from collections.abc import Sequence
+from datetime import date
+from hashlib import sha256
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import __version__
 from .auth import (
-    AuthError,
     CURRENT_CREDENTIAL_POLICY_VERSION,
+    AuthError,
     InvalidCredentialsError,
     LocalAuthStore,
     Role,
@@ -285,7 +285,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     create_pair.add_argument(
         "--enterprise-bundle-directory",
-        help="企业交付区：仅写入 .mgprov、签发公钥和企业交接清单",
+        help="企业交付区：只写入一个自包含 .mgprov 文件",
     )
     create_pair.add_argument(
         "--platform-registration-directory",

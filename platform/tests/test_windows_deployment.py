@@ -200,11 +200,9 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         "--platform-registration-directory",
         "--enterprise-activation-directory",
         "--platform-activation-directory",
-        "Assert-ValidPemCertificateChain",
-        "PRIVATE\\s+KEY",
-        "X509Certificate2",
-        "企业独立核验记录.txt",
-        "independent_handover_record",
+        "企业交付目录必须且只能包含一个 .mgprov 文件",
+        "enterprise_agent_bundle",
+        "enterprise_package_sha256",
         "Initialize-OwnedProtectedRoot",
         ".mineguard-provisioning-root.json",
         "Assert-NoReparseTree",
@@ -213,13 +211,18 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         "Stop-Service -Name 'MineGuardPlatform'",
         "Start-Service -Name 'MineGuardPlatform'",
         "WaitForStatus(",
-        "Publish-FixedAuthorityCa",
-        "platform-ca.pem",
-        ".platform-ca.pending.",
-        "拒绝静默替换",
-        "authority_platform_ca_file",
     ):
         assert required in provisioning_core
+    for removed in (
+        "Assert-ValidPemCertificateChain",
+        "Publish-FixedAuthorityCa",
+        "platform-ca.pem",
+        "authority_platform_ca_file",
+        "independent_handover_record",
+        "enterprise-install-manifest.json",
+        "AgentPublicOrigin",
+    ):
+        assert removed not in provisioning_core
     assert "-Passphrase $plain" not in provisioning_core
     assert "-AdminPassword $" not in provisioning_core
     for required in (
@@ -229,15 +232,11 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         "3. 完成监管端配置",
         "*.activation",
         "SPKI SHA-256",
-        "不要长期同盘保存",
         "-STA",
         "Verb = 'runas'",
         "Assert-AuthorityPolicyMaterial",
         "issuer_public_key_sha256",
-        "platform_ca_sha256",
-        "Test-FixedTimeText",
         "contains_secrets=false",
-        "independent_handover_record",
         "ManageServiceLifecycle",
         "确认短暂停服",
         "mineguard-authority-policy-pending-v1",
@@ -247,10 +246,17 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         "[IO.FileMode]::CreateNew",
         ".authority-policy.",
         "-AllowMatchingPending",
-        "引用了外部或可移动路径的旧版 CA",
-        "监管固定策略和 CA 固定副本已原子发布",
+        "mineguard-authority-policy-v2",
+        "企业只需选择这个 .mgprov 文件",
     ):
         assert required in provisioning_wizard
+    for removed in (
+        "platform_ca_sha256",
+        "independent_handover_record",
+        "政府 HTTPS CA",
+        "AgentPublicOrigin",
+    ):
+        assert removed not in provisioning_wizard
     for removed_legacy_control in (
         "previous_bundle",
         "previous_activation",
@@ -294,7 +300,7 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
     )
     success_status = provisioning_wizard.index('"生成成功（{0}')
     assert pending_create < pair_create < policy_publish < success_status
-    assert provisioning_core.index("Assert-ValidPemCertificateChain -Path $snapshotCa") < (
+    assert provisioning_core.index("企业交付目录必须且只能包含一个 .mgprov 文件") > (
         provisioning_core.index("'provision', 'create-pair'")
     )
     assert provisioning_core.index("Stop-Service -Name 'MineGuardPlatform'") < (
@@ -334,14 +340,16 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
     assert not any(mark in provisioning_wizard for mark in "“”‘’")
     provisioning_readme = (WINDOWS / "README.md").read_text(encoding="utf-8")
     for required in (
-        "provisioning-authority\\platform-ca.pem",
         "authority-policy.pending.json",
         "不会显示“生成成功”",
         "profile_version=1",
         "不显示旧版升级",
-        "同一个 HTTPS FQDN",
+        "同一个 FQDN",
+        "必须且只能包含一个 `.mgprov`",
+        "不需企业域名或入站 HTTPS",
     ):
         assert required in provisioning_readme
+    assert "platform-ca.pem" not in provisioning_readme
 
     start = (WINDOWS / "Start-MineGuardPlatform.ps1").read_text(encoding="utf-8-sig")
     assert "Resolve-MineGuardPlatformExecutable" in start

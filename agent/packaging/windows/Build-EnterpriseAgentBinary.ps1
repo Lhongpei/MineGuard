@@ -23,6 +23,8 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
 $env:PYTHONUTF8 = "1"
 $env:PYTHONUNBUFFERED = "1"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -400,8 +402,13 @@ Assert-OrdinaryDirectoryTree -Root $SourceRoot
 
 New-Item -ItemType Directory -Path $ArtifactsRoot -Force | Out-Null
 Assert-SafeLocalFixedPath -Name "ArtifactsRoot" -PathValue $ArtifactsRoot
-$WorkRoot = Join-Path $ArtifactsRoot (".agent-binary-work-" + [Guid]::NewGuid().ToString("N"))
-$StageRoot = Join-Path $ArtifactsRoot (".agent-binary-stage-" + [Guid]::NewGuid().ToString("N"))
+# Keep the disposable compiler tree directly below the system temp directory
+# for Windows PowerShell 5.1/MAX_PATH. Nuitka embeds deep SCons and HACL trees;
+# even a short child name below a guarded ArtifactsRoot can exceed 260 chars.
+# StageRoot remains beside the release so its final Move-Item is same-volume.
+$WorkRoot = Join-Path ([IO.Path]::GetTempPath()) `
+    ("mga-" + [Guid]::NewGuid().ToString("N"))
+$StageRoot = Join-Path $ArtifactsRoot (".s-" + [Guid]::NewGuid().ToString("N"))
 $BuildEnvironment = Join-Path $WorkRoot ".venv"
 $CompilerOutput = Join-Path $WorkRoot "compiler-output"
 $Completed = $false
@@ -662,7 +669,8 @@ try {
         architecture = "x64"
         release_classification = $ReleaseClassification
         python = $PythonPatchVersion
-        nuitka = (& $BuildPython -m nuitka --version | Select-Object -First 1).Trim()
+        nuitka = $(Get-DistributionVersion `
+            -PythonExecutable $BuildPython -DistributionName "Nuitka")
         build_dependencies = [ordered]@{
             setuptools = $(Get-DistributionVersion -PythonExecutable $BuildPython -DistributionName "setuptools")
             wheel = $(Get-DistributionVersion -PythonExecutable $BuildPython -DistributionName "wheel")

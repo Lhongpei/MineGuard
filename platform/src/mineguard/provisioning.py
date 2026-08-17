@@ -3,8 +3,10 @@
 The provisioning protocol is deliberately independent from both product
 runtimes.  Platform creates a pair of opaque files from one approved profile:
 an Agent profile (``.mgprov``) and the matching Platform registration
-(``.mgreg``).  The two activation codes are distinct, are written only to an
-explicit protected directory, and are never returned by this module.
+(``.mgreg``).  The Agent activation material and issuer public key are embedded
+in its single enterprise delivery file; protected government-side copies of
+the two distinct activation codes remain available for recovery and audit.
+Activation values are never returned in the result object.
 
 Registry locks are checked whenever ``clients.json`` is loaded.  A legacy
 manual registry remains readable, while any registry that declares a
@@ -13,24 +15,25 @@ manual registry remains readable, while any registry that declares a
 
 from __future__ import annotations
 
-from base64 import urlsafe_b64decode, urlsafe_b64encode
-from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
-from hashlib import sha256
 import hmac
 import ipaddress
 import json
 import os
-from pathlib import Path
 import re
 import secrets
 import stat
 import tempfile
 import time
-from typing import Any, Mapping
 import unicodedata
-from urllib.parse import urlsplit
 import uuid
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from collections.abc import Mapping
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -41,8 +44,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-
 CONTRACT_VERSION = "mineguard-provisioning-bundle-v1"
+ENTERPRISE_ACCESS_PACKAGE_FORMAT = "mineguard-enterprise-access-package-v1"
 AGENT_BUNDLE_KIND = "enterprise-agent-provisioning"
 REGISTRATION_BUNDLE_KIND = "platform-client-registration"
 REGISTRY_LOCK_VERSION = "mineguard-platform-registry-lock-v1"
@@ -111,9 +114,7 @@ _PROFILE_KEYS = frozenset(
 )
 _AGENT_PROFILE_KEYS = frozenset(
     {
-        "public_origin",
         "platform_base_url",
-        "platform_ca_bundle",
         "reporting_timezone",
     }
 )
@@ -703,23 +704,6 @@ def _https_origin(value: object, *, label: str) -> str:
     return normalized
 
 
-def _absolute_ca_path(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or value != value.strip()
-        or len(value) > 1024
-        or _contains_control(value)
-    ):
-        raise ProvisioningError("agent.platform_ca_bundle must be an absolute path")
-    is_windows = re.fullmatch(r"[A-Za-z]:[\\/](?![\\/]).+", value) is not None
-    if not Path(value).is_absolute() and not is_windows:
-        raise ProvisioningError("agent.platform_ca_bundle must be an absolute path")
-    if any(part in {".", ".."} for part in re.split(r"[\\/]", value)):
-        raise ProvisioningError("agent.platform_ca_bundle contains an unsafe segment")
-    return value
-
-
 def _canonical_uuid(value: object, *, label: str) -> str:
     if not isinstance(value, str):
         raise ProvisioningError(f"{label} must be a canonical UUID")
@@ -799,12 +783,10 @@ def _profile(document: object, *, now: datetime) -> dict[str, Any]:
     if not isinstance(timezone, str) or timezone != "Asia/Shanghai":
         raise ProvisioningError("agent.reporting_timezone must be Asia/Shanghai")
     normalized_agent = {
-        "public_origin": _https_origin(agent["public_origin"], label="agent.public_origin"),
         "platform_base_url": _https_origin(
             agent["platform_base_url"],
             label="agent.platform_base_url",
         ),
-        "platform_ca_bundle": _absolute_ca_path(agent["platform_ca_bundle"]),
         "reporting_timezone": timezone,
     }
 
@@ -1126,9 +1108,11 @@ def create_pair(
     platform_identity = profile["platform_identity"]
     config = {
         "ENTERPRISE_AGENT_PRODUCTION_MODE": "true",
-        "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED": "true",
-        "ENTERPRISE_AGENT_SECURE_COOKIE": "true",
-        "ENTERPRISE_AGENT_PUBLIC_ORIGIN": agent_settings["public_origin"],
+        "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED": "false",
+        # The enterprise UI is intentionally loopback-only.  Government-to-
+        # enterprise delivery is pulled over PLATFORM_V3_BASE_URL, so the
+        # Agent does not need an inbound HTTPS endpoint or a public origin.
+        "ENTERPRISE_AGENT_SECURE_COOKIE": "false",
         "ENTERPRISE_MINE_ID": subject["mine_id"],
         "ENTERPRISE_MINE_NAME": profile["mine_name"],
         "ENTERPRISE_OPERATOR_ID": subject["party_id"],
@@ -1142,7 +1126,6 @@ def create_pair(
         "ENTERPRISE_OPERATING_REGIME": context["operating_regime"],
         "PLATFORM_V3_BASE_URL": agent_settings["platform_base_url"],
         "PLATFORM_V3_SENDER_ID": subject["system_id"],
-        "PLATFORM_V3_CA_BUNDLE": agent_settings["platform_ca_bundle"],
         "REGULATORY_SYSTEM_ID": platform_identity["system_id"],
         "REGULATORY_PARTY_ID": platform_identity["party_id"],
         "ENTERPRISE_EXCHANGE_KEY_ID": enterprise_key_id,
@@ -1256,10 +1239,7 @@ def create_pair(
     agent_path = enterprise_bundle_output / f"{filename_stem}.mgprov"
     registration_path = platform_registration_output / f"{filename_stem}.mgreg"
     issuer_public_key_path = (
-        enterprise_bundle_output / f"{filename_stem}.issuer-public.pem"
-    )
-    enterprise_handover_manifest_path = (
-        enterprise_bundle_output / f"{filename_stem}.enterprise-handover.json"
+        platform_registration_output / f"{filename_stem}.issuer-public.pem"
     )
     manifest_path = (
         platform_registration_output
@@ -1271,7 +1251,6 @@ def create_pair(
     platform_activation_path = (
         platform_activation_output / f"{filename_stem}-platform.activation"
     )
-    agent_bundle_bytes = canonical_json(agent_envelope) + b"\n"
     registration_bundle_bytes = canonical_json(registration_envelope) + b"\n"
     issuer_public_key = private_key.public_key()
     issuer_public_key_bytes = issuer_public_key.public_bytes(
@@ -1279,6 +1258,15 @@ def create_pair(
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
     issuer_fingerprint = public_key_spki_sha256(issuer_public_key)
+    enterprise_access_package = {
+        "format": ENTERPRISE_ACCESS_PACKAGE_FORMAT,
+        "agent_bundle": agent_envelope,
+        "activation_code": activation_agent.decode("ascii"),
+        "issuer_public_key_pem": issuer_public_key_bytes.decode("ascii"),
+        "issuer_public_key_sha256": issuer_fingerprint,
+        "issuer_key_id": profile["issuer_key_id"],
+    }
+    agent_bundle_bytes = canonical_json(enterprise_access_package) + b"\n"
     issuer_public_key_artifact = {
         "filename": issuer_public_key_path.name,
         "sha256": sha256(issuer_public_key_bytes).hexdigest(),
@@ -1314,32 +1302,11 @@ def create_pair(
             "issuer_public_key": issuer_public_key_artifact,
         },
     }
-    enterprise_handover_manifest = {
-        "schema_version": "mineguard-enterprise-handover-manifest-v1",
-        "pair_id": pair_id,
-        "profile_version": profile["profile_version"],
-        "issued_at": _format_time(issued_at),
-        "expires_at": profile["expires_at"],
-        "subject": dict(subject),
-        "issuer": issuer_manifest,
-        "artifacts": {
-            "agent_bundle": {
-                "bundle_id": agent_bundle_id,
-                "filename": agent_path.name,
-                "sha256": sha256(agent_bundle_bytes).hexdigest(),
-            },
-            "issuer_public_key": issuer_public_key_artifact,
-        },
-    }
     manifest_bytes = canonical_json(manifest) + b"\n"
-    enterprise_handover_manifest_bytes = (
-        canonical_json(enterprise_handover_manifest) + b"\n"
-    )
     targets = (
         agent_path,
         registration_path,
         issuer_public_key_path,
-        enterprise_handover_manifest_path,
         manifest_path,
         agent_activation_path,
         platform_activation_path,
@@ -1351,7 +1318,6 @@ def create_pair(
         for path, payload in (
             (agent_path, agent_bundle_bytes),
             (issuer_public_key_path, issuer_public_key_bytes),
-            (enterprise_handover_manifest_path, enterprise_handover_manifest_bytes),
             (registration_path, registration_bundle_bytes),
             (manifest_path, manifest_bytes),
             (agent_activation_path, activation_agent + b"\n"),
@@ -1375,7 +1341,6 @@ def create_pair(
         "agent_bundle": str(agent_path),
         "platform_registration_bundle": str(registration_path),
         "provisioning_manifest": str(manifest_path),
-        "enterprise_handover_manifest": str(enterprise_handover_manifest_path),
         "issuer_public_key_file": str(issuer_public_key_path),
         "agent_activation_file": str(agent_activation_path),
         "platform_activation_file": str(platform_activation_path),
@@ -1385,6 +1350,7 @@ def create_pair(
             "legacy-shared-v1" if legacy_shared_layout else "split-delivery-v1"
         ),
         "legacy_shared_layout": legacy_shared_layout,
+        "enterprise_package_format": ENTERPRISE_ACCESS_PACKAGE_FORMAT,
         "activation_codes_disclosed": False,
         "secrets_disclosed": False,
     }
@@ -2026,13 +1992,14 @@ def import_registration(
 __all__ = [
     "AGENT_BUNDLE_KIND",
     "CONTRACT_VERSION",
+    "ENTERPRISE_ACCESS_PACKAGE_FORMAT",
     "EXPECTED_ISSUER_KEY_ID_ENV",
     "EXPECTED_PUBLIC_KEY_SHA256_ENV",
     "MANAGED_REQUIRED_ENV",
-    "ProvisioningError",
     "REGISTRATION_BUNDLE_KIND",
     "REGISTRY_LOCK_VERSION",
     "TRUSTED_PUBLIC_KEY_FILE_ENV",
+    "ProvisioningError",
     "canonical_json",
     "create_pair",
     "decrypt_bundle",
@@ -2042,6 +2009,6 @@ __all__ = [
     "public_key_spki_sha256",
     "read_secret_file",
     "registry_lock_status",
-    "registry_lock_status_from_environment",
     "registry_lock_status_file",
+    "registry_lock_status_from_environment",
 ]

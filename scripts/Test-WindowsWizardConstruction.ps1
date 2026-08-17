@@ -55,10 +55,6 @@ $PlatformWizard = Join-Path $PlatformRoot `
     "deploy\windows\Start-MineGuardPlatformProvisioningWizard.ps1"
 $AgentWizard = Join-Path $AgentRoot `
     "deploy\windows\Start-EnterpriseAgentProvisioningWizard.ps1"
-$ModelWizard = Join-Path $AgentRoot `
-    "deploy\windows\Start-EnterpriseAgentModelCredentialWizard.ps1"
-$ModelTrustSource = Join-Path $AgentRoot `
-    "packaging\windows\model-credential-trust.TEST-ONLY.json"
 
 $TemporaryParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
 $ProbeRoot = Join-Path $TemporaryParent (
@@ -66,12 +62,6 @@ $ProbeRoot = Join-Path $TemporaryParent (
 )
 New-Item -ItemType Directory -Path $ProbeRoot | Out-Null
 try {
-    $ModelInstallRoot = Join-Path $ProbeRoot "agent-install"
-    $ModelMetadataRoot = Join-Path $ModelInstallRoot "release-metadata"
-    New-Item -ItemType Directory -Path $ModelMetadataRoot -Force | Out-Null
-    Copy-Item -LiteralPath $ModelTrustSource -Destination (Join-Path `
-        $ModelMetadataRoot "model-credential-trust.json")
-
     Invoke-WizardConstructionProbe -Name "Platform provisioning wizard" `
         -ScriptPath $PlatformWizard -ExpectedComponent `
         "mineguard-platform-provisioning-wizard" -ScriptArguments @(
@@ -82,13 +72,6 @@ try {
         "enterprise-agent-provisioning-wizard" -ScriptArguments @(
             "-InstallRoot", $AgentRoot,
             "-StateRoot", (Join-Path $ProbeRoot "agent-state"),
-            "-SelfTest"
-        )
-    Invoke-WizardConstructionProbe -Name "Agent model credential wizard" `
-        -ScriptPath $ModelWizard -ExpectedComponent `
-        "enterprise-agent-model-credential-wizard" -ScriptArguments @(
-            "-InstallRoot", $ModelInstallRoot,
-            "-StateRoot", (Join-Path $ProbeRoot "model-state"),
             "-SelfTest"
         )
 }

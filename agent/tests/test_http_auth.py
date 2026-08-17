@@ -27,6 +27,26 @@ class SpyService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
+    def model_api_status(self) -> dict[str, Any]:
+        self.calls.append(("model_api_status", {}))
+        return {
+            "managed": True,
+            "state": "configured",
+            "source": "api_admin",
+            "base_url": "https://models.mineguard.cn/v1",
+            "model": "coal-model-v1",
+        }
+
+    def configure_model_api(self, **values: Any) -> dict[str, Any]:
+        self.calls.append(("configure_model_api", values))
+        return {
+            "managed": True,
+            "state": "configured",
+            "source": "api_admin",
+            "base_url": values["base_url"],
+            "model": values["model"],
+        }
+
     def list_drafts(
         self,
         *,
@@ -213,6 +233,67 @@ def _login(
     set_cookie = headers["set-cookie"]
     cookie = set_cookie.split(";", 1)[0]
     return cookie, payload["csrf_token"], payload["principal"], set_cookie
+
+
+def test_model_api_configuration_is_isolated_to_fixed_api_admin() -> None:
+    business = _account(
+        "business-admin",
+        name="业务管理员",
+        role="企业管理员",
+        password="business-password",
+        permissions={"read", "write", "confirm", "submit"},
+    )
+    api_admin = _account(
+        "api_admin",
+        name="API 配置管理员",
+        role="API 配置管理员",
+        password="api-admin-password",
+        permissions={"model_api_admin"},
+    )
+    with _running((business, api_admin)) as (service, connection):
+        business_cookie, business_csrf, _, _ = _login(
+            connection, "business-admin", "business-password"
+        )
+        status, _, _ = _request(
+            connection,
+            "GET",
+            "/api/v1/model-api",
+            cookie=business_cookie,
+        )
+        assert status == 403
+        assert not service.calls
+
+        api_cookie, api_csrf, principal, _ = _login(
+            connection, "api_admin", "api-admin-password"
+        )
+        assert principal["permissions"] == ["model_api_admin"]
+        status, payload, _ = _request(
+            connection,
+            "GET",
+            "/api/v1/model-api",
+            cookie=api_cookie,
+        )
+        assert status == 200
+        assert "api_key" not in payload
+
+        status, payload, _ = _request(
+            connection,
+            "POST",
+            "/api/v1/model-api",
+            {
+                "api_key": "sk-http-secret",
+                "base_url": "https://models.mineguard.cn/v1",
+                "model": "coal-model-v1",
+            },
+            cookie=api_cookie,
+            csrf=api_csrf,
+        )
+        assert status == 200
+        assert "api_key" not in payload
+        configure_call = service.calls[-1]
+        assert configure_call[0] == "configure_model_api"
+        assert configure_call[1]["actor_id"] == "api_admin"
+        assert business_csrf
 
 
 def test_health_discloses_demo_mode_without_disclosing_accounts() -> None:

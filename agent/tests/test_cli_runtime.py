@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 from conftest import complete_values, ensure_event_snapshot
 
 from enterprise_agent.cli import main
@@ -22,6 +23,7 @@ from enterprise_agent.storage import Repository
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.skip(reason="legacy model credential CLI was removed")
 def test_model_rotation_accepts_sanitized_authoritative_environment(
     tmp_path: Path,
     monkeypatch,
@@ -111,6 +113,7 @@ def test_model_rotation_accepts_sanitized_authoritative_environment(
     assert json.loads(capsys.readouterr().out)["credential_version"] == 2
 
 
+@pytest.mark.skip(reason="legacy model credential CLI was removed")
 def test_model_rotation_accepts_new_versioned_linux_final_paths(
     tmp_path: Path,
     monkeypatch,

@@ -108,6 +108,64 @@
       </p>
     </section>
 
+    <main class="model-api-admin" id="modelApiAdminPanel" hidden>
+      <section class="model-api-admin-card" aria-labelledby="modelApiAdminTitle">
+        <div class="model-api-admin-heading">
+          <div>
+            <p class="eyebrow">系统管理 · 仅 api_admin</p>
+            <h2 id="modelApiAdminTitle">模型 API 配置</h2>
+            <p>
+              此账号只能维护模型服务，不能查看、修改或报送企业业务数据。
+              保存前系统会先测试连接，API Key 只在本机加密保存且不会再次显示。
+            </p>
+          </div>
+          <span class="status-badge" id="modelApiState">尚未配置</span>
+        </div>
+        <form id="modelApiForm" autocomplete="off">
+          <div class="model-api-admin-grid">
+            <label class="field">
+              <span>API 地址</span>
+              <input
+                id="modelApiBaseUrl"
+                name="base_url"
+                type="url"
+                inputmode="url"
+                placeholder="https://api.example.com/v1"
+                maxlength="2048"
+                required
+              >
+            </label>
+            <label class="field">
+              <span>模型名称</span>
+              <input
+                id="modelApiModel"
+                name="model"
+                placeholder="模型服务提供的 model 名称"
+                maxlength="128"
+                required
+              >
+            </label>
+          </div>
+          <label class="field">
+            <span>API Key</span>
+            <input
+              id="modelApiKey"
+              name="api_key"
+              type="password"
+              autocomplete="new-password"
+              maxlength="4096"
+              required
+            >
+            <small>更新配置时需要重新输入完整 API Key；页面和接口均不会返回已保存的 Key。</small>
+          </label>
+          <p class="model-api-admin-result" id="modelApiResult" role="status" aria-live="polite"></p>
+          <button class="button button-primary button-large" id="modelApiSaveButton" type="submit">
+            测试连接并保存
+          </button>
+        </form>
+      </section>
+    </main>
+
     <main class="fq-shell" id="fiveQuantityWorkspace">
       <nav class="fq-nav" aria-label="十量报送工作区">
         <button class="fq-nav-button is-active" type="button" data-fq-tab="inbox" aria-pressed="true">

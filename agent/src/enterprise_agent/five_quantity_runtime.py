@@ -2660,7 +2660,7 @@ class FiveQuantityStore:
             return {
                 "required": False,
                 "state": "not_required",
-                "message": "当前为演示/调试单人流程，不代表正式报送配置",
+                "message": "当前由业务管理员完成填报、确认和报送，不要求双人复核",
             }
         if not isinstance(last_actor, str) or not last_actor:
             return {

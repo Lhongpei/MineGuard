@@ -687,7 +687,11 @@ def test_dynamic_content_uses_safe_dom_apis() -> None:
 def test_frontend_has_no_secret_or_platform_code_dependency() -> None:
     combined = "\n".join((HTML, JS, CSS))
     assert not re.search(r"\bsk-[A-Za-z0-9_-]{8,}", combined)
-    assert "api_key" not in combined.lower()
+    api_key_field = HTML[HTML.index('id="modelApiKey"') :]
+    api_key_field = api_key_field[: api_key_field.index(">")]
+    assert 'type="password"' in api_key_field
+    assert 'autocomplete="new-password"' in api_key_field
+    assert "status.api_key" not in JS
     assert "../platform" not in combined
     assert "src/mineguard" not in combined
 

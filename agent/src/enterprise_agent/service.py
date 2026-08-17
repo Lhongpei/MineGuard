@@ -24,6 +24,12 @@ from .five_quantity_runtime import FiveQuantityRuntime
 from .harness import HarnessRuntime
 from .importers import import_text, merge_import
 from .llm import OpenAICompatibleProvider
+from .model_api_config import (
+    load_model_api_config,
+    save_model_api_config,
+    validate_model_api_config,
+    verify_model_api_config,
+)
 from .models import (
     SUBMISSION_SCHEMA_VERSION,
     new_draft,
@@ -31,7 +37,7 @@ from .models import (
 )
 from .security import normalize_observation, observation_payload
 from .settings import AgentV2Config
-from .skills import SkillRegistry, build_skill_registry
+from .skills import CoalNewsConfig, SkillRegistry, build_skill_registry
 from .storage import Repository
 from .util import (
     deep_copy_json,
@@ -500,11 +506,13 @@ class EnterpriseAgentService:
         platform_client: PlatformClient | None = None,
         llm_provider: OpenAICompatibleProvider | None = None,
         skill_registry: SkillRegistry | None = None,
+        coal_news_config: CoalNewsConfig | None = None,
         agent_v2_config: AgentV2Config | None = None,
         five_quantity_runtime: FiveQuantityRuntime | None = None,
         four_eyes_required: bool = False,
         production_mode: bool = False,
         model_credential_status: dict[str, Any] | None = None,
+        model_config_path: str | None = None,
     ):
         self.repository = repository
         self.platform_client = platform_client
@@ -512,6 +520,7 @@ class EnterpriseAgentService:
         self.skills = (
             skill_registry if skill_registry is not None else build_skill_registry()
         )
+        self.coal_news_config = coal_news_config
         self.agent_v2_config = agent_v2_config or AgentV2Config()
         self.governance = GovernanceStore(repository)
         # A single local service process must never race two network attempts
@@ -535,6 +544,72 @@ class EnterpriseAgentService:
             if model_credential_status is not None
             else {"managed": False, "source": "not_configured"}
         )
+        self.model_config_path = model_config_path
+        self._model_config_lock = threading.RLock()
+
+    def model_api_status(self) -> dict[str, Any]:
+        if self.model_config_path is None:
+            return {
+                "managed": False,
+                "state": "not_available",
+                "source": "not_configured",
+            }
+        _config, status = load_model_api_config(self.model_config_path)
+        return status
+
+    def configure_model_api(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        model: str,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Test, durably save and hot-apply api_admin-owned model settings."""
+
+        if self.model_config_path is None:
+            raise ValueError("当前实例未启用 api_admin 模型配置")
+        if actor_id != "api_admin":
+            raise ValueError("只有固定账号 api_admin 可以修改模型 API")
+        if not all(isinstance(value, str) for value in (api_key, base_url, model)):
+            raise ValueError("模型 API 配置必须是文本")
+        candidate = validate_model_api_config(api_key, base_url, model)
+        probe = OpenAICompatibleProvider(candidate)
+        test_result = probe.test_connection()
+        with self._model_config_lock:
+            saved = save_model_api_config(
+                self.model_config_path,
+                api_key=candidate.api_key,
+                base_url=candidate.base_url,
+                model=candidate.model,
+                actor_id=actor_id,
+            )
+            provider = OpenAICompatibleProvider(
+                saved,
+                configuration_guard=lambda: verify_model_api_config(
+                    self.model_config_path or "", saved
+                ),
+                allowed_capabilities=frozenset(
+                    {"chat", "extraction", "coal-news-search"}
+                ),
+            )
+            self.llm_provider = provider
+            self.skills = build_skill_registry(
+                self.coal_news_config,
+                llm_config=saved,
+                llm_configuration_guard=lambda: verify_model_api_config(
+                    self.model_config_path or "", saved
+                ),
+            )
+            if self._five_quantity is not None:
+                self._five_quantity.csv_mapping_provider = provider
+            if self._harness is not None:
+                self._harness.llm_provider = provider
+            if self._chat is not None:
+                self._chat.skills = self.skills
+            _loaded, status = load_model_api_config(self.model_config_path)
+            self.model_credential_status = deep_copy_json(status)
+        return {**status, "connection_test": test_result["status"]}
 
     def _full_integrity_status(self) -> dict[str, Any]:
         """Run the authoritative, linear-history startup verification."""
@@ -763,7 +838,7 @@ class EnterpriseAgentService:
             draft["_meta"]["four_eyes"] = {
                 "required": False,
                 "state": "not_required",
-                "message": "当前为演示/调试单人流程，不得据此视为正式报送配置",
+                "message": "当前由业务管理员完成填报、确认和报送，不要求双人复核",
             }
         return draft
 

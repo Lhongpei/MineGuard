@@ -44,6 +44,7 @@ KNOWN_PERMISSIONS = frozenset(
         "submit",
         "governance_review",
         "skill_admin",
+        "model_api_admin",
     }
 )
 ALL_PERMISSIONS = KNOWN_PERMISSIONS

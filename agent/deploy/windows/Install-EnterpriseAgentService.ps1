@@ -957,7 +957,7 @@ Assert-EAInstanceGlobalIsolation -Context $SharedContext
 Assert-EAInstanceWatchAcls -Context $SharedContext
 
 $ServiceProductionMode = if ($AllowIncompleteDemo -or $AllowUnsignedTestMedia) { "false" } else { "true" }
-$ServiceFourEyesRequired = if ($AllowIncompleteDemo -or $AllowUnsignedTestMedia) { "false" } else { "true" }
+$ServiceFourEyesRequired = "false"
 $ServiceProvisioningManagedRequired = if (
     $AllowIncompleteDemo -or $AllowUnsignedTestMedia
 ) { "false" } else { "true" }

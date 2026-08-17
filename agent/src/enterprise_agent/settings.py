@@ -22,10 +22,9 @@ from .five_quantity_exchange import (
 )
 from .llm import LLMConfig
 from .machine_ingestion import ConnectorClient, parse_connector_clients_json
+from .model_api_config import ModelApiConfigError, load_model_api_config
 from .model_credentials import (
-    ModelCredentialError,
     ModelCredentialStatus,
-    load_model_credential_from_environment,
     plaintext_model_environment_names,
 )
 from .provisioning import (
@@ -107,73 +106,65 @@ _MODEL_ENVIRONMENT = {
     "timeout": "MINEGUARD_AGENT_TIMEOUT_SECONDS",
     "max_retries": "MINEGUARD_AGENT_MAX_RETRIES",
 }
-_LEGACY_MODEL_ENVIRONMENT = {
-    "api_key": "DEEPSEEK_API_KEY",
-    "base_url": "DEEPSEEK_BASE_URL",
-    "model": "DEEPSEEK_MODEL",
-    "timeout": "DEEPSEEK_TIMEOUT_SECONDS",
-    "max_retries": "DEEPSEEK_MAX_RETRIES",
-}
-_MANAGED_MODEL_ENVIRONMENT = {
+_REMOVED_LEGACY_MODEL_ENVIRONMENT = frozenset(
+    {
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_TIMEOUT_SECONDS",
+        "DEEPSEEK_MAX_RETRIES",
+    }
+)
+_REMOVED_MODEL_CREDENTIAL_ENVIRONMENT = {
     "lock": "MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE",
     "secret_store": "MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE",
 }
 
 
 def _model_config_from_environment() -> LLMConfig | None:
-    """Read the provider-neutral model namespace with one-release aliases.
-
-    The legacy namespace is intentionally all-or-nothing.  Mixing it with the
-    canonical namespace could pair a credential with the wrong upstream URL,
-    so ambiguous processes fail before constructing an HTTP provider.
-    """
+    """Read the provider-neutral development-only model namespace."""
 
     current = {
         field: os.environ.get(name) for field, name in _MODEL_ENVIRONMENT.items()
     }
-    legacy = {
-        field: os.environ.get(name) for field, name in _LEGACY_MODEL_ENVIRONMENT.items()
-    }
-    current_present = any(
-        value is not None and value.strip() for value in current.values()
+    removed_legacy_names = sorted(
+        name
+        for name in _REMOVED_LEGACY_MODEL_ENVIRONMENT
+        if os.environ.get(name, "").strip()
     )
-    legacy_present = any(
-        value is not None and value.strip() for value in legacy.values()
-    )
-    if current_present and legacy_present:
-        raise ValueError("MINEGUARD_AGENT_* 模型配置不能与已弃用的 DEEPSEEK_* 配置混用")
-
-    selected = current if current_present else legacy
-    names = _MODEL_ENVIRONMENT if current_present else _LEGACY_MODEL_ENVIRONMENT
-    api_key = (selected["api_key"] or "").strip()
+    if removed_legacy_names:
+        raise ValueError(
+            "DEEPSEEK_* 模型配置已移除；请删除："
+            + "、".join(removed_legacy_names)
+        )
+    api_key = (current["api_key"] or "").strip()
     if not api_key:
         return None
 
-    if current_present:
-        missing = [
-            names[field]
-            for field in ("base_url", "model")
-            if not (selected[field] or "").strip()
-        ]
-        if missing:
-            raise ValueError(
-                "使用 MINEGUARD_AGENT_API_KEY 时必须显式配置 " + "、".join(missing)
-            )
+    missing = [
+        _MODEL_ENVIRONMENT[field]
+        for field in ("base_url", "model")
+        if not (current[field] or "").strip()
+    ]
+    if missing:
+        raise ValueError(
+            "使用 MINEGUARD_AGENT_API_KEY 时必须显式配置 " + "、".join(missing)
+        )
 
     return LLMConfig(
         api_key=api_key,
-        base_url=(selected["base_url"] or "https://api.deepseek.com").strip(),
-        model=(selected["model"] or "deepseek-v4-flash").strip(),
+        base_url=(current["base_url"] or "").strip(),
+        model=(current["model"] or "").strip(),
         timeout_seconds=_float_value(
-            names["timeout"],
-            selected["timeout"],
+            _MODEL_ENVIRONMENT["timeout"],
+            current["timeout"],
             20.0,
             1.0,
             120.0,
         ),
         max_retries=_integer_value(
-            names["max_retries"],
-            selected["max_retries"],
+            _MODEL_ENVIRONMENT["max_retries"],
+            current["max_retries"],
             2,
             0,
             5,
@@ -190,59 +181,52 @@ def _managed_model_config(
     provisioning_status: ProvisioningStatus,
     identity: MineIdentity,
 ) -> tuple[LLMConfig | None, ModelCredentialStatus]:
-    pointers = {
+    local_path = os.environ.get("ENTERPRISE_AGENT_MODEL_CONFIG_FILE", "").strip()
+    removed_pointers = {
         field: os.environ.get(name, "").strip()
-        for field, name in _MANAGED_MODEL_ENVIRONMENT.items()
+        for field, name in _REMOVED_MODEL_CREDENTIAL_ENVIRONMENT.items()
     }
-    present = {field for field, value in pointers.items() if value}
-    if present and present != set(_MANAGED_MODEL_ENVIRONMENT):
-        missing = [
-            name
-            for field, name in _MANAGED_MODEL_ENVIRONMENT.items()
-            if not pointers[field]
-        ]
-        raise ValueError("受管模型凭据路径必须成组配置，缺少：" + "、".join(missing))
-    if not present:
-        config = _model_config_from_environment()
+    if any(removed_pointers.values()):
+        raise ValueError(
+            "旧 .mgllm 模型凭据流程已移除；请删除旧 lock/store 指针，"
+            "并由 api_admin 在企业端页面配置模型 API"
+        )
+    if local_path:
+        if _plaintext_model_environment_present():
+            raise ValueError("api_admin 模型配置不能与明文模型环境变量混用")
+        if not provisioning_status.managed:
+            raise ValueError("api_admin 模型配置必须绑定已验签的企业接入身份")
+        try:
+            config, status = load_model_api_config(local_path)
+        except (ModelApiConfigError, OSError):
+            return None, ModelCredentialStatus(
+                managed=True,
+                mine_id=identity.mine_id,
+                system_id=identity.system_id,
+                party_id=identity.operator_id,
+                pair_id=provisioning_status.pair_id,
+                source="api_admin",
+                state="unavailable",
+                failure_code="local_model_config_invalid",
+            )
         return config, ModelCredentialStatus(
-            managed=False,
-            source=(
-                "development-environment"
-                if config is not None
-                else "not_configured"
-            ),
-        )
-    if _plaintext_model_environment_present():
-        raise ValueError("受管 .mgllm 凭据不能与任何明文模型环境变量混用")
-    if not provisioning_status.managed:
-        raise ValueError("受管模型凭据必须绑定已验签的企业 provisioning 身份")
-    if not provisioning_status.pair_id:
-        raise ValueError("已验签企业 provisioning 身份缺少 pair_id，不能启用模型凭据")
-    expected_subject = {
-        "mine_id": identity.mine_id,
-        "system_id": identity.system_id,
-        "party_id": identity.operator_id,
-        "pair_id": provisioning_status.pair_id,
-    }
-    try:
-        return load_model_credential_from_environment(
-            expected_subject=expected_subject
-        )
-    except (ModelCredentialError, OSError):
-        # A model authorization is optional to the reporting safety path.
-        # Expiry, local damage or a temporarily incompatible release trust
-        # disables all model egress, but must not take CSV review, signing or
-        # submission offline.  Never fall back to editable plaintext config.
-        return None, ModelCredentialStatus(
             managed=True,
             mine_id=identity.mine_id,
             system_id=identity.system_id,
             party_id=identity.operator_id,
             pair_id=provisioning_status.pair_id,
-            source="managed-model-credential-unavailable",
-            state="unavailable",
-            failure_code="credential_invalid_or_unavailable",
+            base_url=(config.base_url if config is not None else None),
+            model=(config.model if config is not None else None),
+            capabilities=("chat", "extraction", "coal-news-search"),
+            secret_protection=status.get("secret_protection"),
+            source="api_admin",
+            state=str(status.get("state") or "not_configured"),
         )
+    config = _model_config_from_environment()
+    return config, ModelCredentialStatus(
+        managed=False,
+        source=("development-environment" if config is not None else "not_configured"),
+    )
 
 
 def _historical_enterprise_signing_keys(
@@ -331,6 +315,7 @@ class Settings:
     platform: PlatformClientConfig | None
     llm: LLMConfig | None
     model_credential_status: ModelCredentialStatus
+    model_config_path: str | None
     coal_news: CoalNewsConfig
     agent_v2: AgentV2Config
     five_quantity_identity: MineIdentity
@@ -619,6 +604,10 @@ class Settings:
             platform=platform,
             llm=llm,
             model_credential_status=model_credential_status,
+            model_config_path=(
+                os.environ.get("ENTERPRISE_AGENT_MODEL_CONFIG_FILE", "").strip()
+                or None
+            ),
             coal_news=CoalNewsConfig(
                 enabled=_boolean("COAL_NEWS_SEARCH_ENABLED", True),
                 timeout_seconds=_float(

@@ -108,35 +108,25 @@ SHA-256，再由 Setup 显式选择 `AllowUnsignedInternalRelease`；它不能�
 ## 3. 推荐入口：导入一矿一包并自动配置
 
 正式新部署不再要求现场人员手写 `agent.env`。安装完成后，从开始菜单打开
-`MineGuard 企业接入配置向导`，点击“选择...”，选择监管端为本矿生成的完整企业交付目录。
-向导会读取 `enterprise-install-manifest.json`，自动定位 `.mgprov`、签发公钥和政府 HTTPS
-CA，带入实例名、issuer key ID 与两个摘要；现场人员不再逐项抄路径和 64 位摘要。随后另选
-不在该目录内的激活码，并输入监管方通过介质外渠道告知的 12 位独立核验码。
+`MineGuard 企业接入配置向导`，点击“选择...”，选择监管端为本矿生成的
+单个 `.mgprov` 文件。包内已包含激活材料和签发公钥，企业端无需再选 CA、
+激活码、公钥、指纹或独立核验码。
 
-现场需提前从相互独立的渠道准备：
+现场只需准备：
 
-- 本矿企业交付目录（含 `.mgprov`、签发公钥、政府 HTTPS CA、交接清单；不含秘密）；
-- 通过第二条渠道单独交付的激活码文件；
-- 通过电话、审批单等企业交付介质之外渠道取得的 **12 位独立核验码**；
-- 首次创建时的未占用端口，以及经办人和复核人的登录名、姓名、不同的正式密码。
+- 本矿的单个 `.mgprov` 企业接入包；
+- 一个未占用的本机端口（默认 8090）；
+- 业务管理员的登录名、姓名和密码；
+- 固定账号 `api_admin` 的密码。
 
-12 位码由 `pair_id`、issuer key ID、公钥 SPKI 摘要和 CA 摘要共同派生。向导会对清单中的
-材料重新验真，并以固定时间比较核验码；把交付目录和核验码放在同一 U 盘不算独立核验。
-密码只在内存中传给正式摘要命令，激活码只由受控文件读取；它们不会进入命令行、日志、
-`agent.env` 或开始菜单快捷方式。两把逐矿 HMAC 只保存在机器级 DPAPI 密文中，受该实例
-专用服务 SID 的 ACL 保护。首次创建必须建立两名具名账号：经办人只能填报，复核人才能
-确认和提交；两人的正式密码必须不同。
+密码只在向导内存中转为 `SecureString`，不进入命令行或日志。逐矿 HMAC
+只保存在机器级 DPAPI 密文中，受该实例专用服务 SID 的 ACL 保护。业务管理员可以
+读取、编辑、确认和提交业务数据；`api_admin` 只能配置模型 API，看不到业务工作区。
 
-签名 profile 中的 `PLATFORM_V3_CA_BUNDLE` 必须预先锁定为该实例最终路径，例如：
-
-```text
-C:\ProgramData\MineGuard\EnterpriseAgent\instances\mine-001\config\platform-ca.pem
-```
-
-向导会精确核对该路径。包选错矿、激活码错误、签名/独立核验错误、CA 被替换、端口或身份
-冲突、正式配置不完整都会在发布前失败。当前图形向导只接受
-`profile_version=1` 的全新配置，并绝不覆盖既有实例；不提供旧版升级或手工拼接信任材料的
-入口。矿井、经营主体、同类矿分组和 key ID 均由签名包锁定，不能手工编辑。
+向导会校验包内签名、嵌入公钥绑定、激活材料、矿端身份、端口与本机路径。
+包选错矿、签名或解密失败、端口或身份冲突、正式配置不完整都会在发布前失败。
+当前图形向导只接受全新实例，绝不覆盖已有实例；不提供旧版升级。矿井、经营主体、
+同类矿分组和 key ID 均由 `.mgprov` 锁定。
 
 接入包导入并通过正式预检后，向导会直接打开正式服务安装窗口；以后也可用左下角的
 “仅安装或修复正式服务…”重新进入。它不会下载或捆绑 WinSW，也不会从所选
@@ -219,13 +209,14 @@ PowerShell 脚本，不支持变量展开或命令替换，也不要 dot-source�
 & 'C:\Program Files\MineGuard\EnterpriseAgent\runtime\MineGuardEnterpriseAgent.exe' hash-password --production --json
 ```
 
-正式部署请分别为经办人、复核负责人运行一次上述命令。
+正式部署请分别为业务管理员和固定 `api_admin` 运行一次上述命令。
 
 将两次输出的 `password_hash`、`credential_provenance`、
 `must_change_password` 写入单行 `ENTERPRISE_AGENT_USERS_JSON`；不能写明文密码。
-经办账号只给 `read/write`，复核账号只给 `read/confirm/submit`。保持
+业务管理员给 `read/write/confirm/submit`，固定 `api_admin` 只给
+`model_api_admin`。保持
 `ENTERPRISE_AGENT_PRODUCTION_MODE=true` 和
-`ENTERPRISE_AGENT_FOUR_EYES_REQUIRED=true`。仅不用 demo 账号不等于正式版。
+`ENTERPRISE_AGENT_FOUR_EYES_REQUIRED=false`。仅不用 demo 账号不等于正式版。
 
 演示账号
 `demo / 123123123` 只允许回环演示，不能确认或报送。
@@ -259,60 +250,16 @@ secret 需要在两个方向分别登记，程序仍按各自 envelope key ID �
 新字段后重新报送。
 
 两把 HMAC 密钥必须不同且至少 32 字节。模型只影响可选对话/新闻功能。正式 Windows
-实例不要在 `agent.env` 中填写 API Key、接口地址或模型；从开始菜单打开
-`MineGuard 模型授权导入向导`，只选择：
+实例不要在 `agent.env` 中填写 API Key、接口地址或模型。使用固定账号
+`api_admin` 登录企业端，在“模型 API 配置”页填写：
 
-- 已完成企业接入配置的实例；
-- 由 MineGuard 签发的本矿 `.mgllm` 模型授权包；
-- 通过另一渠道交付的激活码文件。
+- HTTPS API 地址；
+- 模型名；
+- API Key。
 
-向导不提供 API Key、`BASE_URL`、模型或签发公钥编辑框。签发信任库固定为已签名安装目录
-`release-metadata\model-credential-trust.json`，现场不能另选公钥。导入器先验证包签名、激活
-解密和 mine/system/party/pair 四项身份（其中 `pair_id` 必须与本机 `.mgprov` 接入锁
-一致），再将凭据转换为机器级 DPAPI 密文。实例文件只保留两个
-非秘密固定指针；信任库由运行时从已验签安装目录固定解析，不写入实例配置：
-
-```text
-MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE=C:\ProgramData\MineGuard\EnterpriseAgent\instances\mine-001\config\model-credential-lock.json
-MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE=C:\ProgramData\MineGuard\EnterpriseAgent\instances\mine-001\config\model-credentials.dpapi
-```
-
-`model-credentials.dpapi` 只能在导入它的 Windows 机器上解密，并由实例 ACL 限制为 SYSTEM、
-Administrators 和该实例专用服务 SID；Key 不进入 `agent.env`、WinSW XML、命令行或导入
-结果。程序还从 lock 固定派生同目录的 `model-credential-lock.state.json`，以 HMAC 绑定已
-接受的最高 credential version、bundle 和 issuer key epoch，防止只恢复旧 lock/store 后
-继续外呼；它不是第三个 env 指针，现场不得单独编辑、删除或回退。
-
-首次导入和后续换钥使用同一向导：它与企业接入包更新共用逐实例事务锁，先在同卷受保护
-目录准备新文件，再停止所选服务、写恢复阻断标记，把 DPAPI store、防回退 state、lock 和
-`agent.env` 四个文件纳入同一备份/发布/回滚事务并执行正式配置检查。三份凭据文件缺少任意
-一份或 staging 返回的 state 路径不等于 lock 固定派生路径，都会在发布前失败。成功后恢复
-操作前的运行/停止状态；失败自动回滚，回滚不完整时保持服务停止并保留标记，禁止带半套
-凭据启动。
-
-以下五个供应商无关变量及旧 `DEEPSEEK_*` 别名只允许源码开发/临时迁移使用；`.mgllm`
-导入会把它们全部从实例环境文件删除，正式服务如果发现可编辑明文模型配置应闭锁拒绝：
-
-```text
-MINEGUARD_AGENT_API_KEY=
-MINEGUARD_AGENT_BASE_URL=
-MINEGUARD_AGENT_MODEL=
-MINEGUARD_AGENT_TIMEOUT_SECONDS=
-MINEGUARD_AGENT_MAX_RETRIES=
-```
-
-DeepSeek 原生新闻搜索的 `COAL_NEWS_DEEPSEEK_*` 开关属于厂商专有能力，不是通用模型
-凭据。DPAPI 密文不适合迁移到新机器；灾备换机时应重新签发/导入新版本 `.mgllm`，并在
-模型供应商侧吊销旧企业 Key、设置该企业独立额度和告警。
-
-管理员高级自动化入口如下；激活码文件路径可以进入参数，激活码内容不会进入命令行：
-
-```powershell
-.\Import-EnterpriseAgentModelCredential.ps1 `
-  -InstanceName mine-001 `
-  -BundlePath 'E:\Delivery\mine-001-v1.mgllm' `
-  -ActivationCodeFile 'F:\SeparateChannel\mine-001-v1.activation'
-```
+保存前会用最小请求测试连通性；失败时不替换旧配置。API Key 不会返回给前端，
+也不进入 `agent.env`、WinSW XML 或日志；Windows 上使用机器级 DPAPI 加密保存。
+业务管理员不能查看或修改该配置。新机器需要由 `api_admin` 重新填写 API 配置。
 
 多个监听目录在 Windows 使用分号，例如：
 
@@ -338,8 +285,8 @@ cd 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
 当成当前实例健康。运维脚本要求所有程序、状态和快照路径为显式 `X:\...` 本地固定 NTFS
 路径，并拒绝 UNC、映射盘、盘符相对路径和任何祖先或受控目录树内的重解析点。
 
-浏览器打开 `http://127.0.0.1:8090/`。正式环境仍只让 Agent 监听回环地址，由单位批准的
-IIS/Caddy/Nginx 反向代理统一提供 HTTPS；不要把 8090 直接开放到办公网或公网。
+浏览器在 Agent 本机打开 `http://127.0.0.1:8090/`。正式环境只让 Agent 监听回环地址，
+不要把 8090 开放到办公网或公网。
 
 ## 7. 安装为 Windows 服务
 
@@ -352,7 +299,7 @@ SHA-256。正常流程会在导入配置后自动打开服务安装；需要重�
 若已安装介质分类为 `unsigned-internal-release`，同一个向导会显示醒目的无发布者签名
 警告，并把“签名者 SHA-1”输入框自动改为“Agent 发行清单 SHA-256”。该 64 位值必须来自
 安装介质之外的审批记录，不能把窗口现场计算值或包内 manifest 当作独立批准值。向导仍会
-强制立即启动、绑定实例健康检查、生产模式、四眼复核和 provisioning-managed 策略。
+强制立即启动、绑定实例健康检查、生产模式和 provisioning-managed 策略。
 
 以下 PowerShell 仅作为管理员高级自动化入口：
 
@@ -407,16 +354,14 @@ NTFS ADS、链接、目录联接和挂载点；安装时会严格核对状态根
 `INTERNAL-UNSIGNED` 版要求状态严格为 `NotSigned`，并以线下批准的子发行清单 SHA-256
 校验完整 runtime、部署脚本和
 发行元数据文件集合，而不是只信任主 EXE。
-服务安装默认强制生产模式与四眼复核，并执行
-`config-check --production`：必须有两个
-权限分离的具名正式账号、可信凭据来源、HTTPS 浏览器 origin、
-Secure Cookie、HTTPS 政府 V3 地址、两把不同 HMAC 密钥、正式 key ID 和完整同类矿分组。
-其中浏览器/政府地址会拒绝 `.example/.invalid/.test`、example.com/net/org、localhost 和回环
-IP；允许真实内网 DNS 或内网 IP 的 HTTPS。矿井、经营主体、Agent/政府系统、发送者及连接器
+服务安装默认强制生产模式，并执行 `config-check --production`：必须有一个业务管理员和
+固定 `api_admin`、可信凭据来源、回环监听、HTTPS 政府 V3 地址、两把不同 HMAC 密钥、
+正式 key ID 和完整同类矿分组。政府地址会拒绝 `.example/.invalid/.test`、example.com/net/org、
+localhost 和回环 IP；允许真实内网 DNS 或内网 IP 的 HTTPS。矿井、经营主体、Agent/政府系统、发送者及连接器
 来源标识也会拒绝 demo/example/sample/test/replace 等默认或占位值。
 仅配置不完整但仍使用正式签名二进制的离线演示可传 `-AllowIncompleteDemo`，仍必须提供
 批准指纹。若还要运行实际未签名的内部测试介质，必须同时显式传
-`-AllowIncompleteDemo -AllowUnsignedTestMedia`；服务 XML 会强制生产模式和四眼复核均为
+`-AllowIncompleteDemo -AllowUnsignedTestMedia`；服务 XML 会强制生产模式为
 false。任一演示/测试开关都不能用于生产验收。
 
 WinSW 始终使用 `--authoritative-env-file`：Agent 在读取实例文件前清空继承的
@@ -424,7 +369,7 @@ WinSW 始终使用 `--authoritative-env-file`：Agent 在读取实例文件前�
 以及精确允许的 `MINEGUARD_AGENT_*` 模型配置和 `ENTERPRISE_AGENT_ENV_FILE`，因此
 机器级或管理员 shell 变量不能把另一矿的
 mine/system/database/HMAC 覆盖进来。随后只允许 XML 中三个非秘密且严格为 `true/false` 的
-`MINEGUARD_SERVICE_*` 策略覆盖生产、四眼复核和受管配置要求；HMAC 和密码摘要保存在 ACL 受控
+`MINEGUARD_SERVICE_*` 策略覆盖生产和受管配置要求；HMAC 和密码摘要保存在 ACL 受控
 env 文件，模型密钥只保存在机器级 DPAPI 密文中。安装前 `config-check` 会临时隔离管理员进程中的同名变量，并走与实际 serve
 完全相同的权威加载路径，检查结束后再原样恢复 shell 环境。正式服务必须带 `-Start`，且
 只有 SCM 达到 Running、服务身份再次匹配并通过绑定当前实例的 `/api/v1/health` 后才返回成功；

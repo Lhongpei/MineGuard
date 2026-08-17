@@ -1,22 +1,14 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$BundlePath,
-    [Parameter(Mandatory = $true)][string]$ActivationCodeFile,
-    [Parameter(Mandatory = $true)][string]$TrustKeyPath,
-    [Parameter(Mandatory = $true)][string]$ExpectedTrustKeySha256,
-    [Parameter(Mandatory = $true)][string]$ExpectedIssuerKeyId,
-    [Parameter(Mandatory = $true)][string]$CaSourcePath,
-    [Parameter(Mandatory = $true)][string]$ExpectedCaSha256,
     [Parameter(Mandatory = $true)][string]$InstanceName,
     [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
-    [Parameter(Mandatory = $true)][string]$PreparerActorId,
-    [Parameter(Mandatory = $true)][string]$PreparerName,
-    [Parameter(Mandatory = $true)][Security.SecureString]$PreparerPassword,
-    [Parameter(Mandatory = $true)][Security.SecureString]$PreparerPasswordConfirmation,
-    [Parameter(Mandatory = $true)][string]$ReviewerActorId,
-    [Parameter(Mandatory = $true)][string]$ReviewerName,
-    [Parameter(Mandatory = $true)][Security.SecureString]$ReviewerPassword,
-    [Parameter(Mandatory = $true)][Security.SecureString]$ReviewerPasswordConfirmation,
+    [Parameter(Mandatory = $true)][string]$BusinessAdminActorId,
+    [Parameter(Mandatory = $true)][string]$BusinessAdminName,
+    [Parameter(Mandatory = $true)][Security.SecureString]$BusinessAdminPassword,
+    [Parameter(Mandatory = $true)][Security.SecureString]$BusinessAdminPasswordConfirmation,
+    [Parameter(Mandatory = $true)][Security.SecureString]$ApiAdminPassword,
+    [Parameter(Mandatory = $true)][Security.SecureString]$ApiAdminPasswordConfirmation,
     [string]$InstallRoot = (Join-Path $env:ProgramFiles "MineGuard\EnterpriseAgent"),
     [string]$StateRoot = (Join-Path $env:ProgramData "MineGuard\EnterpriseAgent\instances")
 )
@@ -42,24 +34,6 @@ if (-not $Principal.IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator
     )) {
     throw "请在管理员 PowerShell 或开始菜单配置向导中执行接入包导入。"
-}
-
-function Get-NormalizedSha256 {
-    param([string]$Name, [string]$Value)
-    if ([string]::IsNullOrWhiteSpace($Value) -or
-        $Value -notmatch '^[A-Fa-f0-9\s]+$') {
-        throw "$Name 必须是从介质外审批材料取得的 64 位十六进制 SHA-256。"
-    }
-    $Normalized = ($Value -replace '\s', '').ToLowerInvariant()
-    if ($Normalized -notmatch '^[a-f0-9]{64}$') {
-        throw "$Name 必须是从介质外审批材料取得的 64 位十六进制 SHA-256。"
-    }
-    return $Normalized
-}
-
-if ($ExpectedIssuerKeyId -notmatch `
-    '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$') {
-    throw "介质外 issuer key ID 格式无效。"
 }
 
 function Assert-ActorInput {
@@ -308,50 +282,27 @@ Assert-EAInstanceName -Value $InstanceName
 if ($InstanceName -notmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
     throw "正式接入实例名只允许 1-64 位英文小写字母、数字和中间短横线。"
 }
-Assert-ActorInput -Label "经办人" -ActorId $PreparerActorId `
-    -DisplayName $PreparerName
-Assert-ActorInput -Label "复核人" -ActorId $ReviewerActorId `
-    -DisplayName $ReviewerName
-if ($PreparerActorId.Equals(
-        $ReviewerActorId, [StringComparison]::OrdinalIgnoreCase
+Assert-ActorInput -Label "企业管理员" -ActorId $BusinessAdminActorId `
+    -DisplayName $BusinessAdminName
+if ($BusinessAdminActorId.Equals(
+        'api_admin', [StringComparison]::OrdinalIgnoreCase
     )) {
-    throw "经办人与复核人必须使用不同登录名。"
+    throw "企业管理员登录名不能使用保留账号 api_admin。"
 }
-if (-not (Test-SecureStringEqual $PreparerPassword `
-        $PreparerPasswordConfirmation)) {
-    throw "经办人两次输入的密码不一致。"
+if (-not (Test-SecureStringEqual $BusinessAdminPassword `
+        $BusinessAdminPasswordConfirmation)) {
+    throw "企业管理员两次输入的密码不一致。"
 }
-if (-not (Test-SecureStringEqual $ReviewerPassword `
-        $ReviewerPasswordConfirmation)) {
-    throw "复核人两次输入的密码不一致。"
+if (-not (Test-SecureStringEqual $ApiAdminPassword `
+        $ApiAdminPasswordConfirmation)) {
+    throw "api_admin 两次输入的密码不一致。"
 }
-if (Test-SecureStringEqual $PreparerPassword $ReviewerPassword) {
-    throw "经办人与复核人不能使用相同密码。"
+if (Test-SecureStringEqual $BusinessAdminPassword $ApiAdminPassword) {
+    throw "企业管理员与 api_admin 不能使用相同密码。"
 }
 
-$ExpectedTrustKeySha256 = Get-NormalizedSha256 `
-    -Name "签发公钥 SHA-256" -Value $ExpectedTrustKeySha256
-$ExpectedCaSha256 = Get-NormalizedSha256 `
-    -Name "政府 CA 文件 SHA-256" -Value $ExpectedCaSha256
 $BundlePath = Resolve-ProvisioningInputFile -Name "企业接入包" `
     -PathValue $BundlePath -MaximumBytes 4MB -AllowedExtensions @('.mgprov')
-$ActivationCodeFile = Resolve-ProvisioningInputFile -Name "激活码文件" `
-    -PathValue $ActivationCodeFile -MaximumBytes 4KB
-$TrustKeyPath = Resolve-ProvisioningInputFile -Name "签发公钥" `
-    -PathValue $TrustKeyPath -MaximumBytes 64KB -AllowedExtensions @('.pem')
-$CaSourcePath = Resolve-ProvisioningInputFile -Name "政府 CA 文件" `
-    -PathValue $CaSourcePath -MaximumBytes 1MB -AllowedExtensions @('.pem', '.crt')
-$DistinctInputPaths = @(@(
-    $BundlePath, $ActivationCodeFile, $TrustKeyPath, $CaSourcePath
-) | Select-Object -Unique)
-if ($DistinctInputPaths.Count -ne 4) {
-    throw "接入包、激活码、公钥和 CA 必须是四个不同文件。"
-}
-$ActualCaSha256 = (Get-FileHash -LiteralPath $CaSourcePath `
-    -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($ActualCaSha256 -ne $ExpectedCaSha256) {
-    throw "政府 CA 文件与介质外审批 SHA-256 不一致，已拒绝导入。"
-}
 
 $InstallRoot = Resolve-EASafeLocalPath -Name "InstallRoot" `
     -PathValue $InstallRoot -MustExist -RequiredType Container -CheckTree
@@ -377,7 +328,7 @@ $FinalConfigDirectory = Join-Path $InstanceRoot "config"
 $FinalLockPath = Join-Path $FinalConfigDirectory "provisioning-lock.json"
 $FinalSecretStorePath = Join-Path $FinalConfigDirectory `
     "provisioning-secrets.dpapi"
-$FinalCaPath = Join-Path $FinalConfigDirectory "platform-ca.pem"
+$FinalModelConfigPath = Join-Path $FinalConfigDirectory "model-api.json"
 
 $TransactionRoot = Join-Path $StateRoot `
     (".instance-staging-" + [Guid]::NewGuid().ToString("N"))
@@ -396,26 +347,26 @@ try {
         "/grant:r", "*S-1-5-32-544:(OI)(CI)F"
     )
 
-    $PreparerRecord = Get-ProductionPasswordRecord `
-        -Executable $AgentExecutable -Password $PreparerPassword
-    $ReviewerRecord = Get-ProductionPasswordRecord `
-        -Executable $AgentExecutable -Password $ReviewerPassword
+    $BusinessAdminRecord = Get-ProductionPasswordRecord `
+        -Executable $AgentExecutable -Password $BusinessAdminPassword
+    $ApiAdminRecord = Get-ProductionPasswordRecord `
+        -Executable $AgentExecutable -Password $ApiAdminPassword
     $Users = @(
         [ordered]@{
-            actor_id = $PreparerActorId
-            name = $PreparerName.Trim()
-            role = "企业经办人"
-            password_hash = [string]$PreparerRecord.password_hash
-            permissions = @("read", "write")
+            actor_id = $BusinessAdminActorId
+            name = $BusinessAdminName.Trim()
+            role = "企业管理员"
+            password_hash = [string]$BusinessAdminRecord.password_hash
+            permissions = @("read", "write", "confirm", "submit")
             must_change_password = $false
             credential_provenance = "production_hash_command"
         },
         [ordered]@{
-            actor_id = $ReviewerActorId
-            name = $ReviewerName.Trim()
-            role = "企业复核负责人"
-            password_hash = [string]$ReviewerRecord.password_hash
-            permissions = @("read", "confirm", "submit")
+            actor_id = "api_admin"
+            name = "API 配置管理员"
+            role = "API 配置管理员"
+            password_hash = [string]$ApiAdminRecord.password_hash
+            permissions = @("model_api_admin")
             must_change_password = $false
             credential_provenance = "production_hash_command"
         }
@@ -448,7 +399,7 @@ try {
     $BaseEnvironment = Set-EnvironmentRecord -Content $BaseEnvironment `
         -Name "ENTERPRISE_PROVISIONING_SECRET_STORE" -Value $FinalSecretStorePath
     $BaseEnvironment = Set-EnvironmentRecord -Content $BaseEnvironment `
-        -Name "PLATFORM_V3_CA_BUNDLE" -Value $FinalCaPath
+        -Name "ENTERPRISE_AGENT_MODEL_CONFIG_FILE" -Value $FinalModelConfigPath
     # The signed bundle owns every exchange-secret namespace.  Even the
     # harmless-looking JSON literal [] is truthy to the fail-closed importer,
     # so the local base must leave this key empty rather than inherit it.
@@ -462,8 +413,6 @@ try {
         "provisioning-lock.json"
     $SecretStorePath = Join-Path $TransactionRoot `
         "provisioning-secrets.dpapi"
-    $PreparedCaPath = Join-Path $TransactionRoot "platform-ca.pem"
-    $PreparedActivationPath = Join-Path $TransactionRoot "activation.code"
     $Utf8NoBom = New-Object Text.UTF8Encoding($false)
     $Stream = New-Object IO.FileStream(
         $BaseEnvironmentPath,
@@ -477,34 +426,14 @@ try {
         $Stream.Flush($true)
     }
     finally { $Stream.Dispose() }
-    [IO.File]::Copy($CaSourcePath, $PreparedCaPath, $false)
-    [IO.File]::Copy($ActivationCodeFile, $PreparedActivationPath, $false)
-    $ActivationSourceSha256 = (Get-FileHash -LiteralPath $ActivationCodeFile `
-        -Algorithm SHA256).Hash
-    $ActivationCopySha256 = (Get-FileHash -LiteralPath $PreparedActivationPath `
-        -Algorithm SHA256).Hash
-    if ($ActivationSourceSha256 -ne $ActivationCopySha256) {
-        throw "激活码复制过程中发生变化，已拒绝导入。"
-    }
-    $CopiedCaSha256 = (Get-FileHash -LiteralPath $PreparedCaPath `
-        -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($CopiedCaSha256 -ne $ExpectedCaSha256) {
-        throw "复制后的政府 CA 文件 SHA-256 不一致。"
-    }
     Assert-EAProtectedSnapshotAcl -SnapshotRoot $TransactionRoot
 
-    # The importer performs Ed25519 verification, activation-code decryption,
-    # independent trust-key/CA hash gates, DPAPI LocalMachine protection and
-    # CreateNew writes.  None of the secrets below is placed in an argument.
+    # The self-contained .mgprov package carries its signed encrypted payload,
+    # activation material and issuer public key.  The importer validates all
+    # bindings before DPAPI LocalMachine protection and CreateNew writes.
     $ImportOutput = Invoke-AgentProcess -Executable $AgentExecutable `
         -Arguments @(
             "provision-import", "--bundle", $BundlePath,
-            "--activation-code-file", $PreparedActivationPath,
-            "--issuer-public-key", $TrustKeyPath,
-            "--expected-public-key-sha256", $ExpectedTrustKeySha256,
-            "--expected-issuer-key-id", $ExpectedIssuerKeyId,
-            "--expected-ca-sha256", $ExpectedCaSha256,
-            "--ca-source", $PreparedCaPath,
             "--base-env", $BaseEnvironmentPath,
             "--output-env", $ProvisionedEnvironmentPath,
             "--lock-output", $ProvisioningLockPath,
@@ -540,9 +469,7 @@ try {
         [string]$ProvisionedValues["ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS"] -ne
             $FinalInboxPath -or
         [string]$ProvisionedValues["ENTERPRISE_SYSTEM_ID"] -ne
-            [string]$ProvisionedValues["PLATFORM_V3_SENDER_ID"] -or
-        [string]$ProvisionedValues["PLATFORM_V3_CA_BUNDLE"] -ne
-            $FinalCaPath) {
+            [string]$ProvisionedValues["PLATFORM_V3_SENDER_ID"]) {
         throw "签名配置与本机实例边界不一致。"
     }
 
@@ -558,8 +485,7 @@ try {
         -StateRoot $StateRoot `
         -ProvisionedEnvironmentFile $ProvisionedEnvironmentPath `
         -ProvisioningLockFile $ProvisioningLockPath `
-        -ProvisioningSecretStoreFile $SecretStorePath `
-        -ProvisioningCaFile $PreparedCaPath | Out-String
+        -ProvisioningSecretStoreFile $SecretStorePath | Out-String
     if ($LASTEXITCODE -ne 0) {
         throw "实例创建事务失败，退出码 $LASTEXITCODE。"
     }
@@ -574,8 +500,9 @@ try {
         platform_origin = [string]$ProvisionedValues["PLATFORM_V3_BASE_URL"]
         profile_version = $ImportResult.profile_version
         bundle_id = $ImportResult.bundle_id
-        trust_key_sha256 = $ExpectedTrustKeySha256
-        ca_sha256 = $ExpectedCaSha256
+        package_sha256 = (Get-FileHash -LiteralPath $BundlePath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+        tls_trust = "operating-system"
         production_preflight = "passed"
     }
 }

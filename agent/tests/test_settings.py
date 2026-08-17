@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import pytest
 
-from enterprise_agent import settings as settings_module
 from enterprise_agent.auth import hash_password
 from enterprise_agent.cli import main
 from enterprise_agent.settings import Settings
@@ -62,21 +60,17 @@ def test_provider_neutral_model_configuration_is_canonical(
     assert llm.max_retries == 4
 
 
-def test_legacy_deepseek_model_configuration_remains_a_migration_alias(
+def test_legacy_deepseek_model_configuration_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_model(monkeypatch)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "legacy-enterprise-key")
 
-    llm = Settings.from_environment().llm
-
-    assert llm is not None
-    assert llm.api_key == "legacy-enterprise-key"
-    assert llm.base_url == "https://api.deepseek.com"
-    assert llm.model == "deepseek-v4-flash"
+    with pytest.raises(ValueError, match=r"DEEPSEEK_\* 模型配置已移除"):
+        Settings.from_environment()
 
 
-def test_model_configuration_rejects_mixed_new_and_legacy_namespaces(
+def test_model_configuration_rejects_removed_legacy_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_model(monkeypatch)
@@ -85,7 +79,7 @@ def test_model_configuration_rejects_mixed_new_and_legacy_namespaces(
     monkeypatch.setenv("MINEGUARD_AGENT_MODEL", "approved-model")
     monkeypatch.setenv("DEEPSEEK_MODEL", "legacy-model")
 
-    with pytest.raises(ValueError, match="不能与已弃用的 DEEPSEEK"):
+    with pytest.raises(ValueError, match=r"DEEPSEEK_\* 模型配置已移除"):
         Settings.from_environment()
 
 
@@ -106,11 +100,10 @@ def test_model_configuration_conflict_does_not_disclose_credentials(
     message = str(captured.value)
     assert current_secret not in message
     assert legacy_secret not in message
-    assert "MINEGUARD_AGENT" in message
     assert "DEEPSEEK" in message
 
 
-def test_unavailable_managed_model_disables_egress_without_blocking_core(
+def test_removed_model_credential_pointers_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_model(monkeypatch)
@@ -123,32 +116,8 @@ def test_unavailable_managed_model_disables_egress_without_blocking_core(
         "/var/lib/enterprise-agent/model.secret.json",
     )
 
-    def fail_closed(**_kwargs):
-        raise settings_module.ModelCredentialError("expired secret must not leak")
-
-    monkeypatch.setattr(
-        settings_module,
-        "load_model_credential_from_environment",
-        fail_closed,
-    )
-    llm, status = settings_module._managed_model_config(
-        provisioning_status=SimpleNamespace(
-            managed=True,
-            pair_id="11111111-1111-4111-8111-111111111111",
-        ),
-        identity=SimpleNamespace(
-            mine_id="MINE-QY-001",
-            system_id="agent-mine-qy-001",
-            operator_id="operator-qy-001",
-        ),
-    )
-
-    assert llm is None
-    assert status.managed is True
-    assert status.state == "unavailable"
-    assert status.failure_code == "credential_invalid_or_unavailable"
-    assert status.source == "managed-model-credential-unavailable"
-    assert "expired secret" not in str(status.as_dict())
+    with pytest.raises(ValueError, match=r"旧 \.mgllm 模型凭据流程已移除"):
+        Settings.from_environment()
 
 
 @pytest.mark.parametrize(
@@ -424,7 +393,7 @@ def test_config_check_lists_enterprise_key_ids_without_exposing_secrets(
     assert historical_secret not in output
 
 
-def test_config_check_warns_about_legacy_model_names_without_exposing_key(
+def test_config_check_rejects_legacy_model_names_without_exposing_key(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -432,11 +401,11 @@ def test_config_check_warns_about_legacy_model_names_without_exposing_key(
     legacy_secret = "legacy-model-key-must-not-leak"
     monkeypatch.setenv("DEEPSEEK_API_KEY", legacy_secret)
 
-    assert main(["config-check"]) == 0
+    assert main(["config-check"]) == 1
 
-    output = capsys.readouterr().out
-    document = json.loads(output)
-    assert any("DEEPSEEK_*" in warning for warning in document["warnings"])
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "DEEPSEEK_* 模型配置已移除" in output
     assert legacy_secret not in output
 
 

@@ -504,6 +504,7 @@ def test_key_rotation_epoch_cannot_roll_back_at_issuer_or_import(
         )
 
 
+@pytest.mark.skip(reason="legacy model credential CLI was removed")
 def test_cli_rotation_accepts_sanitized_windows_environment_when_old_credential_expired(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

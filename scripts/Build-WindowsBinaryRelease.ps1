@@ -29,6 +29,8 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
 $env:PYTHONUTF8 = "1"
 $env:PYTHONUNBUFFERED = "1"
 if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
@@ -74,13 +76,28 @@ function Get-GitSourceState {
         throw "Git revision probe returned an invalid object ID: $Revision"
     }
 
-    $WorkingTreeOutput = @(& $GitPath -C $Root diff --quiet --no-ext-diff 2>&1)
-    $WorkingTreeExitCode = $LASTEXITCODE
+    # Windows PowerShell 5.1 promotes native stderr records to terminating
+    # errors under ErrorActionPreference=Stop, even with stderr redirected. Git
+    # can emit harmless line-ending warnings here; these probes intentionally
+    # consume only the native exit codes and immediately restore strict mode.
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = & $GitPath -C $Root diff --quiet --no-ext-diff 2>$null
+        $WorkingTreeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
     if ($WorkingTreeExitCode -notin @(0, 1)) {
         throw "Unable to inspect tracked Git changes (exit code $WorkingTreeExitCode)."
     }
-    $IndexOutput = @(& $GitPath -C $Root diff --cached --quiet --no-ext-diff 2>&1)
-    $IndexExitCode = $LASTEXITCODE
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = & $GitPath -C $Root diff --cached --quiet --no-ext-diff 2>$null
+        $IndexExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
     if ($IndexExitCode -notin @(0, 1)) {
         throw "Unable to inspect staged Git changes (exit code $IndexExitCode)."
     }

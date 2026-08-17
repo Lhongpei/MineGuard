@@ -7,7 +7,6 @@ import hashlib
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -306,11 +305,9 @@ def test_inno_scripts() -> None:
     for token in (
         "Verb = 'runas'",
         "Start-EnterpriseAgentProvisioningWizard.ps1",
-        "Start-EnterpriseAgentModelCredentialWizard.ps1",
         "[Parameter(Mandatory = $true)]",
         "-InstallRoot",
         "-STA",
-        "[switch] $ModelCredentials",
         "[switch] $Elevated",
         "WindowsBuiltInRole]::Administrator",
     ):
@@ -425,7 +422,7 @@ def test_inno_scripts() -> None:
             f"{name} start-menu paths must not be mutable through /GROUP or "
             "a previous installation"
         )
-        expected_shortcut_count = 3
+        expected_shortcut_count = 3 if name == "platform" else 2
         assert icons.count('Name: "{commonprograms}\\MineGuard\\') == (
             expected_shortcut_count
         ), f"{name} start-menu shortcuts must use the fixed audited group"
@@ -475,7 +472,6 @@ def test_inno_scripts() -> None:
     agent_icons_section = agent.split("[Icons]", 1)[1].split("[Run]", 1)[0]
     for token in (
         "MineGuard 企业接入配置向导",
-        "MineGuard 模型授权导入向导",
         "MineGuard 企业端使用说明",
         "Open-MineGuardEnterpriseAgentControlCenter.ps1",
         (
@@ -1618,18 +1614,11 @@ def test_audit_and_lifecycle() -> None:
         "/ALLOW_UNSIGNED_TEST_MEDIA=1",
         "$LifecycleAuditError = $null",
         "preserving the original lifecycle audit error",
-        "Start-EnterpriseAgentModelCredentialWizard.ps1",
         "Start-MineGuardPlatformProvisioningWizard.ps1",
         "Start-EnterpriseAgentProvisioningWizard.ps1",
-        "release-metadata\\model-credential-trust.json",
         "controls_constructed",
         "Platform provisioning wizard GUI construction self-test failed",
         "Agent provisioning wizard GUI construction self-test failed",
-        "enterprise-agent-model-credential-wizard",
-        "trust_store_present",
-        "trust_store_editable",
-        "api_configuration_editable",
-        "Agent model credential wizard headless self-test failed",
         "-----BEGIN",
         "sk-",
     ):

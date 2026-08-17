@@ -8,12 +8,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
-from cryptography.x509.oid import NameOID
 
 from enterprise_agent.auth import hash_password
 from enterprise_agent.cli import _configuration_errors, main
@@ -46,42 +44,24 @@ def _time(value: datetime) -> str:
     )
 
 
-def _ca() -> bytes:
-    key = Ed25519PrivateKey.generate()
-    now = datetime.now(UTC)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "MineGuard Test CA")])
-    certificate = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - timedelta(days=1))
-        .not_valid_after(now + timedelta(days=365))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .sign(key, algorithm=None)
-    )
-    return certificate.public_bytes(serialization.Encoding.PEM)
-
-
 def _users_json() -> str:
     return canonical_json(
         [
             {
-                "actor_id": "preparer-qy-001",
-                "name": "正式经办人员",
-                "role": "企业经办人",
+                "actor_id": "admin-qy-001",
+                "name": "企业业务管理员",
+                "role": "企业管理员",
                 "password_hash": hash_password("MineGuard!Prepare2026"),
-                "permissions": ["read", "write"],
+                "permissions": ["read", "write", "confirm", "submit"],
                 "must_change_password": False,
                 "credential_provenance": "production_hash_command",
             },
             {
-                "actor_id": "reviewer-qy-001",
-                "name": "正式复核人员",
-                "role": "企业复核负责人",
+                "actor_id": "api_admin",
+                "name": "API 配置管理员",
+                "role": "API 配置管理员",
                 "password_hash": hash_password("MineGuard!Review2026"),
-                "permissions": ["read", "confirm", "submit"],
+                "permissions": ["model_api_admin"],
                 "must_change_password": False,
                 "credential_provenance": "production_hash_command",
             },
@@ -133,10 +113,6 @@ def _bundle_fixture(
         serialization.Encoding.DER,
         serialization.PublicFormat.SubjectPublicKeyInfo,
     )
-    ca_bytes = _ca()
-    ca_target = tmp_path / "platform-ca.pem"
-    ca_target.write_bytes(ca_bytes)
-    os.chmod(ca_target, 0o600)
     application_secret = (
         f"A9!application-secret-v{profile_version}-2026-abcdefghijklmnopqrstuvwxyz"
     )
@@ -149,10 +125,9 @@ def _bundle_fixture(
         transport_secret = str(previous["transport_secret"])
         enterprise_key_id = str(previous["enterprise_key_id"])
     config = {
-        "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED": "true",
+        "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED": "false",
         "ENTERPRISE_AGENT_PRODUCTION_MODE": "true",
-        "ENTERPRISE_AGENT_PUBLIC_ORIGIN": "https://agent.mine.internal",
-        "ENTERPRISE_AGENT_SECURE_COOKIE": "true",
+        "ENTERPRISE_AGENT_SECURE_COOKIE": "false",
         "ENTERPRISE_CAPACITY_BAND": "0.9-1.2Mtpa",
         "ENTERPRISE_COAL_TYPE": "thermal-coal",
         "ENTERPRISE_EXCHANGE_HMAC_SECRET": application_secret,
@@ -167,7 +142,6 @@ def _bundle_fixture(
         "ENTERPRISE_SHIFT_SYSTEM": "three-shift-eight-hour",
         "ENTERPRISE_SYSTEM_ID": "agent-mine-qy-001",
         "PLATFORM_V3_BASE_URL": platform_base_url,
-        "PLATFORM_V3_CA_BUNDLE": str(ca_target),
         "PLATFORM_V3_SENDER_ID": "agent-mine-qy-001",
         "PLATFORM_V3_TRANSPORT_HMAC_SECRET": transport_secret,
         "REGULATORY_EXCHANGE_KEY_ID": regulatory_key_id,
@@ -257,7 +231,15 @@ def _bundle_fixture(
         ),
     }
     bundle_path = tmp_path / "mine.mgprov"
-    bundle_path.write_text(canonical_json(document) + "\n", encoding="utf-8")
+    package = {
+        "format": "mineguard-enterprise-access-package-v1",
+        "agent_bundle": document,
+        "activation_code": activation.decode("ascii"),
+        "issuer_public_key_pem": public_pem.decode("ascii"),
+        "issuer_public_key_sha256": hashlib.sha256(public_der).hexdigest(),
+        "issuer_key_id": issuer_key_id,
+    }
+    bundle_path.write_text(canonical_json(package) + "\n", encoding="utf-8")
     public_path = tmp_path / "issuer-public.pem"
     public_path.write_bytes(public_pem)
     base_env = tmp_path / "base.env"
@@ -278,8 +260,6 @@ def _bundle_fixture(
         "public_key": public_path,
         "public_fingerprint": hashlib.sha256(public_der).hexdigest(),
         "activation": activation,
-        "ca": ca_target,
-        "ca_sha256": hashlib.sha256(ca_bytes).hexdigest(),
         "base_env": base_env,
         "application_secret": application_secret,
         "transport_secret": transport_secret,
@@ -307,19 +287,12 @@ def _install(
     store = tmp_path / "secrets.json"
     result = install_provisioning_bundle(
         bundle_path=fixture["bundle"],
-        activation_code=fixture["activation"],
-        issuer_public_key_path=fixture["public_key"],
-        expected_public_key_sha256=str(fixture["public_fingerprint"]),
-        expected_issuer_key_id=str(fixture["issuer_key_id"]),
-        allow_unanchored_test_key=False,
         base_environment_path=fixture["base_env"],
         output_environment_path=env,
         lock_output_path=lock,
         lock_environment_path=lock,
         secret_store_output_path=store,
         secret_store_environment_path=store,
-        ca_source_path=fixture["ca"],
-        expected_ca_sha256=str(fixture["ca_sha256"]),
         secret_protection=TEST_SECRET_PROTECTION,
         expected_mine_id=str(fixture["mine_id"]),
         expected_system_id="agent-mine-qy-001",
@@ -457,7 +430,8 @@ def test_envelope_rejects_json_boolean_for_integer_kdf_parameter(
 ) -> None:
     fixture = _bundle_fixture(tmp_path)
     bundle_path = Path(str(fixture["bundle"]))
-    document = json.loads(bundle_path.read_text(encoding="utf-8"))
+    package = json.loads(bundle_path.read_text(encoding="utf-8"))
+    document = package["agent_bundle"]
     document["protected"]["encryption"]["p"] = True
     signed = {
         "protected": document["protected"],
@@ -468,7 +442,7 @@ def test_envelope_rejects_json_boolean_for_integer_kdf_parameter(
     document["signature"] = _b64url(
         signer.sign(canonical_json(signed).encode())
     )
-    bundle_path.write_text(canonical_json(document) + "\n", encoding="utf-8")
+    bundle_path.write_text(canonical_json(package) + "\n", encoding="utf-8")
 
     with pytest.raises(ProvisioningError, match="加密参数不受支持"):
         _install(tmp_path, fixture)
@@ -538,63 +512,23 @@ def test_runtime_rejects_environment_and_lock_tampering(tmp_path: Path) -> None:
         apply_provisioning_lock(environment)
 
 
-def test_import_rejects_wrong_external_fingerprints_and_expiry(
+def test_import_rejects_tampered_embedded_trust_and_expiry(
     tmp_path: Path,
 ) -> None:
     fixture = _bundle_fixture(tmp_path)
+    bundle_path = Path(str(fixture["bundle"]))
+    original_package = json.loads(bundle_path.read_text(encoding="utf-8"))
+    tampered = json.loads(canonical_json(original_package))
+    tampered["issuer_public_key_sha256"] = "0" * 64
+    bundle_path.write_text(canonical_json(tampered) + "\n", encoding="utf-8")
     with pytest.raises(ProvisioningError, match="公钥.*不匹配"):
-        install_provisioning_bundle(
-            bundle_path=fixture["bundle"],
-            activation_code=fixture["activation"],
-            issuer_public_key_path=fixture["public_key"],
-            expected_public_key_sha256="0" * 64,
-            expected_issuer_key_id="provisioning-ed25519-2026q3",
-            allow_unanchored_test_key=False,
-            base_environment_path=fixture["base_env"],
-            output_environment_path=tmp_path / "bad.env",
-            lock_output_path=tmp_path / "bad.lock",
-            lock_environment_path=tmp_path / "bad.lock",
-            secret_store_output_path=tmp_path / "bad.store",
-            secret_store_environment_path=tmp_path / "bad.store",
-            ca_source_path=fixture["ca"],
-            expected_ca_sha256=str(fixture["ca_sha256"]),
-        )
+        _install(tmp_path, fixture)
 
-    with pytest.raises(ProvisioningError, match="issuer_key_id.*不匹配"):
-        install_provisioning_bundle(
-            bundle_path=fixture["bundle"],
-            activation_code=fixture["activation"],
-            issuer_public_key_path=fixture["public_key"],
-            expected_public_key_sha256=str(fixture["public_fingerprint"]),
-            expected_issuer_key_id="wrong-approved-key-id",
-            allow_unanchored_test_key=False,
-            base_environment_path=fixture["base_env"],
-            output_environment_path=tmp_path / "bad-key-id.env",
-            lock_output_path=tmp_path / "bad-key-id.lock",
-            lock_environment_path=tmp_path / "bad-key-id.lock",
-            secret_store_output_path=tmp_path / "bad-key-id.store",
-            secret_store_environment_path=tmp_path / "bad-key-id.store",
-            ca_source_path=fixture["ca"],
-            expected_ca_sha256=str(fixture["ca_sha256"]),
-        )
-
-    with pytest.raises(ProvisioningError, match="CA bundle.*不匹配"):
-        install_provisioning_bundle(
-            bundle_path=fixture["bundle"],
-            activation_code=fixture["activation"],
-            issuer_public_key_path=fixture["public_key"],
-            expected_public_key_sha256=str(fixture["public_fingerprint"]),
-            expected_issuer_key_id="provisioning-ed25519-2026q3",
-            allow_unanchored_test_key=False,
-            base_environment_path=fixture["base_env"],
-            output_environment_path=tmp_path / "bad-ca.env",
-            lock_output_path=tmp_path / "bad-ca.lock",
-            lock_environment_path=tmp_path / "bad-ca.lock",
-            secret_store_output_path=tmp_path / "bad-ca.store",
-            secret_store_environment_path=tmp_path / "bad-ca.store",
-            ca_source_path=fixture["ca"],
-            expected_ca_sha256="0" * 64,
-        )
+    tampered = json.loads(canonical_json(original_package))
+    tampered["issuer_key_id"] = "wrong-embedded-key-id"
+    bundle_path.write_text(canonical_json(tampered) + "\n", encoding="utf-8")
+    with pytest.raises(ProvisioningError, match="issuer_key_id.*不一致"):
+        _install(tmp_path, fixture)
 
     expired_directory = tmp_path / "expired"
     expired_directory.mkdir()
@@ -719,8 +653,6 @@ def test_cli_import_outputs_only_non_secret_summary(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     fixture = _bundle_fixture(tmp_path)
-    activation_file = tmp_path / "activation.txt"
-    activation_file.write_bytes(bytes(fixture["activation"]) + b"\n")
     env = tmp_path / "cli-agent.env"
     lock = tmp_path / "cli-lock.json"
     store = tmp_path / "cli-secrets.json"
@@ -730,18 +662,6 @@ def test_cli_import_outputs_only_non_secret_summary(
             "provision-import",
             "--bundle",
             str(fixture["bundle"]),
-            "--activation-code-file",
-            str(activation_file),
-            "--issuer-public-key",
-            str(fixture["public_key"]),
-            "--expected-public-key-sha256",
-            str(fixture["public_fingerprint"]),
-            "--expected-issuer-key-id",
-            "provisioning-ed25519-2026q3",
-            "--ca-source",
-            str(fixture["ca"]),
-            "--expected-ca-sha256",
-            str(fixture["ca_sha256"]),
             "--base-env",
             str(fixture["base_env"]),
             "--output-env",

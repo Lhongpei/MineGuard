@@ -2,10 +2,12 @@
 
 This module implements the V1 protocol published in ``contracts`` without
 importing Platform code.  The generic Agent executable receives one opaque
-``.mgprov`` file.  Import verifies the external Ed25519 trust fingerprint,
-verifies the signature before decrypting, validates the sealed enterprise
-identity and HTTPS endpoint, and moves HMAC material into a protected local
-secret store.  The generated ``agent.env`` contains no bilateral secret.
+``.mgprov`` file.  Import binds the embedded Ed25519 issuer key metadata,
+verifies the signature before
+decrypting, validates the sealed enterprise identity and government HTTPS
+endpoint, and moves HMAC material into a protected local secret store.  The
+generated ``agent.env`` contains no bilateral secret.  The enterprise UI
+remains loopback-only and outbound HTTPS uses the operating system trust store.
 """
 
 from __future__ import annotations
@@ -32,7 +34,6 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -44,6 +45,7 @@ from .environment import parse_environment_file
 from .util import canonical_json, utc_text
 
 CONTRACT_VERSION = "mineguard-provisioning-bundle-v1"
+ACCESS_PACKAGE_FORMAT = "mineguard-enterprise-access-package-v1"
 BUNDLE_KIND = "enterprise-agent-provisioning"
 LOCK_FORMAT = "mineguard-enterprise-provisioning-lock-v1"
 SECRET_STORE_FORMAT = "mineguard-enterprise-secret-store-v1"
@@ -105,6 +107,14 @@ _PLACEHOLDER_TOKENS = frozenset(
 )
 
 _ENVELOPE_FIELDS = {"protected", "ciphertext", "signature"}
+_ACCESS_PACKAGE_FIELDS = {
+    "format",
+    "agent_bundle",
+    "activation_code",
+    "issuer_public_key_pem",
+    "issuer_public_key_sha256",
+    "issuer_key_id",
+}
 _PROTECTED_FIELDS = {
     "contract_version",
     "bundle_kind",
@@ -134,7 +144,6 @@ _PAYLOAD_FIELDS = {
 _REQUIRED_CONFIG_KEYS = {
     "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED",
     "ENTERPRISE_AGENT_PRODUCTION_MODE",
-    "ENTERPRISE_AGENT_PUBLIC_ORIGIN",
     "ENTERPRISE_AGENT_SECURE_COOKIE",
     "ENTERPRISE_CAPACITY_BAND",
     "ENTERPRISE_COAL_TYPE",
@@ -150,7 +159,6 @@ _REQUIRED_CONFIG_KEYS = {
     "ENTERPRISE_SHIFT_SYSTEM",
     "ENTERPRISE_SYSTEM_ID",
     "PLATFORM_V3_BASE_URL",
-    "PLATFORM_V3_CA_BUNDLE",
     "PLATFORM_V3_SENDER_ID",
     "PLATFORM_V3_TRANSPORT_HMAC_SECRET",
     "REGULATORY_EXCHANGE_KEY_ID",
@@ -653,17 +661,11 @@ def _validate_config(config: Any, protected: Mapping[str, Any]) -> dict[str, str
             raise ProvisioningError(f"接入包 config {name} 值非法")
     if selected["ENTERPRISE_AGENT_PRODUCTION_MODE"] != "true":
         raise ProvisioningError("接入包必须锁定正式生产模式")
-    if selected["ENTERPRISE_AGENT_FOUR_EYES_REQUIRED"] != "true":
-        raise ProvisioningError("接入包必须锁定四眼复核")
-    if selected["ENTERPRISE_AGENT_SECURE_COOKIE"] != "true":
-        raise ProvisioningError("接入包必须锁定 Secure Cookie")
-    _https_origin(selected["ENTERPRISE_AGENT_PUBLIC_ORIGIN"], "PUBLIC_ORIGIN")
+    if selected["ENTERPRISE_AGENT_FOUR_EYES_REQUIRED"] != "false":
+        raise ProvisioningError("简化接入包必须关闭四眼复核")
+    if selected["ENTERPRISE_AGENT_SECURE_COOKIE"] != "false":
+        raise ProvisioningError("回环企业界面必须关闭 Secure Cookie")
     _https_origin(selected["PLATFORM_V3_BASE_URL"], "PLATFORM_V3_BASE_URL")
-    _absolute_path(
-        selected["PLATFORM_V3_CA_BUNDLE"],
-        "PLATFORM_V3_CA_BUNDLE",
-        maximum=1024,
-    )
     identity_names = (
         "ENTERPRISE_MINE_ID",
         "ENTERPRISE_OPERATOR_ID",
@@ -850,37 +852,26 @@ def read_activation_code_file(path: str | Path) -> bytes:
     return normalize_activation_code(encoded)
 
 
-def _validate_ca_source(encoded: bytes) -> None:
-    if b"PRIVATE KEY" in encoded:
-        raise ProvisioningError("CA bundle 不得包含私钥")
-    try:
-        certificates = x509.load_pem_x509_certificates(encoded)
-    except ValueError as error:
-        raise ProvisioningError("CA bundle 不是有效 PEM 证书链") from error
-    if not certificates:
-        raise ProvisioningError("CA bundle 至少需要一张证书")
-
-
 def _validate_base_accounts(raw: str | None) -> None:
     users = parse_users_json(raw)
-    if len(users) < 2:
-        raise ProvisioningError("基础环境必须先配置至少两个不同的正式具名账号")
-    preparers = []
-    reviewers = []
+    if len(users) != 2:
+        raise ProvisioningError("基础环境必须配置企业管理员和固定 api_admin 两个账号")
+    business_admins = []
+    api_admins = []
     for account in users:
         defects = production_credential_errors(account)
         if defects:
             raise ProvisioningError(f"账号 {account.actor_id} 正式凭据不合格")
-        if {"read", "write"}.issubset(account.permissions) and not (
-            account.permissions & {"confirm", "submit"}
+        if account.actor_id == "api_admin":
+            if account.permissions != frozenset({"model_api_admin"}):
+                raise ProvisioningError("api_admin 只能拥有 model_api_admin 权限")
+            api_admins.append(account.actor_id)
+        elif account.permissions == frozenset(
+            {"read", "write", "confirm", "submit"}
         ):
-            preparers.append(account.actor_id)
-        if {"read", "confirm", "submit"}.issubset(account.permissions) and (
-            "write" not in account.permissions
-        ):
-            reviewers.append(account.actor_id)
-    if not preparers or not reviewers or set(preparers) & set(reviewers):
-        raise ProvisioningError("基础环境账号必须严格分离经办与复核报送权限")
+            business_admins.append(account.actor_id)
+    if len(business_admins) != 1 or api_admins != ["api_admin"]:
+        raise ProvisioningError("基础环境必须包含一个业务管理员和固定 api_admin")
 
 
 def _encode_environment(values: Mapping[str, str]) -> bytes:
@@ -1064,10 +1055,10 @@ def _assert_upgrade(current_lock_path: str | Path, verified: VerifiedBundle) -> 
     except UnicodeEncodeError as error:
         raise ProvisioningError("当前 provisioning lock 签发公钥非法") from error
     if (
-        current["trust_anchor_mode"] != "external-sha256"
+        current["trust_anchor_mode"] != "embedded-package"
         or current_fingerprint != current["issuer_public_key_sha256"]
     ):
-        raise ProvisioningError("当前 provisioning lock 未绑定已审批签发公钥")
+        raise ProvisioningError("当前 provisioning lock 未绑定接入包签发公钥")
     before = _validate_envelope(current["envelope"], current_key)["protected"]
     after = verified.envelope["protected"]
     if before["issuer_key_id"] != current["expected_issuer_key_id"]:
@@ -1132,19 +1123,12 @@ def _assert_upgrade(current_lock_path: str | Path, verified: VerifiedBundle) -> 
 def install_provisioning_bundle(
     *,
     bundle_path: str | Path,
-    activation_code: bytes,
-    issuer_public_key_path: str | Path,
-    expected_public_key_sha256: str | None,
-    expected_issuer_key_id: str | None,
-    allow_unanchored_test_key: bool,
     base_environment_path: str | Path,
     output_environment_path: str | Path,
     lock_output_path: str | Path,
     lock_environment_path: str | Path,
     secret_store_output_path: str | Path,
     secret_store_environment_path: str | Path,
-    ca_source_path: str | Path,
-    expected_ca_sha256: str,
     secret_protection: str = "auto",
     expected_mine_id: str | None = None,
     expected_system_id: str | None = None,
@@ -1152,25 +1136,42 @@ def install_provisioning_bundle(
     now: datetime | None = None,
 ) -> ProvisioningResult:
     _, bundle_bytes = _read_regular(bundle_path, "企业接入包")
-    _, public_bytes = _read_regular(issuer_public_key_path, "签发公钥")
-    verified = verify_and_decrypt_bundle(
+    package = _strict_object(
         _json_bytes(bundle_bytes, "企业接入包"),
-        activation_code=activation_code,
-        issuer_public_key_pem=public_bytes,
-        expected_public_key_sha256=expected_public_key_sha256,
-        allow_unanchored_test_key=allow_unanchored_test_key,
+        _ACCESS_PACKAGE_FIELDS,
+        "企业接入包",
+    )
+    if package["format"] != ACCESS_PACKAGE_FORMAT:
+        raise ProvisioningError("企业接入包格式不受支持")
+    if not isinstance(package["activation_code"], str):
+        raise ProvisioningError("企业接入包内置激活凭据格式非法")
+    if not isinstance(package["issuer_public_key_pem"], str):
+        raise ProvisioningError("企业接入包内置签发公钥格式非法")
+    embedded_fingerprint = package["issuer_public_key_sha256"]
+    if not isinstance(embedded_fingerprint, str) or _HEX_64.fullmatch(
+        embedded_fingerprint
+    ) is None:
+        raise ProvisioningError("企业接入包内置签发公钥摘要格式非法")
+    embedded_issuer_key_id = _production_identifier(
+        package["issuer_key_id"], "企业接入包 issuer_key_id"
+    )
+    try:
+        embedded_activation = package["activation_code"].encode("ascii", "strict")
+        embedded_public_key = package["issuer_public_key_pem"].encode(
+            "ascii", "strict"
+        )
+    except UnicodeEncodeError as error:
+        raise ProvisioningError("企业接入包内置凭据编码非法") from error
+    verified = verify_and_decrypt_bundle(
+        package["agent_bundle"],
+        activation_code=embedded_activation,
+        issuer_public_key_pem=embedded_public_key,
+        expected_public_key_sha256=embedded_fingerprint,
         now=now,
     )
     protected = verified.envelope["protected"]
-    if expected_public_key_sha256 is not None:
-        expected_key_id = _production_identifier(
-            expected_issuer_key_id,
-            "expected issuer key_id",
-        )
-        if protected["issuer_key_id"] != expected_key_id:
-            raise ProvisioningError("接入包 issuer_key_id 与介质外审批记录不匹配")
-    elif expected_issuer_key_id is not None:
-        raise ProvisioningError("测试未锚定公钥时不得伪装外部 issuer_key_id 审批")
+    if protected["issuer_key_id"] != embedded_issuer_key_id:
+        raise ProvisioningError("企业接入包 issuer_key_id 绑定不一致")
     subject = protected["subject"]
     if expected_mine_id is not None and subject["mine_id"] != expected_mine_id:
         raise ProvisioningError("接入包 mine_id 与安装目标不一致")
@@ -1188,14 +1189,6 @@ def install_provisioning_bundle(
         )
     for name in _FORBIDDEN_PROVISIONED_ENDPOINT_ALIASES:
         base.pop(name, None)
-    _, ca_bytes = _read_regular(ca_source_path, "政府 CA bundle")
-    _validate_ca_source(ca_bytes)
-    if _HEX_64.fullmatch(expected_ca_sha256) is None:
-        raise ProvisioningError("政府 CA SHA-256 必须是 64 位小写十六进制")
-    actual_ca_sha256 = _sha256(ca_bytes)
-    if not hmac.compare_digest(expected_ca_sha256, actual_ca_sha256):
-        raise ProvisioningError("政府 CA bundle 与介质外审批 SHA-256 不匹配")
-
     output_env = Path(output_environment_path).expanduser()
     lock_output = Path(lock_output_path).expanduser()
     lock_env = Path(lock_environment_path).expanduser()
@@ -1241,11 +1234,7 @@ def install_provisioning_bundle(
         "issuer_public_key_pem": verified.public_key_pem,
         "issuer_public_key_sha256": verified.public_key_sha256,
         "expected_issuer_key_id": protected["issuer_key_id"],
-        "trust_anchor_mode": (
-            "external-sha256"
-            if expected_public_key_sha256 is not None
-            else "test-unanchored"
-        ),
+        "trust_anchor_mode": "embedded-package",
         "public_payload": {
             "kind": verified.payload["kind"],
             "bundle_id": verified.payload["bundle_id"],
@@ -1257,11 +1246,6 @@ def install_provisioning_bundle(
         "managed_environment": managed,
         "secret_names": sorted(secret_values),
         "secret_store": {"path": str(store_env), "protection": selected_protection},
-        "ca_bundle": {
-            "path": verified.config["PLATFORM_V3_CA_BUNDLE"],
-            "sha256": actual_ca_sha256,
-            "trust_anchor_mode": "external-sha256",
-        },
         "imported_at": imported_at,
         "lock_hmac_algorithm": "hmac-sha256-v1",
     }
@@ -1291,7 +1275,7 @@ def install_provisioning_bundle(
     return ProvisioningResult(
         summary={
             "valid": True,
-            "production_ready": expected_public_key_sha256 is not None,
+            "production_ready": True,
             "bundle_id": protected["bundle_id"],
             "pair_id": protected["pair_id"],
             "profile_version": protected["profile_version"],
@@ -1299,8 +1283,7 @@ def install_provisioning_bundle(
             "system_id": subject["system_id"],
             "party_id": subject["party_id"],
             "platform_origin": verified.config["PLATFORM_V3_BASE_URL"],
-            "ca_target_path": verified.config["PLATFORM_V3_CA_BUNDLE"],
-            "ca_sha256": actual_ca_sha256,
+            "tls_trust": "operating-system",
             "install_before": protected["expires_at"],
             "public_key_sha256": verified.public_key_sha256,
             "secret_protection": selected_protection,
@@ -1325,7 +1308,6 @@ def _load_lock(path: str | Path) -> dict[str, Any]:
         "managed_environment",
         "secret_names",
         "secret_store",
-        "ca_bundle",
         "imported_at",
         "lock_hmac_algorithm",
         "lock_hmac",
@@ -1500,10 +1482,9 @@ def apply_provisioning_lock(
     # expires_at is an import window, not a runtime kill switch.
     if imported_at + timedelta(minutes=5) < issued_at or imported_at >= expires_at:
         raise ProvisioningError("provisioning lock 导入时间不在签发窗口内")
-    if lock["trust_anchor_mode"] != "external-sha256":
-        if target.get("ENTERPRISE_AGENT_PRODUCTION_MODE") == "true":
-            raise ProvisioningError("未锚定介质外公钥指纹的测试接入包不得启动正式模式")
-    elif _HEX_64.fullmatch(lock["issuer_public_key_sha256"]) is None:
+    if lock["trust_anchor_mode"] != "embedded-package":
+        raise ProvisioningError("provisioning lock 信任模式非法")
+    if _HEX_64.fullmatch(lock["issuer_public_key_sha256"]) is None:
         raise ProvisioningError("provisioning lock 公钥指纹非法")
 
     managed = lock["managed_environment"]
@@ -1535,18 +1516,6 @@ def apply_provisioning_lock(
     for name, inherited in inherited_secrets.items():
         if not hmac.compare_digest(str(inherited).encode(), secrets[name].encode()):
             raise ProvisioningError(f"封存实例的 secret {name} 被环境变量覆盖")
-    ca = _strict_object(
-        lock["ca_bundle"],
-        {"path", "sha256", "trust_anchor_mode"},
-        "lock.ca_bundle",
-    )
-    if ca["trust_anchor_mode"] != "external-sha256":
-        raise ProvisioningError("政府 CA 未绑定介质外审批 SHA-256")
-    if config["PLATFORM_V3_CA_BUNDLE"] != ca["path"]:
-        raise ProvisioningError("provisioning lock CA 路径不匹配")
-    _, ca_bytes = _read_regular(ca["path"], "政府 CA bundle")
-    if _sha256(ca_bytes) != ca["sha256"]:
-        raise ProvisioningError("政府 CA bundle 内容被改变")
     target.update(secrets)
     if target is os.environ:
         with _PROCESS_OVERLAY_LOCK:

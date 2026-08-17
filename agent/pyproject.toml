@@ -22,7 +22,6 @@ dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 enterprise-agent = "enterprise_agent.cli:main"
-mineguard-model-issuer = "enterprise_agent.model_issuer_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

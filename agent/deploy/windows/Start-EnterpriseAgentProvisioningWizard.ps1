@@ -9,7 +9,6 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $Utf8NoBom = New-Object -TypeName Text.UTF8Encoding -ArgumentList $false
-$script:ExpectedHandoverCheckCode = ""
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -174,7 +173,7 @@ $Form.Controls.Add($Title)
 
 $Subtitle = New-Object Windows.Forms.Label
 $Subtitle.Text = (
-    "选择监管端交付目录和独立激活码，设置两名本地账号；其余身份与信任参数自动读取。"
+    "选择监管端交付的一个 .mgprov 文件，设置业务管理员和 api_admin；其余参数自动完成。"
 )
 $Subtitle.ForeColor = $Muted
 $Subtitle.Location = New-Object Drawing.Point(27, 56)
@@ -240,119 +239,93 @@ function Add-FileField {
     return $Box
 }
 
-Add-SectionLabel -Text "一、选择监管交付材料" -Y 88
-$HandoverDirectoryBox = Add-TextField -LabelText "企业交付目录" -Y 115 `
+Add-SectionLabel -Text "一、选择企业接入包" -Y 88
+$BundleBox = Add-TextField -LabelText "企业接入包 (.mgprov)" -Y 115 `
     -Width 600
-$HandoverDirectoryBox.ReadOnly = $true
-$ActivationBox = Add-FileField -LabelText "独立激活码文件" -Y 148 `
-    -Filter "MineGuard 激活码 (*.activation)|*.activation|文本文件 (*.txt;*.code)|*.txt;*.code|所有文件 (*.*)|*.*"
-$HandoverSummaryBox = New-Object Windows.Forms.TextBox
-$HandoverSummaryBox.Location = New-Object Drawing.Point(28, 181)
-$HandoverSummaryBox.Size = New-Object Drawing.Size(842, 46)
-$HandoverSummaryBox.Multiline = $true
-$HandoverSummaryBox.ReadOnly = $true
-$HandoverSummaryBox.Text = "尚未选择企业交付目录。"
-$Form.Controls.Add($HandoverSummaryBox)
+$BundleBox.ReadOnly = $true
+$PackageSummaryBox = New-Object Windows.Forms.TextBox
+$PackageSummaryBox.Location = New-Object Drawing.Point(28, 151)
+$PackageSummaryBox.Size = New-Object Drawing.Size(842, 46)
+$PackageSummaryBox.Multiline = $true
+$PackageSummaryBox.ReadOnly = $true
+$PackageSummaryBox.Text = "尚未选择 .mgprov 文件。"
+$Form.Controls.Add($PackageSummaryBox)
 
-# Technical paths and fingerprints are populated only from the signed handover
-# manifest. They deliberately have no manual-entry controls in the current
-# clean-install workflow.
-$BundleBox = New-Object Windows.Forms.TextBox
-$TrustKeyBox = New-Object Windows.Forms.TextBox
-$TrustHashBox = New-Object Windows.Forms.TextBox
-$IssuerKeyIdBox = New-Object Windows.Forms.TextBox
-$CaBox = New-Object Windows.Forms.TextBox
-$CaHashBox = New-Object Windows.Forms.TextBox
-
-Add-SectionLabel -Text "二、确认本机实例" -Y 240
-$InstanceBox = Add-TextField -LabelText "实例名（交付包指定）" -Y 267 -Width 250
-$InstanceBox.ReadOnly = $true
-$PortBox = Add-TextField -LabelText "本机端口" -Y 300 -Width 120
+Add-SectionLabel -Text "二、确认本机实例" -Y 215
+$InstanceBox = Add-TextField -LabelText "实例名" -Y 242 -Width 250
+$InstanceBox.Text = "enterprise"
+$PortBox = Add-TextField -LabelText "本机端口" -Y 275 -Width 120
 $PortBox.Text = "8090"
 
-Add-SectionLabel -Text "三、设置四眼复核账号" -Y 340
-$PreparerIdBox = Add-TextField -LabelText "经办人登录名" -Y 367 -Width 250
-$PreparerIdBox.Text = "preparer"
-$PreparerNameBox = Add-TextField -LabelText "经办人姓名" -Y 400 -Width 250
-$PreparerPasswordBox = Add-TextField -LabelText "经办人密码" -Y 433 `
+Add-SectionLabel -Text "三、设置业务管理员和 API 管理员" -Y 315
+$BusinessAdminIdBox = Add-TextField -LabelText "业务管理员登录名" -Y 342 -Width 250
+$BusinessAdminIdBox.Text = "admin"
+$BusinessAdminNameBox = Add-TextField -LabelText "业务管理员姓名" -Y 375 -Width 250
+$BusinessAdminPasswordBox = Add-TextField -LabelText "业务管理员密码" -Y 408 `
     -Width 250 -Password
-$PreparerConfirmBox = Add-TextField -LabelText "再次输入" -Y 466 `
+$BusinessAdminConfirmBox = Add-TextField -LabelText "再次输入" -Y 441 `
     -Width 250 -Password
 
-$ReviewerIdLabel = New-Object Windows.Forms.Label
-$ReviewerIdLabel.Text = "复核人登录名"
-$ReviewerIdLabel.Location = New-Object Drawing.Point(468, 371)
-$ReviewerIdLabel.Size = New-Object Drawing.Size(110, 24)
-$Form.Controls.Add($ReviewerIdLabel)
-$ReviewerIdBox = New-Object Windows.Forms.TextBox
-$ReviewerIdBox.Location = New-Object Drawing.Point(585, 367)
-$ReviewerIdBox.Size = New-Object Drawing.Size(285, 25)
-$ReviewerIdBox.Text = "reviewer"
-$Form.Controls.Add($ReviewerIdBox)
+$ApiAdminIdLabel = New-Object Windows.Forms.Label
+$ApiAdminIdLabel.Text = "API 管理员登录名"
+$ApiAdminIdLabel.Location = New-Object Drawing.Point(468, 346)
+$ApiAdminIdLabel.Size = New-Object Drawing.Size(110, 24)
+$Form.Controls.Add($ApiAdminIdLabel)
+$ApiAdminIdBox = New-Object Windows.Forms.TextBox
+$ApiAdminIdBox.Location = New-Object Drawing.Point(585, 342)
+$ApiAdminIdBox.Size = New-Object Drawing.Size(285, 25)
+$ApiAdminIdBox.Text = "api_admin"
+$ApiAdminIdBox.ReadOnly = $true
+$Form.Controls.Add($ApiAdminIdBox)
 
-$ReviewerNameLabel = New-Object Windows.Forms.Label
-$ReviewerNameLabel.Text = "复核人姓名"
-$ReviewerNameLabel.Location = New-Object Drawing.Point(468, 404)
-$ReviewerNameLabel.Size = New-Object Drawing.Size(110, 24)
-$Form.Controls.Add($ReviewerNameLabel)
-$ReviewerNameBox = New-Object Windows.Forms.TextBox
-$ReviewerNameBox.Location = New-Object Drawing.Point(585, 400)
-$ReviewerNameBox.Size = New-Object Drawing.Size(285, 25)
-$Form.Controls.Add($ReviewerNameBox)
+$ApiAdminNameLabel = New-Object Windows.Forms.Label
+$ApiAdminNameLabel.Text = "API 管理员姓名"
+$ApiAdminNameLabel.Location = New-Object Drawing.Point(468, 379)
+$ApiAdminNameLabel.Size = New-Object Drawing.Size(110, 24)
+$Form.Controls.Add($ApiAdminNameLabel)
+$ApiAdminNameBox = New-Object Windows.Forms.TextBox
+$ApiAdminNameBox.Location = New-Object Drawing.Point(585, 375)
+$ApiAdminNameBox.Size = New-Object Drawing.Size(285, 25)
+$ApiAdminNameBox.Text = "API 配置管理员"
+$ApiAdminNameBox.ReadOnly = $true
+$Form.Controls.Add($ApiAdminNameBox)
 
-$ReviewerPasswordLabel = New-Object Windows.Forms.Label
-$ReviewerPasswordLabel.Text = "复核人密码"
-$ReviewerPasswordLabel.Location = New-Object Drawing.Point(468, 437)
-$ReviewerPasswordLabel.Size = New-Object Drawing.Size(110, 24)
-$Form.Controls.Add($ReviewerPasswordLabel)
-$ReviewerPasswordBox = New-Object Windows.Forms.TextBox
-$ReviewerPasswordBox.Location = New-Object Drawing.Point(585, 433)
-$ReviewerPasswordBox.Size = New-Object Drawing.Size(285, 25)
-$ReviewerPasswordBox.UseSystemPasswordChar = $true
-$Form.Controls.Add($ReviewerPasswordBox)
+$ApiAdminPasswordLabel = New-Object Windows.Forms.Label
+$ApiAdminPasswordLabel.Text = "API 管理员密码"
+$ApiAdminPasswordLabel.Location = New-Object Drawing.Point(468, 412)
+$ApiAdminPasswordLabel.Size = New-Object Drawing.Size(110, 24)
+$Form.Controls.Add($ApiAdminPasswordLabel)
+$ApiAdminPasswordBox = New-Object Windows.Forms.TextBox
+$ApiAdminPasswordBox.Location = New-Object Drawing.Point(585, 408)
+$ApiAdminPasswordBox.Size = New-Object Drawing.Size(285, 25)
+$ApiAdminPasswordBox.UseSystemPasswordChar = $true
+$Form.Controls.Add($ApiAdminPasswordBox)
 
-$ReviewerConfirmLabel = New-Object Windows.Forms.Label
-$ReviewerConfirmLabel.Text = "再次输入"
-$ReviewerConfirmLabel.Location = New-Object Drawing.Point(468, 470)
-$ReviewerConfirmLabel.Size = New-Object Drawing.Size(110, 24)
-$Form.Controls.Add($ReviewerConfirmLabel)
-$ReviewerConfirmBox = New-Object Windows.Forms.TextBox
-$ReviewerConfirmBox.Location = New-Object Drawing.Point(585, 466)
-$ReviewerConfirmBox.Size = New-Object Drawing.Size(285, 25)
-$ReviewerConfirmBox.UseSystemPasswordChar = $true
-$Form.Controls.Add($ReviewerConfirmBox)
+$ApiAdminConfirmLabel = New-Object Windows.Forms.Label
+$ApiAdminConfirmLabel.Text = "再次输入"
+$ApiAdminConfirmLabel.Location = New-Object Drawing.Point(468, 445)
+$ApiAdminConfirmLabel.Size = New-Object Drawing.Size(110, 24)
+$Form.Controls.Add($ApiAdminConfirmLabel)
+$ApiAdminConfirmBox = New-Object Windows.Forms.TextBox
+$ApiAdminConfirmBox.Location = New-Object Drawing.Point(585, 441)
+$ApiAdminConfirmBox.Size = New-Object Drawing.Size(285, 25)
+$ApiAdminConfirmBox.UseSystemPasswordChar = $true
+$Form.Controls.Add($ApiAdminConfirmBox)
 
 $PasswordHint = New-Object Windows.Forms.Label
-$PasswordHint.Text = "正式密码至少 12 位，并至少包含大写、小写、数字、符号中的三类；两人密码必须不同。"
+$PasswordHint.Text = "正式密码至少 12 位，并至少包含大写、小写、数字、符号中的三类；两个账号密码必须不同。api_admin 只能配置模型 API。"
 $PasswordHint.ForeColor = $Muted
-$PasswordHint.Location = New-Object Drawing.Point(28, 500)
+$PasswordHint.Location = New-Object Drawing.Point(28, 475)
 $PasswordHint.Size = New-Object Drawing.Size(840, 24)
 $Form.Controls.Add($PasswordHint)
 
-$VerificationCodeLabel = New-Object Windows.Forms.Label
-$VerificationCodeLabel.Text = "独立核验码"
-$VerificationCodeLabel.Location = New-Object Drawing.Point(28, 528)
-$VerificationCodeLabel.Size = New-Object Drawing.Size(90, 24)
-$Form.Controls.Add($VerificationCodeLabel)
-$VerificationCodeBox = New-Object Windows.Forms.TextBox
-$VerificationCodeBox.Location = New-Object Drawing.Point(122, 524)
-$VerificationCodeBox.Size = New-Object Drawing.Size(125, 25)
-$VerificationCodeBox.MaxLength = 12
-$Form.Controls.Add($VerificationCodeBox)
-$VerificationHint = New-Object Windows.Forms.Label
-$VerificationHint.Text = "从电话、纸质审批单等交付介质之外的渠道取得"
-$VerificationHint.Location = New-Object Drawing.Point(260, 528)
-$VerificationHint.Size = New-Object Drawing.Size(610, 24)
-$VerificationHint.ForeColor = $Muted
-$Form.Controls.Add($VerificationHint)
-
 $StatusBox = New-Object Windows.Forms.TextBox
-$StatusBox.Location = New-Object Drawing.Point(28, 552)
+$StatusBox.Location = New-Object Drawing.Point(28, 510)
 $StatusBox.Size = New-Object Drawing.Size(842, 58)
 $StatusBox.Multiline = $true
 $StatusBox.ReadOnly = $true
 $StatusBox.ScrollBars = "Vertical"
-$StatusBox.Text = "先选择监管端生成的完整企业交付目录。当前向导只创建新实例，不提供旧版升级入口。"
+$StatusBox.Text = "选择一个 .mgprov 文件并设置两个账号，即可创建全新实例。"
 $Form.Controls.Add($StatusBox)
 
 $ImportButton = New-Object Windows.Forms.Button
@@ -380,169 +353,33 @@ $CloseButton.Size = New-Object Drawing.Size(100, 38)
 $CloseButton.Add_Click({ $Form.Close() })
 $Form.Controls.Add($CloseButton)
 
-function Resolve-HandoverArtifact {
-    param([string]$Directory, [string]$FileName, [string]$Label)
-    if ([string]::IsNullOrWhiteSpace($FileName) -or
-        [IO.Path]::IsPathRooted($FileName) -or $FileName.Contains('/') -or
-        $FileName.Contains('\') -or $FileName.Contains(':') -or
-        [IO.Path]::GetFileName($FileName) -ne $FileName -or
-        $FileName -in @('.', '..')) {
-        throw "$Label 在交接清单中不是安全的单一文件名。"
-    }
-    $Path = [IO.Path]::GetFullPath((Join-Path $Directory $FileName))
-    if (-not (Split-Path -Parent $Path).Equals(
-            $Directory, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "$Label 不在所选企业交付目录中。"
-    }
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "$Label 不存在：$FileName"
-    }
-    $Item = Get-Item -LiteralPath $Path -Force
-    if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        $Item.Length -le 0 -or $Item.Length -gt 4194304) {
-        throw "$Label 必须是交付目录中的普通文件。"
-    }
-    return $Path
-}
-
-function Get-HandoverCheckCode {
-    param(
-        [string]$PairId,
-        [string]$IssuerKeyId,
-        [string]$SpkiSha256,
-        [string]$CaSha256
-    )
-    $NormalizedSpki = ($SpkiSha256 -replace '\s', '').ToLowerInvariant()
-    $NormalizedCa = ($CaSha256 -replace '\s', '').ToLowerInvariant()
-    if ($PairId -notmatch `
-        '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' -or
-        $IssuerKeyId -notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' -or
-        $NormalizedSpki -notmatch '^[a-f0-9]{64}$' -or
-        $NormalizedCa -notmatch '^[a-f0-9]{64}$') {
-        throw "无法从当前材料计算独立核验码。"
-    }
-    $Material = "mineguard-handover-check-v1`n$PairId`n" +
-        "$IssuerKeyId`n$NormalizedSpki`n$NormalizedCa"
-    $Sha = [Security.Cryptography.SHA256]::Create()
-    try {
-        $Digest = $Sha.ComputeHash($Utf8NoBom.GetBytes($Material))
-        return ([BitConverter]::ToString($Digest)).Replace(
-            '-', ''
-        ).ToLowerInvariant().Substring(0, 12)
-    }
-    finally { $Sha.Dispose(); $Material = $null }
-}
-
-function Test-FixedTimeCode {
-    param([string]$Actual, [string]$Expected)
-    $ActualBytes = [Text.Encoding]::ASCII.GetBytes($Actual)
-    $ExpectedBytes = [Text.Encoding]::ASCII.GetBytes($Expected)
-    $Difference = $ActualBytes.Length -bxor $ExpectedBytes.Length
-    $Count = [Math]::Max($ActualBytes.Length, $ExpectedBytes.Length)
-    for ($Index = 0; $Index -lt $Count; $Index++) {
-        $Left = if ($Index -lt $ActualBytes.Length) {
-            [int]$ActualBytes[$Index]
-        } else { 0 }
-        $Right = if ($Index -lt $ExpectedBytes.Length) {
-            [int]$ExpectedBytes[$Index]
-        } else { 0 }
-        $Difference = $Difference -bor ($Left -bxor $Right)
-    }
-    return $Difference -eq 0
-}
-
-function Import-EnterpriseHandoverDirectory {
-    param([string]$Directory)
-    if ([string]::IsNullOrWhiteSpace($Directory) -or
-        $Directory -notmatch '^[A-Za-z]:\\') {
-        throw "企业交付目录必须是 X:\\... 形式的本机完整路径。"
-    }
-    $Directory = [IO.Path]::GetFullPath($Directory).TrimEnd('\')
-    if (-not (Test-Path -LiteralPath $Directory -PathType Container)) {
-        throw "企业交付目录不存在。"
-    }
-    $DirectoryItem = Get-Item -LiteralPath $Directory -Force
-    if (($DirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "企业交付目录不能是符号链接或 junction。"
-    }
-    $ManifestPath = Join-Path $Directory `
-        'enterprise-install-manifest.json'
-    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
-        throw "目录缺少 enterprise-install-manifest.json；请使用监管端接入包向导生成的完整企业交付目录。"
-    }
-    $ManifestItem = Get-Item -LiteralPath $ManifestPath -Force
-    if (($ManifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        $ManifestItem.Length -le 0 -or $ManifestItem.Length -gt 65536) {
-        throw "企业安装交接清单必须是 1-65536 字节的普通文件。"
-    }
-    try {
-        $Manifest = Get-Content -LiteralPath $ManifestPath -Raw `
-            -Encoding UTF8 | ConvertFrom-Json
-    }
-    catch { throw "企业安装交接清单不是有效 JSON。" }
-    if ([string]$Manifest.schema_version -ne
-        'mineguard-enterprise-install-manifest-v1' -or
-        $Manifest.activation_included -isnot [bool] -or
-        [bool]$Manifest.activation_included -or
-        $Manifest.secrets_disclosed -isnot [bool] -or
-        [bool]$Manifest.secrets_disclosed) {
-        throw "企业安装交接清单版本或无秘密声明无效。"
-    }
-    if ([int]$Manifest.profile_version -ne 1) {
-        throw "当前向导只接受新装配置（profile_version 必须为 1）。"
-    }
-    $TrustHash = ([string]$Manifest.issuer_public_key_sha256).ToLowerInvariant()
-    $CaHash = ([string]$Manifest.platform_ca_sha256).ToLowerInvariant()
-    $IssuerKeyId = [string]$Manifest.issuer_key_id
-    $InstanceName = [string]$Manifest.agent_instance_name
-    if ($TrustHash -notmatch '^[a-f0-9]{64}$' -or
-        $CaHash -notmatch '^[a-f0-9]{64}$' -or
-        $IssuerKeyId -notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' -or
-        $InstanceName -notmatch '^[a-z0-9][a-z0-9-]{0,47}$') {
-        throw "企业安装交接清单中的指纹、issuer key ID 或实例名格式无效。"
-    }
-    $BundlePath = Resolve-HandoverArtifact -Directory $Directory `
-        -FileName ([string]$Manifest.agent_bundle_file) `
-        -Label "企业接入包"
-    $PublicKeyPath = Resolve-HandoverArtifact -Directory $Directory `
-        -FileName ([string]$Manifest.issuer_public_key_file) `
-        -Label "签发公钥"
-    $CaPath = Resolve-HandoverArtifact -Directory $Directory `
-        -FileName ([string]$Manifest.platform_ca_file) `
-        -Label "政府 HTTPS CA"
-    $BundleBox.Text = $BundlePath
-    $TrustKeyBox.Text = $PublicKeyPath
-    $TrustHashBox.Text = $TrustHash
-    $IssuerKeyIdBox.Text = $IssuerKeyId
-    $CaBox.Text = $CaPath
-    $CaHashBox.Text = $CaHash
-    $InstanceBox.Text = $InstanceName
-    $HandoverDirectoryBox.Text = $Directory
-    $script:ExpectedHandoverCheckCode = Get-HandoverCheckCode `
-        -PairId ([string]$Manifest.pair_id) -IssuerKeyId $IssuerKeyId `
-        -SpkiSha256 $TrustHash -CaSha256 $CaHash
-    $StatusBox.ForeColor = $Muted
-    $HandoverSummaryBox.Text = (
-        "已读取：$($Manifest.mine_name)（$($Manifest.mine_id)）`r`n" +
-        "实例：$InstanceName；签发 key ID：$IssuerKeyId"
-    )
-    $StatusBox.Text = (
-        "企业交付材料已自动核对并加载。请另选激活码，填写账号和监管方 12 位独立核验码。"
-    )
-}
-
 $LoadHandoverButton.Add_Click({
-    $Dialog = New-Object Windows.Forms.FolderBrowserDialog
-    $Dialog.Description = "选择监管端生成的企业交付目录"
-    $Dialog.ShowNewFolderButton = $false
+    $Dialog = New-Object Windows.Forms.OpenFileDialog
+    $Dialog.Title = "选择监管端生成的企业接入包"
+    $Dialog.Filter = "MineGuard 企业接入包 (*.mgprov)|*.mgprov"
+    $Dialog.CheckFileExists = $true
+    $Dialog.Multiselect = $false
     try {
         if ($Dialog.ShowDialog($Form) -eq [Windows.Forms.DialogResult]::OK) {
-            Import-EnterpriseHandoverDirectory -Directory $Dialog.SelectedPath
+            $Item = Get-Item -LiteralPath $Dialog.FileName -Force
+            if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $Item.Length -le 0 -or $Item.Length -gt 4194304) {
+                throw "企业接入包必须是 1-4194304 字节的普通文件。"
+            }
+            $BundleBox.Text = $Item.FullName
+            $PackageSummaryBox.Text = (
+                "已选择：$($Item.Name)`r`n" +
+                "文件 SHA-256：" +
+                (Get-FileHash -LiteralPath $Item.FullName `
+                    -Algorithm SHA256).Hash.ToLowerInvariant()
+            )
+            $StatusBox.ForeColor = $Muted
+            $StatusBox.Text = "接入包已加载。填写实例和两个账号后即可导入。"
         }
     }
     catch {
         $StatusBox.ForeColor = $Red
-        $StatusBox.Text = "交接清单加载失败：`r`n" + $_.Exception.Message
+        $StatusBox.Text = "接入包加载失败：`r`n" + $_.Exception.Message
         [void][Windows.Forms.MessageBox]::Show(
             $StatusBox.Text, "MineGuard 企业接入配置向导",
             [Windows.Forms.MessageBoxButtons]::OK,
@@ -854,66 +691,45 @@ $ImportButton.Add_Click({
     $StatusBox.ForeColor = $Muted
     $StatusBox.Text = "正在离线验签、解密、创建实例并执行正式配置预检，请稍候..."
     $Form.Refresh()
-    $PreparerSecure = $null
-    $PreparerConfirmSecure = $null
-    $ReviewerSecure = $null
-    $ReviewerConfirmSecure = $null
+    $BusinessAdminSecure = $null
+    $BusinessAdminConfirmSecure = $null
+    $ApiAdminSecure = $null
+    $ApiAdminConfirmSecure = $null
     try {
-        if ([string]::IsNullOrWhiteSpace(
-                $script:ExpectedHandoverCheckCode)) {
-            throw "请先选择监管端生成的完整企业交付目录。"
+        if ([string]::IsNullOrWhiteSpace($BundleBox.Text)) {
+            throw "请先选择监管端生成的 .mgprov 企业接入包。"
         }
-        $ActualCheckCode = $VerificationCodeBox.Text.Trim().ToLowerInvariant()
-        $VerificationCodeBox.Clear()
-        if ($ActualCheckCode -notmatch '^[a-f0-9]{12}$') {
-            throw "独立核验码必须是监管方另行告知的 12 位小写十六进制。"
-        }
-        $ExpectedCheckCode = $script:ExpectedHandoverCheckCode
-        if (-not (Test-FixedTimeCode -Actual $ActualCheckCode `
-                -Expected $ExpectedCheckCode)) {
-            $ActualCheckCode = $null
-            throw "独立核验码不匹配；请停止导入并联系监管方重新核对交付材料。"
-        }
-        $ActualCheckCode = $null
-        if ([string]::IsNullOrWhiteSpace($PreparerPasswordBox.Text) -or
-            [string]::IsNullOrWhiteSpace($ReviewerPasswordBox.Text)) {
-            throw "请填写经办人和复核人密码。"
+        if ([string]::IsNullOrWhiteSpace($BusinessAdminPasswordBox.Text) -or
+            [string]::IsNullOrWhiteSpace($ApiAdminPasswordBox.Text)) {
+            throw "请填写业务管理员和 api_admin 密码。"
         }
         $Port = 0
         if (-not [int]::TryParse($PortBox.Text, [ref]$Port) -or
             $Port -lt 1 -or $Port -gt 65535) {
             throw "本机端口必须是 1-65535 的整数。"
         }
-        $PreparerSecure = ConvertTo-SecureString $PreparerPasswordBox.Text `
+        $BusinessAdminSecure = ConvertTo-SecureString $BusinessAdminPasswordBox.Text `
             -AsPlainText -Force
-        $PreparerConfirmSecure = ConvertTo-SecureString $PreparerConfirmBox.Text `
+        $BusinessAdminConfirmSecure = ConvertTo-SecureString $BusinessAdminConfirmBox.Text `
             -AsPlainText -Force
-        $ReviewerSecure = ConvertTo-SecureString $ReviewerPasswordBox.Text `
+        $ApiAdminSecure = ConvertTo-SecureString $ApiAdminPasswordBox.Text `
             -AsPlainText -Force
-        $ReviewerConfirmSecure = ConvertTo-SecureString $ReviewerConfirmBox.Text `
+        $ApiAdminConfirmSecure = ConvertTo-SecureString $ApiAdminConfirmBox.Text `
             -AsPlainText -Force
-        $PreparerPasswordBox.Clear()
-        $PreparerConfirmBox.Clear()
-        $ReviewerPasswordBox.Clear()
-        $ReviewerConfirmBox.Clear()
+        $BusinessAdminPasswordBox.Clear()
+        $BusinessAdminConfirmBox.Clear()
+        $ApiAdminPasswordBox.Clear()
+        $ApiAdminConfirmBox.Clear()
         $Result = & $ImportScript `
             -BundlePath $BundleBox.Text `
-            -ActivationCodeFile $ActivationBox.Text `
-            -TrustKeyPath $TrustKeyBox.Text `
-            -ExpectedTrustKeySha256 $TrustHashBox.Text `
-            -ExpectedIssuerKeyId $IssuerKeyIdBox.Text `
-            -CaSourcePath $CaBox.Text `
-            -ExpectedCaSha256 $CaHashBox.Text `
             -InstanceName $InstanceBox.Text `
             -Port $Port `
-            -PreparerActorId $PreparerIdBox.Text `
-            -PreparerName $PreparerNameBox.Text `
-            -PreparerPassword $PreparerSecure `
-            -PreparerPasswordConfirmation $PreparerConfirmSecure `
-            -ReviewerActorId $ReviewerIdBox.Text `
-            -ReviewerName $ReviewerNameBox.Text `
-            -ReviewerPassword $ReviewerSecure `
-            -ReviewerPasswordConfirmation $ReviewerConfirmSecure `
+            -BusinessAdminActorId $BusinessAdminIdBox.Text `
+            -BusinessAdminName $BusinessAdminNameBox.Text `
+            -BusinessAdminPassword $BusinessAdminSecure `
+            -BusinessAdminPasswordConfirmation $BusinessAdminConfirmSecure `
+            -ApiAdminPassword $ApiAdminSecure `
+            -ApiAdminPasswordConfirmation $ApiAdminConfirmSecure `
             -InstallRoot $InstallRoot `
             -StateRoot $StateRoot
         $Summary = @($Result | ForEach-Object { [string]$_ }) -join `
@@ -936,11 +752,10 @@ $ImportButton.Add_Click({
         }
     }
     catch {
-        $VerificationCodeBox.Clear()
-        $PreparerPasswordBox.Clear()
-        $PreparerConfirmBox.Clear()
-        $ReviewerPasswordBox.Clear()
-        $ReviewerConfirmBox.Clear()
+        $BusinessAdminPasswordBox.Clear()
+        $BusinessAdminConfirmBox.Clear()
+        $ApiAdminPasswordBox.Clear()
+        $ApiAdminConfirmBox.Clear()
         $StatusBox.Text = "导入失败，未覆盖任何现有实例。`r`n" + `
             $_.Exception.Message
         $StatusBox.ForeColor = $Red
@@ -953,26 +768,25 @@ $ImportButton.Add_Click({
     }
     finally {
         foreach ($SecureValue in @(
-                $PreparerSecure, $PreparerConfirmSecure,
-                $ReviewerSecure, $ReviewerConfirmSecure
+                $BusinessAdminSecure, $BusinessAdminConfirmSecure,
+                $ApiAdminSecure, $ApiAdminConfirmSecure
             )) {
             if ($null -ne $SecureValue) { $SecureValue.Dispose() }
         }
-        $PreparerSecure = $null; $PreparerConfirmSecure = $null
-        $ReviewerSecure = $null; $ReviewerConfirmSecure = $null
-        $PreparerPasswordBox.Clear()
-        $PreparerConfirmBox.Clear()
-        $ReviewerPasswordBox.Clear()
-        $ReviewerConfirmBox.Clear()
+        $BusinessAdminSecure = $null; $BusinessAdminConfirmSecure = $null
+        $ApiAdminSecure = $null; $ApiAdminConfirmSecure = $null
+        $BusinessAdminPasswordBox.Clear()
+        $BusinessAdminConfirmBox.Clear()
+        $ApiAdminPasswordBox.Clear()
+        $ApiAdminConfirmBox.Clear()
         $Form.UseWaitCursor = $false
         $ImportButton.Enabled = $true
     }
 })
 
 $Form.Add_FormClosed({
-    $VerificationCodeBox.Clear()
-    $PreparerPasswordBox.Clear(); $PreparerConfirmBox.Clear()
-    $ReviewerPasswordBox.Clear(); $ReviewerConfirmBox.Clear()
+    $BusinessAdminPasswordBox.Clear(); $BusinessAdminConfirmBox.Clear()
+    $ApiAdminPasswordBox.Clear(); $ApiAdminConfirmBox.Clear()
 })
 try {
     if ($SelfTest) {

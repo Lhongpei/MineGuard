@@ -24,7 +24,6 @@ param(
     [string] $ShiftSystem,
     [string] $CoalType,
     [string] $OperatingRegime,
-    [string] $AgentPublicOrigin,
     [string] $PlatformBaseUrl,
     [string] $AgentInstanceName,
     [string] $PlatformSystemId,
@@ -34,7 +33,6 @@ param(
     [string] $BundleOutputDirectory,
     [string] $PlatformRegistrationDirectory,
     [string] $ActivationDirectory,
-    [string] $PlatformCaSourcePath,
     [ValidateRange(1, 1000000)] [int] $ProfileVersion = 1,
     [string] $PreviousRegistrationBundle,
     [string] $PreviousRegistrationActivationFile,
@@ -367,121 +365,6 @@ function Get-SpkiSha256FromPem {
     }
 }
 
-function Assert-ValidPemCertificateChain {
-    param([Parameter(Mandatory = $true)] [string] $Path)
-    Assert-RegularFile -Path $Path -Label '政府 HTTPS CA PEM' `
-        -MaximumBytes 1048576
-    $bytes = [IO.File]::ReadAllBytes($Path)
-    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
-    try {
-        $pem = $strictUtf8.GetString($bytes)
-    } catch {
-        throw '政府 HTTPS CA 必须是 UTF-8/ASCII PEM 证书链。'
-    } finally { $bytes = $null }
-    if ($pem -match '(?i)PRIVATE\s+KEY') {
-        $pem = $null
-        throw '政府 HTTPS CA PEM 不得包含任何 PRIVATE KEY。'
-    }
-    $pattern = '(?s)-----BEGIN CERTIFICATE-----\s*' +
-        '(?<body>[A-Za-z0-9+/=\s]+?)\s*-----END CERTIFICATE-----'
-    $matches = [Text.RegularExpressions.Regex]::Matches($pem, $pattern)
-    if ($matches.Count -lt 1) {
-        $pem = $null
-        throw '政府 HTTPS CA PEM 至少需要一张可解析的 X.509 证书。'
-    }
-    foreach ($match in $matches) {
-        $der = $null
-        $certificate = $null
-        try {
-            $der = [Convert]::FromBase64String(
-                ($match.Groups['body'].Value -replace '\s', '')
-            )
-            $certificate = New-Object `
-                Security.Cryptography.X509Certificates.X509Certificate2 `
-                -ArgumentList (,$der)
-            if ($certificate.RawData.Length -ne $der.Length) {
-                throw 'DER 长度不一致'
-            }
-        } catch {
-            throw '政府 HTTPS CA PEM 含有无法解析的 X.509 证书。'
-        } finally {
-            if ($null -ne $certificate) { $certificate.Reset() }
-            $der = $null
-        }
-    }
-    $pem = $null
-}
-
-function Publish-FixedAuthorityCa {
-    param(
-        [Parameter(Mandatory = $true)] [string] $SourcePath,
-        [Parameter(Mandatory = $true)] [string] $AuthorityDirectory
-    )
-    $fixedPath = Join-Path $AuthorityDirectory 'platform-ca.pem'
-    $sourceFull = [IO.Path]::GetFullPath($SourcePath)
-    $fixedFull = [IO.Path]::GetFullPath($fixedPath)
-    if ($sourceFull.Equals(
-            $fixedFull, [StringComparison]::OrdinalIgnoreCase)) {
-        Assert-ValidPemCertificateChain -Path $fixedFull
-        return $fixedFull
-    }
-
-    Assert-ValidPemCertificateChain -Path $sourceFull
-    $sourceSha256 = (Get-FileHash -LiteralPath $sourceFull `
-        -Algorithm SHA256).Hash.ToLowerInvariant()
-    if (Test-Path -LiteralPath $fixedFull) {
-        Assert-ValidPemCertificateChain -Path $fixedFull
-        $fixedSha256 = (Get-FileHash -LiteralPath $fixedFull `
-            -Algorithm SHA256).Hash.ToLowerInvariant()
-        if (-not [string]::Equals(
-                $sourceSha256, $fixedSha256,
-                [StringComparison]::Ordinal)) {
-            throw (
-                '监管签发机构已经固定另一份政府 HTTPS CA；拒绝静默替换。' +
-                '如需轮换 CA，请停止签发并执行经批准的显式迁移流程。'
-            )
-        }
-        return $fixedFull
-    }
-
-    $temporary = Join-Path $AuthorityDirectory (
-        '.platform-ca.pending.' + [Guid]::NewGuid().ToString('N')
-    )
-    $stream = $null
-    try {
-        $stream = New-Object IO.FileStream(
-            $temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
-            [IO.FileShare]::None
-        )
-        $payload = [IO.File]::ReadAllBytes($sourceFull)
-        $stream.Write($payload, 0, $payload.Length)
-        $stream.Flush($true)
-        $stream.Dispose(); $stream = $null; $payload = $null
-        Assert-ValidPemCertificateChain -Path $temporary
-        $temporarySha256 = (Get-FileHash -LiteralPath $temporary `
-            -Algorithm SHA256).Hash.ToLowerInvariant()
-        if (-not [string]::Equals(
-                $sourceSha256, $temporarySha256,
-                [StringComparison]::Ordinal)) {
-            throw '政府 HTTPS CA 固定副本在发布前发生变化。'
-        }
-        & "$env:SystemRoot\System32\icacls.exe" $temporary `
-            '/inheritance:r' '/grant:r' '*S-1-5-18:F' `
-            '*S-1-5-32-544:F' | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw '无法保护政府 HTTPS CA 固定副本 ACL。'
-        }
-        Move-Item -LiteralPath $temporary -Destination $fixedFull
-        Assert-ValidPemCertificateChain -Path $fixedFull
-        return $fixedFull
-    } finally {
-        if ($null -ne $stream) { $stream.Dispose() }
-        if (Test-Path -LiteralPath $temporary) {
-            Remove-Item -LiteralPath $temporary -Force
-        }
-    }
-}
-
 function Set-ReadOnlyOrdinaryFile {
     param(
         [Parameter(Mandatory = $true)] [string] $Path,
@@ -490,27 +373,6 @@ function Set-ReadOnlyOrdinaryFile {
     Assert-RegularFile -Path $Path -Label $Label -MaximumBytes 4194304
     $attributes = [IO.File]::GetAttributes($Path)
     [IO.File]::SetAttributes($Path, ($attributes -bor [IO.FileAttributes]::ReadOnly))
-}
-
-function Get-HandoverCheckCode {
-    param(
-        [string] $PairId,
-        [string] $IssuerKeyIdValue,
-        [string] $SpkiSha256,
-        [string] $CaSha256
-    )
-    $material = "mineguard-handover-check-v1`n$PairId`n" +
-        "$IssuerKeyIdValue`n$SpkiSha256`n$CaSha256"
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try {
-        $digest = $sha.ComputeHash($utf8NoBom.GetBytes($material))
-        return ([BitConverter]::ToString($digest)).Replace(
-            '-', ''
-        ).ToLowerInvariant().Substring(0, 12)
-    } finally {
-        $sha.Dispose()
-        $material = $null
-    }
 }
 
 function New-ProtectedWorkDirectory {
@@ -624,12 +486,8 @@ try {
             -MaximumBytes 65536
         $PublicKeyPath = Get-SafeLocalPath -Value $PublicKeyPath `
             -Label '签发公钥'
-        $PlatformCaSourcePath = Get-SafeLocalPath `
-            -Value $PlatformCaSourcePath -Label '政府 HTTPS CA PEM'
         Assert-RegularFile -Path $PublicKeyPath -Label '签发公钥' `
             -MaximumBytes 65536
-        Assert-RegularFile -Path $PlatformCaSourcePath `
-            -Label '政府 HTTPS CA PEM' -MaximumBytes 1048576
         $expectedAuthorityDirectory = Join-Path $InstallRoot `
             'provisioning-authority'
         foreach ($authorityMaterial in @($PrivateKeyPath, $PublicKeyPath)) {
@@ -643,10 +501,10 @@ try {
             -Path $expectedAuthorityDirectory `
             -ExpectedPath $expectedAuthorityDirectory `
             -Purpose 'MineGuard Platform Provisioning Authority'
-        foreach ($otherKeyMaterial in @($PublicKeyPath, $PlatformCaSourcePath)) {
+        foreach ($otherKeyMaterial in @($PublicKeyPath)) {
             if ($PrivateKeyPath.Equals(
                     $otherKeyMaterial, [StringComparison]::OrdinalIgnoreCase)) {
-                throw '签发私钥不能同时作为公钥或 CA 交付文件。'
+                throw '签发私钥不能同时作为签发公钥。'
             }
         }
         $BundleOutputDirectory = Get-SafeLocalPath `
@@ -689,24 +547,12 @@ try {
             $enterpriseDeliveryDirectory, $platformRegistrationOutput,
             $enterpriseActivationOutput, $platformActivationOutput
         )
-        $authorityCaPath = Publish-FixedAuthorityCa `
-            -SourcePath $PlatformCaSourcePath `
-            -AuthorityDirectory $expectedAuthorityDirectory
         $snapshotPublicKey = Join-Path $workDirectory 'issuer-public.pem'
-        $snapshotCa = Join-Path $workDirectory 'platform-ca.pem'
         [IO.File]::WriteAllBytes(
             $snapshotPublicKey, [IO.File]::ReadAllBytes($PublicKeyPath)
         )
-        [IO.File]::WriteAllBytes(
-            $snapshotCa, [IO.File]::ReadAllBytes($authorityCaPath)
-        )
-        Assert-ValidPemCertificateChain -Path $snapshotCa
         $snapshotPublicKeyFingerprint = Get-SpkiSha256FromPem `
             -Path $snapshotPublicKey
-        $snapshotCaSha256 = (Get-FileHash -LiteralPath $snapshotCa `
-            -Algorithm SHA256).Hash.ToLowerInvariant()
-        $caDestination = 'C:\ProgramData\MineGuard\EnterpriseAgent\instances\' +
-            $AgentInstanceName + '\config\platform-ca.pem'
         $expiresAt = [DateTime]::UtcNow.AddDays($InstallWindowDays)
         $profile = [ordered]@{
             profile_version = $ProfileVersion
@@ -725,9 +571,7 @@ try {
                 operating_regime = $OperatingRegime
             }
             agent = [ordered]@{
-                public_origin = $AgentPublicOrigin
                 platform_base_url = $PlatformBaseUrl
-                platform_ca_bundle = $caDestination
                 reporting_timezone = 'Asia/Shanghai'
             }
             platform_identity = [ordered]@{
@@ -784,15 +628,6 @@ try {
             -Arguments $arguments -Label '生成企业接入包'
         $deliveryAgentBundle = [string]$result.agent_bundle
         $deliveryPublicKey = [string]$result.issuer_public_key_file
-        $deliveryCa = Join-Path $enterpriseDeliveryDirectory 'platform-ca.pem'
-        $deliveryGuide = Join-Path $enterpriseDeliveryDirectory `
-            '企业交接说明.txt'
-        $deliveryInstallManifest = Join-Path $enterpriseDeliveryDirectory `
-            'enterprise-install-manifest.json'
-        $independentHandoverRecord = Join-Path `
-            $platformRegistrationOutput '企业独立核验记录.txt'
-        $handoverCheckCode = $null
-        $handoffPublished = $false
         try {
             if ([string]$result.layout -ne 'split-delivery-v1' -or
                 [bool]$result.legacy_shared_layout) {
@@ -814,115 +649,31 @@ try {
                     [StringComparison]::Ordinal)) {
                 throw '所选签发公钥与解密后的签发私钥不属于同一密钥对。'
             }
-            [IO.File]::Copy($snapshotCa, $deliveryCa, $false)
-            $agentBundleSha256 = (Get-FileHash `
-                -LiteralPath $deliveryAgentBundle -Algorithm SHA256
-            ).Hash.ToLowerInvariant()
-            $handoverCheckCode = Get-HandoverCheckCode `
-                -PairId ([string]$result.pair_id) `
-                -IssuerKeyIdValue $IssuerKeyId `
-                -SpkiSha256 ([string]$result.issuer_public_key_sha256) `
-                -CaSha256 $snapshotCaSha256
-            $guide = @(
-                'MineGuard 企业专属接入交接说明',
-                '',
-                ('煤矿：{0}（{1}）' -f $MineName, $MineId),
-                ('企业实例名：{0}' -f $AgentInstanceName),
-                ('pair_id：{0}' -f $result.pair_id),
-                ('profile_version：{0}' -f $result.profile_version),
-                ('安装有效期（UTC）：{0}' -f $expiresAt.ToString('yyyy-MM-ddTHH:mm:ssZ')),
-                '',
-                ('企业接入包：{0}' -f (Split-Path -Leaf $deliveryAgentBundle)),
-                ('接入包 SHA-256：{0}' -f $agentBundleSha256),
-                ('签发公钥：{0}' -f (Split-Path -Leaf $deliveryPublicKey)),
-                ('签发公钥 SPKI-DER SHA-256：{0}' -f $snapshotPublicKeyFingerprint),
-                ('政府 HTTPS CA：{0}' -f (Split-Path -Leaf $deliveryCa)),
-                ('CA 原文件 SHA-256：{0}' -f $snapshotCaSha256),
-                ('企业端 CA 固定安装路径：{0}' -f $caDestination),
-                '',
-                '激活码：不在本目录。由监管人员通过另一条独立渠道交付。',
-                '企业仅接收本目录；监管注册包 .mgreg、Platform 激活码和签发私钥不得交给企业。',
-                'SPKI 指纹、issuer key ID 和 CA SHA-256 应通过独立审批记录再次核对。'
-            ) -join "`r`n"
-            [IO.File]::WriteAllText($deliveryGuide, $guide, $utf8NoBom)
-            $installManifest = [ordered]@{
-                schema_version = 'mineguard-enterprise-install-manifest-v1'
-                mine_id = $MineId
-                mine_name = $MineName
-                agent_instance_name = $AgentInstanceName
-                pair_id = [string]$result.pair_id
-                profile_version = [int]$result.profile_version
-                expires_at = $expiresAt.ToString('yyyy-MM-ddTHH:mm:ssZ')
-                agent_bundle_file = Split-Path -Leaf $deliveryAgentBundle
-                agent_bundle_sha256 = $agentBundleSha256
-                issuer_public_key_file = Split-Path -Leaf $deliveryPublicKey
-                issuer_public_key_sha256 = $snapshotPublicKeyFingerprint
-                issuer_key_id = $IssuerKeyId
-                platform_ca_file = Split-Path -Leaf $deliveryCa
-                platform_ca_sha256 = $snapshotCaSha256
-                platform_ca_install_path = $caDestination
-                activation_included = $false
-                independent_approval_check_required = $true
-                secrets_disclosed = $false
+            $enterpriseFiles = @(Get-ChildItem -LiteralPath `
+                    $enterpriseDeliveryDirectory -Force)
+            if ($enterpriseFiles.Count -ne 1 -or
+                -not $enterpriseFiles[0].FullName.Equals(
+                    $deliveryAgentBundle,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                throw '企业交付目录必须且只能包含一个 .mgprov 文件。'
             }
-            [IO.File]::WriteAllText(
-                $deliveryInstallManifest,
-                ($installManifest | ConvertTo-Json -Depth 5),
-                $utf8NoBom
-            )
-            $independentRecordText = @(
-                'MineGuard 企业交接独立核验记录（监管端留存）',
-                '',
-                ('煤矿：{0}（{1}）' -f $MineName, $MineId),
-                ('pair_id：{0}' -f $result.pair_id),
-                ('profile_version：{0}' -f $result.profile_version),
-                ('签发 key ID：{0}' -f $IssuerKeyId),
-                ('签发公钥 SPKI-DER SHA-256：{0}' -f `
-                    $snapshotPublicKeyFingerprint),
-                ('政府 HTTPS CA 原文件 SHA-256：{0}' -f `
-                    $snapshotCaSha256),
-                ('独立核验码：{0}' -f $handoverCheckCode),
-                ('记录生成时间（UTC）：{0}' -f `
-                    [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')),
-                '',
-                '本记录只能留在监管端。请通过电话、审批单等企业交付介质以外的渠道告知企业 12 位核验码。',
-                '激活码不写入本记录；企业交付目录也不包含本核验码。'
-            ) -join "`r`n"
-            [IO.File]::WriteAllText(
-                $independentHandoverRecord,
-                $independentRecordText,
-                $utf8NoBom
-            )
-            $independentRecordText = $null
-            foreach ($deliveryFile in @(
-                    $deliveryAgentBundle, $deliveryPublicKey, $deliveryCa,
-                    [string]$result.enterprise_handover_manifest,
-                    $deliveryGuide, $deliveryInstallManifest
-                )) {
-                Set-ReadOnlyOrdinaryFile -Path $deliveryFile `
-                    -Label '企业交付文件'
-            }
-            Set-ReadOnlyOrdinaryFile -Path $independentHandoverRecord `
-                -Label '监管独立核验记录'
+            Set-ReadOnlyOrdinaryFile -Path $deliveryAgentBundle `
+                -Label '企业接入包'
             Set-AdministratorOnlyAcl -Path $enterpriseActivationOutput `
                 -Recurse
             Set-AdministratorOnlyAcl -Path $platformActivationOutput `
                 -Recurse
             Set-AdministratorOnlyAcl -Path $platformRegistrationOutput `
                 -Recurse
-            $handoffPublished = $true
         } catch {
             $handoffError = $_
             foreach ($generatedPath in @(
                     [string]$result.agent_bundle,
                     [string]$result.platform_registration_bundle,
                     [string]$result.provisioning_manifest,
-                    [string]$result.enterprise_handover_manifest,
                     [string]$result.issuer_public_key_file,
                     [string]$result.agent_activation_file,
-                    [string]$result.platform_activation_file,
-                    $deliveryCa, $deliveryGuide, $deliveryInstallManifest,
-                    $independentHandoverRecord
+                    [string]$result.platform_activation_file
                 )) {
                 if (-not [string]::IsNullOrWhiteSpace($generatedPath) -and
                     (Test-Path -LiteralPath $generatedPath -PathType Leaf)) {
@@ -947,32 +698,13 @@ try {
             }
             throw $handoffError
         }
-        if (-not $handoffPublished) { throw '企业四区交付事务未完成。' }
         $result | Add-Member -NotePropertyName enterprise_delivery_directory `
             -NotePropertyValue $enterpriseDeliveryDirectory
         $result | Add-Member -NotePropertyName enterprise_agent_bundle `
             -NotePropertyValue $deliveryAgentBundle
-        $result | Add-Member -NotePropertyName enterprise_issuer_public_key `
-            -NotePropertyValue $deliveryPublicKey
-        $result | Add-Member -NotePropertyName enterprise_platform_ca `
-            -NotePropertyValue (Join-Path $enterpriseDeliveryDirectory `
-                'platform-ca.pem')
-        $result | Add-Member -NotePropertyName enterprise_handoff_guide `
-            -NotePropertyValue (Join-Path $enterpriseDeliveryDirectory `
-                '企业交接说明.txt')
-        $result | Add-Member -NotePropertyName enterprise_install_manifest `
-            -NotePropertyValue (Join-Path $enterpriseDeliveryDirectory `
-                'enterprise-install-manifest.json')
-        $result | Add-Member -NotePropertyName platform_ca_sha256 `
-            -NotePropertyValue $snapshotCaSha256
-        $result | Add-Member -NotePropertyName authority_platform_ca_file `
-            -NotePropertyValue $authorityCaPath
-        $result | Add-Member `
-            -NotePropertyName independent_handover_check_code `
-            -NotePropertyValue $handoverCheckCode
-        $result | Add-Member `
-            -NotePropertyName independent_handover_record `
-            -NotePropertyValue $independentHandoverRecord
+        $result | Add-Member -NotePropertyName enterprise_package_sha256 `
+            -NotePropertyValue ((Get-FileHash -LiteralPath `
+                    $deliveryAgentBundle -Algorithm SHA256).Hash.ToLowerInvariant())
         $result | Add-Member -NotePropertyName agent_instance_name `
             -NotePropertyValue $AgentInstanceName
         $result | Add-Member -NotePropertyName expires_at `

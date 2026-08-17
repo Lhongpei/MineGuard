@@ -2,17 +2,12 @@
 param(
     [Parameter(Mandatory = $true)]
     [string] $InstallRoot,
-    [switch] $ModelCredentials,
     [switch] $Elevated
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-$script:LauncherTitle = if ($ModelCredentials) {
-    'MineGuard 模型授权导入向导'
-} else {
-    'MineGuard 企业接入配置向导'
-}
+$script:LauncherTitle = 'MineGuard 企业接入配置向导'
 
 function Show-LauncherError {
     param([string] $Message)
@@ -48,12 +43,8 @@ try {
 
     $resolvedRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
     $launcherPath = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
-    $wizardName = if ($ModelCredentials) {
-        'Start-EnterpriseAgentModelCredentialWizard.ps1'
-    } else {
-        'Start-EnterpriseAgentProvisioningWizard.ps1'
-    }
-    $wizardPath = Join-Path $resolvedRoot ('deploy\windows\' + $wizardName)
+    $wizardPath = Join-Path $resolvedRoot `
+        'deploy\windows\Start-EnterpriseAgentProvisioningWizard.ps1'
     $powershellPath = Join-Path $env:SystemRoot `
         'System32\WindowsPowerShell\v1.0\powershell.exe'
     if (-not (Test-Path -LiteralPath $powershellPath -PathType Leaf)) {
@@ -77,10 +68,9 @@ try {
     # Ordinary users can read only this tiny launcher. Request UAC before
     # inspecting the protected deploy tree so a clean installation opens
     # reliably without leaking deployment scripts to desktop users.
-    $modeArgument = if ($ModelCredentials) { ' -ModelCredentials' } else { '' }
     $arguments = (
-        '-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -InstallRoot "{1}"{2} -Elevated' -f
-            $launcherPath, $resolvedRoot, $modeArgument
+        '-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -InstallRoot "{1}" -Elevated' -f
+            $launcherPath, $resolvedRoot
     )
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $powershellPath

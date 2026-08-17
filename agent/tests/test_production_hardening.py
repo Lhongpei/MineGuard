@@ -128,7 +128,7 @@ def test_formal_account_requires_provenance_and_rejects_demo_hash() -> None:
     assert any("默认密码" in item for item in defects)
 
 
-def test_production_config_requires_two_separated_named_accounts(
+def test_production_config_requires_business_admin_and_api_admin(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -143,28 +143,29 @@ def test_production_config_requires_two_separated_named_accounts(
     unsafe = replace(
         base,
         production_mode=True,
-        four_eyes_required=True,
+        four_eyes_required=False,
         users=(all_powerful,),
     )
     errors = _configuration_errors(unsafe, production=True)
-    assert any("至少需要两个" in item for item in errors)
-    assert any("违反最小权限" in item for item in errors)
+    assert any("必须且只能配置业务管理员和 api_admin" in item for item in errors)
+    assert any("固定且独立的 api_admin" in item for item in errors)
 
-    preparer = _account(
-        "preparer-1",
+    business_admin = _account(
+        "admin-1",
         "张三",
-        frozenset({"read", "write"}),
-        password="MineGuard!Prepare2026",
+        frozenset({"read", "write", "confirm", "submit"}),
+        password="MineGuard!Business2026",
     )
-    reviewer = _account(
-        "reviewer-1",
-        "李四",
-        frozenset({"read", "confirm", "submit"}),
-        password="MineGuard!Review2026",
+    api_admin = _account(
+        "api_admin",
+        "API 配置管理员",
+        frozenset({"model_api_admin"}),
+        password="MineGuard!ApiAdmin2026",
     )
-    separated = replace(unsafe, users=(preparer, reviewer))
+    separated = replace(unsafe, users=(business_admin, api_admin))
     separated_errors = _configuration_errors(separated, production=True)
-    assert not any("账号" in item and "权限" in item for item in separated_errors)
+    assert not any("api_admin" in item for item in separated_errors)
+    assert not any("业务管理员" in item for item in separated_errors)
     assert not any("凭据不合格" in item for item in separated_errors)
 
 

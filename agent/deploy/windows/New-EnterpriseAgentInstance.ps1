@@ -14,7 +14,6 @@ param(
     [string]$ProvisionedEnvironmentFile = "",
     [string]$ProvisioningLockFile = "",
     [string]$ProvisioningSecretStoreFile = "",
-    [string]$ProvisioningCaFile = "",
     [switch]$SkipAcl,
     [switch]$DevelopmentOnly
 )
@@ -45,19 +44,18 @@ if ($SkipAcl -and $GrantWatchReadAcl) {
 $ProvisioningInputs = @(
     $ProvisionedEnvironmentFile,
     $ProvisioningLockFile,
-    $ProvisioningSecretStoreFile,
-    $ProvisioningCaFile
+    $ProvisioningSecretStoreFile
 )
 $ProvisioningInputCount = @($ProvisioningInputs | Where-Object {
     -not [string]::IsNullOrWhiteSpace([string]$_)
 }).Count
-if ($ProvisioningInputCount -notin @(0, 4)) {
+if ($ProvisioningInputCount -notin @(0, 3)) {
     throw (
-        "Provisioned instance creation requires all four prepared files: " +
-        "environment, lock, DPAPI secret store and Platform CA."
+        "Provisioned instance creation requires all three prepared files: " +
+        "environment, lock and DPAPI secret store."
     )
 }
-$UsingProvisioningPackage = $ProvisioningInputCount -eq 4
+$UsingProvisioningPackage = $ProvisioningInputCount -eq 3
 if ($UsingProvisioningPackage -and ($SkipAcl -or $DevelopmentOnly)) {
     throw "Provisioned access packages require the production ACL boundary."
 }
@@ -151,11 +149,9 @@ if ($UsingProvisioningPackage) {
     $PreparedSecretStore = Resolve-EASafeLocalPath `
         -Name "Prepared provisioning secret store" `
         -PathValue $ProvisioningSecretStoreFile -MustExist -RequiredType Leaf
-    $PreparedCa = Resolve-EASafeLocalPath -Name "Prepared Platform CA" `
-        -PathValue $ProvisioningCaFile -MustExist -RequiredType Leaf
     $PreparedParent = [IO.Path]::GetDirectoryName($PreparedEnvironment)
     $ExpectedPreparedParent = [IO.Path]::GetDirectoryName($PreparedLock)
-    foreach ($Candidate in @($PreparedSecretStore, $PreparedCa)) {
+    foreach ($Candidate in @($PreparedSecretStore)) {
         $CandidateParent = [IO.Path]::GetDirectoryName($Candidate)
         if (-not $CandidateParent.Equals(
                 $PreparedParent, [StringComparison]::OrdinalIgnoreCase
@@ -182,7 +178,6 @@ if ($UsingProvisioningPackage) {
         $PreparedEnvironment = "provisioned-agent.env"
         $PreparedLock = "provisioning-lock.json"
         $PreparedSecretStore = "provisioning-secrets.dpapi"
-        $PreparedCa = "platform-ca.pem"
     }
     foreach ($Entry in $ExpectedPreparedNames.GetEnumerator()) {
         $ActualPreparedName = [IO.Path]::GetFileName([string]$Entry.Key)
@@ -200,13 +195,10 @@ if ($UsingProvisioningPackage) {
         -Name "Prepared provisioning lock" -MaximumBytes 1MB
     Assert-EAOrdinaryLeaf -Path $PreparedSecretStore `
         -Name "Prepared provisioning secret store" -MaximumBytes 1MB
-    Assert-EAOrdinaryLeaf -Path $PreparedCa `
-        -Name "Prepared Platform CA" -MaximumBytes 1MB
     $PreparedFiles = [pscustomobject]@{
         Environment = $PreparedEnvironment
         Lock = $PreparedLock
         SecretStore = $PreparedSecretStore
-        Ca = $PreparedCa
         Parent = $PreparedParent
     }
 }
@@ -331,11 +323,6 @@ try {
             (Join-Path $StageConfigDirectory "provisioning-secrets.dpapi"),
             $false
         )
-        [IO.File]::Copy(
-            $PreparedFiles.Ca,
-            (Join-Path $StageConfigDirectory "platform-ca.pem"),
-            $false
-        )
     }
     else {
         $Content = [IO.File]::ReadAllText($Template)
@@ -365,9 +352,6 @@ try {
             )
             "ENTERPRISE_PROVISIONING_SECRET_STORE" = (
                 Join-Path $InstanceRoot "config\provisioning-secrets.dpapi"
-            )
-            "PLATFORM_V3_CA_BUNDLE" = (
-                Join-Path $InstanceRoot "config\platform-ca.pem"
             )
         }
         foreach ($Entry in $ExpectedProvisioningPaths.GetEnumerator()) {
@@ -477,8 +461,10 @@ try {
         }
         try {
             foreach ($PolicyName in $PolicyNames) {
+                $PolicyValue = if ($PolicyName -eq `
+                    "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED") { "false" } else { "true" }
                 [Environment]::SetEnvironmentVariable(
-                    $PolicyName, "true", [EnvironmentVariableTarget]::Process
+                    $PolicyName, $PolicyValue, [EnvironmentVariableTarget]::Process
                 )
             }
             & $CreatedContext.Executable "--env-file" $CreatedContext.ConfigPath `

@@ -31,7 +31,7 @@ from .auth import (
     LoginThrottled,
     is_loopback,
 )
-from .errors import AgentError, RequestTooLargeError
+from .errors import AgentError, ProviderError, RequestTooLargeError
 from .machine_ingestion import (
     AUTOFILL_PATH,
     SOURCE_HEALTH_PATH,
@@ -2381,6 +2381,59 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 {"authenticated": False},
                 headers=(("Set-Cookie", self._cookie("", 0)),),
             )
+            return
+        if path == "/api/v1/model-api":
+            assert context is not None
+            if context.principal.actor_id != "api_admin":
+                self._error(
+                    HTTPStatus.FORBIDDEN,
+                    "permission_denied",
+                    "只有固定账号 api_admin 可以访问模型 API 配置",
+                )
+                return
+            if not self._require(context, "model_api_admin"):
+                return
+            if method == "GET":
+                try:
+                    status = self.server.service.model_api_status()
+                except (OSError, ValueError):
+                    status = {
+                        "managed": True,
+                        "state": "unavailable",
+                        "source": "api_admin",
+                    }
+                self._json(HTTPStatus.OK, status)
+                return
+            if method == "POST":
+                body = self._body()
+                values = {
+                    name: body.get(name)
+                    for name in ("api_key", "base_url", "model")
+                }
+                if any(not isinstance(value, str) for value in values.values()):
+                    self._error(
+                        HTTPStatus.BAD_REQUEST,
+                        "invalid_model_api_configuration",
+                        "API 地址、API Key 和模型名称必须是文本",
+                    )
+                    return
+                try:
+                    result = self.server.service.configure_model_api(
+                        api_key=values["api_key"],
+                        base_url=values["base_url"],
+                        model=values["model"],
+                        actor_id=context.principal.actor_id,
+                    )
+                except (OSError, ProviderError, ValueError) as error:
+                    self._error(
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        "model_api_configuration_failed",
+                        str(error),
+                    )
+                    return
+                self._json(HTTPStatus.OK, result)
+                return
+            self._method_not_allowed(("GET", "POST"))
             return
         if (
             path.startswith("/api/v1/agent/")

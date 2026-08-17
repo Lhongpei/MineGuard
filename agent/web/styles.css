@@ -288,6 +288,75 @@ p {
   padding: 7px 28px;
 }
 
+.model-api-admin {
+  width: min(920px, calc(100% - 32px));
+  margin: 44px auto;
+}
+
+.model-api-admin-card {
+  padding: 32px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.model-api-admin-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+
+.model-api-admin-heading h2 {
+  margin: 4px 0 10px;
+}
+
+.model-api-admin-heading p:last-child {
+  max-width: 680px;
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.7;
+}
+
+.model-api-admin-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(220px, 1fr);
+  gap: 18px;
+}
+
+.model-api-admin-result {
+  min-height: 24px;
+  margin: 8px 0 16px;
+  color: var(--ink-soft);
+}
+
+body.is-model-api-admin .enterprise-mode-bar,
+body.is-model-api-admin .system-status-bar,
+body.is-model-api-admin #fiveQuantityWorkspace,
+body.is-model-api-admin .legacy-workspace,
+body.is-model-api-admin #newDraftButton,
+body.is-model-api-admin #agentCenterButton,
+body.is-model-api-admin #agentTaskButton,
+body.is-model-api-admin #coalChatButton {
+  display: none !important;
+}
+
+@media (max-width: 700px) {
+  .model-api-admin-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .model-api-admin-card {
+    padding: 22px;
+  }
+
+  .model-api-admin-heading {
+    flex-direction: column;
+  }
+}
+
 .system-status-item {
   align-items: center;
   display: flex;

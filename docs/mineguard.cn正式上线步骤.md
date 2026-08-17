@@ -1,5 +1,10 @@
 # mineguard.cn 正式上线步骤
 
+> **旧版网络/证书方案，不用于当前新装。** 当前企业 Agent 只监听
+> `127.0.0.1`，不需企业域名；企业只需政府 Platform 的一个 HTTPS 地址和一个
+> `.mgprov` 文件。以 [Platform Windows 说明](../platform/deploy/windows/README.md) 和
+> [Agent Windows 说明](../agent/deploy/windows/README.md) 为准。
+
 > 适用范围：MineGuard Platform 政府端和梗阳矿 Enterprise Agent 首次正式试运行。
 > 推荐域名：Platform 使用 `platform.mineguard.cn`，梗阳矿 Agent 使用
 > `gengyang.mineguard.cn`。

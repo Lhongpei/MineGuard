@@ -20,6 +20,8 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
 $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 $OutputEncoding = $utf8NoBom
 try { [Console]::OutputEncoding = $utf8NoBom } catch { }
@@ -458,11 +460,15 @@ $releaseName = 'MineGuardPlatform-{0}-windows-x64' -f $productVersion
 $releaseDirectory = Get-LocalAbsolutePath `
     -Value (Join-Path $OutputDirectory $releaseName) -Label 'Platform 最终交付目录'
 $publishToken = [Guid]::NewGuid().ToString('N')
+# Windows PowerShell 5.1 file cmdlets are still constrained by MAX_PATH on the
+# Windows versions we support. Keep transaction directory names short because
+# frozen SciPy DLL names can otherwise push a valid local staging path past 260
+# characters before the atomic rename occurs.
 $publishIncoming = Get-LocalAbsolutePath `
-    -Value (Join-Path $OutputDirectory ('.{0}.incoming.{1}' -f $releaseName, $publishToken)) `
+    -Value (Join-Path $OutputDirectory ('.in-{0}' -f $publishToken)) `
     -Label 'Platform 同级发布暂存目录'
 $publishPrevious = Get-LocalAbsolutePath `
-    -Value (Join-Path $OutputDirectory ('.{0}.previous.{1}' -f $releaseName, $publishToken)) `
+    -Value (Join-Path $OutputDirectory ('.prev-{0}' -f $publishToken)) `
     -Label 'Platform 旧版本备份目录'
 if ((Test-Path -LiteralPath $releaseDirectory) -and
     -not (Test-Path -LiteralPath $releaseDirectory -PathType Container)) {
@@ -678,7 +684,12 @@ try {
     Copy-Item -LiteralPath $desktopLauncherSource `
         -Destination $desktopLauncherReleasePath
 
-    $nuitkaVersionText = & $buildPython '-m' 'nuitka' '--version'
+    # `nuitka --version` performs a compiler probe in Nuitka 4.x and can block
+    # indefinitely in a non-interactive Windows PowerShell 5.1 build. Read the
+    # installed distribution metadata directly; the build requirements already
+    # pin and hash the package used above.
+    $nuitkaVersionText = & $buildPython '-c' `
+        "from importlib.metadata import version; print(version('Nuitka'))"
     if ($LASTEXITCODE -ne 0) { throw '无法读取 Nuitka 构建版本。' }
     $nuitkaVersion = [string]($nuitkaVersionText | Select-Object -First 1)
     [System.IO.File]::WriteAllText(
@@ -802,7 +813,7 @@ try {
             try {
                 if (Test-Path -LiteralPath $releaseDirectory) {
                     $failedPath = Join-Path $OutputDirectory (
-                        '.{0}.failed.{1}' -f $releaseName, [Guid]::NewGuid().ToString('N')
+                        '.fail-{0}' -f [Guid]::NewGuid().ToString('N')
                     )
                     if (Test-Path -LiteralPath $releaseDirectory -PathType Container) {
                         [System.IO.Directory]::Move($releaseDirectory, $failedPath)

@@ -99,16 +99,15 @@ PYTHONPATH=src python -m enterprise_agent serve --host 127.0.0.1 --port 8090
 浏览器打开 <http://127.0.0.1:8090/>。按 `Ctrl+C` 可正常停止。
 
 CSV 智能映射不强制依赖模型 API：未配置时仍会使用标准模板、同矿已批准映射和本地
-规则。正式环境的模型能力必须通过供应商签名、企业身份绑定的 `.mgllm` 授权包启用；
-API Key、接口地址、模型和重试参数不能写入普通环境文件，政府 Platform 也不接收这些
-内容。Windows 使用“MineGuard 模型授权导入向导”，Linux 使用受控 CLI 导入；运行配置
-最终只保留 lock/store 两个绝对路径指针，签发信任库固定在签名发行版中。完整流程见
-[企业模型凭据签发与轮换](../docs/企业模型凭据签发与轮换.md)。
+规则。正式 Windows 实例由固定账号 `api_admin` 在企业端页面填写 API 地址、模型和
+API Key。系统先测试连接，再用机器级 DPAPI 加密保存 Key；业务管理员无权查看或修改，
+政府 Platform 也不接收这些内容。
 
-源码开发环境仍兼容 `MINEGUARD_AGENT_API_KEY`、`MINEGUARD_AGENT_BASE_URL`、
-`MINEGUARD_AGENT_MODEL` 和迁移期 `DEEPSEEK_*` 别名，但这些明文变量会被
-`config-check --production` 拒绝，也不能与受管 `.mgllm` 指针混用。运行中的进程不会
-重新读取凭据；导入或轮换后必须重启。模型只接收获准能力所需的最小数据，例如 CSV
+源码开发环境可临时使用 `MINEGUARD_AGENT_API_KEY`、`MINEGUARD_AGENT_BASE_URL` 和
+`MINEGUARD_AGENT_MODEL`，但这些明文变量会被 `config-check --production` 拒绝，
+也不能与 `api_admin` 本机配置混用。旧 `DEEPSEEK_*` 和 `.mgllm` lock/store 指针已移除，
+一旦出现会直接拒绝启动。页面配置保存后立即
+生效，不需重启。模型只接收获准能力所需的最小数据，例如 CSV
 映射只发送表头和类型计数，不发送原始业务数值。
 
 仅本机、未配置逐用户账号时会启用演示账号：
@@ -119,12 +118,10 @@ API Key、接口地址、模型和重试参数不能写入普通环境文件，�
 ```
 
 演示账号被标记为必须换密，只能查看和编辑，不能确认或报送。正式测试完整流程必须
-显式启用 `ENTERPRISE_AGENT_PRODUCTION_MODE=true` 和
-`ENTERPRISE_AGENT_FOUR_EYES_REQUIRED=true`，并配置两个姓名不同、权限分离的逐用户
-账号：经办人只拥有 `read/write`，复核人只拥有 `read/confirm/submit`。仅仅不使用
-demo 账号不等于正式模式。
+显式启用 `ENTERPRISE_AGENT_PRODUCTION_MODE=true`，并配置恰好两个账号：一个业务管理员拥有
+`read/write/confirm/submit`，固定 `api_admin` 只拥有 `model_api_admin`。
 
-正式凭据建议这样生成（分别为两人运行一次）：
+正式凭据建议为两个账号分别生成：
 
 ```bash
 enterprise-agent hash-password --production --json
@@ -132,9 +129,8 @@ enterprise-agent hash-password --production --json
 
 输出仅含 `password_hash`、`credential_provenance`、`must_change_password`，可复制进
 用户 JSON，不含明文。正式启动前执行 `enterprise-agent config-check --production`；
-最后创建或编辑草稿的人不能确认、排队或提交。CSV/连接器/目录监视自动生成的
-草稿必须先由配置中的具名经办账号打开核对并保存，才能由另一复核账号
-确认。正式模式禁用可自报 `--actor` 的变更 CLI；审计完整性使用全链+尾锚
+业务管理员在同一账号内完成草稿核对、保存、确认和提交。正式模式禁用可自报 `--actor`
+的变更 CLI；审计完整性使用全链+尾锚
 校验，不会因前端只显示 200 条而放过后段篡改。
 
 ## 最小 V3 配置
@@ -199,38 +195,12 @@ export REGULATORY_PREVIOUS_EXCHANGE_KEY_ID=regulator-key-previous
 export REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET='replace-previous-secret-at-least-32-bytes'
 ```
 
-## 企业专属模型授权
+## 企业模型 API 配置
 
-正式环境实行“一企业一 Key、一实例一授权”：供应商在隔离签发机上用
-`mineguard-model-issuer` 生成身份绑定的 `.mgllm`，企业分别取得授权包和激活码，政府
-Platform 不参与签发、解密或存储。签发工具只从属主 `0600` 文件读取 API Key 和私钥
-口令，不接受命令行明文；现场正式配置也不得出现 API Key、模型地址或可替换的 trust
-store。每个企业还必须在模型供应商侧拥有独立硬配额、限速、账单标签、告警和吊销
-范围，不得多矿共用 Key。
-
-Windows 管理员从开始菜单运行“MineGuard 模型授权导入向导”。Linux 管理员使用
-`enterprise-agent model-credential-import`。Windows 向导只要求选择已完成企业接入的实例、
-`.mgllm` 和由另一通道交付的 activation 文件，不允许现场编辑 provider 或选择包旁
-公钥。导入后的正式服务环境中，模型相关项只有两个绝对路径指针：
-
-```text
-MINEGUARD_AGENT_MODEL_CREDENTIAL_LOCK_FILE=/var/lib/enterprise-agent/model-credential-v1.lock.json
-MINEGUARD_AGENT_MODEL_CREDENTIAL_SECRET_STORE=/var/lib/enterprise-agent/model-credential-v1.secret.json
-```
-
-两项必须成对存在。lock 旁还会自动生成不需要写入 env 的 `.state.json` 防回退状态，
-持久化已接受的最高版本和包摘要；三份文件必须一起发布和事务回滚。lock 只含签名身份、
-供应商配置和 secret store 指针；Windows secret store 使用机器级 DPAPI 并受实例 ACL
-保护。Linux V1 的 `0600` secret store 是含 Key 的兼容明文存储，只依赖服务账号和文件
-权限，不是静态加密或机器绑定，不能宣称与
-DPAPI 等效。发行版从
-`release-metadata/model-credential-trust.json` 固定读取签发公钥，正式模式拒绝环境变量
-替换。因此正式 `agent.env` 不得出现 `MINEGUARD_AGENT_MODEL_TRUST_STORE`、明文
-`MINEGUARD_AGENT_API_KEY`、`MINEGUARD_AGENT_BASE_URL`、`MINEGUARD_AGENT_MODEL`、
-`MINEGUARD_AGENT_TIMEOUT_SECONDS`、`MINEGUARD_AGENT_MAX_RETRIES` 或对应的明文
-`DEEPSEEK_*`。安装、轮换和状态检查的完整命令、双通道交付要求、配额/吊销策略及本机管理员
-安全边界见[企业模型凭据签发与轮换](../docs/企业模型凭据签发与轮换.md)。
-拥有本机管理员/root 或运行内存提取能力的攻击者不在这一凭据包的绝对防护目标内。
+正式 Windows 实例固定使用 `api_admin` 配置模型 API。登录后填写 HTTPS API 地址、
+模型名和 API Key，点击“测试连接并保存”。只有连通测试成功才会原子替换旧配置。
+API Key 使用机器级 DPAPI 加密并受实例 ACL 保护，不进入 `agent.env`、日志或页面回显。
+`api_admin` 不能访问业务数据，业务管理员也不能读取或修改 API 配置。
 
 ## 获取数据
 

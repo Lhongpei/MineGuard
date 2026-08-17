@@ -13,6 +13,7 @@
     login: () => "/auth/login",
     me: () => "/auth/me",
     logout: () => "/auth/logout",
+    modelApi: () => "/model-api",
     drafts: () => "/drafts",
     draftList: (limit = 50, offset = 0) =>
       `/drafts?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
@@ -800,6 +801,14 @@
       "loginButton",
       "loginDemoHint",
       "loginRuntimeStatus",
+      "modelApiAdminPanel",
+      "modelApiForm",
+      "modelApiBaseUrl",
+      "modelApiModel",
+      "modelApiKey",
+      "modelApiState",
+      "modelApiResult",
+      "modelApiSaveButton",
     ].forEach((id) => {
       els[id] = document.getElementById(id);
     });
@@ -822,6 +831,10 @@
     });
     els.loginDialog.addEventListener("cancel", (event) => event.preventDefault());
     els.logoutButton.addEventListener("click", () => void logout());
+    els.modelApiForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void saveModelApiConfiguration();
+    });
     els.newDraftButton.addEventListener("click", () => void createDraft());
     els.welcomeStartButton.addEventListener("click", () =>
       void handleWelcomePrimaryAction(),
@@ -1464,6 +1477,8 @@
       applyAuthenticatedSession(payload);
       if (hasPermission("read")) {
         await Promise.all([loadDrafts(), loadPlatformStatus()]);
+      } else if (hasPermission("model_api_admin")) {
+        await loadModelApiConfiguration();
       } else {
         renderDraftList();
       }
@@ -1496,6 +1511,8 @@
       if (els.loginDialog.open) els.loginDialog.close();
       if (hasPermission("read")) {
         await Promise.all([loadDrafts(), loadPlatformStatus()]);
+      } else if (hasPermission("model_api_admin")) {
+        await loadModelApiConfiguration();
       } else {
         renderDraftList();
       }
@@ -1556,6 +1573,69 @@
     renderOperationalStatus();
     if (switchingAccount) {
       showToast("已切换账号；为防止跨账号泄露，上一账号未保存的页面内容已清除。");
+    }
+  }
+
+  function isModelApiAdministrator() {
+    return Boolean(
+      state.principal &&
+        state.principal.actor_id === "api_admin" &&
+        hasPermission("model_api_admin"),
+    );
+  }
+
+  function renderModelApiStatus(status) {
+    const configured = status && status.state === "configured";
+    els.modelApiState.textContent = configured ? "已配置" : "尚未配置";
+    els.modelApiState.className = `status-badge ${configured ? "status-confirmed" : "status-draft"}`;
+    if (status && typeof status.base_url === "string") {
+      els.modelApiBaseUrl.value = status.base_url;
+    }
+    if (status && typeof status.model === "string") {
+      els.modelApiModel.value = status.model;
+    }
+    els.modelApiKey.value = "";
+    els.modelApiResult.textContent = configured
+      ? `当前模型：${status.model}。API Key 已加密保存，不在页面显示。`
+      : "请输入模型服务参数。";
+  }
+
+  async function loadModelApiConfiguration() {
+    if (!isModelApiAdministrator()) return;
+    els.modelApiResult.textContent = "正在读取当前配置…";
+    try {
+      const status = await api(endpoints.modelApi());
+      renderModelApiStatus(status);
+    } catch (error) {
+      els.modelApiResult.textContent = `无法读取配置：${error.message}`;
+    }
+  }
+
+  async function saveModelApiConfiguration() {
+    if (!isModelApiAdministrator()) return;
+    const apiKey = els.modelApiKey.value;
+    const baseUrl = els.modelApiBaseUrl.value.trim();
+    const model = els.modelApiModel.value.trim();
+    if (!apiKey || !baseUrl || !model) {
+      els.modelApiResult.textContent = "API 地址、API Key 和模型名称都必须填写。";
+      return;
+    }
+    setBusy(els.modelApiSaveButton, true, "正在测试连接…");
+    els.modelApiResult.textContent = "正在调用模型服务测试连接，成功后自动保存。";
+    try {
+      const status = await api(endpoints.modelApi(), {
+        method: "POST",
+        body: { api_key: apiKey, base_url: baseUrl, model },
+        timeoutMs: 45000,
+      });
+      renderModelApiStatus(status);
+      els.modelApiResult.textContent = "连接测试成功，配置已加密保存并立即生效。";
+      showToast("模型 API 已更新并立即生效。");
+    } catch (error) {
+      els.modelApiKey.value = "";
+      els.modelApiResult.textContent = `未保存：${error.message}`;
+    } finally {
+      setBusy(els.modelApiSaveButton, false);
     }
   }
 
@@ -2273,6 +2353,10 @@
 
   function renderAuthentication() {
     const principal = state.principal;
+    const modelApiAdministrator = isModelApiAdministrator();
+    document.body.classList.toggle("is-model-api-admin", modelApiAdministrator);
+    els.modelApiAdminPanel.hidden = !modelApiAdministrator;
+    els.modelApiForm.hidden = !modelApiAdministrator;
     els.identityChip.hidden = !principal;
     els.newDraftButton.disabled =
       !principal || !hasPermission("read") || !hasPermission("write");
@@ -2291,6 +2375,8 @@
     els.coalChatButton.disabled = !principal || !hasPermission("read");
     renderOperationGuide();
     if (!principal) {
+      els.modelApiKey.value = "";
+      els.modelApiResult.textContent = "";
       els.currentUserName.textContent = "未登录";
       els.currentUserRole.textContent = "—";
       els.identityAvatar.textContent = "企";
