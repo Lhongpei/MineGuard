@@ -174,11 +174,11 @@ function New-InputTable {
     $table.RowCount = 0
     $table.Dock = [Windows.Forms.DockStyle]::Top
     $table.Padding = New-Object Windows.Forms.Padding(12)
-    $table.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle(
+    [void]$table.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle(
                 [Windows.Forms.SizeType]::Absolute, 178)))
-    $table.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle(
+    [void]$table.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle(
                 [Windows.Forms.SizeType]::Percent, 100)))
-    $table.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle(
+    [void]$table.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle(
                 [Windows.Forms.SizeType]::Absolute, 88)))
     return $table
 }
@@ -196,7 +196,7 @@ function Add-InputRow {
     )
     $row = $Table.RowCount
     $Table.RowCount++
-    $Table.RowStyles.Add((New-Object Windows.Forms.RowStyle(
+    [void]$Table.RowStyles.Add((New-Object Windows.Forms.RowStyle(
                 [Windows.Forms.SizeType]::Absolute, 35)))
     $caption = New-Object Windows.Forms.Label
     $caption.Text = $Label
@@ -238,7 +238,7 @@ function Add-NoteRow {
     param([Windows.Forms.TableLayoutPanel] $Table, [string] $Text)
     $row = $Table.RowCount
     $Table.RowCount++
-    $Table.RowStyles.Add((New-Object Windows.Forms.RowStyle(
+    [void]$Table.RowStyles.Add((New-Object Windows.Forms.RowStyle(
                 [Windows.Forms.SizeType]::Absolute, 45)))
     $label = New-Object Windows.Forms.Label
     $label.Text = $Text
@@ -257,7 +257,7 @@ function Add-ActionRow {
     )
     $row = $Table.RowCount
     $Table.RowCount++
-    $Table.RowStyles.Add((New-Object Windows.Forms.RowStyle(
+    [void]$Table.RowStyles.Add((New-Object Windows.Forms.RowStyle(
                 [Windows.Forms.SizeType]::Absolute, 52)))
     $button = New-Object Windows.Forms.Button
     $button.Text = $Text

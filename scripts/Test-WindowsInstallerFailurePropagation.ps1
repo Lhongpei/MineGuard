@@ -1544,6 +1544,16 @@ function Test-OneTransactionalRollbackAndDowngrade {
         [string]$Version,
         [string]$ProbeRoot
     )
+    New-Item -ItemType Directory -Path $ProbeRoot -Force | Out-Null
+    $PriorStage = $OriginalStage
+    if ($Product -eq "agent") {
+        # Seed a valid unsigned-test installation, then install the current
+        # candidate classification over it.  This catches accidental reuse of
+        # incoming trust switches while inspecting the existing runtime.
+        $PriorStage = Join-Path $ProbeRoot "prior-agent-unsigned-test"
+        [void](New-UnsignedWrapperProbeStage -Product agent `
+            -OriginalStage $OriginalStage -Destination $PriorStage)
+    }
     $InstallRoot = Join-Path $ProbeRoot "i"
     $StateRoot = Join-Path $ProbeRoot "s"
     $RuntimeRoot = Join-Path $InstallRoot "runtime"
@@ -1572,12 +1582,12 @@ function Test-OneTransactionalRollbackAndDowngrade {
     $Sentinels = @()
     if ($Product -eq "agent") {
         foreach ($Item in Get-ChildItem -LiteralPath (
-            Join-Path $OriginalStage "runtime"
+            Join-Path $PriorStage "runtime"
         ) -Force) {
             Copy-Item -LiteralPath $Item.FullName -Destination $RuntimeRoot -Recurse
         }
         foreach ($Item in Get-ChildItem -LiteralPath (
-            Join-Path $OriginalStage "deploy\windows"
+            Join-Path $PriorStage "deploy\windows"
         ) -Force) {
             Copy-Item -LiteralPath $Item.FullName -Destination $OperationsRoot -Recurse
         }
@@ -1585,7 +1595,7 @@ function Test-OneTransactionalRollbackAndDowngrade {
             "VERSION.txt", "build-metadata.json", "release-manifest.json",
             "SHA256SUMS.txt", "model-credential-trust.json"
         )) {
-            Copy-Item -LiteralPath (Join-Path $OriginalStage $MetadataName) `
+            Copy-Item -LiteralPath (Join-Path $PriorStage $MetadataName) `
                 -Destination $MetadataRoot
         }
         New-Item -ItemType Directory `
@@ -1757,8 +1767,9 @@ function Test-OneTransactionalRollbackAndDowngrade {
             -RuntimeRoot $RuntimeRoot -OperationsRoot $OperationsRoot `
             -MetadataRoot $MetadataRoot -Label "Agent missing-metadata rejection"
         Write-Host (
-            "$Product post-switch rollback (exit $PostSwitchExit), legacy-process " +
-            "rejection and missing-metadata rejection passed."
+            "$Product unsigned-test classification transition, post-switch " +
+            "rollback (exit $PostSwitchExit), legacy-process rejection and " +
+            "missing-metadata rejection passed."
         )
     }
 }

@@ -1605,6 +1605,24 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     assert "timestamp_url" in installer
     assert "TimeStamperCertificate" in installer
     assert "Test-InstalledBinaryRuntime" in installer
+    assert "[switch]$UseInstalledReleaseClassification" in installer
+    assert "-UseInstalledReleaseClassification" in installer
+    assert (
+        "Validate an already installed release according to its own immutable"
+        in installer
+    )
+    existing_validation = installer[
+        installer.index("if ($UseInstalledReleaseClassification)") : installer.index(
+            "$ReportedVersion =", installer.index("if ($UseInstalledReleaseClassification)")
+        )
+    ]
+    for classification in (
+        '"signed-production-candidate"',
+        '"unsigned-internal-release"',
+        '"unsigned-test-only"',
+    ):
+        assert classification in existing_validation
+    assert "$InstalledSignature.SignerCertificate.Thumbprint" in existing_validation
     assert "incomplete release metadata" in installer
     assert "Active compiled Agent --version" in installer
     install_source_guard = installer.index(

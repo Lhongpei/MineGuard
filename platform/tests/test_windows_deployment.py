@@ -261,6 +261,13 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         assert removed_legacy_control not in provisioning_wizard
     assert "ProfileVersion = 1" in provisioning_wizard
     assert "Set-CurrentEnterpriseIdentifiers" in provisioning_wizard
+    # TableLayoutStyleCollection.Add returns its inserted index.  If that
+    # value escapes a helper function, PowerShell turns the intended Control
+    # result into Object[], and the next Controls.Add(...) fails at runtime.
+    assert provisioning_wizard.count("[void]$table.ColumnStyles.Add(") == 3
+    assert provisioning_wizard.count("[void]$Table.RowStyles.Add(") == 3
+    assert "\n    $table.ColumnStyles.Add(" not in provisioning_wizard
+    assert "\n    $Table.RowStyles.Add(" not in provisioning_wizard
     self_test = provisioning_wizard.index("if ($SelfTest)")
     elevation_check = provisioning_wizard.index(
         "$identity = [Security.Principal.WindowsIdentity]::GetCurrent()"

@@ -869,6 +869,7 @@ function Test-InstalledBinaryRuntime {
         [string]$ApprovedSignerThumbprint,
         [switch]$AllowUnsignedTestMedia,
         [switch]$AllowUnsignedInternalRelease,
+        [switch]$UseInstalledReleaseClassification,
         [switch]$RequireModelTrustStore
     )
     $Executable = Join-Path $RuntimeDirectory "MineGuardEnterpriseAgent.exe"
@@ -986,11 +987,52 @@ function Test-InstalledBinaryRuntime {
             throw "Installed release manifest metadata mismatch: $Relative"
         }
     }
+    $ValidationParameters = @{
+        ApprovedSignerThumbprint = $ApprovedSignerThumbprint
+        AllowUnsignedTestMedia = [bool]$AllowUnsignedTestMedia
+        AllowUnsignedInternalRelease = [bool]$AllowUnsignedInternalRelease
+    }
+    if ($UseInstalledReleaseClassification) {
+        # Validate an already installed release according to its own immutable
+        # metadata, not according to the incoming candidate's classification.
+        # Otherwise a legitimate unsigned-test -> INTERNAL-UNSIGNED replacement
+        # is rejected before the transactional switch even starts.
+        $ManifestClassification = Get-OptionalReleaseClassification `
+            -Object $Manifest -Document "installed release-manifest.json"
+        $MetadataClassification = Get-OptionalReleaseClassification `
+            -Object $BuildMetadata -Document "installed build-metadata.json"
+        if ($ManifestClassification -ne $MetadataClassification) {
+            throw "Installed release manifest and build metadata classifications are inconsistent."
+        }
+        $ValidationParameters = @{
+            ApprovedSignerThumbprint = ""
+            AllowUnsignedTestMedia = $false
+            AllowUnsignedInternalRelease = $false
+        }
+        switch ($ManifestClassification) {
+            "signed-production-candidate" {
+                $InstalledSignature = Get-AuthenticodeSignature `
+                    -LiteralPath $Executable
+                if ($null -ne $InstalledSignature.SignerCertificate) {
+                    $ValidationParameters.ApprovedSignerThumbprint = (
+                        $InstalledSignature.SignerCertificate.Thumbprint `
+                            -replace '\s', ''
+                    ).ToUpperInvariant()
+                }
+            }
+            "unsigned-internal-release" {
+                $ValidationParameters.AllowUnsignedInternalRelease = $true
+            }
+            "unsigned-test-only" {
+                $ValidationParameters.AllowUnsignedTestMedia = $true
+            }
+            default {
+                throw "Installed Agent release has no supported explicit release_classification."
+            }
+        }
+    }
     Test-ReleaseSignatureContract -Manifest $Manifest -BuildMetadata $BuildMetadata `
-        -ExecutablePath $Executable `
-        -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
-        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia `
-        -AllowUnsignedInternalRelease:$AllowUnsignedInternalRelease
+        -ExecutablePath $Executable @ValidationParameters
     $ReportedVersion = (& $Executable --version | Select-Object -Last 1).Trim()
     if ($LASTEXITCODE -ne 0 -or $ReportedVersion -ne "enterprise-agent $VersionText") {
         throw "Active compiled Agent --version does not match installed release metadata."
@@ -1724,9 +1766,7 @@ if (-not $BuildFromSource) {
     Assert-EABinaryInstallPathBudget -Root $InstallRoot -Manifest $Manifest
     $ExistingVersionText = Test-InstalledBinaryRuntime `
         -ApplicationRoot $InstallRoot -RuntimeDirectory $RuntimeRoot `
-        -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
-        -AllowUnsignedTestMedia:$AllowUnsignedTestMedia `
-        -AllowUnsignedInternalRelease:$AllowUnsignedInternalRelease
+        -UseInstalledReleaseClassification
     if ($null -ne $ExistingVersionText -and
         [version]$CandidateVersionText -lt [version]$ExistingVersionText) {
         throw "Agent downgrade from $ExistingVersionText to $CandidateVersionText is blocked by default."

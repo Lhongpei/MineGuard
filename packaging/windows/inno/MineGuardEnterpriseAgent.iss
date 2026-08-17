@@ -900,7 +900,8 @@ begin
   begin
     ProductInstallFailed := True;
     RaiseException(Format(
-      'Enterprise Agent transaction action %s failed with exit code %d.', [
+      'Enterprise Agent transaction action %s failed with exit code %d. ' +
+      'See Setup log for the first PowerShell error.', [
       ActionName, ResultCode]));
   end;
 end;
