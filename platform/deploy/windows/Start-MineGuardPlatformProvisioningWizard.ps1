@@ -80,34 +80,36 @@ if ($SelfTest) {
             throw "安装不完整，缺少文件：$required"
         }
     }
-    [ordered]@{
+    $selfTestResult = [ordered]@{
         status = 'ok'
         component = 'mineguard-platform-provisioning-wizard'
         gui = 'windows-forms-ps51'
         install_root = $InstallRoot
         secret_transport = 'protected-files-only'
-    } | ConvertTo-Json -Compress | Write-Output
-    return
+        controls_constructed = $true
+    }
 }
 
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$principal = New-Object Security.Principal.WindowsPrincipal $identity
-if (-not $principal.IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    try {
-        $powerShell = Join-Path $env:SystemRoot `
-            'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $start = New-Object Diagnostics.ProcessStartInfo
-        $start.FileName = $powerShell
-        $start.Arguments = Join-NativeArguments @(
-            '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File',
-            $scriptPath, '-InstallRoot', $InstallRoot
-        )
-        $start.UseShellExecute = $true
-        $start.Verb = 'runas'
-        [void][Diagnostics.Process]::Start($start)
-    } catch { Show-Fatal ('UAC 提权未完成：' + $_.Exception.Message); exit 1 }
-    exit 0
+if (-not $SelfTest) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal $identity
+    if (-not $principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        try {
+            $powerShell = Join-Path $env:SystemRoot `
+                'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $start = New-Object Diagnostics.ProcessStartInfo
+            $start.FileName = $powerShell
+            $start.Arguments = Join-NativeArguments @(
+                '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File',
+                $scriptPath, '-InstallRoot', $InstallRoot
+            )
+            $start.UseShellExecute = $true
+            $start.Verb = 'runas'
+            [void][Diagnostics.Process]::Start($start)
+        } catch { Show-Fatal ('UAC 提权未完成：' + $_.Exception.Message); exit 1 }
+        exit 0
+    }
 }
 
 # The installed service tree is intentionally unreadable to a normal desktop
@@ -1080,6 +1082,10 @@ try {
         Set-Status '已检测到正式 Platform：新增煤矿时将强制沿用现有 state、端口、管理员和签发信任，不会重配领导端。'
     } else {
         Set-Status '请按 1 → 2 → 3 操作。已存在签发密钥时可直接从第 2 步开始。'
+    }
+    if ($SelfTest) {
+        $selfTestResult | ConvertTo-Json -Compress | Write-Output
+        return
     }
     [void]$form.ShowDialog()
 } finally {

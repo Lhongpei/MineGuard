@@ -268,6 +268,12 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
     assert provisioning_wizard.count("[void]$Table.RowStyles.Add(") == 3
     assert "\n    $table.ColumnStyles.Add(" not in provisioning_wizard
     assert "\n    $Table.RowStyles.Add(" not in provisioning_wizard
+    assert "controls_constructed = $true" in provisioning_wizard
+    assert provisioning_wizard.index("$selfTestResult = [ordered]@{") < (
+        provisioning_wizard.index("$form = New-Object Windows.Forms.Form")
+    ) < provisioning_wizard.index(
+        "$selfTestResult | ConvertTo-Json -Compress | Write-Output"
+    )
     self_test = provisioning_wizard.index("if ($SelfTest)")
     elevation_check = provisioning_wizard.index(
         "$identity = [Security.Principal.WindowsIdentity]::GetCurrent()"

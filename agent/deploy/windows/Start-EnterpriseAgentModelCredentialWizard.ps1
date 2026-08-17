@@ -91,7 +91,7 @@ if ($SelfTest) {
             throw "模型授权向导缺少正式导入、安全组件或固定签发信任库。"
         }
     }
-    [ordered]@{
+    $SelfTestResult = [ordered]@{
         status = "ok"
         component = "enterprise-agent-model-credential-wizard"
         powershell = $PSVersionTable.PSVersion.ToString()
@@ -101,13 +101,13 @@ if ($SelfTest) {
         trust_store_editable = $false
         api_configuration_editable = $false
         secrets_on_command_line = $false
-    } | ConvertTo-Json -Compress | Write-Output
-    return
+        controls_constructed = $true
+    }
 }
 
 $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
-if (-not $Principal.IsInRole(
+if (-not $SelfTest -and -not $Principal.IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator
     )) {
     try {
@@ -142,22 +142,24 @@ foreach ($RequiredScript in @($ImportScript, $SafetyHelper)) {
 }
 . $SafetyHelper
 
-try {
-    $InstallRoot = Resolve-EASafeLocalPath -Name "InstallRoot" `
-        -PathValue $InstallRoot -MustExist -RequiredType Container -CheckTree
-    $StateRoot = Resolve-EASafeLocalPath -Name "StateRoot" `
-        -PathValue $StateRoot -MustExist -RequiredType Container
-    [void](Assert-EAStateRootMarker -StateRoot $StateRoot)
-    $FixedTrustStore = Resolve-EASafeLocalPath -Name "已安装模型签发者信任库" `
-        -PathValue (Join-Path $InstallRoot `
-            "release-metadata\model-credential-trust.json") `
-        -MustExist -RequiredType Leaf
-    Assert-EAOrdinaryLeaf -Path $FixedTrustStore `
-        -Name "已安装模型签发者信任库" -MaximumBytes 1MB
-}
-catch {
-    Show-FatalMessage ("安装或信任库校验失败：" + $_.Exception.Message)
-    exit 1
+if (-not $SelfTest) {
+    try {
+        $InstallRoot = Resolve-EASafeLocalPath -Name "InstallRoot" `
+            -PathValue $InstallRoot -MustExist -RequiredType Container -CheckTree
+        $StateRoot = Resolve-EASafeLocalPath -Name "StateRoot" `
+            -PathValue $StateRoot -MustExist -RequiredType Container
+        [void](Assert-EAStateRootMarker -StateRoot $StateRoot)
+        $FixedTrustStore = Resolve-EASafeLocalPath -Name "已安装模型签发者信任库" `
+            -PathValue (Join-Path $InstallRoot `
+                "release-metadata\model-credential-trust.json") `
+            -MustExist -RequiredType Leaf
+        Assert-EAOrdinaryLeaf -Path $FixedTrustStore `
+            -Name "已安装模型签发者信任库" -MaximumBytes 1MB
+    }
+    catch {
+        Show-FatalMessage ("安装或信任库校验失败：" + $_.Exception.Message)
+        exit 1
+    }
 }
 
 [Windows.Forms.Application]::EnableVisualStyles()
@@ -373,9 +375,20 @@ $ImportButton.Add_Click({
     }
 })
 
-try { Load-Instances }
+if ($SelfTest) {
+    try {
+        $SelfTestResult | ConvertTo-Json -Compress | Write-Output
+    }
+    finally { $Form.Dispose() }
+    return
+}
+try {
+    Load-Instances
+}
 catch {
+    $Form.Dispose()
     Show-FatalMessage ("无法读取实例列表：" + $_.Exception.Message)
     exit 1
 }
-[void]$Form.ShowDialog()
+try { [void]$Form.ShowDialog() }
+finally { $Form.Dispose() }

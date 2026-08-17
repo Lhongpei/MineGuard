@@ -107,6 +107,10 @@ jobs:
         shell: powershell
         run: .\scripts\Test-WindowsProductUninstallTransactions.ps1
 
+      - name: Construct onboarding wizard controls with PowerShell 5.1
+        shell: powershell
+        run: .\scripts\Test-WindowsWizardConstruction.ps1
+
       - name: Verify trusted bootstrap transactions with Windows PowerShell 5.1
         shell: powershell
         run: .\scripts\Test-WindowsTrustedBootstrapTransaction.ps1

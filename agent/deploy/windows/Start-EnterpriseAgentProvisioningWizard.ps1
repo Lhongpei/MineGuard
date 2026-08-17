@@ -94,19 +94,19 @@ if ($SelfTest) {
             throw "配置向导缺少接入或正式服务安装组件。"
         }
     }
-    [ordered]@{
+    $SelfTestResult = [ordered]@{
         status = "ok"
         component = "enterprise-agent-provisioning-wizard"
         powershell = $PSVersionTable.PSVersion.ToString()
         gui_mode = "windows-forms-ps51"
         secrets_on_command_line = $false
-    } | ConvertTo-Json -Compress | Write-Output
-    return
+        controls_constructed = $true
+    }
 }
 
 $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
-if (-not $Principal.IsInRole(
+if (-not $SelfTest -and -not $Principal.IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator
     )) {
     try {
@@ -974,4 +974,11 @@ $Form.Add_FormClosed({
     $PreparerPasswordBox.Clear(); $PreparerConfirmBox.Clear()
     $ReviewerPasswordBox.Clear(); $ReviewerConfirmBox.Clear()
 })
-[void]$Form.ShowDialog()
+try {
+    if ($SelfTest) {
+        $SelfTestResult | ConvertTo-Json -Compress | Write-Output
+        return
+    }
+    [void]$Form.ShowDialog()
+}
+finally { $Form.Dispose() }

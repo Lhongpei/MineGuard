@@ -560,6 +560,12 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     assert "-PreparerPassword $PreparerSecure" in wizard
     assert "-ReviewerPassword $ReviewerSecure" in wizard
     assert "runas" in wizard
+    assert "controls_constructed = $true" in wizard
+    assert wizard.index("$SelfTestResult = [ordered]@{") < wizard.index(
+        "$Form = New-Object Windows.Forms.Form"
+    ) < wizard.index(
+        "$SelfTestResult | ConvertTo-Json -Compress | Write-Output"
+    )
     assert '"--current-lock", $FinalLockPath' in updater
     assert '"--expected-issuer-key-id", $ExpectedIssuerKeyId' in updater
     assert '"dpapi-local-machine"' in updater
@@ -683,6 +689,12 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         "trust_store_editable = $false",
     ):
         assert token in model_wizard
+    assert "controls_constructed = $true" in model_wizard
+    assert model_wizard.index("$SelfTestResult = [ordered]@{") < model_wizard.index(
+        "$Form = New-Object Windows.Forms.Form"
+    ) < model_wizard.index(
+        "$SelfTestResult | ConvertTo-Json -Compress | Write-Output"
+    )
     for forbidden in (
         "API KeyBox",
         "BaseUrlBox",
@@ -1613,7 +1625,8 @@ def test_windows_binary_build_is_standalone_source_free_and_binary_first() -> No
     )
     existing_validation = installer[
         installer.index("if ($UseInstalledReleaseClassification)") : installer.index(
-            "$ReportedVersion =", installer.index("if ($UseInstalledReleaseClassification)")
+            "$ReportedVersion =",
+            installer.index("if ($UseInstalledReleaseClassification)"),
         )
     ]
     for classification in (

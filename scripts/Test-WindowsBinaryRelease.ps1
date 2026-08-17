@@ -1360,6 +1360,25 @@ function Remove-VerificationRootWithRetry {
         "Lifecycle cleanup timed out after $TimeoutSeconds seconds; leaving $FullVerificationRoot in place ($FailureDetail)."
 }
 
+function Invoke-InstalledWizardConstructionSelfTest {
+    param(
+        [string]$Name,
+        [string]$ScriptPath,
+        [object[]]$ScriptArguments
+    )
+    $WindowsPowerShell = Join-Path $env:SystemRoot `
+        "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $OutputLines = @(& $WindowsPowerShell -NoProfile -STA `
+        -ExecutionPolicy Bypass -File $ScriptPath @ScriptArguments 2>&1)
+    $OutputText = @($OutputLines | ForEach-Object { [string]$_ }) -join `
+        [Environment]::NewLine
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Name exited with code $LASTEXITCODE`: $OutputText"
+    }
+    try { return ($OutputText | ConvertFrom-Json) }
+    catch { throw "$Name emitted an invalid self-test result: $OutputText" }
+}
+
 function Invoke-InstallerLifecycleTest {
     param(
         [string]$Product,
@@ -1517,9 +1536,13 @@ function Invoke-InstallerLifecycleTest {
         if ($Product -eq "platform") {
             $Wizard = Join-Path $OperationsDirectory `
                 "Start-MineGuardPlatformWizard.ps1"
+            $ProvisioningWizard = Join-Path $OperationsDirectory `
+                "Start-MineGuardPlatformProvisioningWizard.ps1"
             $Launcher = Join-Path $InstallRoot `
                 "launcher\Open-MineGuardPlatformControlCenter.ps1"
-            foreach ($RequiredControlCenterFile in @($Wizard, $Launcher)) {
+            foreach ($RequiredControlCenterFile in @(
+                    $Wizard, $ProvisioningWizard, $Launcher
+                )) {
                 if (-not (Test-Path -LiteralPath $RequiredControlCenterFile `
                         -PathType Leaf)) {
                     throw "Platform control center file is missing: $RequiredControlCenterFile"
@@ -1533,13 +1556,27 @@ function Invoke-InstallerLifecycleTest {
                     "mineguard-platform-control-center") {
                 throw "Platform control center headless self-test failed."
             }
+            $ProvisioningProbe = Invoke-InstalledWizardConstructionSelfTest `
+                -Name "Platform provisioning wizard" `
+                -ScriptPath $ProvisioningWizard -ScriptArguments @(
+                    "-InstallRoot", $InstallRoot, "-SelfTest"
+                )
+            if ([string]$ProvisioningProbe.status -ne "ok" -or
+                [string]$ProvisioningProbe.component -ne `
+                    "mineguard-platform-provisioning-wizard" -or
+                -not [bool]$ProvisioningProbe.controls_constructed) {
+                throw "Platform provisioning wizard GUI construction self-test failed."
+            }
         }
         else {
+            $ProvisioningWizard = Join-Path $OperationsDirectory `
+                "Start-EnterpriseAgentProvisioningWizard.ps1"
             $ModelCredentialWizard = Join-Path $OperationsDirectory `
                 "Start-EnterpriseAgentModelCredentialWizard.ps1"
             $InstalledModelTrustStore = Join-Path $InstallRoot `
                 "release-metadata\model-credential-trust.json"
             foreach ($RequiredAgentModelFile in @(
+                $ProvisioningWizard,
                 $ModelCredentialWizard,
                 $InstalledModelTrustStore
             )) {
@@ -1548,12 +1585,30 @@ function Invoke-InstallerLifecycleTest {
                     throw "Agent managed model credential file is missing: $RequiredAgentModelFile"
                 }
             }
-            $ModelWizardProbeText = & $ModelCredentialWizard `
-                -InstallRoot $InstallRoot -SelfTest | Out-String
-            $ModelWizardProbe = $ModelWizardProbeText | ConvertFrom-Json
+            $ProvisioningProbe = Invoke-InstalledWizardConstructionSelfTest `
+                -Name "Agent provisioning wizard" `
+                -ScriptPath $ProvisioningWizard -ScriptArguments @(
+                    "-InstallRoot", $InstallRoot,
+                    "-StateRoot", $AgentStateRoot,
+                    "-SelfTest"
+                )
+            if ([string]$ProvisioningProbe.status -ne "ok" -or
+                [string]$ProvisioningProbe.component -ne `
+                    "enterprise-agent-provisioning-wizard" -or
+                -not [bool]$ProvisioningProbe.controls_constructed) {
+                throw "Agent provisioning wizard GUI construction self-test failed."
+            }
+            $ModelWizardProbe = Invoke-InstalledWizardConstructionSelfTest `
+                -Name "Agent model credential wizard" `
+                -ScriptPath $ModelCredentialWizard -ScriptArguments @(
+                    "-InstallRoot", $InstallRoot,
+                    "-StateRoot", $AgentStateRoot,
+                    "-SelfTest"
+                )
             if ([string]$ModelWizardProbe.status -ne "ok" -or
                 [string]$ModelWizardProbe.component -ne
                     "enterprise-agent-model-credential-wizard" -or
+                -not [bool]$ModelWizardProbe.controls_constructed -or
                 -not [bool]$ModelWizardProbe.trust_store_present -or
                 [bool]$ModelWizardProbe.trust_store_editable -or
                 [bool]$ModelWizardProbe.api_configuration_editable -or

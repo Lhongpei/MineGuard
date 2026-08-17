@@ -72,6 +72,7 @@ def test_layout() -> None:
         "packaging/windows/assets/Windows-binary-release-guide.html",
         "scripts/Build-WindowsBinaryRelease.ps1",
         "scripts/Test-WindowsBinaryRelease.ps1",
+        "scripts/Test-WindowsWizardConstruction.ps1",
         "scripts/Test-WindowsGuiProcessWait.ps1",
         "scripts/Test-WindowsProductionInnoCompile.ps1",
         "scripts/Test-WindowsTrustedBootstrapTransaction.ps1",
@@ -1618,7 +1619,12 @@ def test_audit_and_lifecycle() -> None:
         "$LifecycleAuditError = $null",
         "preserving the original lifecycle audit error",
         "Start-EnterpriseAgentModelCredentialWizard.ps1",
+        "Start-MineGuardPlatformProvisioningWizard.ps1",
+        "Start-EnterpriseAgentProvisioningWizard.ps1",
         "release-metadata\\model-credential-trust.json",
+        "controls_constructed",
+        "Platform provisioning wizard GUI construction self-test failed",
+        "Agent provisioning wizard GUI construction self-test failed",
         "enterprise-agent-model-credential-wizard",
         "trust_store_present",
         "trust_store_editable",
@@ -2626,6 +2632,12 @@ def test_workflow() -> None:
         ".\\scripts\\Test-WindowsTrustedBootstrapTransaction.ps1"
         in native_workflow
     )
+    assert ".\\scripts\\Test-WindowsWizardConstruction.ps1" in native_workflow
+    assert native_workflow.index(
+        "Construct onboarding wizard controls with PowerShell 5.1"
+    ) < native_workflow.index("Set up Python 3.12 x64"), (
+        "wizard GUI construction must fail fast before dependency setup"
+    )
     assert native_workflow.index(
         "Verify trusted bootstrap transactions with Windows PowerShell 5.1"
     ) < native_workflow.index("Set up Python 3.12 x64"), (
@@ -2707,6 +2719,8 @@ def test_workflow() -> None:
         "trusted-bootstrap-ps51-gate",
         "Fast Windows PowerShell 5.1 installer transaction gate",
         "Validate release lifecycle fixtures before compiler work",
+        "Construct onboarding wizard controls with PowerShell 5.1",
+        ".\\scripts\\Test-WindowsWizardConstruction.ps1",
         "Verify trusted bootstrap transactions with Windows PowerShell 5.1",
         "Compile both production Inno scripts with minimal release trees",
         "Verify fast real Inno install exit and uninstall flow",
