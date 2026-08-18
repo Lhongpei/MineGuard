@@ -86,6 +86,56 @@ finally {
 }
 Write-Host "MineGuard PowerShell 5.1 JSON collection semantics passed."
 
+# Exercise the exact SCM transition used by the Agent installer.  WinSW may
+# initially register LocalSystem; production setup must then bind the service
+# name to its passwordless NT SERVICE virtual account before ACL/health checks.
+$ScPath = Join-Path $env:SystemRoot "System32\sc.exe"
+$VirtualAccountProbeId = "MineGuardEnterpriseAgent-IdentityProbe" + `
+    ([Guid]::NewGuid().ToString("N").Substring(0, 10))
+$VirtualAccountProbeBinary = Join-Path $env:SystemRoot "System32\PING.EXE"
+try {
+    & $ScPath create $VirtualAccountProbeId `
+        "binPath=" $VirtualAccountProbeBinary "start=" "demand" | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Virtual-account probe service creation failed with exit code $LASTEXITCODE."
+    }
+    & $ScPath config $VirtualAccountProbeId `
+        "obj=" ("NT SERVICE\" + $VirtualAccountProbeId) | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Virtual-account probe configuration failed with exit code $LASTEXITCODE."
+    }
+    $VirtualAccountProbe = @(Get-CimInstance Win32_Service `
+        -Filter "Name='$VirtualAccountProbeId'" -ErrorAction Stop)
+    if ($VirtualAccountProbe.Count -ne 1 -or
+        -not ([string]$VirtualAccountProbe[0].StartName).Equals(
+            ("NT SERVICE\" + $VirtualAccountProbeId),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "SCM did not persist the dedicated virtual service account."
+    }
+    & $ScPath sidtype $VirtualAccountProbeId unrestricted | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Virtual-account probe SID type failed with exit code $LASTEXITCODE."
+    }
+    Write-Host "Enterprise Agent SCM virtual-account transition passed."
+}
+finally {
+    if ($null -ne (Get-Service -Name $VirtualAccountProbeId `
+            -ErrorAction SilentlyContinue)) {
+        & $ScPath delete $VirtualAccountProbeId | Out-Host
+        $DeleteDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            Start-Sleep -Milliseconds 200
+        } while ($null -ne (Get-Service -Name $VirtualAccountProbeId `
+                -ErrorAction SilentlyContinue) -and
+            [DateTime]::UtcNow -lt $DeleteDeadline)
+        if ($null -ne (Get-Service -Name $VirtualAccountProbeId `
+                -ErrorAction SilentlyContinue)) {
+            throw "Virtual-account probe service was not deleted."
+        }
+    }
+}
+
 # FileSystemRights.Write and Modify are composite enums whose numeric values
 # overlap ReadAndExecute. Security filters must use only atomic mutation bits.
 $MutationRights = [Security.AccessControl.FileSystemRights]::WriteData -bor
