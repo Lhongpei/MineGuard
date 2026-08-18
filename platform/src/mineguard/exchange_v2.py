@@ -774,7 +774,7 @@ class FiveQuantitySubmissionPayload(WireContractModel):
     period_start: WireDate
     period_end: WireDate
     closed_at: WireDateTime
-    comparison_context: WireComparisonContext
+    comparison_context: WireComparisonContext | None = None
     days: Annotated[list[WireDay], Field(min_length=1, max_length=366)]
     sources: Annotated[list[WireSource], Field(min_length=1, max_length=256)]
     agent_processing: WireAgentProcessing
@@ -845,7 +845,7 @@ class TenQuantitySubmissionPayload(WireContractModel):
     period_start: WireDate
     period_end: WireDate
     closed_at: WireDateTime
-    comparison_context: WireComparisonContext
+    comparison_context: WireComparisonContext | None = None
     days: Annotated[list[WireTenDay], Field(min_length=1, max_length=366)]
     sources: Annotated[list[WireSource], Field(min_length=1, max_length=256)]
     agent_processing: WireAgentProcessing
@@ -985,8 +985,10 @@ class FiveQuantitySubmissionMessage(ExchangeMessageBase):
             ),
             period_start=self.payload.period_start,
             period_end=self.payload.period_end,
-            comparison_context=ComparisonContext(
-                **self.payload.comparison_context.model_dump()
+            comparison_context=(
+                ComparisonContext(**self.payload.comparison_context.model_dump())
+                if self.payload.comparison_context is not None
+                else None
             ),
             days=[
                 FiveQuantityDay(
@@ -1137,8 +1139,10 @@ class TenQuantitySubmissionMessage(ExchangeMessageBase):
             ),
             period_start=self.payload.period_start,
             period_end=self.payload.period_end,
-            comparison_context=ComparisonContext(
-                **self.payload.comparison_context.model_dump()
+            comparison_context=(
+                ComparisonContext(**self.payload.comparison_context.model_dump())
+                if self.payload.comparison_context is not None
+                else None
             ),
             days=[
                 FiveQuantityDay(
@@ -2122,26 +2126,26 @@ def validate_production_exchange_clients(
         seen_mines[client.mine_id] = registry_sender_id
 
         context = client.comparison_context
-        if not isinstance(context, Mapping) or set(context) != set(
-            _PRODUCTION_CONTEXT_FIELDS
-        ):
-            raise ValueError(
-                "production exchange client "
-                f"{registry_sender_id} requires all five comparison_context fields"
-            )
-        for field_name in sorted(_PRODUCTION_CONTEXT_FIELDS):
-            context_value = context[field_name]
-            if (
-                not isinstance(context_value, str)
-                or not context_value.strip()
-                or len(context_value.strip()) > 64
-                or _production_context_placeholder(context_value)
+        if context is not None:
+            if not isinstance(context, Mapping) or set(context) != set(
+                _PRODUCTION_CONTEXT_FIELDS
             ):
                 raise ValueError(
-                    "production exchange client "
-                    f"{registry_sender_id} has placeholder comparison_context "
-                    f"field {field_name}"
+                    "optional comparison_context must contain all five fields"
                 )
+            for field_name in sorted(_PRODUCTION_CONTEXT_FIELDS):
+                context_value = context[field_name]
+                if (
+                    not isinstance(context_value, str)
+                    or not context_value.strip()
+                    or len(context_value.strip()) > 64
+                    or _production_context_placeholder(context_value)
+                ):
+                    raise ValueError(
+                        "production exchange client "
+                        f"{registry_sender_id} has placeholder comparison_context "
+                        f"field {field_name}"
+                    )
 
         message_keys = client.message_verification_keys
         secret_entries: list[tuple[str, bytes]] = []

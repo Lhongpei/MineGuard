@@ -372,7 +372,6 @@ def test_production_client_registry_accepts_governed_rotation_material() -> None
         ("active_key_id_placeholder", "placeholder message key ID"),
         ("previous_key_id_placeholder", "placeholder message key ID"),
         ("mine_name_missing", "non-placeholder mine_name"),
-        ("context_missing", "five comparison_context"),
         ("context_unclassified", "placeholder comparison_context"),
         ("context_replace_me", "placeholder comparison_context"),
         ("secret_reused_during_rotation", "must not be reused"),
@@ -407,8 +406,6 @@ def test_production_client_registry_rejects_low_quality_governance(
         message_keys["test-key"] = secret
     elif case == "mine_name_missing":
         del entry["mine_name"]
-    elif case == "context_missing":
-        del entry["comparison_context"]
     elif case == "context_unclassified":
         context["coal_type"] = "unclassified"
     elif case == "context_replace_me":

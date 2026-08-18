@@ -1646,21 +1646,9 @@ def test_audit_and_lifecycle() -> None:
             'if ($PSCmdlet.ParameterSetName -eq "SecretAudit")'
         )
     ]
-    assert lifecycle.count("comparison_context = [ordered]@{") == 2, (
-        "both Platform lifecycle client registries must carry governed comparison "
-        "context"
+    assert "comparison_context = [ordered]@{" not in lifecycle, (
+        "Windows onboarding must not require optional mine-comparison metadata"
     )
-    for field, value in (
-        ("capacity_band", "0.9-1.2Mtpa"),
-        ("mining_method", "underground-longwall"),
-        ("shift_system", "three-shift-eight-hour"),
-        ("coal_type", "thermal-coal"),
-        ("operating_regime", "normal-production"),
-    ):
-        assert lifecycle.count(f'{field} = "{value}"') == 2, (
-            "both lifecycle client registries must satisfy the production "
-            f"comparison_context schema: {field}"
-        )
     for token in (
         "$ExpectedConfigurationFault",
         "$_.Exception.Message -ne $ExpectedConfigurationFault",

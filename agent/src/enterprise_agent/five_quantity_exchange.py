@@ -157,11 +157,11 @@ class MineIdentity:
     previous_regulator_key_id: str | None = None
     previous_message_hmac_secret: str | None = None
     timezone: str = "Asia/Shanghai"
-    capacity_band: str = "unclassified"
-    mining_method: str = "unclassified"
-    shift_system: str = "three-shift-eight-hour"
-    coal_type: str = "unclassified"
-    operating_regime: str = "normal-production"
+    capacity_band: str | None = None
+    mining_method: str | None = None
+    shift_system: str | None = None
+    coal_type: str | None = None
+    operating_regime: str | None = None
 
     def __post_init__(self) -> None:
         for field in (
@@ -205,19 +205,23 @@ class MineIdentity:
             )
         if not isinstance(self.timezone, str) or not self.timezone.strip():
             raise ValueError("timezone 不能为空")
-        for field in (
-            "capacity_band",
-            "mining_method",
-            "shift_system",
-            "coal_type",
-            "operating_regime",
+        context_values = (
+            self.capacity_band,
+            self.mining_method,
+            self.shift_system,
+            self.coal_type,
+            self.operating_regime,
+        )
+        if any(value is not None for value in context_values) and not all(
+            isinstance(value, str) and value.strip() and len(value) <= 64
+            for value in context_values
         ):
-            value = getattr(self, field)
-            if not isinstance(value, str) or not value.strip() or len(value) > 64:
-                raise ValueError(f"{field} 必须是 1-64 字符")
+            raise ValueError("可选同类矿资料必须五项同时配置，且每项为 1-64 字符")
 
     @property
-    def comparison_context(self) -> dict[str, str]:
+    def comparison_context(self) -> dict[str, str] | None:
+        if self.capacity_band is None:
+            return None
         return {
             "capacity_band": self.capacity_band,
             "mining_method": self.mining_method,
@@ -225,7 +229,6 @@ class MineIdentity:
             "coal_type": self.coal_type,
             "operating_regime": self.operating_regime,
         }
-
     @property
     def mine(self) -> dict[str, str]:
         return {

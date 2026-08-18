@@ -419,11 +419,6 @@ Add-InputRow $createTable $create 'passphrase' '签发私钥口令' '' -Password
 Add-InputRow $createTable $create 'mine_id' '煤矿 ID' '' | Out-Null
 Add-InputRow $createTable $create 'mine_name' '煤矿名称' '' | Out-Null
 Add-InputRow $createTable $create 'party_name' '企业名称' '' | Out-Null
-Add-InputRow $createTable $create 'capacity' '核定产能区间' '' | Out-Null
-Add-InputRow $createTable $create 'method' '开采方式' '' | Out-Null
-Add-InputRow $createTable $create 'shift' '班次制度' '' | Out-Null
-Add-InputRow $createTable $create 'coal' '主要煤种' '' | Out-Null
-Add-InputRow $createTable $create 'regime' '生产制度' '' | Out-Null
 Add-InputRow $createTable $create 'platform_url' '监管端 HTTPS 地址' '' | Out-Null
 Add-InputRow $createTable $create 'output' '企业交付根目录（可选U盘）' '' -Browse folder | Out-Null
 
@@ -816,10 +811,6 @@ $null = Add-ActionRow $createTable '生成这一家企业的专属接入包' {
             EnterprisePartyId = $create.party_id.Text
             EnterprisePartyName = $create.party_name.Text
             EnterpriseSystemId = $create.system_id.Text
-            CapacityBand = $create.capacity.Text
-            MiningMethod = $create.method.Text
-            ShiftSystem = $create.shift.Text; CoalType = $create.coal.Text
-            OperatingRegime = $create.regime.Text
             PlatformBaseUrl = $create.platform_url.Text
             AgentInstanceName = $create.instance.Text
             PlatformSystemId = $create.platform_system.Text

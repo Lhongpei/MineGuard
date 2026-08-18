@@ -620,11 +620,19 @@ class FiveQuantitySubmission(StrictModel):
     ] = None
     period_start: date
     period_end: date
-    comparison_context: ComparisonContext
+    comparison_context: ComparisonContext | None = None
     days: Annotated[list[FiveQuantityDay], Field(min_length=1, max_length=366)]
     provenance: Annotated[
         list[SubmissionProvenance], Field(min_length=1, max_length=64)
     ]
+
+    @property
+    def comparison_group(self) -> str:
+        """Keep history mine-local when optional cohort metadata is absent."""
+
+        if self.comparison_context is not None:
+            return self.comparison_context.group_key
+        return "mine-local-" + _sha256(self.mine_id)[:24]
 
     @model_validator(mode="before")
     @classmethod
@@ -1002,7 +1010,11 @@ def _run_advanced_v3_evidence_layer(
             # current window.  Their observation date is a conservative lower
             # bound for availability and cannot leak current-period facts.
             available_at=item.date,
-            operating_regime=submission.comparison_context.operating_regime,
+            operating_regime=(
+                submission.comparison_context.operating_regime
+                if submission.comparison_context is not None
+                else "normal"
+            ),
             baseline_eligible=True,
             totals=advanced_v3.TenQuantityTotals(**item.values()),
         )
@@ -1014,7 +1026,11 @@ def _run_advanced_v3_evidence_layer(
         period_start=submission.period_start,
         period_end=submission.period_end,
         coverage_as_of=submission.period_end,
-        operating_regime=submission.comparison_context.operating_regime,
+        operating_regime=(
+            submission.comparison_context.operating_regime
+            if submission.comparison_context is not None
+            else "normal"
+        ),
         days=days,
         applicability=advanced_v3.ModuleApplicability(
             raw_coal_balance=False,
@@ -1094,7 +1110,8 @@ def analyze_five_quantity(
         and item.mine_count is not None
         and item.mine_count >= parameters.minimum_peer_mines
         and item.sample_count >= parameters.minimum_reference_samples
-        and item.comparison_group == submission.comparison_context.group_key
+        and submission.comparison_context is not None
+        and item.comparison_group == submission.comparison_group
         and item.relationship in applicable_relationships
     ]
     within = _within_submission_bands(

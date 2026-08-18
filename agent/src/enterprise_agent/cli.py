@@ -615,9 +615,6 @@ def _configuration_errors(
                 if historical_regulator_overlap:
                     continue
                 errors.append(f"{left_label} 与 {right_label} 不得复用")
-    for field, value in identity.comparison_context.items():
-        if value.casefold() == "unclassified":
-            errors.append(f"正式服务必须配置同类矿分组字段 {field}")
     return tuple(errors)
 
 

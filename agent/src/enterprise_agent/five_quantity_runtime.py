@@ -87,7 +87,6 @@ _DRAFT_PAYLOAD_KEYS = {
     "period_start",
     "period_end",
     "closed_at",
-    "comparison_context",
     "days",
     "sources",
     "agent_processing",
@@ -99,7 +98,6 @@ _CORRECTION_LOCKED_PAYLOAD_FIELDS = (
     "timezone",
     "period_start",
     "period_end",
-    "comparison_context",
 )
 _MEASUREMENT_KEYS = {
     "metric_code",
@@ -235,15 +233,20 @@ def validate_five_quantity_payload(
         active_metrics = LEGACY_V2_METRICS
     else:
         raise ValueError("报送 contract_version 不受支持")
-    expected_keys = _FINAL_PAYLOAD_KEYS if confirmed else _DRAFT_PAYLOAD_KEYS
+    expected_keys = set(_FINAL_PAYLOAD_KEYS if confirmed else _DRAFT_PAYLOAD_KEYS)
+    if "comparison_context" in payload:
+        expected_keys.add("comparison_context")
     if set(payload) != expected_keys:
         raise ValueError("报送 payload 字段不完整或包含未知字段")
     mine = _object(payload["mine"], "mine")
     if mine != identity.mine:
         raise ValueError("草稿矿井/经营主体与本实例启动身份不一致")
-    context = _object(payload["comparison_context"], "comparison_context")
-    if set(context) != _COMPARISON_KEYS or context != identity.comparison_context:
-        raise ValueError("同类矿上下文必须与本实例受控配置完全一致")
+    if "comparison_context" in payload:
+        context = _object(payload["comparison_context"], "comparison_context")
+        if identity.comparison_context is None or context != identity.comparison_context:
+            raise ValueError("可选同类矿资料必须与本实例受控配置完全一致")
+    elif identity.comparison_context is not None:
+        raise ValueError("草稿缺少本实例已配置的可选同类矿资料")
     reporting_month = payload["reporting_month"]
     if (
         not isinstance(reporting_month, str)
@@ -530,7 +533,6 @@ def _merge_machine_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
             "mine",
             "reporting_month",
             "timezone",
-            "comparison_context",
         ):
             if sha256_jcs(payload.get(field)) != sha256_jcs(result.get(field)):
                 raise ConflictError(f"draft_key 的十量身份、口径或月份冲突：{field}")

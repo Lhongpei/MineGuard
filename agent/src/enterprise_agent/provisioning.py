@@ -145,18 +145,13 @@ _REQUIRED_CONFIG_KEYS = {
     "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED",
     "ENTERPRISE_AGENT_PRODUCTION_MODE",
     "ENTERPRISE_AGENT_SECURE_COOKIE",
-    "ENTERPRISE_CAPACITY_BAND",
-    "ENTERPRISE_COAL_TYPE",
     "ENTERPRISE_EXCHANGE_HMAC_SECRET",
     "ENTERPRISE_EXCHANGE_KEY_ID",
     "ENTERPRISE_MINE_ID",
     "ENTERPRISE_MINE_NAME",
-    "ENTERPRISE_MINING_METHOD",
-    "ENTERPRISE_OPERATING_REGIME",
     "ENTERPRISE_OPERATOR_ID",
     "ENTERPRISE_OPERATOR_NAME",
     "ENTERPRISE_REPORTING_TIMEZONE",
-    "ENTERPRISE_SHIFT_SYSTEM",
     "ENTERPRISE_SYSTEM_ID",
     "PLATFORM_V3_BASE_URL",
     "PLATFORM_V3_SENDER_ID",
@@ -166,6 +161,11 @@ _REQUIRED_CONFIG_KEYS = {
     "REGULATORY_SYSTEM_ID",
 }
 _OPTIONAL_CONFIG_KEYS = {
+    "ENTERPRISE_CAPACITY_BAND",
+    "ENTERPRISE_COAL_TYPE",
+    "ENTERPRISE_MINING_METHOD",
+    "ENTERPRISE_OPERATING_REGIME",
+    "ENTERPRISE_SHIFT_SYSTEM",
     "ENTERPRISE_HISTORICAL_EXCHANGE_KEYS_JSON",
     "REGULATORY_PREVIOUS_EXCHANGE_HMAC_SECRET",
     "REGULATORY_PREVIOUS_EXCHANGE_KEY_ID",
@@ -682,13 +682,17 @@ def _validate_config(config: Any, protected: Mapping[str, Any]) -> dict[str, str
     _production_display(
         selected["ENTERPRISE_OPERATOR_NAME"], "ENTERPRISE_OPERATOR_NAME"
     )
-    for name in (
+    context_names = (
         "ENTERPRISE_CAPACITY_BAND",
         "ENTERPRISE_MINING_METHOD",
         "ENTERPRISE_SHIFT_SYSTEM",
         "ENTERPRISE_COAL_TYPE",
         "ENTERPRISE_OPERATING_REGIME",
-    ):
+    )
+    present_context_names = [name for name in context_names if name in selected]
+    if present_context_names and len(present_context_names) != len(context_names):
+        raise ProvisioningError("可选同类矿资料必须五项同时提供或全部省略")
+    for name in present_context_names:
         _production_display(selected[name], name, 64)
     if selected["ENTERPRISE_REPORTING_TIMEZONE"] != "Asia/Shanghai":
         raise ProvisioningError("V1 接入包时区必须是 Asia/Shanghai")

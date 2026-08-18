@@ -1578,15 +1578,17 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         message: FiveQuantitySubmissionMessage | TenQuantitySubmissionMessage,
         client: ExchangeClient,
     ) -> None:
-        if client.comparison_context is None:
-            raise ValueError(
-                "government client registry lacks the mine comparison_context"
-            )
-        if message.payload.comparison_context.model_dump() != dict(
-            client.comparison_context
-        ):
+        if client.comparison_context is not None:
+            if message.payload.comparison_context is None or (
+                message.payload.comparison_context.model_dump()
+                != dict(client.comparison_context)
+            ):
+                raise RegulatoryV2ConflictError(
+                    "self-reported comparison context differs from government registry"
+                )
+        elif message.payload.comparison_context is not None:
             raise RegulatoryV2ConflictError(
-                "self-reported comparison context differs from government registry"
+                "submission includes comparison context absent from government registry"
             )
         if (
             client.mine_name is not None

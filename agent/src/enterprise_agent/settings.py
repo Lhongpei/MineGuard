@@ -488,19 +488,13 @@ class Settings:
             timezone=os.environ.get(
                 "ENTERPRISE_REPORTING_TIMEZONE", "Asia/Shanghai"
             ).strip(),
-            capacity_band=os.environ.get(
-                "ENTERPRISE_CAPACITY_BAND", "unclassified"
-            ).strip(),
-            mining_method=os.environ.get(
-                "ENTERPRISE_MINING_METHOD", "unclassified"
-            ).strip(),
-            shift_system=os.environ.get(
-                "ENTERPRISE_SHIFT_SYSTEM", "three-shift-eight-hour"
-            ).strip(),
-            coal_type=os.environ.get("ENTERPRISE_COAL_TYPE", "unclassified").strip(),
+            capacity_band=os.environ.get("ENTERPRISE_CAPACITY_BAND", "").strip() or None,
+            mining_method=os.environ.get("ENTERPRISE_MINING_METHOD", "").strip() or None,
+            shift_system=os.environ.get("ENTERPRISE_SHIFT_SYSTEM", "").strip() or None,
+            coal_type=os.environ.get("ENTERPRISE_COAL_TYPE", "").strip() or None,
             operating_regime=os.environ.get(
-                "ENTERPRISE_OPERATING_REGIME", "normal-production"
-            ).strip(),
+                "ENTERPRISE_OPERATING_REGIME", ""
+            ).strip() or None,
         )
         five_quantity_platform = None
         if v2_base:

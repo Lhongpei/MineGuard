@@ -1588,7 +1588,7 @@ class RegulatoryV2Store:
                         root_workflow_id,
                         submission.period_start.isoformat(),
                         submission.period_end.isoformat(),
-                        submission.comparison_context.group_key,
+                        submission.comparison_group,
                         idempotency_key,
                         payload_json,
                         payload_sha256,
@@ -1635,7 +1635,7 @@ class RegulatoryV2Store:
                 submission.mine_id,
                 before=submission.period_start,
                 excluded_submission_id=submission.submission_id,
-                comparison_group=submission.comparison_context.group_key,
+                comparison_group=submission.comparison_group,
                 quantity_scope=submission.quantity_scope,
             )
             peer_bands = self._anonymous_peer_bands(
@@ -4143,7 +4143,7 @@ class RegulatoryV2Store:
         submission: FiveQuantitySubmission,
         parameters: RegulatoryFiveQuantityParameters,
     ) -> list[ReferenceBand]:
-        comparison_group = submission.comparison_context.group_key
+        comparison_group = submission.comparison_group
         snapshot_group = (
             f"{comparison_group}.ten-v3"
             if submission.quantity_scope == "ten_quantity_v3"

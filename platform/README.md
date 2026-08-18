@@ -234,10 +234,11 @@ mineguard user change-password admin \
 审计和历史留痕。
 
 正式注册表必须显式填写非演示的 `sender_id`、`party_id`、`mine_id`、
-`mine_name` 和五个 `comparison_context` 维度，并配置消息密钥和另一把不同的
+`mine_name`，并配置消息密钥和另一把不同的
 运输密钥。正式门禁会检查当前及轮换窗口内的全部密钥，拒绝演示/占位 key ID、
-低多样性或短片段重复密钥、跨用途复用密钥，以及 `unclassified`、`replace`等占位
-分组值。轮换时可在 `message_keys` 中短期保留旧 key ID，并用
+低多样性或短片段重复密钥及跨用途复用密钥。可选 `comparison_context` 只有五项
+完整且为真实治理值时才启用匿名同类矿比较；缺省不阻断接入。轮换时可在
+`message_keys` 中短期保留旧 key ID，并用
 `active_message_key_id` 指定当前密钥。
 
 服务启动后终端保持占用是正常现象。另开终端检查：

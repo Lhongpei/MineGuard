@@ -1606,13 +1606,6 @@ function Invoke-InstallerLifecycleTest {
                     party_id = "operator-ci-mine-001"
                     mine_id = "MINE-CI-001"
                     mine_name = "Windows release audit mine"
-                    comparison_context = [ordered]@{
-                        capacity_band = "0.9-1.2Mtpa"
-                        mining_method = "underground-longwall"
-                        shift_system = "three-shift-eight-hour"
-                        coal_type = "thermal-coal"
-                        operating_regime = "normal-production"
-                    }
                     active_message_key_id = "ci-key-v1"
                     message_keys = [ordered]@{
                         "ci-key-v1" = "ci-message-secret-material-000000000001"
@@ -1628,13 +1621,6 @@ function Invoke-InstallerLifecycleTest {
                     party_id = "operator-ci-mine-001"
                     mine_id = "MINE-CI-001"
                     mine_name = "Windows release audit mine changed"
-                    comparison_context = [ordered]@{
-                        capacity_band = "0.9-1.2Mtpa"
-                        mining_method = "underground-longwall"
-                        shift_system = "three-shift-eight-hour"
-                        coal_type = "thermal-coal"
-                        operating_regime = "normal-production"
-                    }
                     active_message_key_id = "ci-key-v2"
                     message_keys = [ordered]@{
                         "ci-key-v2" = "changed-message-secret-material-000000001"

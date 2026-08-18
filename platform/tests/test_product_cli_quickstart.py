@@ -443,7 +443,7 @@ def test_production_registry_gate_is_shared_by_config_check_and_serve(
         ]
     ) == 2
     config_error = json.loads(capsys.readouterr().out)
-    assert "comparison_context" in config_error["error"]["message"]
+    assert "placeholder message key ID" in config_error["error"]["message"]
 
     monkeypatch.setenv("MINEGUARD_V2_CLIENTS_FILE", str(clients_file))
     monkeypatch.delenv("MINEGUARD_V2_CLIENTS_JSON", raising=False)
@@ -462,7 +462,7 @@ def test_production_registry_gate_is_shared_by_config_check_and_serve(
         ]
     ) == 2
     serve_error = json.loads(capsys.readouterr().out)
-    assert "comparison_context" in serve_error["error"]["message"]
+    assert "placeholder message key ID" in serve_error["error"]["message"]
 
 
 def test_production_serve_rejects_placeholder_or_colliding_platform_identity(

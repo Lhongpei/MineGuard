@@ -1837,18 +1837,20 @@ def _draft_payload(
         agent_processing["model_output_sha256"] = model_output_sha256
     elif model_output_sha256 is not None:
         raise ImportContentError("模型未参与字段映射时不得声明模型输出摘要")
-    return {
+    result = {
         "mine": identity.mine,
         "reporting_month": next(iter(months)),
         "timezone": identity.timezone,
         "period_start": min(dates),
         "period_end": max(dates),
         "closed_at": captured_at,
-        "comparison_context": identity.comparison_context,
         "days": days,
         "sources": sources,
         "agent_processing": agent_processing,
     }
+    if identity.comparison_context is not None:
+        result["comparison_context"] = identity.comparison_context
+    return result
 
 
 def _masked_value_type(value: Any) -> str:

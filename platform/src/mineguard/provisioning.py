@@ -122,7 +122,6 @@ _PROFILE_KEYS = frozenset(
         "issuer_id",
         "issuer_key_id",
         "subject",
-        "comparison_context",
         "agent",
         "platform_identity",
     }
@@ -734,7 +733,12 @@ def _canonical_uuid(value: object, *, label: str) -> str:
 
 
 def _profile(document: object, *, now: datetime) -> dict[str, Any]:
-    profile = _strict_object(document, keys=_PROFILE_KEYS, label="profile")
+    if not isinstance(document, dict) or set(document) not in (
+        set(_PROFILE_KEYS),
+        set(_PROFILE_KEYS) | {"comparison_context"},
+    ):
+        raise ProvisioningError("profile fields are incomplete or unsupported")
+    profile = dict(document)
     version = profile["profile_version"]
     if type(version) is not int or not 1 <= version <= MAX_PROFILE_VERSION:
         raise ProvisioningError(
@@ -777,23 +781,27 @@ def _profile(document: object, *, now: datetime) -> dict[str, Any]:
         subject_source["party_name"], label="subject.party_name"
     )
 
-    comparison = _strict_object(
-        profile["comparison_context"], keys=_CONTEXT_KEYS, label="comparison_context"
-    )
-    normalized_comparison: dict[str, str] = {}
-    for key in sorted(_CONTEXT_KEYS):
-        value = comparison[key]
-        if (
-            not isinstance(value, str)
-            or not value.strip()
-            or len(value.strip()) > 64
-            or _contains_control(value)
-            or _looks_placeholder(value)
-        ):
-            raise ProvisioningError(
-                f"comparison_context.{key} must be a governed non-placeholder value"
-            )
-        normalized_comparison[key] = value.strip()
+    normalized_comparison: dict[str, str] | None = None
+    if "comparison_context" in profile:
+        comparison = _strict_object(
+            profile["comparison_context"],
+            keys=_CONTEXT_KEYS,
+            label="comparison_context",
+        )
+        normalized_comparison = {}
+        for key in sorted(_CONTEXT_KEYS):
+            value = comparison[key]
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value.strip()) > 64
+                or _contains_control(value)
+                or _looks_placeholder(value)
+            ):
+                raise ProvisioningError(
+                    f"comparison_context.{key} must be a governed non-placeholder value"
+                )
+            normalized_comparison[key] = value.strip()
 
     agent = _strict_object(profile["agent"], keys=_AGENT_PROFILE_KEYS, label="agent")
     timezone = agent["reporting_timezone"]
@@ -825,7 +833,7 @@ def _profile(document: object, *, now: datetime) -> dict[str, Any]:
     }
     if normalized_platform["system_id"] == normalized_platform["party_id"]:
         raise ProvisioningError("Platform system_id and party_id must be distinct")
-    return {
+    normalized = {
         "profile_version": version,
         "expires_at": _format_time(expires_at),
         "issuer_id": issuer_id,
@@ -833,10 +841,12 @@ def _profile(document: object, *, now: datetime) -> dict[str, Any]:
         "subject": subject,
         "mine_name": mine_name,
         "party_name": party_name,
-        "comparison_context": normalized_comparison,
         "agent": normalized_agent,
         "platform_identity": normalized_platform,
     }
+    if normalized_comparison is not None:
+        normalized["comparison_context"] = normalized_comparison
+    return normalized
 
 
 def _load_private_key(payload: bytes, passphrase: bytes) -> Ed25519PrivateKey:
@@ -1120,7 +1130,6 @@ def create_pair(
     )
 
     subject = profile["subject"]
-    context = profile["comparison_context"]
     agent_settings = profile["agent"]
     platform_identity = profile["platform_identity"]
     config = {
@@ -1136,11 +1145,6 @@ def create_pair(
         "ENTERPRISE_OPERATOR_NAME": profile["party_name"],
         "ENTERPRISE_SYSTEM_ID": subject["system_id"],
         "ENTERPRISE_REPORTING_TIMEZONE": agent_settings["reporting_timezone"],
-        "ENTERPRISE_CAPACITY_BAND": context["capacity_band"],
-        "ENTERPRISE_MINING_METHOD": context["mining_method"],
-        "ENTERPRISE_SHIFT_SYSTEM": context["shift_system"],
-        "ENTERPRISE_COAL_TYPE": context["coal_type"],
-        "ENTERPRISE_OPERATING_REGIME": context["operating_regime"],
         "PLATFORM_V3_BASE_URL": agent_settings["platform_base_url"],
         "PLATFORM_V3_SENDER_ID": subject["system_id"],
         "REGULATORY_SYSTEM_ID": platform_identity["system_id"],
@@ -1150,6 +1154,17 @@ def create_pair(
         "ENTERPRISE_EXCHANGE_HMAC_SECRET": message_secret,
         "PLATFORM_V3_TRANSPORT_HMAC_SECRET": transport_secret,
     }
+    context = profile.get("comparison_context")
+    if context is not None:
+        config.update(
+            {
+                "ENTERPRISE_CAPACITY_BAND": context["capacity_band"],
+                "ENTERPRISE_MINING_METHOD": context["mining_method"],
+                "ENTERPRISE_SHIFT_SYSTEM": context["shift_system"],
+                "ENTERPRISE_COAL_TYPE": context["coal_type"],
+                "ENTERPRISE_OPERATING_REGIME": context["operating_regime"],
+            }
+        )
     if previous_client is not None and previous_platform_identity is not None:
         previous_message_key_id = str(previous_client["active_message_key_id"])
         previous_message_secret = str(
@@ -1188,8 +1203,9 @@ def create_pair(
         "active_message_key_id": enterprise_key_id,
         "message_keys": {enterprise_key_id: message_secret},
         "transport_secrets": [transport_secret],
-        "comparison_context": dict(context),
     }
+    if context is not None:
+        client["comparison_context"] = dict(context)
     if previous_client is not None:
         previous_message_key_id = str(previous_client["active_message_key_id"])
         client["message_keys"][previous_message_key_id] = previous_client[

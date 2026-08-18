@@ -258,6 +258,42 @@ def test_registration_requires_external_spki_fingerprint_and_key_id(
     assert cli_result["platform_identity"]["system_id"] == "mineguard-qinyuan"
 
 
+def test_pairing_does_not_require_comparison_metadata(
+    tmp_path: Path, issuer: dict[str, object]
+) -> None:
+    profile = _profile()
+    del profile["comparison_context"]
+    pair = _create(tmp_path, issuer, profile, label="minimal-onboarding")
+    public_key = load_public_key(Path(str(issuer["public"])).read_bytes())
+    enterprise_package = json.loads(
+        Path(pair["agent_bundle"]).read_text(encoding="utf-8")
+    )
+    _, agent_payload = decrypt_bundle(
+        enterprise_package["agent_bundle"],
+        activation_code=enterprise_package["activation_code"].encode("ascii"),
+        issuer_public_key=public_key,
+        expected_kind=AGENT_BUNDLE_KIND,
+    )
+    _, registration_payload = decrypt_bundle(
+        json.loads(
+            Path(pair["platform_registration_bundle"]).read_text(encoding="utf-8")
+        ),
+        activation_code=read_secret_file(
+            pair["platform_activation_file"], label="platform activation"
+        ),
+        issuer_public_key=public_key,
+        expected_kind=REGISTRATION_BUNDLE_KIND,
+    )
+    assert "comparison_context" not in registration_payload["client"]
+    assert not {
+        "ENTERPRISE_CAPACITY_BAND",
+        "ENTERPRISE_MINING_METHOD",
+        "ENTERPRISE_SHIFT_SYSTEM",
+        "ENTERPRISE_COAL_TYPE",
+        "ENTERPRISE_OPERATING_REGIME",
+    } & set(agent_payload["config"])
+
+
 def test_tampered_bundle_and_wrong_activation_fail_without_registry_write(
     tmp_path: Path, issuer: dict[str, object]
 ) -> None:
