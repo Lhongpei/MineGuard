@@ -667,3 +667,17 @@ def test_platform_status_distinguishes_offline_reachable_and_compatible() -> Non
     assert status["reachable"] is False
     assert status["compatible"] is False
     assert status["error"]["retryable"] is True
+
+
+def test_platform_status_reports_configured_ten_quantity_v3_client() -> None:
+    service = EnterpriseAgentService(Repository(":memory:"))
+    service._five_quantity = SimpleNamespace(platform_client=object())
+
+    assert service.platform_status() == {
+        "configured": True,
+        "reachable": None,
+        "compatible": None,
+        "message": (
+            "监管平台十量 V3 接口已配置；实际提交和风险拉取时进行签名连通性校验"
+        ),
+    }

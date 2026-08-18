@@ -1257,6 +1257,17 @@ class EnterpriseAgentService:
         )
 
     def platform_status(self) -> dict[str, Any]:
+        five_quantity_runtime = getattr(self, "_five_quantity", None)
+        v3_platform_client = getattr(five_quantity_runtime, "platform_client", None)
+        if v3_platform_client is not None:
+            return {
+                "configured": True,
+                "reachable": None,
+                "compatible": None,
+                "message": (
+                    "监管平台十量 V3 接口已配置；实际提交和风险拉取时进行签名连通性校验"
+                ),
+            }
         if self.platform_client is None:
             return {
                 "configured": False,
