@@ -527,6 +527,7 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         "ProvisionedEnvironmentFile",
         "ProvisioningSecretStoreFile",
         "ENTERPRISE_AGENT_MODEL_CONFIG_FILE",
+        '$FinalDataDirectory "model-api.json"',
         "BusinessAdminActorId",
         "ApiAdminPassword",
         "实例已存在，接入包导入绝不会覆盖",
@@ -837,6 +838,11 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     assert "S-1-5-19:(OI)(CI)" not in runtime
     assert "Assert-EARegisteredRuntimeServiceIdentity" in runtime
     assert "Registered service $ServiceId uses legacy/shared identity" in runtime
+    assert '"LocalSystem", [StringComparison]::OrdinalIgnoreCase' in runtime
+    assert "-AllowRepairableLegacyIdentity" in runtime
+    assert "Set-EACanonicalProductTreeAcl -Path $StateParent -RootTraverseOnly" in (
+        runtime
+    )
 
     assert "-ServiceSid $ServiceIdentity.Sid -ServicePermission 'RX'" in creator
     assert "-ServiceSid $ServiceIdentity.Sid -ServicePermission 'M'" in creator

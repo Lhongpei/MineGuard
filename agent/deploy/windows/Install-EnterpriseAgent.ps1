@@ -1294,7 +1294,11 @@ function Get-EADerivedServiceIdentity {
 }
 
 function Assert-EARegisteredRuntimeServiceIdentity {
-    param([string]$ServiceId)
+    param(
+        [string]$ServiceId,
+        [string]$StateRoot,
+        [switch]$AllowRepairableLegacyIdentity
+    )
     $Services = @(Get-CimInstance Win32_Service -Filter "Name='$ServiceId'" `
         -ErrorAction Stop)
     if ($Services.Count -ne 1) {
@@ -1305,6 +1309,30 @@ function Assert-EARegisteredRuntimeServiceIdentity {
     if (-not ([string]$Service.StartName).Equals(
             $Identity.AccountName, [StringComparison]::OrdinalIgnoreCase
         )) {
+        $InstanceName = $ServiceId.Substring(
+            "MineGuardEnterpriseAgent-".Length
+        )
+        $ExpectedWrapper = Join-Path $StateRoot (
+            "$InstanceName\service\$ServiceId.exe"
+        )
+        $RegisteredPath = ([string]$Service.PathName).Trim()
+        if ($RegisteredPath -match '^"([^"\r\n]+)"\s*$') {
+            $RegisteredPath = $Matches[1]
+        }
+        if ($AllowRepairableLegacyIdentity -and
+            ([string]$Service.StartName).Equals(
+                "LocalSystem", [StringComparison]::OrdinalIgnoreCase
+            ) -and
+            $RegisteredPath.Equals(
+                $ExpectedWrapper, [StringComparison]::OrdinalIgnoreCase
+            )) {
+            Write-Warning (
+                "Allowing the exact instance-owned LocalSystem service " +
+                "$ServiceId to remain stopped during runtime repair; the " +
+                "service installer must replace it with its virtual account."
+            )
+            return
+        }
         throw (
             "Registered service $ServiceId uses legacy/shared identity " +
             "$($Service.StartName). Run Uninstall-EnterpriseAgentService.ps1 " +
@@ -1665,9 +1693,12 @@ Assert-LocalFixedPath -Name "StateRoot" -PathValue $StateRoot
 Assert-LocalFixedPath -Name "SourceRoot" -PathValue $SourceRoot
 $InstallRoot = ([IO.Path]::GetFullPath($InstallRoot)).TrimEnd('\')
 $StateRoot = ([IO.Path]::GetFullPath($StateRoot)).TrimEnd('\')
+$StateParent = Split-Path -Parent $StateRoot
 $SourceRoot = ([IO.Path]::GetFullPath($SourceRoot)).TrimEnd('\')
 Assert-NotBroadProductRoot -Name "InstallRoot" -PathValue $InstallRoot
 Assert-NotBroadProductRoot -Name "StateRoot" -PathValue $StateRoot
+Assert-LocalFixedPath -Name "StateRoot parent" -PathValue $StateParent
+Assert-NotBroadProductRoot -Name "StateRoot parent" -PathValue $StateParent
 $InstallPrefix = $InstallRoot.TrimEnd('\') + '\'
 $StatePrefix = $StateRoot.TrimEnd('\') + '\'
 if ($InstallRoot.Equals($StateRoot, [StringComparison]::OrdinalIgnoreCase) -or
@@ -1740,7 +1771,9 @@ if ($RunningServices.Count -ne 0) {
     throw "Stop all MineGuardEnterpriseAgent-* services before installing or upgrading the shared runtime."
 }
 foreach ($RegisteredService in $RegisteredServices) {
-    Assert-EARegisteredRuntimeServiceIdentity -ServiceId $RegisteredService.Name
+    Assert-EARegisteredRuntimeServiceIdentity `
+        -ServiceId $RegisteredService.Name -StateRoot $StateRoot `
+        -AllowRepairableLegacyIdentity
 }
 Assert-LocalFixedPath -Name "InstallRoot" -PathValue $InstallRoot
 Assert-NotBroadProductRoot -Name "InstallRoot" -PathValue $InstallRoot
@@ -1902,11 +1935,12 @@ if (-not $BuildFromSource) {
         Assert-NotBroadProductRoot -Name "StateRoot" -PathValue $StateRoot
         Assert-StateRootOrdinary -Root $StateRoot
         Assert-StateRootMarker -Root $StateRoot
-        if (-not $HasTrustedBootstrapTransaction -or
-            -not $StateRootExistedBeforeInstall) {
-            Set-EACanonicalProductTreeAcl -Path $StateRoot `
-                -RootTraverseOnly
-        }
+        # The frozen runtime validates every ancestor of agent.env against
+        # reparse-point redirection. Give all service identities read/traverse
+        # on the two non-secret routing directories only; this does not
+        # inherit into any instance configuration or data.
+        Set-EACanonicalProductTreeAcl -Path $StateParent -RootTraverseOnly
+        Set-EACanonicalProductTreeAcl -Path $StateRoot -RootTraverseOnly
         Set-EACanonicalProductTreeAcl -Path $StagedRuntime -Recurse
         Set-EACanonicalProductTreeAcl -Path $StagedDeploy `
             -UsersReadExecute -Recurse
@@ -1938,7 +1972,8 @@ if (-not $BuildFromSource) {
         foreach ($LateRegisteredService in @(Get-Service `
             -Name "MineGuardEnterpriseAgent-*" -ErrorAction SilentlyContinue)) {
             Assert-EARegisteredRuntimeServiceIdentity `
-                -ServiceId $LateRegisteredService.Name
+                -ServiceId $LateRegisteredService.Name -StateRoot $StateRoot `
+                -AllowRepairableLegacyIdentity
         }
         Assert-NoEnterpriseAgentRuntimeProcesses -RuntimeDirectory $RuntimeRoot
         # Inno has already created its uninstaller, documentation and uninstall
@@ -2355,6 +2390,7 @@ if ($BuildFromSource) {
     Assert-NotBroadProductRoot -Name "StateRoot" -PathValue $StateRoot
     Assert-StateRootOrdinary -Root $StateRoot
     Assert-StateRootMarker -Root $StateRoot
+    Set-EACanonicalProductTreeAcl -Path $StateParent -RootTraverseOnly
     Set-EACanonicalProductTreeAcl -Path $StateRoot `
         -RootTraverseOnly
     Set-EAInstalledInstanceAcls -ApplicationRoot $InstallRoot `

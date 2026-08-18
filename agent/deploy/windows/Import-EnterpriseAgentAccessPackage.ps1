@@ -323,12 +323,13 @@ if (Test-Path -LiteralPath $InstanceRoot) {
 }
 
 $FinalDatabasePath = Join-Path $InstanceRoot "data\enterprise-agent.db"
+$FinalDataDirectory = Join-Path $InstanceRoot "data"
 $FinalInboxPath = Join-Path $InstanceRoot "inbox"
 $FinalConfigDirectory = Join-Path $InstanceRoot "config"
 $FinalLockPath = Join-Path $FinalConfigDirectory "provisioning-lock.json"
 $FinalSecretStorePath = Join-Path $FinalConfigDirectory `
     "provisioning-secrets.dpapi"
-$FinalModelConfigPath = Join-Path $FinalConfigDirectory "model-api.json"
+$FinalModelConfigPath = Join-Path $FinalDataDirectory "model-api.json"
 
 $TransactionRoot = Join-Path $StateRoot `
     (".instance-staging-" + [Guid]::NewGuid().ToString("N"))
