@@ -901,12 +901,37 @@ function Set-ExactSecuritySddl {
     Set-Acl -LiteralPath $Path -AclObject $security
 }
 
+function Get-SecurityAccessFingerprint {
+    param([Parameter(Mandatory = $true)] [string] $Sddl)
+    $descriptor = New-Object Security.AccessControl.RawSecurityDescriptor($Sddl)
+    $owner = if ($null -eq $descriptor.Owner) { '' } else { $descriptor.Owner.Value }
+    $group = if ($null -eq $descriptor.Group) { '' } else { $descriptor.Group.Value }
+    # Auto-inheritance bookkeeping flags may be normalized by Set-Acl even
+    # when the effective descriptor is unchanged.  Access safety depends on
+    # DACL presence/protection and the ordered ACE bytes, all retained here.
+    $daclPresent = (($descriptor.ControlFlags -band
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -ne 0)
+    $daclProtected = (($descriptor.ControlFlags -band
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0)
+    $aces = [System.Collections.Generic.List[string]]::new()
+    if ($null -ne $descriptor.DiscretionaryAcl) {
+        foreach ($ace in $descriptor.DiscretionaryAcl) {
+            $bytes = [byte[]]::new($ace.BinaryLength)
+            $ace.GetBinaryForm($bytes, 0)
+            $aces.Add([BitConverter]::ToString($bytes).Replace('-', ''))
+        }
+    }
+    return "$owner|$group|$daclPresent|$daclProtected|$($aces -join ',')"
+}
+
 function Assert-ExactSecuritySddl {
     param(
         [Parameter(Mandatory = $true)] [string] $Path,
         [Parameter(Mandatory = $true)] [string] $ExpectedSddl
     )
-    if ((Get-OriginalSecuritySddl -Path $Path) -cne $ExpectedSddl) {
+    $actual = Get-OriginalSecuritySddl -Path $Path
+    if ((Get-SecurityAccessFingerprint -Sddl $actual) -cne
+            (Get-SecurityAccessFingerprint -Sddl $ExpectedSddl)) {
         throw "Restored security descriptor does not match its snapshot: $Path"
     }
 }

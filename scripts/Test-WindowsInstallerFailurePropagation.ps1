@@ -33,6 +33,26 @@ function Invoke-NativeChecked {
     }
 }
 
+function Get-SecurityAccessFingerprint {
+    param([Parameter(Mandatory = $true)] [string] $Sddl)
+    $descriptor = New-Object Security.AccessControl.RawSecurityDescriptor($Sddl)
+    $owner = if ($null -eq $descriptor.Owner) { '' } else { $descriptor.Owner.Value }
+    $group = if ($null -eq $descriptor.Group) { '' } else { $descriptor.Group.Value }
+    $daclPresent = (($descriptor.ControlFlags -band
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -ne 0)
+    $daclProtected = (($descriptor.ControlFlags -band
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0)
+    $aces = [System.Collections.Generic.List[string]]::new()
+    if ($null -ne $descriptor.DiscretionaryAcl) {
+        foreach ($ace in $descriptor.DiscretionaryAcl) {
+            $bytes = [byte[]]::new($ace.BinaryLength)
+            $ace.GetBinaryForm($bytes, 0)
+            $aces.Add([BitConverter]::ToString($bytes).Replace('-', ''))
+        }
+    }
+    return "$owner|$group|$daclPresent|$daclProtected|$($aces -join ',')"
+}
+
 function Invoke-RegExeForExitCode {
     param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
     $PreviousErrorActionPreference = $ErrorActionPreference
@@ -524,7 +544,7 @@ function Get-ExactArtifactSnapshot {
             }
             $Key = "$RootKey|$Relative"
             $Acl = Get-Acl -LiteralPath $Item.FullName
-            $Security = "$($Acl.Owner)|$($Acl.AreAccessRulesProtected)|$($Acl.Sddl)"
+            $Security = Get-SecurityAccessFingerprint -Sddl $Acl.Sddl
             if ($Item.PSIsContainer) {
                 $Snapshot[$Key] = "directory|$Security"
             }
