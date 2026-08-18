@@ -502,6 +502,8 @@ def test_concurrent_registration_imports_do_not_lose_clients(
         ("placeholder_identity", "placeholder identifier"),
         ("placeholder_context", "governed non-placeholder"),
         ("placeholder_context_phrase", "governed non-placeholder"),
+        ("placeholder_context_tbd", "governed non-placeholder"),
+        ("placeholder_context_instruction", "governed non-placeholder"),
     ],
 )
 def test_profile_validation_fails_closed_before_writing_bundles(
@@ -519,6 +521,10 @@ def test_profile_validation_fails_closed_before_writing_bundles(
         profile["subject"]["mine_id"] = "demo-mine-001"
     elif mutation == "placeholder_context":
         profile["comparison_context"]["coal_type"] = "unclassified"
+    elif mutation == "placeholder_context_tbd":
+        profile["comparison_context"]["coal_type"] = "tbd"
+    elif mutation == "placeholder_context_instruction":
+        profile["comparison_context"]["coal_type"] = "请填写真实煤种"
     else:
         profile["comparison_context"]["capacity_band"] = "待补充产能"
 

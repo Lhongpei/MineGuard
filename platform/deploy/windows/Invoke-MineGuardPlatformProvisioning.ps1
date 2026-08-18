@@ -480,6 +480,38 @@ try {
                 throw "$($displayEntry[1]) 必须填写，且不能超过 64 个字符。"
             }
         }
+        $placeholderValues = @(
+            '-', 'n/a', 'na', 'none', 'null', 'tbd', 'unknown',
+            'unclassified', '占位', '待填写', '待分类', '待配置',
+            '待补充', '未分类', '未配置', '未知', '测试', '示例'
+        )
+        $placeholderMarkers = @(
+            'change me', 'change-me', 'change_me', 'demo', 'example',
+            'placeholder', 'replace', 'sample', 'test-only', 'test_only',
+            '占位', '填写', '部署时', '待填', '待配置', '待补充',
+            '未分类', '未知', '测试值', '示例值'
+        )
+        foreach ($contextEntry in @(
+                @($CapacityBand, '核定产能区间'),
+                @($MiningMethod, '开采方式'),
+                @($ShiftSystem, '班次制度'),
+                @($CoalType, '主要煤种'),
+                @($OperatingRegime, '生产制度')
+            )) {
+            $normalizedContext = ([string]$contextEntry[0]).Trim().ToLowerInvariant()
+            $isPlaceholder = $placeholderValues -contains $normalizedContext
+            if (-not $isPlaceholder) {
+                foreach ($marker in $placeholderMarkers) {
+                    if ($normalizedContext.Contains($marker)) {
+                        $isPlaceholder = $true
+                        break
+                    }
+                }
+            }
+            if ($isPlaceholder) {
+                throw "$($contextEntry[1])不能填写占位值；请填写矿方确认的真实信息。"
+            }
+        }
         $PrivateKeyPath = Get-SafeLocalPath -Value $PrivateKeyPath `
             -Label '签发私钥' -RequireFixedNtfs
         Assert-RegularFile -Path $PrivateKeyPath -Label '签发私钥' `

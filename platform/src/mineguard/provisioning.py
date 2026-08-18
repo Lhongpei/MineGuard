@@ -72,16 +72,25 @@ _UTC_DATETIME = re.compile(
 )
 _PLACEHOLDER_TOKENS = frozenset(
     {
+        "-",
         "change",
         "demo",
         "example",
+        "n/a",
+        "na",
+        "none",
+        "null",
         "placeholder",
         "replace",
         "sample",
         "synthetic",
         "test",
+        "test-only",
+        "test_only",
+        "tbd",
         "unknown",
         "unclassified",
+        "填写",
         "待填写",
         "待填",
         "待配置",
@@ -581,6 +590,8 @@ def _contains_control(value: str) -> bool:
 
 def _looks_placeholder(value: str) -> bool:
     folded = value.strip().casefold()
+    if folded in _PLACEHOLDER_TOKENS:
+        return True
     ascii_tokens = {
         token for token in re.split(r"[^a-z0-9]+", folded) if token
     }
