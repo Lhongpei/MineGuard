@@ -506,6 +506,7 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     installer = (root / "Install-EnterpriseAgentService.ps1").read_text(
         encoding="utf-8"
     )
+    assert '"deploy\\windows\\service-host\\WinSW-x64.exe"' in installer
     assert "WinSWExpectedSha256" in installer
     assert '"--production"' in installer
     backup = (root / "Backup-EnterpriseAgent.ps1").read_text(encoding="utf-8")
@@ -566,7 +567,10 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         "Reviewer",
     ):
         assert removed not in wizard
-    assert "批准的 WinSW" in wizard
+    assert "服务包装器和完整性摘要已内置在安装包中" in wizard
+    assert "WinSWBox" not in wizard
+    assert "WinSWHashBox" not in wizard
+    assert "SignerBox" not in wizard
     inno = (
         root.parents[2]
         / "packaging"
@@ -621,15 +625,13 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     for token in (
         '"Install-EnterpriseAgentService.ps1"',
         '"EnterpriseAgent.WindowsSafety.ps1"',
-        "仅安装或修复正式服务…",
+        "已有实例：安装或修复服务…",
+        "尚未创建实例 [$SelectedInstance]",
+        "首次部署请先选择监管端生成的",
         "Show-FormalServiceInstallDialog",
         "Get-EAInstanceContext",
-        "介质外 WinSW SHA-256",
-        "Agent runtime 签名者 SHA-1",
-        "不会下载、捆绑或自动计算批准值",
-        "-WinSWPath $WinSWBox.Text",
-        "-WinSWExpectedSha256 $ExpectedWinSWHash",
-        "-ApprovedSignerThumbprint $ApprovedRuntimeValue",
+        "服务包装器和完整性摘要已内置在安装包中",
+        "-AllowUnsignedInternalRelease",
         "-Start `",
         "1>$null 3>$null 4>$null 5>$null 6>$null",
         "正式服务已安装、启动并通过绑定当前实例的健康检查",
@@ -640,9 +642,8 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
     assert "thumbprint: $ApprovedSignerThumbprint" not in installer
     assert "matched the independently approved thumbprint" in installer
     service_invocation = wizard.index("& $ServiceInstallScript")
-    assert wizard.index("$WinSWHashBox.Clear()", service_invocation) > (
-        service_invocation
-    )
+    assert "-WinSWPath" not in wizard[service_invocation:]
+    assert "ExpectedReleaseManifestSha256" not in wizard[service_invocation:]
     finalizer = wizard.index("finally {", wizard.index("$ImportButton.Add_Click"))
     assert wizard.index("$BusinessAdminPasswordBox.Clear()", finalizer) > finalizer
 
@@ -652,8 +653,8 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         "api_admin",
         "业务管理员",
         "不提供旧版升级",
-        "仅安装或修复正式服务…",
-        "介质外审批记录中的 WinSW SHA-256",
+        "已有实例：安装或修复服务…",
+        "WinSW v2.12.0 x64",
     ):
         assert token in deployment_readme
 
@@ -698,7 +699,7 @@ def test_windows_service_lifecycle_is_path_bound_and_transactional() -> None:
         '$StateRoot = Assert-SafeLocalFixedNtfsPath -Name "StateRoot"'
     ) < installer.index('Assert-OrdinaryDirectoryTree -Name "StateRoot"')
     assert installer.index(
-        '$WinSWPath = Assert-SafeLocalFixedNtfsPath -Name "WinSWPath"'
+        '$WinSWPath = Assert-SafeLocalFixedNtfsPath -Name "Bundled WinSWPath"'
     ) < installer.index('Assert-OrdinaryFile -Name "WinSW executable"')
     assert installer.count("Get-FileHash -LiteralPath $WinSWPath") >= 2
     assert "Get-FileHash -LiteralPath $TemporaryWrapper" in installer
@@ -1035,6 +1036,9 @@ def test_windows_unsigned_internal_is_a_distinct_production_trust_mode() -> None
     assert "e3df516dc9ce7cce905597484d794625a6ac4e6ac2a11dfc07dbc8e2f15fb413" in build
     assert build.count('"unsigned-internal-release"') >= 1
     assert "release_classification = $ReleaseClassification" in build
+    assert '"05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da"' in build
+    assert '"vendor\\winsw\\v$WinSWVersion"' in build
+    assert '"deploy/windows/service-host/WinSW-x64.exe"' in build
 
     assert "[switch]$AllowUnsignedInternalRelease" in runtime
     assert (
@@ -1069,11 +1073,10 @@ def test_windows_unsigned_internal_is_a_distinct_production_trust_mode() -> None
     assert '"--production"' in service
 
     assert 'return "internal-unsigned"' in wizard
-    assert '"Agent 发行清单 SHA-256"' in wizard
-    assert "-AllowUnsignedInternalRelease `" in wizard
-    assert "-ExpectedReleaseManifestSha256 $ApprovedRuntimeValue" in wizard
-    assert "没有 Windows 发布者签名" in wizard
-    assert "本窗口不会自动计算" in wizard
+    assert "-AllowUnsignedInternalRelease" in wizard
+    assert "ExpectedReleaseManifestSha256" not in wizard
+    assert "服务包装器和完整性摘要已内置在安装包中" in wizard
+    assert "无需选择" in wizard
 
     combined = "\n".join((build, runtime, service, wizard))
     for obsolete in (

@@ -650,6 +650,26 @@ try {
     foreach ($Item in Get-ChildItem -LiteralPath (Join-Path $SourceRoot "deploy\windows") -Force) {
         Copy-Item -LiteralPath $Item.FullName -Destination $DeployStage -Recurse
     }
+    $WinSWVersion = "2.12.0"
+    $ExpectedWinSWSha256 = `
+        "05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da"
+    $WinSWSourceRoot = Join-Path $SourceRoot "vendor\winsw\v$WinSWVersion"
+    $WinSWSource = Join-Path $WinSWSourceRoot "WinSW-x64.exe"
+    $WinSWLicenseSource = Join-Path $WinSWSourceRoot "LICENSE.txt"
+    foreach ($RequiredWinSWFile in @($WinSWSource, $WinSWLicenseSource)) {
+        if (-not (Test-Path -LiteralPath $RequiredWinSWFile -PathType Leaf)) {
+            throw "The pinned WinSW v$WinSWVersion vendor file is missing: $RequiredWinSWFile"
+        }
+    }
+    $ActualWinSWSha256 = (Get-FileHash -LiteralPath $WinSWSource `
+        -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($ActualWinSWSha256 -ne $ExpectedWinSWSha256) {
+        throw "The pinned WinSW v$WinSWVersion x64 SHA-256 does not match the source policy."
+    }
+    $ServiceHostStage = Join-Path $DeployStage "service-host"
+    New-Item -ItemType Directory -Path $ServiceHostStage -Force | Out-Null
+    [IO.File]::Copy($WinSWSource, (Join-Path $ServiceHostStage "WinSW-x64.exe"), $false)
+    [IO.File]::Copy($WinSWLicenseSource, (Join-Path $ServiceHostStage "WinSW-LICENSE.txt"), $false)
     [IO.File]::WriteAllText(
         (Join-Path $StageRoot "VERSION.txt"),
         ($Version + [Environment]::NewLine),
@@ -703,6 +723,12 @@ try {
                 $ExpectedModelIssuerTrustStoreSha256
         )
         model_credential_trust_test_only = $UsingTestOnlyModelTrust
+        service_wrapper = [ordered]@{
+            product = "WinSW"
+            version = $WinSWVersion
+            path = "deploy/windows/service-host/WinSW-x64.exe"
+            sha256 = $ExpectedWinSWSha256
+        }
     }
     [IO.File]::WriteAllText(
         (Join-Path $StageRoot "build-metadata.json"),

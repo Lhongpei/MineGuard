@@ -338,7 +338,7 @@ $ImportButton.FlatStyle = "Flat"
 $Form.Controls.Add($ImportButton)
 
 $ServiceInstallButton = New-Object Windows.Forms.Button
-$ServiceInstallButton.Text = "仅安装或修复正式服务…"
+$ServiceInstallButton.Text = "已有实例：安装或修复服务…"
 $ServiceInstallButton.Location = New-Object Drawing.Point(28, 624)
 $ServiceInstallButton.Size = New-Object Drawing.Size(300, 38)
 $ServiceInstallButton.BackColor = [Drawing.Color]::FromArgb(43, 93, 152)
@@ -440,226 +440,47 @@ function Get-InstalledAgentServiceTrustMode {
 function Show-FormalServiceInstallDialog {
     param([Parameter(Mandatory = $true)][string]$InstanceName)
 
-    # This is a GUI-side preflight only. The service installer repeats the full
-    # path, ownership, metadata, ACL, signer, hash and runtime checks immediately
-    # before it changes Windows service state.
-    $InstanceContext = Get-EAInstanceContext -InstanceName $InstanceName `
+    $ValidatedContext = Get-EAInstanceContext -InstanceName $InstanceName `
         -InstallRoot $InstallRoot -StateRoot $StateRoot
-    $InstanceContext = $null
+    $ValidatedContext = $null
     $ServiceTrustMode = Get-InstalledAgentServiceTrustMode
     $InternalUnsignedMode = $ServiceTrustMode -eq "internal-unsigned"
+    $confirmation = (
+        "将为实例 [$InstanceName] 安装并启动正式 Windows 服务。`r`n`r`n" +
+        "服务包装器和完整性摘要已内置在安装包中，将自动核验，无需选择 " +
+        "WinSW 或填写 SHA。是否继续？"
+    )
+    $choice = [Windows.Forms.MessageBox]::Show(
+        $confirmation, "安装并启动 MineGuard 正式服务",
+        [Windows.Forms.MessageBoxButtons]::YesNo,
+        [Windows.Forms.MessageBoxIcon]::Question
+    )
+    if ($choice -ne [Windows.Forms.DialogResult]::Yes) { return }
 
-    $ServiceDialog = New-Object Windows.Forms.Form
-    $ServiceDialog.Text = "安装并启动 MineGuard 正式服务"
-    $ServiceDialog.ClientSize = New-Object Drawing.Size(720, 325)
-    $ServiceDialog.StartPosition = "CenterParent"
-    $ServiceDialog.FormBorderStyle = `
-        [Windows.Forms.FormBorderStyle]::FixedDialog
-    $ServiceDialog.MaximizeBox = $false
-    $ServiceDialog.MinimizeBox = $false
-    $ServiceDialog.ShowInTaskbar = $false
-    $ServiceDialog.Font = $NormalFont
-
-    $ServiceTitle = New-Object Windows.Forms.Label
-    $ServiceTitle.Text = "正式 Windows 服务安装"
-    $ServiceTitle.Font = $SectionFont
-    $ServiceTitle.Location = New-Object Drawing.Point(22, 18)
-    $ServiceTitle.Size = New-Object Drawing.Size(660, 26)
-    $ServiceDialog.Controls.Add($ServiceTitle)
-
-    $InstanceLabel = New-Object Windows.Forms.Label
-    $InstanceLabel.Text = "已验证实例"
-    $InstanceLabel.Location = New-Object Drawing.Point(22, 58)
-    $InstanceLabel.Size = New-Object Drawing.Size(145, 24)
-    $ServiceDialog.Controls.Add($InstanceLabel)
-    $SelectedInstanceBox = New-Object Windows.Forms.TextBox
-    $SelectedInstanceBox.Text = $InstanceName
-    $SelectedInstanceBox.Location = New-Object Drawing.Point(174, 54)
-    $SelectedInstanceBox.Size = New-Object Drawing.Size(510, 25)
-    $SelectedInstanceBox.ReadOnly = $true
-    $ServiceDialog.Controls.Add($SelectedInstanceBox)
-
-    $WinSWLabel = New-Object Windows.Forms.Label
-    $WinSWLabel.Text = "批准的 WinSW 文件"
-    $WinSWLabel.Location = New-Object Drawing.Point(22, 98)
-    $WinSWLabel.Size = New-Object Drawing.Size(145, 24)
-    $ServiceDialog.Controls.Add($WinSWLabel)
-    $WinSWBox = New-Object Windows.Forms.TextBox
-    $WinSWBox.Location = New-Object Drawing.Point(174, 94)
-    $WinSWBox.Size = New-Object Drawing.Size(420, 25)
-    $ServiceDialog.Controls.Add($WinSWBox)
-    $WinSWSelectButton = New-Object Windows.Forms.Button
-    $WinSWSelectButton.Text = "选择…"
-    $WinSWSelectButton.Location = New-Object Drawing.Point(604, 92)
-    $WinSWSelectButton.Size = New-Object Drawing.Size(80, 29)
-    $ServiceDialog.Controls.Add($WinSWSelectButton)
-
-    $WinSWHashLabel = New-Object Windows.Forms.Label
-    $WinSWHashLabel.Text = "介质外 WinSW SHA-256"
-    $WinSWHashLabel.Location = New-Object Drawing.Point(22, 138)
-    $WinSWHashLabel.Size = New-Object Drawing.Size(150, 24)
-    $ServiceDialog.Controls.Add($WinSWHashLabel)
-    $WinSWHashBox = New-Object Windows.Forms.TextBox
-    $WinSWHashBox.Location = New-Object Drawing.Point(174, 134)
-    $WinSWHashBox.Size = New-Object Drawing.Size(510, 25)
-    $WinSWHashBox.MaxLength = 96
-    $ServiceDialog.Controls.Add($WinSWHashBox)
-
-    $SignerLabel = New-Object Windows.Forms.Label
-    $SignerLabel.Text = if ($InternalUnsignedMode) {
-        "Agent 发行清单 SHA-256"
-    } else {
-        "Agent runtime 签名者 SHA-1"
+    $ValidatedContext = Get-EAInstanceContext -InstanceName $InstanceName `
+        -InstallRoot $InstallRoot -StateRoot $StateRoot
+    $ValidatedContext = $null
+    if ($InternalUnsignedMode) {
+        & $ServiceInstallScript -InstanceName $InstanceName `
+            -AllowUnsignedInternalRelease -InstallRoot $InstallRoot `
+            -StateRoot $StateRoot -Start `
+            1>$null 3>$null 4>$null 5>$null 6>$null
     }
-    $SignerLabel.Location = New-Object Drawing.Point(22, 178)
-    $SignerLabel.Size = New-Object Drawing.Size(170, 24)
-    $ServiceDialog.Controls.Add($SignerLabel)
-    $SignerBox = New-Object Windows.Forms.TextBox
-    $SignerBox.Location = New-Object Drawing.Point(194, 174)
-    $SignerBox.Size = New-Object Drawing.Size(490, 25)
-    $SignerBox.MaxLength = if ($InternalUnsignedMode) { 96 } else { 72 }
-    $ServiceDialog.Controls.Add($SignerBox)
-
-    $ServiceNote = New-Object Windows.Forms.Label
-    $ServiceNote.Text = if ($InternalUnsignedMode) {
-        "警告：该版本没有 Windows 发布者签名。WinSW 和 Agent 子发行清单的 SHA-256 " +
-        "都必须从安装介质之外的审批记录手工输入；本窗口不会自动计算或替你信任包内数值。"
-    } else {
-        "WinSW 必须先复制到本机固定 NTFS 目录。本窗口不会下载、捆绑或自动计算批准值；" +
-        "两个核验值必须由操作员从所选文件之外的审批记录手工输入。"
+    else {
+        & $ServiceInstallScript -InstanceName $InstanceName `
+            -InstallRoot $InstallRoot -StateRoot $StateRoot -Start `
+            1>$null 3>$null 4>$null 5>$null 6>$null
     }
-    $ServiceNote.ForeColor = if ($InternalUnsignedMode) { $Red } else { $Muted }
-    $ServiceNote.Location = New-Object Drawing.Point(24, 216)
-    $ServiceNote.Size = New-Object Drawing.Size(660, 48)
-    $ServiceDialog.Controls.Add($ServiceNote)
-
-    $ServiceCancelButton = New-Object Windows.Forms.Button
-    $ServiceCancelButton.Text = "取消"
-    $ServiceCancelButton.Location = New-Object Drawing.Point(400, 276)
-    $ServiceCancelButton.Size = New-Object Drawing.Size(90, 34)
-    $ServiceCancelButton.DialogResult = [Windows.Forms.DialogResult]::Cancel
-    $ServiceDialog.Controls.Add($ServiceCancelButton)
-    $InstallServiceNowButton = New-Object Windows.Forms.Button
-    $InstallServiceNowButton.Text = "安装、启动并健康检查"
-    $InstallServiceNowButton.Location = New-Object Drawing.Point(502, 276)
-    $InstallServiceNowButton.Size = New-Object Drawing.Size(182, 34)
-    $InstallServiceNowButton.BackColor = $Green
-    $InstallServiceNowButton.ForeColor = [Drawing.Color]::White
-    $InstallServiceNowButton.FlatStyle = "Flat"
-    $ServiceDialog.Controls.Add($InstallServiceNowButton)
-    $ServiceDialog.CancelButton = $ServiceCancelButton
-
-    $WinSWSelectButton.Add_Click({
-        $Picker = New-Object Windows.Forms.OpenFileDialog
-        $Picker.Title = "选择单位批准的 WinSW x64 可执行文件"
-        $Picker.Filter = "WinSW 可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*"
-        $Picker.CheckFileExists = $true
-        $Picker.Multiselect = $false
-        try {
-            if ($Picker.ShowDialog($ServiceDialog) -eq `
-                    [Windows.Forms.DialogResult]::OK) {
-                $WinSWBox.Text = $Picker.FileName
-            }
-        }
-        finally { $Picker.Dispose() }
-    })
-
-    $InstallServiceNowButton.Add_Click({
-        $ExpectedWinSWHash = $null
-        $ApprovedRuntimeValue = $null
-        $InstallServiceNowButton.Enabled = $false
-        $ServiceDialog.UseWaitCursor = $true
-        try {
-            if (-not (Test-Path -LiteralPath $WinSWBox.Text -PathType Leaf)) {
-                throw "请选择已复制到本机固定 NTFS 目录的 WinSW 可执行文件。"
-            }
-            $ExpectedWinSWHash = (
-                $WinSWHashBox.Text -replace '\s', ''
-            ).ToUpperInvariant()
-            $ApprovedRuntimeValue = (
-                $SignerBox.Text -replace '\s', ''
-            ).ToUpperInvariant()
-            $WinSWHashBox.Clear()
-            $SignerBox.Clear()
-            if ($ExpectedWinSWHash -cnotmatch '^[A-F0-9]{64}$') {
-                throw "介质外 WinSW SHA-256 必须是 64 位十六进制。"
-            }
-            if ($InternalUnsignedMode) {
-                if ($ApprovedRuntimeValue -cnotmatch '^[A-F0-9]{64}$') {
-                    throw "介质外 Agent 发行清单 SHA-256 必须是 64 位十六进制。"
-                }
-            }
-            elseif ($ApprovedRuntimeValue -cnotmatch '^[A-F0-9]{40}$') {
-                throw "Agent runtime 签名者 SHA-1 指纹必须是 40 位十六进制。"
-            }
-            # Re-resolve the instance immediately before the mutating script to
-            # close the GUI validation/use interval as far as practical.
-            $ValidatedContext = Get-EAInstanceContext `
-                -InstanceName $InstanceName -InstallRoot $InstallRoot `
-                -StateRoot $StateRoot
-            $ValidatedContext = $null
-            if ($InternalUnsignedMode) {
-                & $ServiceInstallScript `
-                    -InstanceName $InstanceName `
-                    -WinSWPath $WinSWBox.Text `
-                    -WinSWExpectedSha256 $ExpectedWinSWHash `
-                    -AllowUnsignedInternalRelease `
-                    -ExpectedReleaseManifestSha256 $ApprovedRuntimeValue `
-                    -InstallRoot $InstallRoot `
-                    -StateRoot $StateRoot `
-                    -Start `
-                    1>$null 3>$null 4>$null 5>$null 6>$null
-            }
-            else {
-                & $ServiceInstallScript `
-                    -InstanceName $InstanceName `
-                    -WinSWPath $WinSWBox.Text `
-                    -WinSWExpectedSha256 $ExpectedWinSWHash `
-                    -ApprovedSignerThumbprint $ApprovedRuntimeValue `
-                    -InstallRoot $InstallRoot `
-                    -StateRoot $StateRoot `
-                    -Start `
-                    1>$null 3>$null 4>$null 5>$null 6>$null
-            }
-            $StatusBox.ForeColor = $Green
-            $StatusBox.Text = (
-                "正式服务已安装、启动并通过绑定当前实例的健康检查：" +
-                $InstanceName
-            )
-            [void][Windows.Forms.MessageBox]::Show(
-                $StatusBox.Text,
-                "MineGuard 企业接入配置向导",
-                [Windows.Forms.MessageBoxButtons]::OK,
-                [Windows.Forms.MessageBoxIcon]::Information
-            )
-            $ServiceDialog.DialogResult = [Windows.Forms.DialogResult]::OK
-            $ServiceDialog.Close()
-        }
-        catch {
-            $Message = "正式服务安装未完成：`r`n" + $_.Exception.Message
-            [void][Windows.Forms.MessageBox]::Show(
-                $Message,
-                "MineGuard 企业接入配置向导",
-                [Windows.Forms.MessageBoxButtons]::OK,
-                [Windows.Forms.MessageBoxIcon]::Error
-            )
-        }
-        finally {
-            $ExpectedWinSWHash = $null
-            $ApprovedRuntimeValue = $null
-            $WinSWHashBox.Clear()
-            $SignerBox.Clear()
-            $ServiceDialog.UseWaitCursor = $false
-            $InstallServiceNowButton.Enabled = $true
-        }
-    })
-
-    $ServiceDialog.Add_FormClosed({
-        $WinSWHashBox.Clear()
-        $SignerBox.Clear()
-    })
-    try { [void]$ServiceDialog.ShowDialog($Form) }
-    finally { $ServiceDialog.Dispose() }
+    $StatusBox.ForeColor = $Green
+    $StatusBox.Text = (
+        "正式服务已安装、启动并通过绑定当前实例的健康检查：" +
+        $InstanceName
+    )
+    [void][Windows.Forms.MessageBox]::Show(
+        $StatusBox.Text, "MineGuard 企业接入配置向导",
+        [Windows.Forms.MessageBoxButtons]::OK,
+        [Windows.Forms.MessageBoxIcon]::Information
+    )
 }
 
 $ServiceInstallButton.Add_Click({
@@ -668,6 +489,15 @@ $ServiceInstallButton.Add_Click({
         $SelectedInstance = $InstanceBox.Text.Trim()
         if ([string]::IsNullOrWhiteSpace($SelectedInstance)) {
             throw "请先在主界面填写或加载要安装服务的实例名。"
+        }
+        $SelectedInstanceRoot = Join-Path $StateRoot $SelectedInstance
+        if (-not (Test-Path -LiteralPath $SelectedInstanceRoot `
+                -PathType Container)) {
+            throw (
+                "尚未创建实例 [$SelectedInstance]。首次部署请先选择监管端生成的 " +
+                ".mgprov，填写企业管理员和 api_admin 密码，然后点击右侧绿色" +
+                "[导入配置并继续安装服务]。"
+            )
         }
         Show-FormalServiceInstallDialog -InstanceName $SelectedInstance
     }

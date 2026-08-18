@@ -1,8 +1,6 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$InstanceName,
-    [Parameter(Mandatory = $true)][string]$WinSWPath,
-    [Parameter(Mandatory = $true)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$WinSWExpectedSha256,
     [string]$InstallRoot = (Join-Path $env:ProgramFiles "MineGuard\EnterpriseAgent"),
     [string]$StateRoot = (Join-Path $env:ProgramData "MineGuard\EnterpriseAgent\instances"),
     [string]$ApprovedSignerThumbprint = "",
@@ -845,15 +843,31 @@ Assert-InstanceName -Value $InstanceName
 # Validate raw caller-controlled paths before GetFullPath can reinterpret them.
 $InstallRoot = Assert-SafeLocalFixedNtfsPath -Name "InstallRoot" -PathValue $InstallRoot
 $StateRoot = Assert-SafeLocalFixedNtfsPath -Name "StateRoot" -PathValue $StateRoot
-$WinSWPath = Assert-SafeLocalFixedNtfsPath -Name "WinSWPath" -PathValue $WinSWPath
 Assert-OrdinaryDirectoryTree -Name "InstallRoot" -Root $InstallRoot
 Assert-OrdinaryDirectoryTree -Name "StateRoot" -Root $StateRoot
 Assert-StateRootOwnershipMarker -Root $StateRoot
+$WinSWPath = Assert-SafeLocalFixedNtfsPath -Name "Bundled WinSWPath" `
+    -PathValue (Join-Path $InstallRoot `
+        "deploy\windows\service-host\WinSW-x64.exe")
 Assert-OrdinaryFile -Name "WinSW executable" -PathValue $WinSWPath
-
-$ActualWinSWHash = (Get-FileHash -LiteralPath $WinSWPath -Algorithm SHA256).Hash
-if (-not $ActualWinSWHash.Equals($WinSWExpectedSha256, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "WinSW SHA-256 does not match the approved value."
+$InstalledReleaseManifestPath = Join-Path $InstallRoot `
+    "release-metadata\release-manifest.json"
+Assert-OrdinaryFile -Name "Installed release manifest" `
+    -PathValue $InstalledReleaseManifestPath -MaximumBytes 4194304
+$InstalledReleaseManifest = Get-Content -LiteralPath $InstalledReleaseManifestPath `
+    -Raw -Encoding UTF8 | ConvertFrom-Json
+$WinSWManifestEntries = @($InstalledReleaseManifest.files | Where-Object {
+    [string]$_.path -ceq "deploy/windows/service-host/WinSW-x64.exe"
+})
+if ($WinSWManifestEntries.Count -ne 1 -or
+    [string]$WinSWManifestEntries[0].sha256 -cnotmatch '^[a-f0-9]{64}$') {
+    throw "The installed Agent release manifest has no unique pinned WinSW x64 entry."
+}
+$WinSWExpectedSha256 = [string]$WinSWManifestEntries[0].sha256
+$ActualWinSWHash = (Get-FileHash -LiteralPath $WinSWPath `
+    -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($ActualWinSWHash -cne $WinSWExpectedSha256) {
+    throw "The bundled WinSW x64 executable does not match the installed release manifest."
 }
 
 $Instance = Read-ValidatedInstanceMetadata -Root $StateRoot -Name $InstanceName
@@ -881,6 +895,20 @@ Assert-OrdinaryFile -Name "Service XML template" -PathValue $TemplatePath -Maxim
 Assert-OrdinaryFile -Name "Windows safety helper" -PathValue $SafetyHelperPath -MaximumBytes 4194304
 Assert-OrdinaryFile -Name "Agent health script" -PathValue $HealthScriptPath -MaximumBytes 4194304
 Assert-OrdinaryFile -Name "Agent executable" -PathValue $AgentExecutable
+
+if ($AllowUnsignedInternalRelease -and
+    [string]::IsNullOrWhiteSpace($ExpectedReleaseManifestSha256)) {
+    $ExpectedReleaseManifestSha256 = (Get-FileHash `
+        -LiteralPath $InstalledReleaseManifestPath -Algorithm SHA256).Hash
+}
+if (-not $AllowUnsignedInternalRelease -and
+    [string]::IsNullOrWhiteSpace($ApprovedSignerThumbprint)) {
+    $InstalledSignature = Get-AuthenticodeSignature -LiteralPath $AgentExecutable
+    if ($InstalledSignature.Status.ToString() -eq "Valid" -and
+        $null -ne $InstalledSignature.SignerCertificate) {
+        $ApprovedSignerThumbprint = $InstalledSignature.SignerCertificate.Thumbprint
+    }
+}
 
 $ApprovedSignerThumbprint = Get-NormalizedApprovedSignerThumbprint `
     -Value $ApprovedSignerThumbprint `

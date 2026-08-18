@@ -501,6 +501,7 @@ def test_concurrent_registration_imports_do_not_lose_clients(
         ("invalid_port", "invalid port"),
         ("placeholder_identity", "placeholder identifier"),
         ("placeholder_context", "governed non-placeholder"),
+        ("placeholder_context_phrase", "governed non-placeholder"),
     ],
 )
 def test_profile_validation_fails_closed_before_writing_bundles(
@@ -516,8 +517,10 @@ def test_profile_validation_fails_closed_before_writing_bundles(
         profile["agent"]["platform_base_url"] = "https://platform.internal:abc"
     elif mutation == "placeholder_identity":
         profile["subject"]["mine_id"] = "demo-mine-001"
-    else:
+    elif mutation == "placeholder_context":
         profile["comparison_context"]["coal_type"] = "unclassified"
+    else:
+        profile["comparison_context"]["capacity_band"] = "待补充产能"
 
     with pytest.raises(ProvisioningError, match=message):
         _create(tmp_path, issuer, profile, label=f"invalid-{mutation}")

@@ -1,6 +1,7 @@
 # 企业端 Agent：Windows 原生部署
 
-本目录提供企业端 Agent 的 Windows PowerShell 5.1 部署方案。它不会下载 WinSW，
+本目录提供企业端 Agent 的 Windows PowerShell 5.1 部署方案。正式安装包内置并校验固定
+WinSW v2.12.0 x64 服务包装器，目标机不会联网下载，
 不会把用户密码、模型密钥或两把 HMAC 密钥写入服务 XML/命令行，也不会执行配置文件。
 每个实例分别拥有端口、Windows 服务名、配置目录、SQLite 状态库、日志和备份目录。
 
@@ -11,7 +12,7 @@
 - 正式二进制发行包不要求目标机安装 Python、编译器、Node.js 或源码；
 - 本机固定 NTFS 磁盘；数据库不得放在 UNC、映射网络盘、OneDrive 或同步目录；
 - 新版 Edge/Chrome；不需要 GPU、Java、Excel 或外部数据库；
-- 如需服务托管，另行从单位批准的软件源取得 WinSW，并取得发布方 SHA-256。
+- 服务托管所需 WinSW 已包含在 Agent 子发行清单中，无需现场另行准备或输入摘要。
 
 发行目录中的 `runtime\MineGuardEnterpriseAgent.exe` 是基于 CPython 3.12 x64 和固定依赖
 构建的 Nuitka standalone 程序，并携带 Windows 所需的 `tzdata`。目标机不能只复制单个
@@ -129,11 +130,9 @@ SHA-256，再由 Setup 显式选择 `AllowUnsignedInternalRelease`；它不能�
 同类矿分组和 key ID 均由 `.mgprov` 锁定。
 
 接入包导入并通过正式预检后，向导会直接打开正式服务安装窗口；以后也可用左下角的
-“仅安装或修复正式服务…”重新进入。它不会下载或捆绑 WinSW，也不会从所选
-文件自动计算并信任摘要；操作员仍须选择已复制到本机固定 NTFS 目录的批准 WinSW，手工
-输入介质外审批记录中的 WinSW SHA-256；签名版再输入 Agent runtime 签名者 SHA-1 指纹，
-`INTERNAL-UNSIGNED` 版则输入 Agent 子发行清单 SHA-256。向导会按已安装发行分类自动切换字段，
-复用正式服务安装事务，只有安装、启动、实例绑定健康检查全部通过才报告成功，核验值不写日志。
+“已有实例：安装或修复服务…”重新进入。窗口只需确认一次；WinSW、发行分类和完整性摘要
+都从安装时已验证并受 ACL 保护的 Agent 子发行自动取得。只有安装、启动、实例绑定健康检查
+全部通过才报告成功。
 
 PowerShell 自动化也可直接调用
 `Import-EnterpriseAgentAccessPackage.ps1`，但密码参数必须使用 `SecureString` 对象，禁止把
@@ -290,43 +289,26 @@ cd 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
 
 ## 7. 安装为 Windows 服务
 
-本项目不下载、不捆绑 WinSW。先从批准渠道准备 WinSW x64 可执行文件并核对其官方
-SHA-256。正常流程会在导入配置后自动打开服务安装；需要重试时点击向导左下角
-“仅安装或修复正式服务…”，
-再按窗口提示手工输入介质外 WinSW SHA-256 和 Agent runtime 签名者 SHA-1 指纹。该入口
-可以独立重开，不需要重复导入接入包。
-
-若已安装介质分类为 `unsigned-internal-release`，同一个向导会显示醒目的无发布者签名
-警告，并把“签名者 SHA-1”输入框自动改为“Agent 发行清单 SHA-256”。该 64 位值必须来自
-安装介质之外的审批记录，不能把窗口现场计算值或包内 manifest 当作独立批准值。向导仍会
-强制立即启动、绑定实例健康检查、生产模式和 provisioning-managed 策略。
+正式 Agent Setup 内置固定的 WinSW v2.12.0 x64，并在构建、安装和服务注册前分别按
+Agent 子发行清单校验。正常流程会在导入配置后自动打开服务安装；需要重试时点击向导
+左下角“已有实例：安装或修复服务…”。不需要选择 WinSW、输入 WinSW SHA、签名者指纹或
+Agent 子发行清单 SHA。向导仍强制立即启动、绑定实例健康检查、生产模式和
+provisioning-managed 策略。
 
 以下 PowerShell 仅作为管理员高级自动化入口：
 
 ```powershell
-$WinSW = 'C:\ApprovedTools\WinSW-x64.exe'
-$ExpectedHash = '<从已批准发布清单抄录的64位SHA-256>'
-$ApprovedSignerThumbprint = Read-Host '再次抄录线下审批材料中的 Agent 签名证书指纹'
-
 .\Install-EnterpriseAgentService.ps1 `
   -InstanceName qinyuan-001 `
-  -WinSWPath $WinSW `
-  -WinSWExpectedSha256 $ExpectedHash `
-  -ApprovedSignerThumbprint $ApprovedSignerThumbprint `
   -Start
 ```
 
 无 Authenticode 的受控内网候选版使用另一组互斥参数：
 
 ```powershell
-$ReleaseManifestSha256 = Read-Host '抄录介质外审批记录中的 Agent 子发行清单 SHA-256'
-
 .\Install-EnterpriseAgentService.ps1 `
   -InstanceName qinyuan-001 `
-  -WinSWPath $WinSW `
-  -WinSWExpectedSha256 $ExpectedHash `
   -AllowUnsignedInternalRelease `
-  -ExpectedReleaseManifestSha256 $ReleaseManifestSha256 `
   -Start
 ```
 
@@ -335,8 +317,7 @@ Authenticode 状态为 `NotSigned` 的主程序，并在配置预检后、写入
 完整 standalone 目录与受信子发行清单。摘要不匹配、目录存在新增/缺失/篡改文件、带
 无效/未知签名、普通测试包或缺少生产配置都会 fail-close。
 
-生产变更单中应填写预先从可信渠道获得的散列值，不应把对当前未知文件现场计算的值当成
-供应链校验。服务名为 `MineGuardEnterpriseAgent-qinyuan-001`，使用唯一虚拟服务账号
+服务名为 `MineGuardEnterpriseAgent-qinyuan-001`，使用唯一虚拟服务账号
 `NT SERVICE\MineGuardEnterpriseAgent-qinyuan-001`；安装器显式执行
 `sc.exe sidtype ... unrestricted`，再复核 SCM `StartName`、注册表 `ServiceSidType=1`、
 账号翻译后的 SID 与 `sc.exe showsid` 结果完全一致，之后才允许启动。服务自动延迟启动；
@@ -345,7 +326,7 @@ stdout/stderr 按 10 MiB 滚动，保留 14 个文件。XML 只包含可执行�
 
 服务脚本只接受本机固定 NTFS 磁盘上的 `X:\...` 绝对路径，拒绝 UNC、盘符相对路径、
 NTFS ADS、链接、目录联接和挂载点；安装时会严格核对状态根所有权标记及 `instance.json`，
-并在复制 WinSW 前后都核对批准的 SHA-256。既有 wrapper 或同名服务不会被覆盖。wrapper
+并在复制 WinSW 前后都核对子发行清单中的 SHA-256。既有 wrapper 或同名服务不会被覆盖。wrapper
 与 XML 先在实例 `service` 目录中完整落盘后原子发布；注册或启动失败会撤销本次服务注册
 并清理本次文件，不留下可继续误用的半安装状态。
 

@@ -83,11 +83,17 @@ _PLACEHOLDER_TOKENS = frozenset(
         "unknown",
         "unclassified",
         "待填写",
+        "待填",
         "待配置",
+        "待补充",
         "未分类",
         "未知",
+        "占位",
+        "部署时",
         "示例",
+        "示例值",
         "测试",
+        "测试值",
     }
 )
 _CONTEXT_KEYS = frozenset(
