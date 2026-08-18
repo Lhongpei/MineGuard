@@ -839,6 +839,7 @@ $null = Add-ActionRow $createTable '生成这一家企业的专属接入包' {
         $import.public.Text = $create.public.Text
         $import.hash.Text = [string]$result.issuer_public_key_sha256
         $import.issuer_key.Text = $create.issuer_key_id.Text
+        $script:PendingGeneratedRegistration = $true
         Set-Status ((
                 "生成成功（{0}，版本 {1}；企业实例名 {6}）。`r`n" +
                 "交给企业的唯一文件：{2}`r`n文件 SHA-256：{3}`r`n" +
@@ -928,6 +929,54 @@ if (Test-Path -LiteralPath $installedSettingsPath -PathType Leaf) {
         Set-Status ('现有 settings.json 无法安全预填：' + $_.Exception.Message)
     }
 }
+
+function Restore-LatestGovernmentHandoff {
+    $registrationRoot = Join-Path $InstallRoot 'provisioning-registrations'
+    $activationRoot = Join-Path (Join-Path $InstallRoot `
+            'provisioning-activations') 'platform'
+    if (-not (Test-Path -LiteralPath $registrationRoot -PathType Container) -or
+        -not (Test-Path -LiteralPath $activationRoot -PathType Container)) {
+        return $null
+    }
+
+    $candidates = @()
+    foreach ($registrationDirectory in @(Get-ChildItem -LiteralPath `
+                $registrationRoot -Directory -Force -ErrorAction Stop)) {
+        $activationDirectory = Join-Path $activationRoot `
+            $registrationDirectory.Name
+        if (-not (Test-Path -LiteralPath $activationDirectory `
+                -PathType Container)) { continue }
+        $bundles = @(Get-ChildItem -LiteralPath $registrationDirectory.FullName `
+                -File -Force -Filter '*.mgreg' -ErrorAction Stop)
+        $activations = @(Get-ChildItem -LiteralPath $activationDirectory `
+                -File -Force -Filter '*.activation' -ErrorAction Stop)
+        if ($bundles.Count -ne 1 -or $activations.Count -ne 1) { continue }
+        $candidates += [pscustomobject]@{
+            leaf = $registrationDirectory.Name
+            bundle = $bundles[0].FullName
+            activation = $activations[0].FullName
+            written = $bundles[0].LastWriteTimeUtc
+        }
+    }
+    if ($candidates.Count -eq 0) { return $null }
+    $latest = @($candidates | Sort-Object written -Descending)[0]
+    Assert-GuiOrdinaryFile -Path $latest.bundle -Label '政府注册包'
+    Assert-GuiOrdinaryFile -Path $latest.activation -Label 'Platform 激活码' `
+        -MaximumBytes 4096
+    Assert-GuiOrdinaryFile -Path $import.public.Text -Label '签发公钥' `
+        -MaximumBytes 65536
+    $import.bundle.Text = $latest.bundle
+    $import.activation.Text = $latest.activation
+    $import.hash.Text = Get-GuiSpkiSha256FromPem -Path $import.public.Text
+    return $latest
+}
+
+$restoredGovernmentHandoff = $null
+try {
+    $restoredGovernmentHandoff = Restore-LatestGovernmentHandoff
+} catch {
+    Set-Status ('政府留存材料自动恢复失败：' + $_.Exception.Message)
+}
 $null = Add-ActionRow $importTable '验签、导入并完成正式配置' {
     $adminSecure = $null
     try {
@@ -991,6 +1040,7 @@ $null = Add-ActionRow $importTable '验签、导入并完成正式配置' {
         if ($manageService) { $parameters.ManageServiceLifecycle = $true }
         if ($null -ne $adminSecure) { $parameters.AdminPassword = $adminSecure }
         $result = & $coreScript @parameters
+        $script:PendingGeneratedRegistration = $false
         $serviceResultNote = if ($manageService) {
             '原先运行的 Platform 服务已自动恢复。'
         } else {
@@ -1012,6 +1062,21 @@ $null = Add-ActionRow $importTable '验签、导入并完成正式配置' {
     finally { if ($null -ne $adminSecure) { $adminSecure.Dispose() } }
 }
 
+$script:PendingGeneratedRegistration = $false
+$form.Add_FormClosing({
+    if (-not $script:PendingGeneratedRegistration) { return }
+    $decision = [Windows.Forms.MessageBox]::Show(
+        '企业接入包已经生成，但政府注册尚未完成。现在关闭不会删除政府留存材料；下次打开向导会自动找回。是否仍要关闭？',
+        '政府配置尚未完成',
+        [Windows.Forms.MessageBoxButtons]::YesNo,
+        [Windows.Forms.MessageBoxIcon]::Warning,
+        [Windows.Forms.MessageBoxDefaultButton]::Button2
+    )
+    if ($decision -ne [Windows.Forms.DialogResult]::Yes) {
+        $_.Cancel = $true
+        $tabs.SelectedTab = $importPage
+    }
+})
 $form.Add_FormClosed({
         foreach ($box in @(
                 $issuerPass, $issuerConfirm, $create.passphrase,
@@ -1021,6 +1086,10 @@ $form.Add_FormClosed({
 try {
     if ($script:ExistingFormalImportConfiguration) {
         Set-Status '已检测到正式 Platform：新增煤矿时将强制沿用现有 state、端口、管理员和签发信任，不会重配领导端。'
+    } elseif ($null -ne $restoredGovernmentHandoff) {
+        Set-Status ("已自动找回政府留存材料：{0}。请直接进入第 3 步，设置管理员密码并完成监管端配置。" -f `
+                $restoredGovernmentHandoff.leaf)
+        $tabs.SelectedTab = $importPage
     } else {
         Set-Status '请按 1 → 2 → 3 操作。已存在签发密钥时可直接从第 2 步开始。'
     }
