@@ -2785,6 +2785,9 @@ def test_workflow() -> None:
         in unsigned_definition
     )
     assert "needs: trusted-bootstrap-ps51-gate" in unsigned_definition
+    assert "github.event_name == 'push'" not in unsigned_definition, (
+        "push-triggered builds must produce INTERNAL-UNSIGNED artifacts, not test media"
+    )
     build_block, _, _ = named_step_block(
         unsigned_job, "Build, audit, compile, install, health-check and uninstall"
     )
@@ -2860,6 +2863,10 @@ def test_workflow() -> None:
     assert "github.ref == 'refs/heads/main'" in internal_job, (
         "the protected hosted release must not execute arbitrary branch refs"
     )
+    assert "github.event_name == 'push'" in internal_job
+    assert "contains(github.event.head_commit.message, '[windows-build]')" in (
+        internal_job
+    ), "a [windows-build] push must build and upload INTERNAL-UNSIGNED artifacts"
     for token in (
         "Materialize and validate externally approved hosted release inputs",
         "Parse release PowerShell with Windows PowerShell 5.1",

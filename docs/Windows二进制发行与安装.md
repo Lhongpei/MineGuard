@@ -542,7 +542,8 @@ GitHub Actions 的 [windows-release.yml](../.github/workflows/windows-release.ym
 - `internal-unsigned`：仅在 `main` 上运行，通过
   `windows-internal-unsigned-release` Environment 审批后，在新的 `windows-2022`
   GitHub-hosted runner 上重建并核对已批准输入、执行完整生命周期测试、为精确
-  四文件生成 artifact attestation，然后上传无证书内网正式版；
+  四文件生成 artifact attestation，然后上传无证书内网正式版；`main` 上提交消息含
+  `[windows-build]` 的 push 也固定进入此路径，不再生成 `UNSIGNED-TEST-ONLY`；
 - `signed`：仍只能在同时带 `self-hosted`、`windows`、`x64`、`signing`
   标签、预装证书/SignTool/Python/Inno 和已批准离线介质的隔离自托管 runner 上生成。
 
@@ -554,6 +555,7 @@ GitHub Actions 的 [windows-release.yml](../.github/workflows/windows-release.ym
 它们的已批准 SHA-256，以及证书 thumbprint 和时间戳 URL。
 
 只有 `internal-unsigned` 和 `signed` 两条正式路径会上传 artifact，且都不自动创建
-公开 Release。推送 `main` 或 tag 本身不会绕过手工发布选择和 Environment 保护。
+公开 Release。带 `[windows-build]` 的 `main` push 固定选择 `internal-unsigned`，但不会
+绕过 Environment 保护、受控输入与摘要核验。
 发布清单记录版本、实际/预期散列和外部锚核验结果；attestation 另行关联仓库、
 workflow、run 和 commit，不被包内文件当作自证材料。
