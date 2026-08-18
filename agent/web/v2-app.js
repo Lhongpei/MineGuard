@@ -1958,11 +1958,11 @@
 
   function auditEventLabel(eventType) {
     const labels = {
-      import_preview_created: "已生成导入预览",
-      import_preview_confirmed: "已确认导入预览",
-      submission_data_imported: "已导入十量数据",
-      submission_confirmed_and_queued: "已确认并进入报送队列",
-      submission_delivered: "监管平台已接收",
+      data_import_preview_created: "已生成生产数据导入预览",
+      data_import_preview_confirmed: "已确认生产数据导入预览",
+      production_data_imported: "已导入生产数据",
+      submission_confirmed_and_queued: "生产数据已确认并进入报送队列",
+      submission_delivered: "监管平台已接收生产数据",
       submission_review_saved: "已保存人工复核",
       submission_draft_discarded: "已放弃填报草稿",
       submission_quarantined: "异常来源已隔离",

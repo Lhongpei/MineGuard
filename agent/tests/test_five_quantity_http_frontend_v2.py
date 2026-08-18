@@ -180,7 +180,7 @@ def test_enterprise_v2_http_import_review_confirm_and_audit(tmp_path: Path) -> N
         assert status == 200
         assert audit["valid"] is True
         assert [event["event_type"] for event in audit["events"]] == [
-            "submission_data_imported",
+            "production_data_imported",
             "submission_confirmed_and_queued",
         ]
         assert [event["event_code"] for event in audit["events"]] == [
@@ -463,7 +463,7 @@ def test_csv_preview_mapping_profile_and_materialize_http_flow(
         preview_events = [
             item
             for item in audit["events"]
-            if item["event_type"].startswith("import_preview_")
+            if item["event_type"].startswith("data_import_preview_")
         ]
         assert preview_events
         assert all(

@@ -1265,7 +1265,7 @@ class EnterpriseAgentService:
                 "reachable": None,
                 "compatible": None,
                 "message": (
-                    "监管平台十量 V3 接口已配置；实际提交和风险拉取时进行签名连通性校验"
+                    "监管平台生产数据 V3 接口已配置；实际提交和风险拉取时进行签名连通性校验"
                 ),
             }
         if self.platform_client is None:

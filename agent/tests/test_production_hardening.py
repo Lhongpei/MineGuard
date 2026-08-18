@@ -281,7 +281,7 @@ def test_existing_single_person_unsent_queue_is_reopened_on_upgrade(
     assert hardened.store.due_outbox() == []
     assert any(
         item["event_type"]
-        == "five_quantity_legacy_queue_reopened_for_four_eyes"
+        == "submission_legacy_queue_reopened_for_four_eyes"
         for item in hardened.store.audit()["events"]
     )
     first_event_count = hardened.store.verify_audit()["event_count"]
@@ -349,7 +349,7 @@ def test_legacy_connector_draft_with_different_reviewer_is_reopened(
         event
         for event in hardened.store.audit()["events"]
         if event["event_type"]
-        == "five_quantity_legacy_queue_reopened_for_four_eyes"
+        == "submission_legacy_queue_reopened_for_four_eyes"
     ]
     assert len(migration_events) == 1
     assert migration_events[0]["details"]["reason"] == (
@@ -367,7 +367,7 @@ def test_legacy_connector_draft_with_different_reviewer_is_reopened(
             event
             for event in restarted.store.audit()["events"]
             if event["event_type"]
-            == "five_quantity_legacy_queue_reopened_for_four_eyes"
+            == "submission_legacy_queue_reopened_for_four_eyes"
         ]
     ) == 1
 

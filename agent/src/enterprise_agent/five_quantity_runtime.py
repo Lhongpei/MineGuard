@@ -63,9 +63,9 @@ _FQ_SCHEMA_VERSION = 4
 _FQ_SCHEMA_COMPONENT = "five_quantity_v2"
 
 _PUBLIC_AUDIT_EVENT_TYPES = {
-    "five_quantity_csv_preview_created": "import_preview_created",
-    "five_quantity_csv_preview_consumed": "import_preview_confirmed",
-    "five_quantity_imported": "submission_data_imported",
+    "five_quantity_csv_preview_created": "data_import_preview_created",
+    "five_quantity_csv_preview_consumed": "data_import_preview_confirmed",
+    "five_quantity_imported": "production_data_imported",
     "five_quantity_confirmed_and_queued": "submission_confirmed_and_queued",
     "five_quantity_outbox_delivered": "submission_delivered",
 }
