@@ -1710,7 +1710,6 @@ function Get-ManagedArtifactSpecifications {
     } else {
         @(
             'MineGuard 企业接入配置向导.lnk',
-            'MineGuard 模型授权导入向导.lnk',
             'MineGuard 企业端使用说明.lnk'
         )
     }
