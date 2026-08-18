@@ -1951,8 +1951,24 @@
     $("fqAuditIntegrity").className = payload.valid ? "is-ok" : "is-error";
     const events = [...(payload.events || [])].reverse();
     $("fqAuditEvents").innerHTML = events.length
-      ? events.map((event) => `<article><span class="fq-timeline-dot" aria-hidden="true"></span><div><strong>${escapeHtml(event.event_type)}</strong><p>${escapeHtml(formatTime(event.occurred_at))} · ${escapeHtml(event.actor)}</p><small>序号 ${event.sequence} · ${escapeHtml(shortHash(event.event_hash))}</small></div></article>`).join("")
+      ? events.map((event) => `<article><span class="fq-timeline-dot" aria-hidden="true"></span><div><strong>${escapeHtml(auditEventLabel(event.event_type))}</strong><p>${escapeHtml(formatTime(event.occurred_at))} · ${escapeHtml(event.actor)}</p><small>序号 ${event.sequence} · ${escapeHtml(shortHash(event.event_hash))}</small></div></article>`).join("")
       : '<p class="fq-empty">暂无留痕</p>';
     if (notify) message("身份、接口和留痕状态已刷新。", "success");
+  }
+
+  function auditEventLabel(eventType) {
+    const labels = {
+      import_preview_created: "已生成导入预览",
+      import_preview_confirmed: "已确认导入预览",
+      submission_data_imported: "已导入十量数据",
+      submission_confirmed_and_queued: "已确认并进入报送队列",
+      submission_delivered: "监管平台已接收",
+      submission_review_saved: "已保存人工复核",
+      submission_draft_discarded: "已放弃填报草稿",
+      submission_quarantined: "异常来源已隔离",
+      submission_machine_autofilled: "已生成自动填报草稿",
+      submission_machine_preflight_recomputed: "已重新执行自动预检",
+    };
+    return labels[eventType] || "系统留痕事件";
   }
 })();

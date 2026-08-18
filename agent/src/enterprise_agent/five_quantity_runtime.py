@@ -61,6 +61,23 @@ from .util import jcs_json, parse_aware_datetime, sha256_jcs, utc_now, utc_text
 ZERO_HASH = "0" * 64
 _FQ_SCHEMA_VERSION = 4
 _FQ_SCHEMA_COMPONENT = "five_quantity_v2"
+
+_PUBLIC_AUDIT_EVENT_TYPES = {
+    "five_quantity_csv_preview_created": "import_preview_created",
+    "five_quantity_csv_preview_consumed": "import_preview_confirmed",
+    "five_quantity_imported": "submission_data_imported",
+    "five_quantity_confirmed_and_queued": "submission_confirmed_and_queued",
+    "five_quantity_outbox_delivered": "submission_delivered",
+}
+
+
+def _public_audit_event_type(event_type: str) -> str:
+    mapped = _PUBLIC_AUDIT_EVENT_TYPES.get(event_type)
+    if mapped is not None:
+        return mapped
+    if event_type.startswith("five_quantity_"):
+        return "submission_" + event_type.removeprefix("five_quantity_")
+    return event_type
 LEGACY_SUBMISSION_CONTRACT = "five-quantity-submission-v2"
 CURRENT_SUBMISSION_CONTRACT = TEN_QUANTITY_SUBMISSION_CONTRACT
 _DRAFT_PAYLOAD_KEYS = {
@@ -4148,7 +4165,17 @@ class FiveQuantityStore:
         events = []
         for row in rows:
             details = self._loads(row["details_json"])
-            events.append({**dict(row), "details": details, "details_json": None})
+            stored = dict(row)
+            stored_event_type = str(stored["event_type"])
+            events.append(
+                {
+                    **stored,
+                    "event_code": stored_event_type,
+                    "event_type": _public_audit_event_type(stored_event_type),
+                    "details": details,
+                    "details_json": None,
+                }
+            )
         return {
             **integrity,
             "displayed_count": len(events),

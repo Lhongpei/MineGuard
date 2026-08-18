@@ -180,6 +180,10 @@ def test_enterprise_v2_http_import_review_confirm_and_audit(tmp_path: Path) -> N
         assert status == 200
         assert audit["valid"] is True
         assert [event["event_type"] for event in audit["events"]] == [
+            "submission_data_imported",
+            "submission_confirmed_and_queued",
+        ]
+        assert [event["event_code"] for event in audit["events"]] == [
             "five_quantity_imported",
             "five_quantity_confirmed_and_queued",
         ]
@@ -317,7 +321,8 @@ def test_enterprise_v2_http_import_review_confirm_and_audit(tmp_path: Path) -> N
         status, audit = request_json(connection, "GET", "/api/v2/audit")
         assert status == 200
         assert audit["valid"] is True
-        assert audit["events"][-1]["event_type"] == "five_quantity_draft_discarded"
+        assert audit["events"][-1]["event_type"] == "submission_draft_discarded"
+        assert audit["events"][-1]["event_code"] == "five_quantity_draft_discarded"
         assert audit["events"][-1]["details"]["reason"] == (
             "重复导入，保留原始记录供审计"
         )
@@ -458,7 +463,7 @@ def test_csv_preview_mapping_profile_and_materialize_http_flow(
         preview_events = [
             item
             for item in audit["events"]
-            if item["event_type"].startswith("five_quantity_csv_")
+            if item["event_type"].startswith("import_preview_")
         ]
         assert preview_events
         assert all(
