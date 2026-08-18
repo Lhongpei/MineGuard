@@ -779,14 +779,11 @@ function Assert-ServiceTargetsWrapper {
 function Remove-ServiceRegistrationChecked {
     param(
         [string]$ServiceId,
-        [string]$ExpectedWrapper,
-        [string]$ExpectedAccount
+        [string]$ExpectedWrapper
     )
     $Service = Get-RegisteredService -ServiceId $ServiceId
     if ($null -eq $Service) { return }
     Assert-ServiceTargetsWrapper -Service $Service -ServiceId $ServiceId -ExpectedWrapper $ExpectedWrapper
-    Assert-ServiceUsesDedicatedAccount -Service $Service -ServiceId $ServiceId `
-        -ExpectedAccount $ExpectedAccount
     if (-not ([string]$Service.State).Equals("Stopped", [StringComparison]::OrdinalIgnoreCase)) {
         Stop-Service -Name $ServiceId -Force -ErrorAction Stop
         $Deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -795,8 +792,6 @@ function Remove-ServiceRegistrationChecked {
             $Service = Get-RegisteredService -ServiceId $ServiceId
             if ($null -eq $Service) { return }
             Assert-ServiceTargetsWrapper -Service $Service -ServiceId $ServiceId -ExpectedWrapper $ExpectedWrapper
-            Assert-ServiceUsesDedicatedAccount -Service $Service -ServiceId $ServiceId `
-                -ExpectedAccount $ExpectedAccount
         } while (-not ([string]$Service.State).Equals("Stopped", [StringComparison]::OrdinalIgnoreCase) -and
             [DateTime]::UtcNow -lt $Deadline)
         if (-not ([string]$Service.State).Equals("Stopped", [StringComparison]::OrdinalIgnoreCase)) {
@@ -806,8 +801,6 @@ function Remove-ServiceRegistrationChecked {
     $Service = Get-RegisteredService -ServiceId $ServiceId
     if ($null -eq $Service) { return }
     Assert-ServiceTargetsWrapper -Service $Service -ServiceId $ServiceId -ExpectedWrapper $ExpectedWrapper
-    Assert-ServiceUsesDedicatedAccount -Service $Service -ServiceId $ServiceId `
-        -ExpectedAccount $ExpectedAccount
     $ScPath = Join-Path $env:SystemRoot "System32\sc.exe"
     & $ScPath delete $ServiceId | Out-Host
     if ($LASTEXITCODE -ne 0) {
@@ -1013,10 +1006,6 @@ if ($AllowUnsignedInternalRelease) {
         -ExpectedSha256 $ExpectedRuntimeSha256
 }
 
-if ($null -ne (Get-RegisteredService -ServiceId $ServiceId)) {
-    throw "Windows service already exists: $ServiceId"
-}
-
 $ServiceDirectory = Assert-SafeLocalFixedNtfsPath -Name "Instance service directory" `
     -PathValue (Join-Path $InstanceRoot "service")
 $LogDirectory = Assert-SafeLocalFixedNtfsPath -Name "Instance log directory" `
@@ -1031,9 +1020,19 @@ $WrapperExecutable = Assert-SafeLocalFixedNtfsPath -Name "WinSW instance wrapper
 $WrapperXml = Assert-SafeLocalFixedNtfsPath -Name "WinSW instance XML" -PathValue ($WrapperBase + ".xml")
 Assert-PathBelowRoot -Name "WinSW instance wrapper" -PathValue $WrapperExecutable -Root $ServiceDirectory
 Assert-PathBelowRoot -Name "WinSW instance XML" -PathValue $WrapperXml -Root $ServiceDirectory
+
+# "Install or repair" is idempotent for the service registration owned by this
+# exact instance wrapper.  Account validation is deliberately not required for
+# removal: a previous transaction may have created the right service/path but
+# failed while assigning its virtual account.
+$ExistingService = Get-RegisteredService -ServiceId $ServiceId
+if ($null -ne $ExistingService) {
+    Remove-ServiceRegistrationChecked -ServiceId $ServiceId `
+        -ExpectedWrapper $WrapperExecutable
+}
 foreach ($Target in @($WrapperExecutable, $WrapperXml)) {
     if (Test-Path -LiteralPath $Target) {
-        throw "Service installation refuses to overwrite an existing wrapper file: $Target"
+        Remove-Item -LiteralPath $Target -Force -ErrorAction Stop
     }
 }
 
@@ -1112,9 +1111,20 @@ try {
     }
     Assert-ServiceTargetsWrapper -Service $RegisteredService -ServiceId $ServiceId `
         -ExpectedWrapper $WrapperExecutable
+    # WinSW 2.12 can register a service while leaving its default LocalSystem
+    # identity when Windows does not accept a virtual account during wrapper
+    # installation.  Assign it explicitly through SCM after the service name
+    # exists, then verify the resulting Win32_Service StartName below.
+    $ScPath = Join-Path $env:SystemRoot "System32\sc.exe"
+    Invoke-NativeChecked -FilePath $ScPath -ArgumentList @(
+        "config", $ServiceId, "obj=", $ServiceIdentity.AccountName
+    )
+    $RegisteredService = Get-RegisteredService -ServiceId $ServiceId
+    if ($null -eq $RegisteredService) {
+        throw "Windows service disappeared while assigning its virtual account: $ServiceId"
+    }
     Assert-ServiceUsesDedicatedAccount -Service $RegisteredService `
         -ServiceId $ServiceId -ExpectedAccount $ServiceIdentity.AccountName
-    $ScPath = Join-Path $env:SystemRoot "System32\sc.exe"
     Invoke-NativeChecked -FilePath $ScPath -ArgumentList @(
         "sidtype", $ServiceId, "unrestricted"
     )
@@ -1172,11 +1182,8 @@ catch {
         if ($null -ne $RollbackService) {
             Assert-ServiceTargetsWrapper -Service $RollbackService -ServiceId $ServiceId `
                 -ExpectedWrapper $WrapperExecutable
-            Assert-ServiceUsesDedicatedAccount -Service $RollbackService `
-                -ServiceId $ServiceId -ExpectedAccount $ServiceIdentity.AccountName
             Remove-ServiceRegistrationChecked -ServiceId $ServiceId `
-                -ExpectedWrapper $WrapperExecutable `
-                -ExpectedAccount $ServiceIdentity.AccountName
+                -ExpectedWrapper $WrapperExecutable
         }
     }
     catch {

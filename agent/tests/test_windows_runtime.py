@@ -706,10 +706,8 @@ def test_windows_service_lifecycle_is_path_bound_and_transactional() -> None:
     assert "Get-FileHash -LiteralPath $WrapperExecutable" in installer
     assert "FileMode]::CreateNew" in installer
     assert "$Stream.Flush($true)" in installer
-    assert (
-        "Service installation refuses to overwrite an existing wrapper file"
-        in installer
-    )
+    assert "Remove-Item -LiteralPath $Target -Force -ErrorAction Stop" in installer
+    assert "Remove-ServiceRegistrationChecked -ServiceId $ServiceId" in installer
     assert (
         "Move-Item -LiteralPath $TemporaryWrapper -Destination $WrapperExecutable"
     ) in installer
@@ -862,6 +860,7 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     )
 
     assert '"sidtype", $ServiceId, "unrestricted"' in service
+    assert '"config", $ServiceId, "obj=", $ServiceIdentity.AccountName' in service
     assert '"__SERVICE_ACCOUNT__"' in service
     assert "Assert-EARegisteredServiceIdentity" in service
     assert "Set-EAInstanceCanonicalAcl -Context $SharedContext" in service
