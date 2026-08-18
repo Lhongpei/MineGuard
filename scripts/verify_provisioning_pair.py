@@ -9,21 +9,14 @@ that the independently implemented Agent can consume the matching ``mgprov``.
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime, timedelta
-import hashlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
-
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.x509.oid import NameOID
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PLATFORM_SOURCE = REPOSITORY_ROOT / "platform" / "src"
@@ -74,8 +67,7 @@ def _run_json(
         input=input_text,
         text=True,
         encoding="utf-8",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=60,
         check=False,
     )
@@ -104,28 +96,6 @@ def _utc_text(value: datetime) -> str:
     )
 
 
-def _write_ca(path: Path) -> None:
-    private = Ed25519PrivateKey.generate()
-    now = datetime.now(UTC)
-    name = x509.Name(
-        [x509.NameAttribute(NameOID.COMMON_NAME, "MineGuard Acceptance CA")]
-    )
-    certificate = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(private.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - timedelta(days=1))
-        .not_valid_after(now + timedelta(days=30))
-        .add_extension(
-            x509.BasicConstraints(ca=True, path_length=None), critical=True
-        )
-        .sign(private, algorithm=None)
-    )
-    path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
-
-
 def _password_record(agent_python: str, password: str) -> dict[str, Any]:
     return _run_json(
         python=agent_python,
@@ -142,24 +112,24 @@ def _password_record(agent_python: str, password: str) -> dict[str, Any]:
 
 
 def _users(agent_python: str) -> str:
-    preparer = _password_record(agent_python, "Acceptance!Prepare2026")
-    reviewer = _password_record(agent_python, "Acceptance!Review2026")
+    business_admin = _password_record(agent_python, "Acceptance!Business2026")
+    api_admin = _password_record(agent_python, "Acceptance!ApiAdmin2026")
     document = [
         {
-            "actor_id": "acceptance-preparer",
-            "name": "验收经办人员",
-            "role": "企业经办人",
-            "password_hash": preparer["password_hash"],
-            "permissions": ["read", "write"],
+            "actor_id": "acceptance-business-admin",
+            "name": "验收企业管理员",
+            "role": "企业管理员",
+            "password_hash": business_admin["password_hash"],
+            "permissions": ["read", "write", "confirm", "submit"],
             "must_change_password": False,
             "credential_provenance": "production_hash_command",
         },
         {
-            "actor_id": "acceptance-reviewer",
-            "name": "验收复核人员",
-            "role": "企业复核负责人",
-            "password_hash": reviewer["password_hash"],
-            "permissions": ["read", "confirm", "submit"],
+            "actor_id": "api_admin",
+            "name": "API 配置管理员",
+            "role": "API 配置管理员",
+            "password_hash": api_admin["password_hash"],
+            "permissions": ["model_api_admin"],
             "must_change_password": False,
             "credential_provenance": "production_hash_command",
         },
@@ -200,9 +170,6 @@ def verify(platform_python: str, agent_python: str) -> dict[str, Any]:
         if len(fingerprint) != 64:
             raise AcceptanceError("Platform returned an invalid SPKI fingerprint")
 
-        ca_path = root / "platform-ca.pem"
-        _write_ca(ca_path)
-        ca_sha256 = hashlib.sha256(ca_path.read_bytes()).hexdigest()
         profile = {
             "profile_version": 1,
             "expires_at": _utc_text(datetime.now(UTC) + timedelta(days=7)),
@@ -223,9 +190,7 @@ def verify(platform_python: str, agent_python: str) -> dict[str, Any]:
                 "operating_regime": "normal-production",
             },
             "agent": {
-                "public_origin": "https://agent-acceptance.mine.internal/",
-                "platform_base_url": "https://mineguard.qinyuan.gov.cn/",
-                "platform_ca_bundle": str(ca_path),
+                "platform_base_url": "https://mineguard.qinyuan.gov.cn",
                 "reporting_timezone": "Asia/Shanghai",
             },
             "platform_identity": {
@@ -278,8 +243,7 @@ def verify(platform_python: str, agent_python: str) -> dict[str, Any]:
 
         expected_parent = {
             "agent_bundle": enterprise_delivery,
-            "enterprise_handover_manifest": enterprise_delivery,
-            "issuer_public_key_file": enterprise_delivery,
+            "issuer_public_key_file": government_registration,
             "platform_registration_bundle": government_registration,
             "provisioning_manifest": government_registration,
             "agent_activation_file": enterprise_activation,
@@ -298,21 +262,19 @@ def verify(platform_python: str, agent_python: str) -> dict[str, Any]:
             for marker in ("activation", "hmac_secret", "ciphertext")
         ):
             raise AcceptanceError("Non-secret handover manifest exposes secret material")
-        enterprise_manifest = json.loads(
-            Path(str(pair["enterprise_handover_manifest"])).read_text(
-                encoding="utf-8"
-            )
+        enterprise_package = json.loads(
+            Path(str(pair["agent_bundle"])).read_text(encoding="utf-8")
         )
-        serialized_enterprise_manifest = json.dumps(
-            enterprise_manifest, ensure_ascii=False
-        ).casefold()
-        if any(
-            marker in serialized_enterprise_manifest
-            for marker in ("activation", "hmac_secret", "ciphertext", ".mgreg")
+        if (
+            enterprise_package.get("format")
+            != "mineguard-enterprise-access-package-v1"
         ):
-            raise AcceptanceError(
-                "Enterprise handover manifest exposes government or secret material"
-            )
+            raise AcceptanceError("Enterprise package is not the simplified access file")
+        serialized_enterprise_package = json.dumps(
+            enterprise_package, ensure_ascii=False
+        ).casefold()
+        if ".mgreg" in serialized_enterprise_package:
+            raise AcceptanceError("Enterprise package exposes government registration media")
 
         clients = root / "clients.json"
         registration = _run_json(
@@ -388,18 +350,6 @@ def verify(platform_python: str, agent_python: str) -> dict[str, Any]:
                 "provision-import",
                 "--bundle",
                 str(pair["agent_bundle"]),
-                "--activation-code-file",
-                str(pair["agent_activation_file"]),
-                "--issuer-public-key",
-                str(public_key),
-                "--expected-public-key-sha256",
-                fingerprint,
-                "--expected-issuer-key-id",
-                ISSUER_KEY_ID,
-                "--ca-source",
-                str(ca_path),
-                "--expected-ca-sha256",
-                ca_sha256,
                 "--base-env",
                 str(base_env),
                 "--output-env",
@@ -446,7 +396,7 @@ def verify(platform_python: str, agent_python: str) -> dict[str, Any]:
             ],
             extra_environment={
                 "MINEGUARD_SERVICE_PRODUCTION_MODE": "true",
-                "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED": "true",
+                "MINEGUARD_SERVICE_FOUR_EYES_REQUIRED": "false",
                 "MINEGUARD_SERVICE_PROVISIONING_MANAGED_REQUIRED": "true",
             },
         )
