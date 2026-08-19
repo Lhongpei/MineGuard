@@ -373,6 +373,8 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         "'config-check', '--clients-file', $clientsFile"
     )
     assert managed_probe_environment < managed_registry_probe
+    assert "$registryProbeFailure" in start
+    assert "[Environment]::NewLine + $registryProbeFailure" in start
     bootstrap_command = start.index("'bootstrap-admin'")
     password_file_argument = start.index("'--password-file', $bootstrapSecret")
     bootstrap_file_absent = start.index(

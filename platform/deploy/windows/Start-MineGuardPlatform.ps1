@@ -550,7 +550,14 @@ if (-not [string]::IsNullOrWhiteSpace($clientsFile)) {
         )
     $registryProbeText = & $runtime.filePath @registryProbeArguments
     if ($LASTEXITCODE -ne 0) {
-        throw '煤矿客户端注册表无法通过短生命周期只读核验。'
+        $registryProbeFailure = ([string]($registryProbeText | Out-String)).Trim()
+        if ([string]::IsNullOrWhiteSpace($registryProbeFailure)) {
+            throw '煤矿客户端注册表无法通过短生命周期只读核验。'
+        }
+        throw (
+            '煤矿客户端注册表无法通过短生命周期只读核验：' +
+            [Environment]::NewLine + $registryProbeFailure
+        )
     }
     try {
         $registryProbe = $registryProbeText | Out-String | ConvertFrom-Json
