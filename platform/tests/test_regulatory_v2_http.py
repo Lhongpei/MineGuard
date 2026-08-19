@@ -77,6 +77,66 @@ def _seed_ready_production_admin(path: Path) -> None:
         auth.bootstrap_admin("ready-admin", "Ready-Admin-Password-2026!")
 
 
+def test_registered_mine_without_submission_has_empty_detail(tmp_path: Path) -> None:
+    client = _minimal_exchange_client()
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "empty-detail.db",
+        auth_database_path=tmp_path / "empty-detail-auth.db",
+        auth_required=False,
+        clients={client.sender_id: client},
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        connection.request("GET", f"/v2/regulatory/mines/{client.mine_id}")
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload["mine"] == {
+            "mine_id": client.mine_id,
+            "mine_name": client.mine_name,
+            "status": "not_reported",
+            "data_as_of": None,
+        }
+        assert payload["latest_submission"]["data_as_of"] is None
+        assert payload["daily_series"] == []
+        assert payload["findings"] == []
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_idle_keep_alive_timeout_is_not_logged_as_server_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    server = create_server(
+        "127.0.0.1",
+        0,
+        database_path=tmp_path / "idle-timeout.db",
+        auth_database_path=tmp_path / "idle-timeout-auth.db",
+        auth_required=False,
+        clients={},
+        request_io_timeout_seconds=0.1,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    idle_socket = socket.create_connection(("127.0.0.1", server.server_port), timeout=2)
+    try:
+        assert thread.is_alive()
+        Event().wait(0.25)
+    finally:
+        idle_socket.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+    assert "Request timed out" not in capsys.readouterr().err
+
+
 def test_production_server_boundary_rejects_insecure_or_incomplete_setup(
     tmp_path: Path,
 ) -> None:

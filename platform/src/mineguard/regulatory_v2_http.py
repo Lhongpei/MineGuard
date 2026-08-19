@@ -762,8 +762,17 @@ class RegulatoryV2HTTPServer(ThreadingHTTPServer):
         error = sys.exc_info()[1]
         if isinstance(
             error,
-            (BrokenPipeError, ConnectionAbortedError, ConnectionResetError),
+            (
+                BrokenPipeError,
+                ConnectionAbortedError,
+                ConnectionResetError,
+                TimeoutError,
+            ),
         ):
+            # An idle HTTP/1.1 keep-alive socket reaches the configured request
+            # I/O timeout when the browser has nothing more to send.  Closing
+            # that socket is expected lifecycle management, not a service
+            # failure, so do not emit socketserver's alarming traceback line.
             return
         super().handle_error(request, client_address)
 
@@ -778,6 +787,17 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         super().log_message(format, *args)
+
+    def log_error(self, format: str, *args: object) -> None:
+        # BaseHTTPRequestHandler reports an idle keep-alive expiry through its
+        # error logger even though it simply closes the inactive connection.
+        if (
+            format == "Request timed out: %r"
+            and args
+            and isinstance(args[0], TimeoutError)
+        ):
+            return
+        super().log_error(format, *args)
 
     def do_GET(self) -> None:  # noqa: N802
         self._tracked_request(lambda: self._guard(self._dispatch_get))
@@ -2717,6 +2737,55 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         visible = self._visible_mines(principal)
         if visible is not None and mine_id not in visible:
             raise RegulatoryV2NotFoundError("mine is outside principal scope")
+        registered_client = next(
+            (client for client in self.server.clients.values() if client.mine_id == mine_id),
+            None,
+        )
+        if registered_client is not None and not any(
+            item.mine_id == mine_id for item in self.server.store.list_mine_overviews()
+        ):
+            # The mine list intentionally includes provisioned clients before
+            # their first submission.  Its detail endpoint must describe the
+            # same valid "not reported" state instead of returning a confusing
+            # 404 when an operator opens that row.
+            return {
+                "mine": {
+                    "mine_id": mine_id,
+                    "mine_name": registered_client.mine_name or mine_id,
+                    "status": "not_reported",
+                    "data_as_of": None,
+                },
+                "latest_submission": {
+                    "contract_version": None,
+                    "quantity_scope": None,
+                    "report_month": "",
+                    "data_as_of": None,
+                    "source_disclosure": self._submission_source_disclosure(mine_id, ""),
+                },
+                "latest_analysis": {
+                    "status": None,
+                    "algorithm_version": None,
+                    "configuration_sha256": None,
+                    "solver_status": None,
+                    "temporal_status": None,
+                    "peer_sample_count": 0,
+                    "baseline_eligible": None,
+                    "baseline_reference_candidate": None,
+                    "baseline_rule_version": None,
+                },
+                "response_summary": {
+                    "open": 0,
+                    "delivered": 0,
+                    "replied": 0,
+                    "last_response_at": None,
+                },
+                "daily_series": [],
+                "current_period_series": [],
+                "findings": [],
+                "current_findings": [],
+                "responses": [],
+                "timeline": [],
+            }
         detail = self.server.store.mine_detail_projection(mine_id, limit=200)
         report = detail.analysis_reports[0] if detail.analysis_reports else None
         latest_run = detail.runs[0] if detail.runs else {}
