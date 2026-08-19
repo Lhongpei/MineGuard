@@ -366,6 +366,13 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
     assert "'--state-directory', $stateDirectory, '--production'" in start
     assert "'--auth-database', $authDatabase, '--production'" in start
     assert "-isnot [bool]" in start
+    managed_probe_environment = start.index(
+        "$env:MINEGUARD_PROVISIONING_MANAGED_REQUIRED = 'true'"
+    )
+    managed_registry_probe = start.index(
+        "'config-check', '--clients-file', $clientsFile"
+    )
+    assert managed_probe_environment < managed_registry_probe
     bootstrap_command = start.index("'bootstrap-admin'")
     password_file_argument = start.index("'--password-file', $bootstrapSecret")
     bootstrap_file_absent = start.index(

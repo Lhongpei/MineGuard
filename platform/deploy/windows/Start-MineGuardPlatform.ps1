@@ -501,6 +501,39 @@ foreach ($environmentEntry in $inheritedMineGuardEnvironment) {
 }
 $inheritedMineGuardEnvironment = $null
 
+if ($managedProvisioningRequired) {
+    $provisioningTrustedPublicKeyFile = Get-SafeFixedNtfsPath `
+        -Value $provisioningTrustedPublicKeyFile -Label '签发信任公钥'
+    $expectedTrustPath = Get-SafeFixedNtfsPath `
+        -Value (Join-Path $configDirectory 'provisioning-issuer-public.pem') `
+        -Label '固定签发信任公钥路径'
+    if (-not $provisioningTrustedPublicKeyFile.Equals(
+            $expectedTrustPath, [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $provisioningTrustedPublicKeyFile `
+            -PathType Leaf)) {
+        throw '受管签发公钥必须是 config\provisioning-issuer-public.pem 普通文件。'
+    }
+    $trustItem = Get-Item -LiteralPath $provisioningTrustedPublicKeyFile -Force
+    if (($trustItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $trustItem.Length -le 0 -or $trustItem.Length -gt 65536) {
+        throw '受管签发公钥大小或文件类型无效。'
+    }
+    if ($provisioningExpectedPublicKeySha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $provisioningExpectedIssuerKeyId -notmatch `
+            '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$') {
+        throw '受管签发公钥 SPKI SHA-256 或 issuer key ID 格式无效。'
+    }
+    # The short-lived config-check below validates a managed clients.json too,
+    # so it needs the same trust boundary as the long-running process.
+    $env:MINEGUARD_PROVISIONING_MANAGED_REQUIRED = 'true'
+    $env:MINEGUARD_PROVISIONING_TRUSTED_PUBLIC_KEY_FILE = `
+        $provisioningTrustedPublicKeyFile
+    $env:MINEGUARD_PROVISIONING_EXPECTED_PUBLIC_KEY_SHA256 = `
+        $provisioningExpectedPublicKeySha256
+    $env:MINEGUARD_PROVISIONING_EXPECTED_ISSUER_KEY_ID = `
+        $provisioningExpectedIssuerKeyId
+}
+
 if (-not [string]::IsNullOrWhiteSpace($clientsFile)) {
     $clientsFile = Get-SafeFixedNtfsPath -Value $clientsFile -Label '煤矿客户端注册表'
     if (-not (Test-Path -LiteralPath $clientsFile -PathType Leaf)) {
@@ -528,37 +561,6 @@ if (-not [string]::IsNullOrWhiteSpace($clientsFile)) {
     if ($hasManagedRegistryLock -and -not $managedProvisioningRequired) {
         throw 'clients.json 已包含受管注册锁，但 settings.json 未启用强制受管校验；拒绝降级启动。'
     }
-}
-
-if ($managedProvisioningRequired) {
-    $provisioningTrustedPublicKeyFile = Get-SafeFixedNtfsPath `
-        -Value $provisioningTrustedPublicKeyFile -Label '签发信任公钥'
-    $expectedTrustPath = Get-SafeFixedNtfsPath `
-        -Value (Join-Path $configDirectory 'provisioning-issuer-public.pem') `
-        -Label '固定签发信任公钥路径'
-    if (-not $provisioningTrustedPublicKeyFile.Equals(
-            $expectedTrustPath, [StringComparison]::OrdinalIgnoreCase) -or
-        -not (Test-Path -LiteralPath $provisioningTrustedPublicKeyFile `
-            -PathType Leaf)) {
-        throw '受管签发公钥必须是 config\provisioning-issuer-public.pem 普通文件。'
-    }
-    $trustItem = Get-Item -LiteralPath $provisioningTrustedPublicKeyFile -Force
-    if (($trustItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        $trustItem.Length -le 0 -or $trustItem.Length -gt 65536) {
-        throw '受管签发公钥大小或文件类型无效。'
-    }
-    if ($provisioningExpectedPublicKeySha256 -cnotmatch '^[0-9a-f]{64}$' -or
-        $provisioningExpectedIssuerKeyId -notmatch `
-            '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$') {
-        throw '受管签发公钥 SPKI SHA-256 或 issuer key ID 格式无效。'
-    }
-    $env:MINEGUARD_PROVISIONING_MANAGED_REQUIRED = 'true'
-    $env:MINEGUARD_PROVISIONING_TRUSTED_PUBLIC_KEY_FILE = `
-        $provisioningTrustedPublicKeyFile
-    $env:MINEGUARD_PROVISIONING_EXPECTED_PUBLIC_KEY_SHA256 = `
-        $provisioningExpectedPublicKeySha256
-    $env:MINEGUARD_PROVISIONING_EXPECTED_ISSUER_KEY_ID = `
-        $provisioningExpectedIssuerKeyId
 }
 
 $env:MINEGUARD_V2_PLATFORM_SYSTEM_ID = [string](
