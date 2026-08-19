@@ -459,6 +459,10 @@ def test_platform_trusted_bootstrap_transaction_preserves_existing_acls() -> Non
     assert "-ExpectedServicePermission 'RX'" in read_only_validation
     assert read_only_validation.count("-ExpectedServicePermission 'M'") == 1
     assert "-AllowUsersReadExecute" in read_only_validation
+    assert "[switch] $AllowBootstrapPasswordDelete" in install
+    assert "bootstrap-admin-password.txt" in install
+    assert "FileSystemRights]::Delete" in install
+    assert "-AllowBootstrapPasswordDelete" in read_only_validation
 
     transaction_start = install.index("if ($binaryMode) {\n    $runtimeTarget")
     transaction_end = install.index("\n} else {\n    $venvPython", transaction_start)

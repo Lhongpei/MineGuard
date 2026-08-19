@@ -475,7 +475,8 @@ function Assert-MineGuardExistingTreeAclSafe {
         [Parameter(Mandatory = $true)] [string] $Path,
         [ValidateSet('RX', 'M')] [string] $ExpectedServicePermission,
         [switch] $AllowUsersReadExecute,
-        [switch] $AllowDedicatedServiceOwner
+        [switch] $AllowDedicatedServiceOwner,
+        [switch] $AllowBootstrapPasswordDelete
     )
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $fullRoot = [IO.Path]::GetFullPath($Path).TrimEnd('\')
@@ -508,6 +509,19 @@ function Assert-MineGuardExistingTreeAclSafe {
         $items += @(Get-ChildItem -LiteralPath $Path -Force -Recurse)
     }
     foreach ($item in $items) {
+        $expectedItemServiceRights = $expectedServiceRights
+        if ($AllowBootstrapPasswordDelete -and
+            -not $item.PSIsContainer -and
+            $item.FullName.Equals(
+                (Join-Path $fullRoot 'bootstrap-admin-password.txt'),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            # Before the first successful start this fixed one-time secret has
+            # Read+Delete, allowing the dedicated service SID to consume and
+            # remove it.  No other config file may use this exception.
+            $expectedItemServiceRights = `
+                [Security.AccessControl.FileSystemRights]::Read -bor `
+                [Security.AccessControl.FileSystemRights]::Delete
+        }
         $security = Get-Acl -LiteralPath $item.FullName
         if ($item.FullName.Equals(
                 $fullRoot, [StringComparison]::OrdinalIgnoreCase) -and
@@ -550,9 +564,9 @@ function Assert-MineGuardExistingTreeAclSafe {
             $usersEffectiveRights = $usersEffectiveRights -bor
                 $rule.FileSystemRights
         }
-        $serviceRightsWithSynchronize = $expectedServiceRights -bor
+        $serviceRightsWithSynchronize = $expectedItemServiceRights -bor
             [Security.AccessControl.FileSystemRights]::Synchronize
-        if ($serviceEffectiveRights -ne $expectedServiceRights -and
+        if ($serviceEffectiveRights -ne $expectedItemServiceRights -and
             $serviceEffectiveRights -ne $serviceRightsWithSynchronize) {
             throw "Platform 既有业务目录没有服务所需的精确权限：$($item.FullName)"
         }
@@ -961,7 +975,7 @@ if ($binaryMode -and $trustedBootstrapTransaction) {
     # candidate path; do not silently repair and thereby evade exact rollback.
     Assert-MineGuardExistingTreeAclSafe `
         -Path (Join-Path $InstallRoot 'config') `
-        -ExpectedServicePermission 'RX'
+        -ExpectedServicePermission 'RX' -AllowBootstrapPasswordDelete
     foreach ($existingTree in @(
             (Join-Path $InstallRoot 'state'),
             (Join-Path $InstallRoot 'backups'),
