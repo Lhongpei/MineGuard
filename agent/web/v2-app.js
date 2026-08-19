@@ -1727,9 +1727,14 @@
         });
         message("已完成企业确认，消息已可靠入队并会自动重试。", "success");
       } else if (action === "send-draft") {
-        await api(`/api/v2/drafts/${encodeURIComponent(state.currentDraft.draft_id)}/send-now`, { method: "POST", body: {} });
+        const delivery = await api(`/api/v2/drafts/${encodeURIComponent(state.currentDraft.draft_id)}/send-now`, { method: "POST", body: {} });
         state.currentDraft = await api(`/api/v2/drafts/${encodeURIComponent(state.currentDraft.draft_id)}`);
-        message("已执行一次发送；失败时仍会保留并后台重试。", "success");
+        const attempt = delivery.items && delivery.items[0];
+        if (!attempt) throw new Error("当前草稿没有可重试的待发消息，请刷新草稿状态。");
+        if (attempt.status !== "succeeded") {
+          throw new Error(attempt.error || "发送失败；消息已保留并会在后台继续重试。");
+        }
+        message("政府监管平台已接收并返回回执。", "success");
       } else if (action === "discard-draft") {
         await api(`/api/v2/drafts/${encodeURIComponent(state.currentDraft.draft_id)}`, {
           method: "DELETE",

@@ -1906,7 +1906,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 if not self._require(context, "submit"):
                     return True
                 self._body(optional=True)
-                result = runtime.process_outbox_once()
+                result = runtime.process_outbox_once(aggregate_id=draft_id)
                 self._json(HTTPStatus.OK, {"items": result, "count": len(result)})
                 return True
             self._method_not_allowed(

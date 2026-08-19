@@ -2608,14 +2608,22 @@ class FiveQuantityStore:
     ) -> list[dict[str, Any]]:
         with self.repository._read() as db:
             rows = db.execute(
-                "SELECT * FROM fq_imports "
-                + ("" if include_discarded else "WHERE status!='discarded' ")
-                + "ORDER BY created_at DESC LIMIT ?",
+                "SELECT imports.*, drafts.status AS draft_status "
+                "FROM fq_imports AS imports "
+                "LEFT JOIN fq_drafts AS drafts ON drafts.draft_id=imports.draft_id "
+                + (
+                    ""
+                    if include_discarded
+                    else "WHERE imports.status!='discarded' "
+                )
+                + "ORDER BY imports.created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [
             {
                 **dict(row),
+                "status": row["draft_status"] or row["status"],
+                "draft_status": None,
                 "suggestions": self._loads(row["suggestions_json"]),
                 "suggestions_json": None,
             }
@@ -3677,7 +3685,9 @@ class FiveQuantityStore:
             )
         return self.get_draft(draft_id)
 
-    def due_outbox(self, limit: int = 20) -> list[dict[str, Any]]:
+    def due_outbox(
+        self, limit: int = 20, *, aggregate_id: str | None = None
+    ) -> list[dict[str, Any]]:
         now = utc_text()
         with self.repository._transaction() as db:
             integrity = self._verify_audit_in_transaction(db)
@@ -3685,12 +3695,20 @@ class FiveQuantityStore:
                 raise ConflictError(
                     "报送审计链或审计锚点异常；发送队列已停止，未向监管端发送"
                 )
-            rows = db.execute(
-                """SELECT * FROM fq_outbox
-                   WHERE status IN ('queued','failed') AND next_attempt_at<=?
-                   ORDER BY created_at LIMIT ?""",
-                (now, limit),
-            ).fetchall()
+            if aggregate_id is None:
+                rows = db.execute(
+                    """SELECT * FROM fq_outbox
+                       WHERE status IN ('queued','failed') AND next_attempt_at<=?
+                       ORDER BY created_at LIMIT ?""",
+                    (now, limit),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """SELECT * FROM fq_outbox
+                       WHERE status IN ('queued','failed') AND aggregate_id=?
+                       ORDER BY created_at LIMIT ?""",
+                    (aggregate_id, limit),
+                ).fetchall()
             for row in rows:
                 failure = self._outbox_four_eyes_failure(db, row)
                 if failure is not None:
@@ -5272,11 +5290,18 @@ class FiveQuantityRuntime:
         )
         return self.store.get_draft(draft_id)
 
-    def process_outbox_once(self) -> list[dict[str, Any]]:
+    def process_outbox_once(
+        self, *, aggregate_id: str | None = None
+    ) -> list[dict[str, Any]]:
         if self.platform_client is None:
             return []
         results = []
-        for item in self.store.due_outbox():
+        pending = (
+            self.store.due_outbox()
+            if aggregate_id is None
+            else self.store.due_outbox(aggregate_id=aggregate_id)
+        )
+        for item in pending:
             message = item["body"]
             try:
                 self.store.assert_outbox_sendable(item["message_id"])
@@ -5353,7 +5378,10 @@ class FiveQuantityRuntime:
                 self.store.outbox_failed(
                     item["message_id"], error=str(error), attempts=item["attempts"]
                 )
-                results.append({"message_id": item["message_id"], "status": "failed"})
+                failure = {"message_id": item["message_id"], "status": "failed"}
+                if aggregate_id is not None:
+                    failure["error"] = str(error)
+                results.append(failure)
         return results
 
     def poll_analysis_once(self) -> dict[str, Any] | None:
