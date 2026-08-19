@@ -368,6 +368,7 @@ def test_binary_install_validates_then_atomically_switches_runtime() -> None:
         "winsw-integrity.json",
         "wrapperSha256",
         "'.example'",
+        "'.md'",
         "release-metadata",
         "未签名内部测试版",
         "deploy/windows/Open-MineGuardPlatformControlCenter.ps1",

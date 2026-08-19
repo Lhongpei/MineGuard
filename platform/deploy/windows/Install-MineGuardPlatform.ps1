@@ -1087,7 +1087,7 @@ if ($binaryMode) {
         Invoke-CheckedNative -Command $incomingExecutable -Arguments @('self-check') `
             -Label '验证待切换冻结运行时'
         foreach ($file in Get-ChildItem -LiteralPath $serviceSource -File) {
-            if ($file.Extension -in @('.ps1', '.xml', '.example')) {
+            if ($file.Extension -in @('.ps1', '.xml', '.example', '.md')) {
                 Copy-Item -LiteralPath $file.FullName -Destination $serviceIncoming
             }
         }
@@ -1620,7 +1620,7 @@ $serviceTarget = Join-Path $InstallRoot 'service'
 if (-not $binaryMode) {
     $serviceSource = $PSScriptRoot
     foreach ($file in Get-ChildItem -LiteralPath $serviceSource -File) {
-        if ($file.Extension -in @('.ps1', '.xml', '.example')) {
+        if ($file.Extension -in @('.ps1', '.xml', '.example', '.md')) {
             Copy-Item -LiteralPath $file.FullName -Destination $serviceTarget -Force
         }
     }
