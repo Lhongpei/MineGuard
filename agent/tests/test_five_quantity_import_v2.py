@@ -58,7 +58,8 @@ def test_csv_normalisation_never_invents_missing_values_or_trust_tiers() -> None
     )
     payload = imported["payload"]
     assert payload["mine"] == identity().mine
-    assert payload["reporting_month"] == "2026-07"
+    assert payload["period_start"] == "2026-07-01"
+    assert payload["period_end"] == "2026-07-02"
     assert len(payload["days"]) == 2
     assert (
         payload["days"][1]["reported_quantity"]["daily_total"]["production_t"]["value"]
@@ -80,6 +81,29 @@ def test_csv_normalisation_never_invents_missing_values_or_trust_tiers() -> None
         for shift in SHIFT_KEYS:
             measurements = day["reported_quantity"]["shifts"][shift]["measurements"]
             assert set(measurements) == set(METRICS)
+
+
+def test_production_batch_can_cross_months_and_skip_dates() -> None:
+    imported = import_five_quantity_bytes(
+        filename="跨月生产数据.csv",
+        content=(
+            b"date,daily_production_t\n"
+            b"2026-07-31,100\n"
+            b"2026-08-02,120\n"
+        ),
+        acquisition_mode="manual_import",
+        identity=identity(),
+        captured_at="2026-08-03T00:00:00Z",
+    )
+
+    payload = imported["payload"]
+    assert payload["period_start"] == "2026-07-31"
+    assert payload["period_end"] == "2026-08-02"
+    assert [day["date"] for day in payload["days"]] == [
+        "2026-07-31",
+        "2026-08-02",
+    ]
+    assert "reporting_month" not in payload
 
 
 def test_preferred_chinese_five_quantity_header_keeps_first_and_only_day() -> None:

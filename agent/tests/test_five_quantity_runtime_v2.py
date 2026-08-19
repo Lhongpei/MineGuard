@@ -177,7 +177,6 @@ class FakeGovernment:
             "submission_message_id": self.submission["message_id"],
             "submission_revision": 1,
             "mine": self.identity.mine,
-            "reporting_month": submission_payload["reporting_month"],
             "period_start": submission_payload["period_start"],
             "period_end": submission_payload["period_end"],
             "issued_at": utc_text(),

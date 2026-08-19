@@ -239,7 +239,7 @@ def test_enterprise_v2_http_import_review_confirm_and_audit(tmp_path: Path) -> N
         )
         assert status == 201
         second_draft = second_import["draft"]
-        status, duplicate_month = request_json(
+        status, second_confirmation = request_json(
             connection,
             "POST",
             f"/api/v2/drafts/{second_draft['draft_id']}/confirm",
@@ -247,15 +247,25 @@ def test_enterprise_v2_http_import_review_confirm_and_audit(tmp_path: Path) -> N
                 "expected_revision": second_draft["revision"],
                 "confirmer_name": "本机测试员",
                 "confirmer_role": "企业填报员",
-                "attestation": "同月第二份首报必须得到清晰冲突提示。",
+                "attestation": "同月不同日期范围作为独立生产批次报送。",
                 "accepted": True,
             },
         )
-        assert status == 409
-        assert "该月份" in duplicate_month["error"]["message"]
-        assert runtime.store.get_draft(second_draft["draft_id"])["status"] == (
-            "ready_review"
+        assert status == 202
+        assert second_confirmation["status"] == "queued"
+
+        discard_csv = csv.replace(b"2026-07-01", b"2026-07-03")
+        status, discard_import = request_json(
+            connection,
+            "POST",
+            "/api/v2/imports",
+            {
+                "filename": "discard-me.csv",
+                "content_base64": base64.b64encode(discard_csv).decode(),
+            },
         )
+        assert status == 201
+        second_draft = discard_import["draft"]
         status, discarded = request_json(
             connection,
             "DELETE",

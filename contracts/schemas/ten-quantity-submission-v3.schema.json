@@ -191,7 +191,6 @@
       "additionalProperties": false,
       "required": [
         "mine",
-        "reporting_month",
         "timezone",
         "period_start",
         "period_end",
@@ -206,7 +205,9 @@
         "mine": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/mine"},
         "reporting_month": {
           "type": "string",
-          "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])$"
+          "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])$",
+          "deprecated": true,
+          "description": "Optional aggregation hint only; it does not define batch identity or require full-month coverage."
         },
         "timezone": {
           "type": "string",

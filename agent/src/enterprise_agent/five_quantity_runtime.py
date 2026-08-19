@@ -82,7 +82,6 @@ LEGACY_SUBMISSION_CONTRACT = "five-quantity-submission-v2"
 CURRENT_SUBMISSION_CONTRACT = TEN_QUANTITY_SUBMISSION_CONTRACT
 _DRAFT_PAYLOAD_KEYS = {
     "mine",
-    "reporting_month",
     "timezone",
     "period_start",
     "period_end",
@@ -94,7 +93,6 @@ _DRAFT_PAYLOAD_KEYS = {
 _FINAL_PAYLOAD_KEYS = _DRAFT_PAYLOAD_KEYS | {"human_confirmation"}
 _CORRECTION_LOCKED_PAYLOAD_FIELDS = (
     "mine",
-    "reporting_month",
     "timezone",
     "period_start",
     "period_end",
@@ -234,6 +232,8 @@ def validate_five_quantity_payload(
     else:
         raise ValueError("报送 contract_version 不受支持")
     expected_keys = set(_FINAL_PAYLOAD_KEYS if confirmed else _DRAFT_PAYLOAD_KEYS)
+    if contract_version == CURRENT_SUBMISSION_CONTRACT and "reporting_month" in payload:
+        expected_keys.add("reporting_month")
     if "comparison_context" in payload:
         expected_keys.add("comparison_context")
     if set(payload) != expected_keys:
@@ -247,13 +247,6 @@ def validate_five_quantity_payload(
             raise ValueError("可选同类矿资料必须与本实例受控配置完全一致")
     elif identity.comparison_context is not None:
         raise ValueError("草稿缺少本实例已配置的可选同类矿资料")
-    reporting_month = payload["reporting_month"]
-    if (
-        not isinstance(reporting_month, str)
-        or len(reporting_month) != 7
-        or reporting_month[4] != "-"
-    ):
-        raise ValueError("reporting_month 格式非法")
     start = _iso_date(payload["period_start"], "period_start")
     end = _iso_date(payload["period_end"], "period_end")
     if end < start:
@@ -318,11 +311,8 @@ def validate_five_quantity_payload(
         if set(day) != {"date", "operating_state", "reported_quantity"}:
             raise ValueError(f"days[{day_index}] 字段非法")
         current_date = _iso_date(day["date"], f"days[{day_index}].date")
-        if (
-            not start <= current_date <= end
-            or current_date.strftime("%Y-%m") != reporting_month
-        ):
-            raise ValueError("日报日期超出月报期间")
+        if not start <= current_date <= end:
+            raise ValueError("生产数据日期超出声明批次范围")
         dates.append(current_date)
         if day["operating_state"] not in {
             "producing",
@@ -419,12 +409,6 @@ def validate_five_quantity_payload(
         raise ValueError("days 必须按日期升序且不得重复")
     if dates[0] != start or dates[-1] != end:
         raise ValueError("period_start/end 必须等于首尾日报日期")
-    expected_dates = [
-        start + timedelta(days=offset)
-        for offset in range((end - start).days + 1)
-    ]
-    if dates != expected_dates:
-        raise ValueError("days 必须无间断覆盖 period_start 至 period_end")
     processing = _object(payload["agent_processing"], "agent_processing")
     required_processing = {
         "normalization_performed",
@@ -531,11 +515,10 @@ def _merge_machine_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
     for payload in payloads[1:]:
         for field in (
             "mine",
-            "reporting_month",
             "timezone",
         ):
             if sha256_jcs(payload.get(field)) != sha256_jcs(result.get(field)):
-                raise ConflictError(f"draft_key 的十量身份、口径或月份冲突：{field}")
+                raise ConflictError(f"draft_key 的生产数据身份或口径冲突：{field}")
         for source in payload["sources"]:
             source_id = str(source["source_id"])
             previous_source = source_by_id.get(source_id)
@@ -617,30 +600,12 @@ def _v2_machine_preflight(
     mismatches: list[str] = []
     period_start = date.fromisoformat(str(payload["period_start"]))
     period_end = date.fromisoformat(str(payload["period_end"]))
-    expected_day_count = (period_end - period_start).days + 1
-    missing_day_count = max(0, expected_day_count - len(payload["days"]))
-    month_start = date.fromisoformat(f"{payload['reporting_month']}-01")
-    following_month = (month_start.replace(day=28) + timedelta(days=4)).replace(
-        day=1
-    )
-    month_end = following_month - timedelta(days=1)
-    leading_days = max(0, (period_start - month_start).days)
-    trailing_days = max(0, (month_end - period_end).days)
+    missing_day_count = 0
     calendar_coverage = {
-        "kind": (
-            "full_month"
-            if leading_days == 0 and trailing_days == 0
-            else "partial_window"
-        ),
-        "reporting_month": payload["reporting_month"],
-        "month_start": month_start.isoformat(),
-        "month_end": month_end.isoformat(),
+        "kind": "production_batch",
         "declared_period_start": period_start.isoformat(),
         "declared_period_end": period_end.isoformat(),
         "declared_day_count": len(payload["days"]),
-        "calendar_day_count": month_end.day,
-        "leading_days_outside_window": leading_days,
-        "trailing_days_outside_window": trailing_days,
     }
     is_ten_quantity = contract_version == CURRENT_SUBMISSION_CONTRACT
     if contract_version not in {
@@ -686,13 +651,6 @@ def _v2_machine_preflight(
     warnings: list[str] = []
     if missing_count:
         warnings.append(f"仍有 {missing_count} 个明确缺失或不可用测量值")
-    if missing_day_count:
-        warnings.append(f"统计期间缺少 {missing_day_count} 个完整日报日期")
-    if calendar_coverage["kind"] == "partial_window":
-        warnings.append(
-            "当前声明的是月内部分统计窗口，并非整月日历覆盖；"
-            "报送前请核对采集截止日"
-        )
     warnings.extend(mismatches[:19])
     return {
         "contract_version": (
@@ -2203,17 +2161,28 @@ class FiveQuantityStore:
                 confirmed=False,
                 contract_version=CURRENT_SUBMISSION_CONTRACT,
             )
-            reporting_month = str(merged["reporting_month"])
+            batch_span = f"{merged['period_start']}:{merged['period_end']}"
             expected_draft_key = (
-                f"draft:{identity.operator_id}:five-quantity:monthly:"
-                f"{reporting_month}"
+                f"draft:{identity.operator_id}:production-batch:{batch_span}"
             )
-            if draft_key != expected_draft_key:
+            legacy_month_key = (
+                f"draft:{identity.operator_id}:five-quantity:monthly:"
+                f"{merged.get('reporting_month')}"
+                if merged.get("reporting_month")
+                else None
+            )
+            if draft_key not in {expected_draft_key, legacy_month_key}:
                 raise ConflictError(
-                    "draft_key 必须等于当前经营主体和月份的权威报送草稿键"
+                    "draft_key 必须等于当前经营主体和数据范围的生产批次草稿键"
                 )
-            if binding is not None and binding["reporting_month"] != reporting_month:
-                raise ConflictError("draft_key 已绑定其他报送月份")
+            compatible_binding_scopes = {batch_span}
+            if merged.get("reporting_month"):
+                compatible_binding_scopes.add(str(merged["reporting_month"]))
+            if (
+                binding is not None
+                and binding["reporting_month"] not in compatible_binding_scopes
+            ):
+                raise ConflictError("draft_key 已绑定其他生产数据范围")
 
             content_row = db.execute(
                 "SELECT * FROM fq_imports WHERE content_sha256 = ?",
@@ -2290,7 +2259,7 @@ class FiveQuantityStore:
                     (
                         draft_import_id,
                         replacement_hash,
-                        f"machine-replacement-{reporting_month}.json",
+                        f"machine-replacement-{merged['period_start']}-{merged['period_end']}.json",
                         f"connector:replacement:{replacement_of}"[:1000],
                         draft_id,
                         jcs_json(imported["suggestions"]),
@@ -2337,7 +2306,7 @@ class FiveQuantityStore:
                             client_id,
                             draft_key,
                             draft_id,
-                            reporting_month,
+                            batch_span,
                             draft_revision,
                             sha256_jcs(merged),
                             now,
@@ -2354,7 +2323,7 @@ class FiveQuantityStore:
                         """,
                         (
                             draft_id,
-                            reporting_month,
+                            batch_span,
                             draft_revision,
                             sha256_jcs(merged),
                             client_id,
@@ -2447,7 +2416,7 @@ class FiveQuantityStore:
                 db,
                 client_id=client_id,
                 draft_key=draft_key,
-                reporting_month=reporting_month,
+                reporting_month=batch_span,
                 source_id=source_id,
                 source_system=str(ingestion["source_system"]),
                 source_required=source_required,
@@ -2547,7 +2516,7 @@ class FiveQuantityStore:
                     {
                         "discarded_draft_id": replacement_of,
                         "replacement_draft_id": draft_id,
-                        "reporting_month": reporting_month,
+                        "batch_span": batch_span,
                         "payload_sha256": payload_sha256,
                     },
                 )
@@ -2910,8 +2879,12 @@ class FiveQuantityStore:
                 confirmed=False,
                 contract_version=CURRENT_SUBMISSION_CONTRACT,
             )
-            if merged["reporting_month"] != binding["reporting_month"]:
-                raise ConflictError("机器来源月份与草稿绑定不一致")
+            batch_span = f"{merged['period_start']}:{merged['period_end']}"
+            compatible_binding_scopes = {batch_span}
+            if merged.get("reporting_month"):
+                compatible_binding_scopes.add(str(merged["reporting_month"]))
+            if binding["reporting_month"] not in compatible_binding_scopes:
+                raise ConflictError("机器来源数据范围与草稿绑定不一致")
             revision = expected_revision + 1
             payload_hash = sha256_jcs(merged)
             previous_hash = sha256_jcs(json.loads(draft["payload_json"]))
@@ -3185,7 +3158,7 @@ class FiveQuantityStore:
                 ).encode()
             ).hexdigest()
             filename = (
-                f"correction-{correction_payload['reporting_month']}"
+                f"correction-{correction_payload['period_start']}-{correction_payload['period_end']}"
                 f"-r{submission_revision}.json"
             )
             db.execute(
@@ -4211,7 +4184,6 @@ def _validate_analysis_report(report: dict[str, Any], identity: MineIdentity) ->
         "submission_message_id",
         "submission_revision",
         "mine",
-        "reporting_month",
         "period_start",
         "period_end",
         "issued_at",
@@ -4912,9 +4884,6 @@ class FiveQuantityRuntime:
         )
         if (
             coverage_as_of != imported["payload"]["period_end"]
-            or not coverage_as_of.startswith(
-                f"{imported['payload']['reporting_month']}-"
-            )
         ):
             raise ValueError(
                 "source.coverage_as_of 必须等于规范化快照的 period_end"
@@ -5248,8 +5217,8 @@ class FiveQuantityRuntime:
             contract_version=CURRENT_SUBMISSION_CONTRACT,
         )
         idempotency = (
-            f"tq3.{self.identity.mine_id}."
-            f"{payload['reporting_month']}.r{draft['submission_revision']}"
+            f"tq3.{self.identity.mine_id}.{draft['draft_id']}."
+            f"r{draft['submission_revision']}"
         )
         submission_revision = int(draft["submission_revision"])
         if submission_revision == 1:

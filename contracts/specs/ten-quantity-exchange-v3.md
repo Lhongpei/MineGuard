@@ -176,7 +176,7 @@ example-v3-exchange-secret-not-for-production
 
 | 示例 | payload SHA-256 | HMAC-SHA256 |
 |---|---|---|
-| `ten-quantity-submission-v3.json` | `9a5467b816bd4d971ecab3dd4331f49aecc483ab35358b95f08456f8a1765dd3` | `71381f3e912547d34f33b4748e513448c4c06cec1db6b1f58620202818a05d40` |
+| `ten-quantity-submission-v3.json` | `2e22623b7c9303cd3d26698533d8c26ac39d93e803b0fb1954a64ad7d9be885a` | `18703f0be96f66afaf0bf079ec89605eb3637fda6935332ef2bdde8a6ba98f89` |
 | `analysis-report-v3.json` | `0a2580eb0ece19c1de0f9b2b9ba0cdc268a3800523c76d7d01eeb735b348b6f0` | `0c81e6689535ac7e7e18ec305943dd2e7c0e5eabb77fc644e0ae18a9a38fcdf3` |
 
 `scripts/validate_contracts.py` 必须从示例 payload 重算摘要和签名，不得信任示例中
@@ -240,7 +240,8 @@ V2 报文不能通过补五个新业务量原地转换为 V3。缺失的新量�
 双方实现至少还要检查：
 
 - 认证客户端、信封、payload、路径资源、回执和报告始终属于同一矿井；
-- 报告日按时间升序、不得重复、处于声明期间且与 `reporting_month` 一致；
+- 报告日按时间升序、不得重复、处于声明期间；声明期间必须与首末数据日期一致，
+  允许批次跨月，也允许日期不连续；
 - 三个班次结束时刻严格晚于开始时刻，并符合矿井登记班制；
 - source ID 唯一，所有 `source_refs` 均存在；
 - 日报精确 11 项，班次必有前 7 项且不得出现目录外字段；

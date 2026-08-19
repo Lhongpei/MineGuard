@@ -362,8 +362,8 @@ async function main() {
     assert.match(evidence.textContent, /这份预检已经过期/);
     assert.match(evidence.textContent, /当前草稿为修订 4/);
     assert.equal(evidence.querySelector("img"), null, "rejection text must be escaped");
-    assert.match(document.getElementById("fqDraftDetail").textContent, /月内统计窗口（非整月）/);
-    assert.match(document.getElementById("fqDraftDetail").textContent, /当前不是整月覆盖/);
+    assert.match(document.getElementById("fqDraftDetail").textContent, /生产数据批次/);
+    assert.match(document.getElementById("fqDraftDetail").textContent, /1 个数据日期/);
     assert.match(document.getElementById("fqDraftDetail").textContent, /申报窗口内的完整内容/);
     assert(!document.getElementById("fqDraftDetail").textContent.includes("本月完整内容"));
     for (const forbidden of [

@@ -1809,8 +1809,6 @@ def _draft_payload(
     if len(dates) != len(set(dates)):
         raise ImportContentError("文件中存在重复日期，请人工处理后重新导入")
     months = {value[:7] for value in dates}
-    if len(months) != 1:
-        raise ImportContentError("一次导入只能形成一个月份的报表")
     processing_record = {
         "captured_at": captured_at,
         "suggestions": suggestions,
@@ -1839,7 +1837,6 @@ def _draft_payload(
         raise ImportContentError("模型未参与字段映射时不得声明模型输出摘要")
     result = {
         "mine": identity.mine,
-        "reporting_month": next(iter(months)),
         "timezone": identity.timezone,
         "period_start": min(dates),
         "period_end": max(dates),
@@ -1850,6 +1847,8 @@ def _draft_payload(
     }
     if identity.comparison_context is not None:
         result["comparison_context"] = identity.comparison_context
+    if len(months) == 1:
+        result["reporting_month"] = next(iter(months))
     return result
 
 

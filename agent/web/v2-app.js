@@ -159,21 +159,11 @@
   const statusText = (value) => STATUS[value] || value || "—";
   const metricLabel = (value) => METRIC_LABELS[value] || value || "未列明";
   const reportingWindow = (payload) => {
-    const month = String((payload && payload.reporting_month) || "");
-    const match = /^(\d{4})-(\d{2})$/.exec(month);
-    if (!match) return { fullMonth: false, label: "统计窗口" };
-    const year = Number(match[1]);
-    const monthNumber = Number(match[2]);
-    const lastDay = new Date(Date.UTC(year, monthNumber, 0))
-      .getUTCDate()
-      .toString()
-      .padStart(2, "0");
-    const fullMonth =
-      payload.period_start === `${month}-01` &&
-      payload.period_end === `${month}-${lastDay}`;
     return {
-      fullMonth,
-      label: fullMonth ? "整月月报" : "月内统计窗口（非整月）",
+      label: "生产数据批次",
+      dateRange: payload && payload.period_start === payload.period_end
+        ? payload.period_start
+        : `${payload.period_start} 至 ${payload.period_end}`,
     };
   };
   const can = (permission) =>
@@ -591,7 +581,7 @@
     $("fqMappingPreview").hidden = false;
     const monthText = state.uploadPreview.detected_months.length
       ? state.uploadPreview.detected_months.join("、")
-      : "月份待确认";
+      : "日期范围待确认";
     const dayText = state.uploadPreview.valid_day_count > 0
       ? ` · ${state.uploadPreview.valid_day_count} 个有效日期`
       : "";
@@ -1024,7 +1014,7 @@
           state.currentDraft && state.currentDraft.draft_id === draft.draft_id;
         const windowInfo = reportingWindow(draft.payload);
         return `<button class="fq-list-item ${selected ? "is-selected" : ""}" data-draft-id="${escapeHtml(draft.draft_id)}" type="button">
-          <span><strong>${escapeHtml(draft.payload.reporting_month)} · ${escapeHtml(windowInfo.label)}</strong><small>${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)}</small></span>
+          <span><strong>${escapeHtml(windowInfo.label)}</strong><small>${escapeHtml(windowInfo.dateRange)}</small></span>
           <span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span>
         </button>`;
       })
@@ -1557,12 +1547,11 @@
         ? "当前账号缺少确认或提交权限，可继续复核和保存。"
         : "确认后消息进入可靠发送队列；接收回执不代表监管认定正常。";
     target.innerHTML = `
-      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(draft.payload.mine.mine_name)}</p><h3>${escapeHtml(draft.payload.reporting_month)} 十量${escapeHtml(windowInfo.fullMonth ? "整月月报" : "月内窗口报表")}</h3><p>${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)} · ${escapeHtml(windowInfo.label)} · 修订 ${draft.revision}</p></div><span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span></div>
+      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(draft.payload.mine.mine_name)}</p><h3>生产数据批次</h3><p>${escapeHtml(windowInfo.dateRange)} · ${draft.payload.days.length} 个数据日期 · 草稿修订 ${draft.revision}</p></div><span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span></div>
       <div class="fq-summary-strip"><span><strong>${draft.payload.days.length}</strong>日报天数</span><span class="${receivedQuantityCount < 10 ? "is-warn" : "is-ok"}"><strong>${receivedQuantityCount}/10</strong>十量已到</span><span class="${missing ? "is-warn" : "is-ok"}"><strong>${missing}</strong>已接入字段缺失</span><span><strong>${draft.payload.sources.length}</strong>来源记录</span><span><strong>${draft.submission_revision}</strong>报送版本</span></div>
       ${receivedQuantityCount === 5 ? '<div class="fq-import-warning"><strong>当前是旧版 V2 五量数据：已到 5/10</strong><p>新增的开采量、销售量、运输量、洗煤量和开票量尚未接入；页面不会用历史比例、算法或 0 补齐。</p></div>' : receivedQuantityCount < 10 ? `<div class="fq-import-warning"><strong>十量尚未全部接入：已到 ${receivedQuantityCount}/10</strong><p>未接入项保持明确缺失，不会阻止查看旧报文，也不会由 Agent 猜测填补。</p></div>` : ""}
       ${reviewGate.required ? `<div class="fq-import-warning" role="status"><strong>四眼复核：${awaitingHumanPreparer ? "先由经办人接收核对" : currentIsLastEditor ? "待另一账号接手" : reviewActorMissing ? "经办人记录缺失" : "当前账号可独立复核"}</strong><p>${escapeHtml(reviewGate.message || "最后创建/编辑人不能确认或入发送队列。")}</p></div>` : ""}
       ${draft.predecessor ? `<div class="fq-import-warning" role="status"><strong>这是第 ${escapeHtml(draft.submission_revision)} 版正式更正草稿</strong><p>同一报送链继续编号；直接前序消息 ${escapeHtml(shortHash(draft.predecessor.message_id))} 及其签名摘要已锁定，保存本草稿不会覆盖历史报文。为避免修订链中断，更正草稿创建后不能放弃或删除，可暂存并在后续继续复核。</p></div>` : ""}
-      ${windowInfo.fullMonth ? "" : `<div class="fq-import-warning"><strong>当前不是整月覆盖</strong><p>本次申报窗口仅为 ${escapeHtml(draft.payload.period_start)} 至 ${escapeHtml(draft.payload.period_end)}。系统不会把窗口外日期算作已填报；确认前请核对这正是本次应申报范围。</p></div>`}
       ${importWarnings.length ? `<div class="fq-import-warning"><strong>导入映射需要人工核对</strong><ul>${importWarnings.slice(0, 20).map((item) => `<li>${escapeHtml(item.reason || "存在未明确的来源字段")}</li>`).join("")}</ul></div>` : ""}
       <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。每天先核对十量日报合计；只有需要时再展开三个班次，销售量、运输量、洗煤量和开票量不强制提供班次实值。</div>
       ${autofillEvidenceHtml(draft)}
@@ -1779,7 +1768,7 @@
         const payload = record.report.payload;
         const selected =
           state.currentRisk && state.currentRisk.report_id === record.report_id;
-        return `<button class="fq-list-item ${selected ? "is-selected" : ""}" data-report-id="${escapeHtml(record.report_id)}" type="button"><span><strong>${escapeHtml(payload.reporting_month)} · ${payload.outcome === "risk" ? "风险" : "数据不足"}</strong><small>${escapeHtml(payload.summary)}</small></span><span class="fq-status is-risk">${payload.findings.length} 项</span></button>`;
+        return `<button class="fq-list-item ${selected ? "is-selected" : ""}" data-report-id="${escapeHtml(record.report_id)}" type="button"><span><strong>${escapeHtml(payload.period_start === payload.period_end ? payload.period_start : `${payload.period_start} 至 ${payload.period_end}`)} · ${payload.outcome === "risk" ? "风险" : "数据不足"}</strong><small>${escapeHtml(payload.summary)}</small></span><span class="fq-status is-risk">${payload.findings.length} 项</span></button>`;
       })
       .join("");
   }
@@ -1833,7 +1822,7 @@
       ? state.messages.map((item) => `<div class="fq-chat-message is-${escapeHtml(item.role)}"><strong>${item.role === "assistant" ? "煤矿风险助手" : "企业人员"}</strong><p>${escapeHtml(item.content)}</p>${item.tools && item.tools.length ? `<small>只读工具：${escapeHtml(item.tools.join("、"))}</small>` : ""}</div>`).join("")
       : '<p class="fq-empty">可询问“为什么提示这个风险”“该核对哪些原始记录”等。</p>';
     target.innerHTML = `
-      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(payload.mine.mine_name)}</p><h3>${escapeHtml(payload.reporting_month)} 算法报告</h3><p>政府签发 ${escapeHtml(formatTime(payload.issued_at))} · 回复期限 ${escapeHtml(formatTime(payload.response_due_at))}</p></div><span class="fq-status is-risk">${payload.outcome === "risk" ? "需回复" : "数据不足"}</span></div>
+      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(payload.mine.mine_name)}</p><h3>生产数据分析报告</h3><p>数据范围 ${escapeHtml(payload.period_start === payload.period_end ? payload.period_start : `${payload.period_start} 至 ${payload.period_end}`)} · 政府签发 ${escapeHtml(formatTime(payload.issued_at))} · 回复期限 ${escapeHtml(formatTime(payload.response_due_at))}</p></div><span class="fq-status is-risk">${payload.outcome === "risk" ? "需回复" : "数据不足"}</span></div>
       <div class="fq-risk-summary"><strong>算法结论</strong><p>${escapeHtml(payload.summary)}</p><small>引擎 ${escapeHtml(payload.algorithm.engine_id)} ${escapeHtml(payload.algorithm.engine_version)}；模块：${escapeHtml(payload.algorithm.modules.join("、"))}</small></div>
       <div class="fq-findings">${findings}</div>
       <section class="fq-chat"><div class="fq-section-head"><div><h4>围绕本报告对话</h4><p>不能查新闻、闲聊或替企业编造原因。</p></div></div><div class="fq-chat-log" id="fqChatLog">${messages}</div><form id="fqChatForm" class="fq-chat-form"><textarea id="fqChatQuestion" rows="2" maxlength="2000" placeholder="例如：L1 求解器为什么把 7 月 31 日列入核对范围？" required></textarea><button class="button button-secondary" type="submit">询问</button></form></section>

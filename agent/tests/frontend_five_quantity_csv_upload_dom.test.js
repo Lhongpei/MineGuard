@@ -501,7 +501,7 @@ async function main() {
     assert.match(document.getElementById("fqGlobalMessage").textContent, /当前尚未报送/);
     assert.equal(document.getElementById("fqPanelReview").hidden, false);
     await waitFor(
-      () => /2026-07 十量/.test(document.getElementById("fqDraftDetail").textContent),
+      () => /2026-07-01 至 2026-07-02/.test(document.getElementById("fqDraftDetail").textContent),
       "created draft detail",
     );
     const detail = document.getElementById("fqDraftDetail");

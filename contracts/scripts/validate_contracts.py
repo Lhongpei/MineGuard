@@ -139,12 +139,12 @@ V2_FIVE_QUANTITY_GROUPS = {
 }
 EXPECTED_V3_VECTORS = {
     "ten-quantity-submission-v3.json": (
-        "9a5467b816bd4d971ecab3dd4331f49aecc483ab35358b95f08456f8a1765dd3",
-        "71381f3e912547d34f33b4748e513448c4c06cec1db6b1f58620202818a05d40",
+        "2e22623b7c9303cd3d26698533d8c26ac39d93e803b0fb1954a64ad7d9be885a",
+        "18703f0be96f66afaf0bf079ec89605eb3637fda6935332ef2bdde8a6ba98f89",
     ),
     "analysis-report-v3.json": (
-        "0a2580eb0ece19c1de0f9b2b9ba0cdc268a3800523c76d7d01eeb735b348b6f0",
-        "0c81e6689535ac7e7e18ec305943dd2e7c0e5eabb77fc644e0ae18a9a38fcdf3",
+        "1a4d5b433daa6ffaaa705e658b88a6929fbc56b75b3bbc972ba942d505f7df2c",
+        "a1ed980a381cabef728761ade76ac3a5956097f4f5e044d0e635ed69492c1ab2",
     ),
 }
 V3_EXAMPLE_SECRET = b"example-v3-exchange-secret-not-for-production"
@@ -232,10 +232,10 @@ V3_BUSINESS_SEMANTICS = {
     },
 }
 V3_EXPECTED_BODY_SHA256 = (
-    "4286f4e0bac39f090d3c3805f233a33de3f322d1c7cbcf5593438410fdd801e4"
+    "80391318cc19539f0f19f7ddb02b7964970cdeb0b9f8ee5a76ec6e2c682ce60b"
 )
 V3_EXPECTED_TRANSPORT_SIGNATURE = (
-    "8db2b067cbe5af7cabfe40cbb0887e42ec0384cbbac48cba3cab6e4ce11b7165"
+    "99bf92ec2ea53cb601c52699af8b0c8c0b5d67ad82c49a5261088ba092de0eb9"
 )
 V3_TRANSPORT_EXAMPLE_SECRET = b"example-v3-transport-secret-not-for-production"
 
@@ -1314,16 +1314,14 @@ def _check_v3_submission_semantics(submission: dict[str, Any]) -> None:
         raise ContractValidationError("V3 reporting period ends before it starts")
     days = payload["days"]
     day_values = [_parse_date(day["date"], "days[].date") for day in days]
-    expected_days = [
-        period_start + timedelta(days=offset)
-        for offset in range((period_end - period_start).days + 1)
-    ]
-    if day_values != expected_days:
+    if day_values != sorted(set(day_values)):
         raise ContractValidationError(
-            "V3 days must chronologically and contiguously cover the period"
+            "V3 days must be unique and chronologically ordered"
         )
-    if any(day.strftime("%Y-%m") != payload["reporting_month"] for day in day_values):
-        raise ContractValidationError("V3 day does not match reporting_month")
+    if day_values[0] != period_start or day_values[-1] != period_end:
+        raise ContractValidationError("V3 period must match the first and last day")
+    if any(day < period_start or day > period_end for day in day_values):
+        raise ContractValidationError("V3 day falls outside the declared period")
 
     sources = payload["sources"]
     source_ids = [source["source_id"] for source in sources]
@@ -1457,7 +1455,6 @@ def _check_v3_workflow_semantics(messages: dict[str, dict[str, Any]]) -> None:
         or report["causation_id"] != submission["message_id"]
         or report_payload["submission_message_id"] != submission["message_id"]
         or report_payload["submission_revision"] != submission["revision"]
-        or report_payload["reporting_month"] != submission["payload"]["reporting_month"]
         or report_payload["period_start"] != submission["payload"]["period_start"]
         or report_payload["period_end"] != submission["payload"]["period_end"]
     ):

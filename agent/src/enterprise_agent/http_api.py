@@ -768,13 +768,13 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
         runtime = getattr(self.server.service, "_five_quantity", None)
         if runtime is None:
             raise ValueError("十量 V3 正式填报运行时未启用")
-        expected_draft_key = (
+        legacy_month_key = (
             f"draft:{runtime.identity.operator_id}:five-quantity:monthly:"
             f"{payload['reporting_month']}"
         )
-        if payload["draft_key"] != expected_draft_key:
+        if payload["draft_key"] != legacy_month_key:
             raise ConnectorAuthorizationError(
-                "draft_key 不属于当前经营主体的权威十量月度范围"
+                "draft_key 不属于当前经营主体的机器来源健康范围"
             )
         if payload["coverage_as_of"] is not None:
             local_today = utc_now().astimezone(

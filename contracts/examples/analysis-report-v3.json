@@ -29,7 +29,6 @@
       "operator_id": "operator-qy-001",
       "operator_name": "示例一号煤业有限公司"
     },
-    "reporting_month": "2026-07",
     "period_start": "2026-07-31",
     "period_end": "2026-07-31",
     "issued_at": "2026-08-01T00:06:30Z",
@@ -38,7 +37,7 @@
       "engine_version": "3.2.0",
       "algorithm_run_id": "73333333-3333-4333-8333-333333333333",
       "config_sha256": "8181818181818181818181818181818181818181818181818181818181818181",
-      "input_snapshot_sha256": "9a5467b816bd4d971ecab3dd4331f49aecc483ab35358b95f08456f8a1765dd3",
+      "input_snapshot_sha256": "2e22623b7c9303cd3d26698533d8c26ac39d93e803b0fb1954a64ad7d9be885a",
       "own_history_snapshot_sha256": "8383838383838383838383838383838383838383838383838383838383838383",
       "peer_snapshot_sha256": "8484848484848484848484848484848484848484848484848484848484848484",
       "started_at": "2026-08-01T00:05:05Z",
@@ -115,7 +114,7 @@
     "key_id": "regulator-key-2026-02",
     "signed_at": "2026-08-01T00:06:30Z",
     "nonce": "VGVuUXVhbnRpdHlWZWN0b3IwMg",
-    "payload_sha256": "0a2580eb0ece19c1de0f9b2b9ba0cdc268a3800523c76d7d01eeb735b348b6f0",
-    "signature": "0c81e6689535ac7e7e18ec305943dd2e7c0e5eabb77fc644e0ae18a9a38fcdf3"
+    "payload_sha256": "1a4d5b433daa6ffaaa705e658b88a6929fbc56b75b3bbc972ba942d505f7df2c",
+    "signature": "a1ed980a381cabef728761ade76ac3a5956097f4f5e044d0e635ed69492c1ab2"
   }
 }

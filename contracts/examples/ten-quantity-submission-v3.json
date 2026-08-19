@@ -26,7 +26,6 @@
       "operator_id": "operator-qy-001",
       "operator_name": "示例一号煤业有限公司"
     },
-    "reporting_month": "2026-07",
     "timezone": "Asia/Shanghai",
     "period_start": "2026-07-31",
     "period_end": "2026-07-31",
@@ -155,7 +154,7 @@
     "key_id": "enterprise-key-2026-02",
     "signed_at": "2026-08-01T00:05:00Z",
     "nonce": "VGVuUXVhbnRpdHlWZWN0b3IwMQ",
-    "payload_sha256": "9a5467b816bd4d971ecab3dd4331f49aecc483ab35358b95f08456f8a1765dd3",
-    "signature": "71381f3e912547d34f33b4748e513448c4c06cec1db6b1f58620202818a05d40"
+    "payload_sha256": "2e22623b7c9303cd3d26698533d8c26ac39d93e803b0fb1954a64ad7d9be885a",
+    "signature": "18703f0be96f66afaf0bf079ec89605eb3637fda6935332ef2bdde8a6ba98f89"
   }
 }

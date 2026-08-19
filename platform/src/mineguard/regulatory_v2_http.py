@@ -1955,7 +1955,6 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             "submission_message_id": report.submission_id,
             "submission_revision": inbound["revision"],
             "mine": inbound["payload"]["mine"],
-            "reporting_month": inbound["payload"]["reporting_month"],
             "period_start": inbound["payload"]["period_start"],
             "period_end": inbound["payload"]["period_end"],
             "issued_at": _iso(report.issued_at),

@@ -287,14 +287,16 @@ def test_future_reporting_period_is_rejected_before_baseline_admission() -> None
         assert store.list_submissions() == []
 
 
-def test_one_mine_cannot_create_parallel_or_overlapping_monthly_roots() -> None:
+def test_one_mine_can_create_independent_batches_in_the_same_month() -> None:
     with RegulatoryV2Store(":memory:", now=lambda: NOW) as store:
         first = store.submit_and_analyze(
             _submission(str(uuid4()), start=date(2026, 1, 1))
         )
-        with pytest.raises(RegulatoryV2ConflictError, match="one root workflow"):
-            store.submit_and_analyze(_submission(str(uuid4()), start=date(2026, 1, 2)))
-        assert len(store.list_submissions(mine_id="mine-a")) == 1
+        second = store.submit_and_analyze(
+            _submission(str(uuid4()), start=date(2026, 1, 2))
+        )
+        assert len(store.list_submissions(mine_id="mine-a")) == 2
+        assert second.submission_id != first.submission_id
         assert store.get_submission_receipt(first.submission_id).run_id == first.run_id
 
 

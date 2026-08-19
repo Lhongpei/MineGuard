@@ -1272,13 +1272,7 @@ class RegulatoryV2Store:
                 self._connection.execute(
                     "ALTER TABLE v2_submissions ADD COLUMN root_workflow_id TEXT"
                 )
-            self._connection.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_one_monthly_root
-                ON v2_submissions(mine_id, reporting_month)
-                WHERE revision = 1 AND reporting_month IS NOT NULL
-                """
-            )
+            self._connection.execute("DROP INDEX IF EXISTS idx_v2_one_monthly_root")
             self._connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_v2_submission_workflow
@@ -1561,11 +1555,14 @@ class RegulatoryV2Store:
                 )
 
             predecessor = self._validate_revision(connection, submission)
-            reporting_month = submission.period_start.strftime("%Y-%m")
             root_workflow_id = (
                 submission.submission_id
                 if predecessor is None
                 else (predecessor["root_workflow_id"] or predecessor["submission_id"])
+            )
+            batch_span = (
+                f"{submission.period_start.isoformat()}:"
+                f"{submission.period_end.isoformat()}"
             )
             try:
                 connection.execute(
@@ -1584,7 +1581,7 @@ class RegulatoryV2Store:
                         submission.mine_name,
                         submission.revision,
                         submission.supersedes_submission_id,
-                        reporting_month,
+                        batch_span,
                         root_workflow_id,
                         submission.period_start.isoformat(),
                         submission.period_end.isoformat(),
@@ -4011,20 +4008,6 @@ class RegulatoryV2Store:
             if submission.revision != 1:
                 raise RegulatoryV2ConflictError(
                     "revision greater than one requires supersedes_submission_id"
-                )
-            reporting_month = submission.period_start.strftime("%Y-%m")
-            existing_root = connection.execute(
-                """
-                SELECT submission_id FROM v2_submissions
-                WHERE mine_id = ? AND revision = 1
-                  AND COALESCE(reporting_month, substr(period_start, 1, 7)) = ?
-                """,
-                (submission.mine_id, reporting_month),
-            ).fetchone()
-            if existing_root is not None:
-                raise RegulatoryV2ConflictError(
-                    "one mine may have only one root workflow per reporting month; "
-                    "submit a direct revision of the current leaf"
                 )
             return None
         predecessor = connection.execute(

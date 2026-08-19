@@ -257,7 +257,6 @@
         "submission_message_id",
         "submission_revision",
         "mine",
-        "reporting_month",
         "period_start",
         "period_end",
         "issued_at",
@@ -278,10 +277,6 @@
           "$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/safePositiveInteger"
         },
         "mine": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/mine"},
-        "reporting_month": {
-          "type": "string",
-          "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])$"
-        },
         "period_start": {"type": "string", "format": "date"},
         "period_end": {"type": "string", "format": "date"},
         "issued_at": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"},

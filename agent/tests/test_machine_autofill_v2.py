@@ -316,9 +316,8 @@ def test_signed_connector_enters_visible_v2_inbox_and_replays_by_event(
         assert result["workflow"]["preflight"]["missing_count"] > 0
         assert result["import"]["mode"] == "ten_quantity_v3_direct_collection"
         coverage = result["workflow"]["preflight"]["calendar_coverage"]
-        assert coverage["kind"] == "partial_window"
-        assert coverage["leading_days_outside_window"] == 0
-        assert coverage["trailing_days_outside_window"] == 30
+        assert coverage["kind"] == "production_batch"
+        assert coverage["declared_day_count"] == 1
 
         status, draft = _get(port, f"/api/v2/drafts/{draft_id}")
         assert status == 200
@@ -972,11 +971,11 @@ def test_machine_input_fails_closed_for_ambiguous_or_malformed_json(
             ),
             trigger=True,
         )
-        status, error = _machine_request(
+        status, accepted = _machine_request(
             port, gap, request_id="robust-date-gap"
         )
-        assert status == 400
-        assert "无间断" in error["error"]["message"]
+        assert status == 202
+        assert accepted["status"] == "completed"
     finally:
         _close(server, thread)
 

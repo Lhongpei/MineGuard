@@ -840,7 +840,9 @@ class TenQuantitySubmissionPayload(WireContractModel):
     """V3 submission payload for ten business quantities / eleven atoms."""
 
     mine: WireMine
-    reporting_month: Annotated[str, Field(pattern=r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")]
+    reporting_month: Annotated[
+        str, Field(pattern=r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")
+    ] | None = None
     timezone: TimezoneText
     period_start: WireDate
     period_end: WireDate
@@ -855,22 +857,17 @@ class TenQuantitySubmissionPayload(WireContractModel):
     def validate_reporting_window(self) -> "TenQuantitySubmissionPayload":
         if self.period_end < self.period_start:
             raise ValueError("period_end cannot predate period_start")
-        if (
-            self.period_start.strftime("%Y-%m") != self.reporting_month
-            or self.period_end.strftime("%Y-%m") != self.reporting_month
-        ):
-            raise ValueError("period window must stay inside reporting_month")
         dates = [item.date for item in self.days]
         if dates != sorted(dates) or len(dates) != len(set(dates)):
             raise ValueError("days must be unique and chronological")
+        if dates[0] != self.period_start or dates[-1] != self.period_end:
+            raise ValueError("period window must equal the first and last batch dates")
         if any(
-            item < self.period_start
-            or item > self.period_end
-            or item.strftime("%Y-%m") != self.reporting_month
+            item < self.period_start or item > self.period_end
             for item in dates
         ):
             raise ValueError(
-                "daily date is outside the declared reporting month/window"
+                "daily date is outside the declared production batch window"
             )
         source_ids = [item.source_id for item in self.sources]
         if len(source_ids) != len(set(source_ids)):
