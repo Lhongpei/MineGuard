@@ -615,13 +615,19 @@ class ChatStore:
         self.repository = repository
 
     @staticmethod
+    def _bound_draft(row: Any) -> str | None:
+        keys = set(row.keys())
+        context = row["context_draft_id"] if "context_draft_id" in keys else None
+        return context or row["draft_id"]
+
+    @staticmethod
     def _session_projection(row: Any) -> dict[str, Any]:
         return {
             "session_id": row["session_id"],
             "actor_id": row["actor_id"],
             "client_request_id": row["client_request_id"],
             "title": row["title"],
-            "draft_id": row["draft_id"],
+            "draft_id": ChatStore._bound_draft(row),
             "deleted_at": row["deleted_at"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -834,6 +840,7 @@ class ChatStore:
         actor_id: str,
         title: str,
         draft_id: str | None,
+        context_draft_id: str | None = None,
         client_request_id: str,
     ) -> dict[str, Any]:
         session_id = str(uuid.uuid4())
@@ -847,7 +854,10 @@ class ChatStore:
                 (actor_id, client_request_id),
             ).fetchone()
             if existing is not None:
-                if existing["title"] != title or existing["draft_id"] != draft_id:
+                if (
+                    existing["title"] != title
+                    or self._bound_draft(existing) != (context_draft_id or draft_id)
+                ):
                     raise ConflictError("client_request_id 已用于其他会话参数")
                 if existing["deleted_at"] is not None:
                     raise ConflictError("client_request_id 对应的会话已经删除")
@@ -878,8 +888,8 @@ class ChatStore:
                 """
                 INSERT INTO chat_sessions (
                     session_id, actor_id, client_request_id, title, draft_id,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    context_draft_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -887,6 +897,7 @@ class ChatStore:
                     client_request_id,
                     title,
                     draft_id,
+                    context_draft_id,
                     now,
                     now,
                 ),
@@ -940,7 +951,7 @@ class ChatStore:
                     "session_id": row["session_id"],
                     "client_request_id": row["client_request_id"],
                     "title": row["title"],
-                    "draft_id": row["draft_id"],
+                    "draft_id": self._bound_draft(row),
                     "message_count": int(row["message_count"]),
                     "last_message_status": row["last_status"],
                     "last_message_preview": (
@@ -971,7 +982,7 @@ class ChatStore:
             "session_id": row["session_id"],
             "client_request_id": row["client_request_id"],
             "title": row["title"],
-            "draft_id": row["draft_id"],
+            "draft_id": self._bound_draft(row),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -1111,7 +1122,7 @@ class ChatStore:
             if existing is not None:
                 if existing["content"] != content:
                     raise ConflictError("client_message_id 已用于其他消息内容")
-                if draft_id is not None and session["draft_id"] != draft_id:
+                if draft_id is not None and self._bound_draft(session) != draft_id:
                     raise ConflictError("client_message_id 已用于其他草稿参数")
                 assistant = db.execute(
                     """
@@ -1147,7 +1158,7 @@ class ChatStore:
             ).fetchone()
             if int(count["amount"]) + 2 > _MAX_MESSAGES_PER_SESSION:
                 raise ConflictError("当前对话消息已达上限，请新建对话")
-            current_draft = session["draft_id"]
+            current_draft = self._bound_draft(session)
             if current_draft is not None and draft_id not in {
                 None,
                 current_draft,
@@ -1156,7 +1167,7 @@ class ChatStore:
             selected_draft = draft_id or current_draft
             if current_draft is None and selected_draft is not None:
                 db.execute(
-                    "UPDATE chat_sessions SET draft_id = ? WHERE session_id = ?",
+                    "UPDATE chat_sessions SET context_draft_id = ? WHERE session_id = ?",
                     (selected_draft, session_id),
                 )
             sequence = int(count["maximum"]) + 1
@@ -1557,7 +1568,7 @@ class CoalChatRuntime:
             return None
         if not isinstance(value, str) or _DRAFT_ID.fullmatch(value) is None:
             raise ValueError("draft_id 格式非法")
-        self.service.get_draft(value)
+        self.service.get_analysis_draft(value)
         return value
 
     @staticmethod
@@ -1595,10 +1606,19 @@ class CoalChatRuntime:
             raise ValueError("client_request_id 必须是 1 到 128 字符的安全标识")
         else:
             normalized_request_id = client_request_id
+        normalized_draft = self._draft(draft_id)
+        production_context = False
+        if normalized_draft is not None:
+            view = self.service.get_analysis_draft(normalized_draft)
+            production_context = (
+                view.get("_meta", {}).get("source_kind")
+                == "production_data_batch"
+            )
         session = self.store.create_session(
             actor_id=actor,
             title=normalized_title,
-            draft_id=self._draft(draft_id),
+            draft_id=None if production_context else normalized_draft,
+            context_draft_id=(normalized_draft if production_context else None),
             client_request_id=normalized_request_id,
         )
         return {

@@ -12,8 +12,9 @@ class ReadOnlyRepository:
 
     __slots__ = ("__get", "__history", "__list")
 
-    def __init__(self, repository: Any):
-        self.__get = repository.get_draft
+    def __init__(self, service: Any):
+        repository = getattr(service, "repository", service)
+        self.__get = getattr(service, "get_analysis_draft", repository.get_draft)
         self.__list = repository.list_drafts
         self.__history = repository.historical_observations
 

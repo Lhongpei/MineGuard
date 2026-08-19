@@ -13,6 +13,7 @@ from enterprise_agent.five_quantity_runtime import (
     FiveQuantityRuntime,
     validate_five_quantity_payload,
 )
+from enterprise_agent.service import EnterpriseAgentService
 from enterprise_agent.storage import Repository
 from enterprise_agent.util import utc_text
 
@@ -81,6 +82,61 @@ def test_mine_entry_persons_requires_integer_sum_aggregation(tmp_path: Path) -> 
             confirmed=False,
             contract_version=CURRENT_SUBMISSION_CONTRACT,
         )
+
+
+def test_production_batch_has_read_only_assistant_view(tmp_path: Path) -> None:
+    repository = Repository(tmp_path / "assistant.db")
+    runtime = FiveQuantityRuntime(
+        repository,
+        identity=identity(),
+        quarantine_directory=tmp_path / "quarantine-assistant",
+    )
+    draft = runtime.ingest_bytes(
+        filename="assistant.csv",
+        content=csv_bytes(),
+        acquisition_mode="manual_import",
+        actor="operator-1",
+    )["draft"]
+    service = EnterpriseAgentService(
+        repository,
+        five_quantity_runtime=runtime,
+    )
+
+    view = service.get_analysis_draft(draft["draft_id"])
+
+    assert view["draft_id"] == draft["draft_id"]
+    assert view["_meta"]["read_only"] is True
+    assert view["_meta"]["source_kind"] == "production_data_batch"
+    assert view["mine_id"] == identity().mine_id
+    assert view["window_start"].startswith("2026-07-01")
+    assert view["window_end"].startswith("2026-07-02")
+    assert any(
+        item["metric_code"] == "production_t"
+        for item in view["observations"]
+    )
+
+    service.enable_harness()
+    try:
+        session_id = service.chat.create_session(
+            actor_id="operator-1",
+            draft_id=draft["draft_id"],
+            client_request_id="production-assistant-session",
+        )["session"]["session_id"]
+        service.chat.post_message(
+            session_id,
+            actor_id="operator-1",
+            content="请分析当前草稿的差额异常并做来源核验。",
+            client_message_id="production-assistant-message",
+        )
+        for _ in range(500):
+            detail = service.chat.get_session(session_id, actor_id="operator-1")
+            if detail["messages"][-1]["status"] != "queued":
+                break
+            time.sleep(0.01)
+        assert detail["messages"][-1]["status"] == "completed"
+        assert detail["messages"][-1]["evidence"]["tool_profile"] == "chat_read_only"
+    finally:
+        service.disable_harness()
 
 
 class FakeGovernment:

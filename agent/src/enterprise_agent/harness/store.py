@@ -111,10 +111,23 @@ class HarnessStore:
         }
         with self.repository._transaction() as db:
             if draft_id is not None:
-                self.repository._assert_active_draft_in_transaction(
-                    db,
-                    draft_id,
-                )
+                try:
+                    self.repository._assert_active_draft_in_transaction(
+                        db,
+                        draft_id,
+                    )
+                except NotFoundError:
+                    production_draft = db.execute(
+                        "SELECT status FROM fq_drafts WHERE draft_id = ?",
+                        (draft_id,),
+                    ).fetchone()
+                    if (
+                        production_draft is None
+                        or production_draft["status"] == "discarded"
+                        or tool_profile != "chat_read_only"
+                        or allow_mutations
+                    ):
+                        raise
             actor_active = db.execute(
                 """
                 SELECT COUNT(*) AS amount FROM agent_runs

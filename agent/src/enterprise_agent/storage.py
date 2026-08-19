@@ -1554,6 +1554,7 @@ class Repository:
                         client_request_id TEXT,
                         title TEXT NOT NULL,
                         draft_id TEXT,
+                        context_draft_id TEXT,
                         deleted_at TEXT,
                         event_count INTEGER NOT NULL DEFAULT 0,
                         event_head_hash TEXT NOT NULL DEFAULT
@@ -2093,6 +2094,11 @@ class Repository:
                     db.execute(
                         "ALTER TABLE chat_sessions "
                         "ADD COLUMN client_request_id TEXT"
+                    )
+                if "context_draft_id" not in chat_session_columns:
+                    db.execute(
+                        "ALTER TABLE chat_sessions "
+                        "ADD COLUMN context_draft_id TEXT"
                     )
                 db.execute(
                     """

@@ -17,6 +17,7 @@ from .errors import (
     ConfirmationRequiredError,
     ConflictError,
     ImportContentError,
+    NotFoundError,
     PlatformError,
     ValidationBlockedError,
 )
@@ -841,6 +842,74 @@ class EnterpriseAgentService:
                 "message": "当前由业务管理员完成填报、确认和报送，不要求双人复核",
             }
         return draft
+
+    def get_analysis_draft(
+        self, draft_id: str, *, include_deleted: bool = False
+    ) -> dict[str, Any]:
+        """Return a read-only tool view for either legacy or production drafts."""
+
+        try:
+            if include_deleted:
+                return self.repository.get_draft(draft_id, include_deleted=True)
+            return self.get_draft(draft_id)
+        except NotFoundError as error:
+            if self._five_quantity is None:
+                raise
+            try:
+                source = self._five_quantity.store.get_draft(draft_id)
+            except NotFoundError:
+                raise error
+
+        payload = source["payload"]
+        mine = payload["mine"]
+        document = new_draft(
+            enterprise_id=str(mine["operator_id"]),
+            mine_id=str(mine["mine_id"]),
+            profile_id="production-data-batch",
+            profile_version=str(source["contract_version"]),
+        )
+        document.update(
+            {
+                "draft_id": source["draft_id"],
+                "enterprise_name": str(mine["operator_name"]),
+                "unified_social_credit_code": "",
+                "mine_name": str(mine["mine_name"]),
+                "window_start": f"{payload['period_start']}T00:00:00+08:00",
+                "window_end": f"{payload['period_end']}T23:59:59+08:00",
+                "status": source["status"],
+                "notes": "生产数据批次只读分析视图",
+            }
+        )
+        observations: list[dict[str, Any]] = []
+        for day in payload["days"]:
+            measurements = day["reported_quantity"]["daily_total"]
+            for metric_code, measurement in measurements.items():
+                value = measurement.get("value")
+                if value is None:
+                    continue
+                observations.append(
+                    {
+                        "source_id": (
+                            str(measurement.get("source_refs", ["manual"])[0])
+                            if measurement.get("source_refs")
+                            else "manual"
+                        ),
+                        "observation_id": f"{day['date']}:{metric_code}",
+                        "metric_code": metric_code,
+                        "value": value,
+                        "unit": measurement["unit"],
+                        "observed_at": f"{day['date']}T12:00:00+08:00",
+                        "received_at": str(payload["closed_at"]),
+                    }
+                )
+        document["observations"] = observations
+        document["_meta"] = {
+            "revision": int(source["revision"]),
+            "confirmed": source["status"] in {"queued", "submitted", "acknowledged"},
+            "read_only": True,
+            "source_kind": "production_data_batch",
+        }
+        return document
 
     def patch_draft(
         self,

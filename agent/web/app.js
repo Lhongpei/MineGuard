@@ -5950,6 +5950,19 @@
     }
   }
 
+  async function openProductionDataAssistant(binding) {
+    if (!binding || typeof binding.draft_id !== "string") return;
+    state.activeDraft = {
+      id: binding.draft_id,
+      enterprise: { mine_name: String(binding.mine_name || "当前矿井") },
+    };
+    state.chat.draftChoiceTouched = false;
+    state.chat.selectedSessionId = "";
+    state.chat.detail = null;
+    await openCoalChat();
+    await createCoalChat();
+  }
+
   function closeCoalChat() {
     stopCoalChatPolling();
     els.coalChatWorkbench.hidden = true;
@@ -12999,6 +13012,7 @@
     endpoints,
     parseCsv,
     normalizeConfidence,
+    openProductionDataAssistant,
   });
 
   void openDialogById;

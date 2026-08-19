@@ -115,7 +115,7 @@ class HarnessRuntime:
         self.registry = ToolRegistry(
             specs,
             context=ToolContext(
-                repository=ReadOnlyRepository(service.repository)
+                repository=ReadOnlyRepository(service)
             ),
         )
         try:
@@ -209,7 +209,7 @@ class HarnessRuntime:
         if draft_id is None:
             normalized_draft = None
         elif isinstance(draft_id, str) and _DRAFT.fullmatch(draft_id):
-            self.service.get_draft(draft_id)
+            self.service.get_analysis_draft(draft_id)
             normalized_draft = draft_id
         else:
             raise ValueError("draft_id 格式非法")
@@ -464,7 +464,7 @@ class HarnessRuntime:
                 run["run_id"], summary="已返回确定性能力说明", answer=answer
             )
             return
-        draft = self.service.get_draft(run["draft_id"])
+        draft = self.service.get_analysis_draft(run["draft_id"])
         metric_codes: list[str] = []
         for observation in draft.get("observations", []):
             metric = (

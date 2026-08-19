@@ -1557,6 +1557,7 @@
       ${autofillEvidenceHtml(draft)}
       <div class="fq-day-list">${days}</div>
       <div class="fq-sticky-actions">
+        ${can("read") ? '<button class="button button-secondary" type="button" data-fq-action="open-production-assistant">询问生产数据助手</button>' : ""}
         <button class="button button-secondary" type="button" data-fq-action="save-draft" ${locked || !can("write") ? "disabled" : ""}>${awaitingHumanPreparer ? "接收核对并保存" : "保存复核修改"}</button>
         ${draft.status === "ready_review" && !draft.predecessor && can("write") ? '<button class="button button-danger-quiet" type="button" data-fq-action="discard-draft">放弃草稿</button>' : ""}
         ${draft.status === "queued" ? '<button class="button button-primary" type="button" data-fq-action="send-draft">立即重试发送</button>' : ""}
@@ -1607,6 +1608,18 @@
     const button = event.target.closest("[data-fq-action]");
     if (!button || !state.currentDraft) return;
     const action = button.dataset.fqAction;
+    if (action === "open-production-assistant") {
+      const assistant = window.EnterpriseReportingAgent;
+      if (!assistant || typeof assistant.openProductionDataAssistant !== "function") {
+        setGlobalMessage("生产数据助手暂时不可用，请刷新页面后重试。", "error");
+        return;
+      }
+      await assistant.openProductionDataAssistant({
+        draft_id: state.currentDraft.draft_id,
+        mine_name: state.currentDraft.payload.mine.mine_name,
+      });
+      return;
+    }
     if (action === "refresh-ingestions") {
       button.disabled = true;
       try {
