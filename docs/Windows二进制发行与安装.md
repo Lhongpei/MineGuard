@@ -481,8 +481,10 @@ Set-Location 'C:\ProgramData\MineGuard\Platform\service'
 
 企业 Agent 程序默认在 `C:\Program Files\MineGuard\EnterpriseAgent`，实例状态在
 `C:\ProgramData\MineGuard\EnterpriseAgent\instances`。一矿一智能体。正式新部署从开始
-菜单打开 **MineGuard 企业接入配置向导**，加载监管端交付的企业目录，另行选择激活码，
-核对独立审批摘要，再建立经办/复核两个具名账号。向导验签、解密并原子发布实例配置，
+菜单打开 **MineGuard 企业接入配置向导**，选择监管端交付的本矿唯一 `.mgprov`，
+再建立一个业务管理员并设置固定账号 `api_admin` 的独立密码。激活材料、签发公钥和
+Platform 地址均已锁定在 `.mgprov` 中，不再另选激活码、CA PEM、公钥或指纹。
+向导验签、解密并原子发布实例配置，
 现场人员不手写矿井身份、政府地址或两把 HMAC。下面的手工命令仅是高级兼容入口：
 
 ```powershell
@@ -493,11 +495,11 @@ Set-Location 'C:\Program Files\MineGuard\EnterpriseAgent\deploy\windows'
   -OperatorName '本企业名称' -SystemId agent-qy-001 -Port 8090
 ```
 
-演示登录只限回环隔离测试，不能用于确认、报送或生产服务。模型能力必须在企业接入实例
-完成后，从开始菜单打开 **MineGuard 模型授权导入向导**，分别选择本矿 `.mgllm` 和经另一
-渠道交付的激活码。正式实例禁止在 `agent.env` 中写入 API Key、模型地址或可替换的信任库；
-密钥由向导转换为本机 DPAPI 保护的秘密库，政府 Platform 不接收这些内容。未导入模型授权
-不影响 CSV 导入、确定性校验、报送和监管算法。
+演示登录只限回环隔离测试，不能用于确认、报送或生产服务。企业接入实例完成后，使用固定
+账号 `api_admin` 登录本机 Agent，在“模型 API 配置”中填写 API 地址、模型名称和完整
+API Key。系统先测试连接，再将密钥写入本机 DPAPI 保护的秘密库；页面、接口、业务管理员
+和政府 Platform 均不能读取已保存的 Key。不要在 `agent.env` 中写入 API Key。模型服务未
+配置或暂时不可用，不影响人工导入、确定性校验、可靠报送和政府监管算法。
 
 Platform 服务仍使用单位批准的外部 WinSW。Enterprise Agent Setup 已内置固定且写入子发行
 清单的 WinSW v2.12.0 x64，企业端不再选择文件或输入 SHA；Agent 服务安装器会在复制前后
