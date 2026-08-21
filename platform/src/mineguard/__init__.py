@@ -49,4 +49,4 @@ __all__ = [
     "detect_temporal_anomalies",
 ]
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"

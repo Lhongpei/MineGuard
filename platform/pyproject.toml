@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 # The distribution identifier is retained for in-place upgrade compatibility;
 # the product/runtime name is MineGuard Platform.
 name = "mineguard-mvp"
-version = "0.6.1"
+version = "0.6.2"
 description = "煤矿多源交叉验证与监管核查闭环生产候选版"
 requires-python = ">=3.11"
 dependencies = [
