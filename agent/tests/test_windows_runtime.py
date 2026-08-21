@@ -636,6 +636,9 @@ def test_windows_deployment_assets_keep_secrets_out_of_service_xml() -> None:
         "-Start `",
         "1>$null 3>$null 4>$null 5>$null 6>$null",
         "正式服务已安装、启动并通过绑定当前实例的健康检查",
+        "打开企业页面",
+        "Open-EnterpriseAgentPage",
+        "是否立即打开企业页面",
     ):
         assert token in wizard
     assert wizard.count("Get-EAInstanceContext") >= 2

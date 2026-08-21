@@ -330,8 +330,8 @@ $Form.Controls.Add($StatusBox)
 
 $ImportButton = New-Object Windows.Forms.Button
 $ImportButton.Text = "导入配置并继续安装服务"
-$ImportButton.Location = New-Object Drawing.Point(452, 624)
-$ImportButton.Size = New-Object Drawing.Size(418, 38)
+$ImportButton.Location = New-Object Drawing.Point(530, 624)
+$ImportButton.Size = New-Object Drawing.Size(340, 38)
 $ImportButton.BackColor = $Green
 $ImportButton.ForeColor = [Drawing.Color]::White
 $ImportButton.FlatStyle = "Flat"
@@ -340,16 +340,25 @@ $Form.Controls.Add($ImportButton)
 $ServiceInstallButton = New-Object Windows.Forms.Button
 $ServiceInstallButton.Text = "已有实例：安装或修复服务…"
 $ServiceInstallButton.Location = New-Object Drawing.Point(28, 624)
-$ServiceInstallButton.Size = New-Object Drawing.Size(300, 38)
+$ServiceInstallButton.Size = New-Object Drawing.Size(238, 38)
 $ServiceInstallButton.BackColor = [Drawing.Color]::FromArgb(43, 93, 152)
 $ServiceInstallButton.ForeColor = [Drawing.Color]::White
 $ServiceInstallButton.FlatStyle = "Flat"
 $Form.Controls.Add($ServiceInstallButton)
 
+$OpenAgentButton = New-Object Windows.Forms.Button
+$OpenAgentButton.Text = "打开企业页面"
+$OpenAgentButton.Location = New-Object Drawing.Point(276, 624)
+$OpenAgentButton.Size = New-Object Drawing.Size(145, 38)
+$OpenAgentButton.BackColor = [Drawing.Color]::FromArgb(43, 93, 152)
+$OpenAgentButton.ForeColor = [Drawing.Color]::White
+$OpenAgentButton.FlatStyle = "Flat"
+$Form.Controls.Add($OpenAgentButton)
+
 $CloseButton = New-Object Windows.Forms.Button
 $CloseButton.Text = "关闭"
-$CloseButton.Location = New-Object Drawing.Point(340, 624)
-$CloseButton.Size = New-Object Drawing.Size(100, 38)
+$CloseButton.Location = New-Object Drawing.Point(431, 624)
+$CloseButton.Size = New-Object Drawing.Size(89, 38)
 $CloseButton.Add_Click({ $Form.Close() })
 $Form.Controls.Add($CloseButton)
 
@@ -437,6 +446,18 @@ function Get-InstalledAgentServiceTrustMode {
     throw "当前安装介质不是签名正式版或明确分类的内网无证书正式发行版，不能安装正式服务。"
 }
 
+function Open-EnterpriseAgentPage {
+    param([Parameter(Mandatory = $true)][string]$InstanceName)
+
+    $Context = Get-EAInstanceContext -InstanceName $InstanceName `
+        -InstallRoot $InstallRoot -StateRoot $StateRoot
+    $Url = "http://127.0.0.1:$($Context.Port)/"
+    $StartInfo = New-Object Diagnostics.ProcessStartInfo
+    $StartInfo.FileName = $Url
+    $StartInfo.UseShellExecute = $true
+    [void][Diagnostics.Process]::Start($StartInfo)
+}
+
 function Show-FormalServiceInstallDialog {
     param([Parameter(Mandatory = $true)][string]$InstanceName)
 
@@ -476,12 +497,37 @@ function Show-FormalServiceInstallDialog {
         "正式服务已安装、启动并通过绑定当前实例的健康检查：" +
         $InstanceName
     )
-    [void][Windows.Forms.MessageBox]::Show(
-        $StatusBox.Text, "MineGuard 企业接入配置向导",
-        [Windows.Forms.MessageBoxButtons]::OK,
+    $OpenChoice = [Windows.Forms.MessageBox]::Show(
+        ($StatusBox.Text + "`r`n`r`n是否立即打开企业页面？"),
+        "MineGuard 企业接入配置向导",
+        [Windows.Forms.MessageBoxButtons]::YesNo,
         [Windows.Forms.MessageBoxIcon]::Information
     )
+    if ($OpenChoice -eq [Windows.Forms.DialogResult]::Yes) {
+        Open-EnterpriseAgentPage -InstanceName $InstanceName
+    }
 }
+
+$OpenAgentButton.Add_Click({
+    $OpenAgentButton.Enabled = $false
+    try {
+        $SelectedInstance = $InstanceBox.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($SelectedInstance)) {
+            throw "请先填写或加载要打开的实例名。"
+        }
+        Open-EnterpriseAgentPage -InstanceName $SelectedInstance
+    }
+    catch {
+        $StatusBox.ForeColor = $Red
+        $StatusBox.Text = "无法打开企业页面：`r`n" + $_.Exception.Message
+        [void][Windows.Forms.MessageBox]::Show(
+            $StatusBox.Text, "MineGuard 企业接入配置向导",
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Error
+        )
+    }
+    finally { $OpenAgentButton.Enabled = $true }
+})
 
 $ServiceInstallButton.Add_Click({
     $ServiceInstallButton.Enabled = $false
