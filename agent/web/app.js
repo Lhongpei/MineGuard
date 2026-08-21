@@ -2372,7 +2372,9 @@
     els.credentialNotice.hidden = !credentialRotationRequired();
     els.accessNotice.hidden =
       !principal || hasPermission("write") || credentialRotationRequired();
-    els.coalChatButton.disabled = !principal || !hasPermission("read");
+    const canUseCoalChat = Boolean(principal && hasPermission("read"));
+    els.coalChatButton.hidden = !canUseCoalChat;
+    els.coalChatButton.disabled = !canUseCoalChat;
     renderOperationGuide();
     if (!principal) {
       els.modelApiKey.value = "";

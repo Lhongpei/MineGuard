@@ -537,6 +537,11 @@ async function main() {
   );
   assert.match(document.body.textContent, /<img src=x onerror=/);
   assert.equal(dom.window.chatXss, undefined);
+  assert.equal(
+    document.getElementById("coalChatButton").hidden,
+    false,
+    "coal chat entry must be visible after a readable business user signs in",
+  );
   assert.match(document.body.textContent, /本地煤炭常识/);
   assert.match(document.body.textContent, /模型通识解释/);
   assert.match(document.body.textContent, /草稿工具证据/);
