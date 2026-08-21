@@ -613,6 +613,35 @@ function Assert-AuthorityPolicyMaterial {
     }
 }
 
+function Get-CanonicalPlatformOrigin {
+    param([string] $Value)
+
+    $candidate = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        throw '监管端 HTTPS 地址不能为空。请填写例如 https://qinyuan-platform.mineguard.cn'
+    }
+    try {
+        $uri = New-Object Uri($candidate, [UriKind]::Absolute)
+    } catch {
+        throw '监管端 HTTPS 地址格式无效。请只填写 https://域名，不要填写接口路径。'
+    }
+    if ($uri.Scheme -cne 'https' -or
+        [string]::IsNullOrWhiteSpace($uri.DnsSafeHost) -or
+        -not [string]::IsNullOrEmpty($uri.UserInfo) -or
+        -not [string]::IsNullOrEmpty($uri.Query) -or
+        -not [string]::IsNullOrEmpty($uri.Fragment) -or
+        $uri.AbsolutePath -ne '/') {
+        throw ('监管端 HTTPS 地址必须是服务器根地址，例如 ' +
+            'https://qinyuan-platform.mineguard.cn；不要添加 /v2、/api、/healthz、' +
+            '查询参数、账号或密码。')
+    }
+    $builder = New-Object UriBuilder($uri)
+    $builder.Path = ''
+    $builder.Query = ''
+    $builder.Fragment = ''
+    return $builder.Uri.AbsoluteUri.TrimEnd('/')
+}
+
 function Import-AuthorityPolicy {
     param(
         [string] $Path,
@@ -790,6 +819,8 @@ $null = Add-ActionRow $createTable '生成这一家企业的专属接入包' {
     try {
         $days = 14
         Set-CurrentEnterpriseIdentifiers
+        $create.platform_url.Text = Get-CanonicalPlatformOrigin `
+            -Value $create.platform_url.Text
         $secure = New-SecureValue $create.passphrase
         $create.passphrase.Clear()
         $policyPath = Get-AuthorityPolicyPath

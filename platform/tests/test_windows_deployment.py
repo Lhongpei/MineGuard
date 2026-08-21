@@ -248,6 +248,8 @@ def test_windows_powershell_surface_is_ps51_safe_and_bom_encoded() -> None:
         "-AllowMatchingPending",
         "mineguard-authority-policy-v2",
         "企业只需选择这个 .mgprov 文件",
+        "Get-CanonicalPlatformOrigin",
+        "不要添加 /v2、/api、/healthz",
     ):
         assert required in provisioning_wizard
     for removed in (
