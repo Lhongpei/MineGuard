@@ -488,8 +488,12 @@ class Settings:
             timezone=os.environ.get(
                 "ENTERPRISE_REPORTING_TIMEZONE", "Asia/Shanghai"
             ).strip(),
-            capacity_band=os.environ.get("ENTERPRISE_CAPACITY_BAND", "").strip() or None,
-            mining_method=os.environ.get("ENTERPRISE_MINING_METHOD", "").strip() or None,
+            capacity_band=(
+                os.environ.get("ENTERPRISE_CAPACITY_BAND", "").strip() or None
+            ),
+            mining_method=(
+                os.environ.get("ENTERPRISE_MINING_METHOD", "").strip() or None
+            ),
             shift_system=os.environ.get("ENTERPRISE_SHIFT_SYSTEM", "").strip() or None,
             coal_type=os.environ.get("ENTERPRISE_COAL_TYPE", "").strip() or None,
             operating_regime=os.environ.get(

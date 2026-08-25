@@ -1493,7 +1493,7 @@
         ).join("");
         const needsAttention = dayMissing > 0 || dayReceived < TEN_QUANTITIES.length;
         return `<details class="fq-day-card" ${dayMissing ? "" : ""}>
-          <summary><span><strong>${escapeHtml(day.date)}</strong><small>十量日报已到 ${dayReceived}/10${dayMissing ? ` · ${dayMissing} 个已接入字段缺失` : ""}</small></span><span class="fq-status ${needsAttention ? "is-warn" : "is-ok"}">${needsAttention ? "待核对" : "完整"}</span></summary>
+          <summary><span><strong>${escapeHtml(day.date)}</strong><small>已填生产指标 ${dayReceived}/10${dayMissing ? ` · ${dayMissing} 个已接入字段缺失` : ""} · 允许部分报送</small></span><span class="fq-status ${needsAttention ? "is-warn" : "is-ok"}">${needsAttention ? "待核对" : "完整"}</span></summary>
           <label class="field fq-operating-state"><span>当日运行状态</span><select data-fq-operating-state data-day="${dayIndex}" ${locked ? "disabled" : ""}>${[
             ["producing", "生产"], ["stopped", "停产"], ["maintenance", "检修"], ["restarting", "复产过渡"], ["unknown", "待确认"],
           ].map(([value, label]) => `<option value="${value}" ${day.operating_state === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
@@ -1548,8 +1548,8 @@
         : "确认后消息进入可靠发送队列；接收回执不代表监管认定正常。";
     target.innerHTML = `
       <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(draft.payload.mine.mine_name)}</p><h3>生产数据批次</h3><p>${escapeHtml(windowInfo.dateRange)} · ${draft.payload.days.length} 个数据日期 · 草稿修订 ${draft.revision}</p></div><span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span></div>
-      <div class="fq-summary-strip"><span><strong>${draft.payload.days.length}</strong>日报天数</span><span class="${receivedQuantityCount < 10 ? "is-warn" : "is-ok"}"><strong>${receivedQuantityCount}/10</strong>十量已到</span><span class="${missing ? "is-warn" : "is-ok"}"><strong>${missing}</strong>已接入字段缺失</span><span><strong>${draft.payload.sources.length}</strong>来源记录</span><span><strong>${draft.submission_revision}</strong>报送版本</span></div>
-      ${receivedQuantityCount === 5 ? '<div class="fq-import-warning"><strong>当前是旧版 V2 五量数据：已到 5/10</strong><p>新增的开采量、销售量、运输量、洗煤量和开票量尚未接入；页面不会用历史比例、算法或 0 补齐。</p></div>' : receivedQuantityCount < 10 ? `<div class="fq-import-warning"><strong>十量尚未全部接入：已到 ${receivedQuantityCount}/10</strong><p>未接入项保持明确缺失，不会阻止查看旧报文，也不会由 Agent 猜测填补。</p></div>` : ""}
+      <div class="fq-summary-strip"><span><strong>${draft.payload.days.length}</strong>数据日期</span><span class="${receivedQuantityCount < 10 ? "is-warn" : "is-ok"}"><strong>${receivedQuantityCount}/10</strong>已填生产指标</span><span class="${missing ? "is-warn" : "is-ok"}"><strong>${missing}</strong>已接入字段缺失</span><span><strong>${draft.payload.sources.length}</strong>来源记录</span><span><strong>${draft.submission_revision}</strong>报送版本</span></div>
+      ${receivedQuantityCount < 10 ? `<div class="fq-import-warning"><strong>当前已填 ${receivedQuantityCount}/10，可部分报送</strong><p>未填项目保持 null 并标记为缺失；人工核对后可以正常提交，系统不会用 0、历史值或算法补齐。</p></div>` : ""}
       ${reviewGate.required ? `<div class="fq-import-warning" role="status"><strong>四眼复核：${awaitingHumanPreparer ? "先由经办人接收核对" : currentIsLastEditor ? "待另一账号接手" : reviewActorMissing ? "经办人记录缺失" : "当前账号可独立复核"}</strong><p>${escapeHtml(reviewGate.message || "最后创建/编辑人不能确认或入发送队列。")}</p></div>` : ""}
       ${draft.predecessor ? `<div class="fq-import-warning" role="status"><strong>这是第 ${escapeHtml(draft.submission_revision)} 版正式更正草稿</strong><p>同一报送链继续编号；直接前序消息 ${escapeHtml(shortHash(draft.predecessor.message_id))} 及其签名摘要已锁定，保存本草稿不会覆盖历史报文。为避免修订链中断，更正草稿创建后不能放弃或删除，可暂存并在后续继续复核。</p></div>` : ""}
       ${importWarnings.length ? `<div class="fq-import-warning"><strong>导入映射需要人工核对</strong><ul>${importWarnings.slice(0, 20).map((item) => `<li>${escapeHtml(item.reason || "存在未明确的来源字段")}</li>`).join("")}</ul></div>` : ""}

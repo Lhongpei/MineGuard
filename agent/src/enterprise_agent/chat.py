@@ -1167,7 +1167,8 @@ class ChatStore:
             selected_draft = draft_id or current_draft
             if current_draft is None and selected_draft is not None:
                 db.execute(
-                    "UPDATE chat_sessions SET context_draft_id = ? WHERE session_id = ?",
+                    "UPDATE chat_sessions SET context_draft_id = ? "
+                    "WHERE session_id = ?",
                     (selected_draft, session_id),
                 )
             sequence = int(count["maximum"]) + 1

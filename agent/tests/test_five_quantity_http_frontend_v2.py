@@ -646,7 +646,9 @@ def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
     ):
         assert metric in script
         assert label in script
-    assert "旧版 V2 五量数据：已到 5/10" in script
+    assert "可部分报送" in script
+    assert "未填项目保持 null 并标记为缺失" in script
+    assert "十量尚未全部接入" not in script
     assert "班次高级明细" in script
     assert "销售量、运输量、洗煤量和开票量不强制填班次" in script
     assert '{ code: "transport", label: "运输量", shiftRequired: false' in script

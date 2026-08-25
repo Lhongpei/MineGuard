@@ -1255,10 +1255,12 @@ def _assert_application_signature(
     assert hmac.compare_digest(expected, document["signature_envelope"]["signature"])
 
 
-def _signed_enterprise_message(document: dict[str, Any]) -> bytes:
+def _signed_enterprise_message(
+    document: dict[str, Any], *, secret: bytes = EXAMPLE_SECRET
+) -> bytes:
     document["signature_envelope"]["payload_sha256"] = "0" * 64
     document["signature_envelope"]["signature"] = "0" * 64
-    sign_exchange_message(document, EXAMPLE_SECRET)
+    sign_exchange_message(document, secret)
     return json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
 
 
@@ -1287,10 +1289,23 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
 ) -> None:
     import base64
 
-    submission_body = (
-        CONTRACTS / "examples" / "ten-quantity-submission-v3.json"
-    ).read_bytes()
-    submission = json.loads(submission_body)
+    submission = json.loads(
+        (CONTRACTS / "examples" / "ten-quantity-submission-v3.json").read_bytes()
+    )
+    submission["payload"].pop("comparison_context")
+    reported = submission["payload"]["days"][0]["reported_quantity"]
+    available_metrics = {"production_t", "sales_t"}
+    for metric, measurement in reported["daily_total"].items():
+        if metric not in available_metrics:
+            measurement["value"] = None
+            measurement["quality_flags"] = ["missing"]
+    for shift in reported["shifts"].values():
+        for metric, measurement in shift["measurements"].items():
+            if metric not in available_metrics:
+                measurement["value"] = None
+                measurement["quality_flags"] = ["missing"]
+    submission_body = _signed_enterprise_message(submission, secret=V3_EXAMPLE_SECRET)
+    _assert_contract(submission, "ten-quantity-submission-v3.schema.json")
     client = ExchangeClient(
         sender_id=submission["sender"]["system_id"],
         party_id=submission["sender"]["party_id"],
@@ -1298,7 +1313,7 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
         secret=V3_EXAMPLE_SECRET,
         transport_secret=b"example-v3-transport-secret-not-for-production",
         mine_name=submission["payload"]["mine"]["mine_name"],
-        comparison_context=submission["payload"]["comparison_context"],
+        comparison_context=None,
         message_key_id=submission["signature_envelope"]["key_id"],
     )
     server = create_server(
@@ -1357,12 +1372,16 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
         assert stored.quantity_scope == "ten_quantity_v3"
         day = stored.days[0]
         assert day.extraction_t is not None
+        assert day.extraction_t.daily_total is None
         assert day.sales_t is not None
         assert day.transport_t is not None
+        assert day.transport_t.daily_total is None
         assert day.wash_feed_t is not None
+        assert day.wash_feed_t.daily_total is None
         assert day.invoiced_quantity_t is not None
+        assert day.invoiced_quantity_t.daily_total is None
+        assert day.production_t.daily_total == 3280.5
         assert day.sales_t.daily_total == 2510.0
-        assert day.invoiced_quantity_t.daily_total == 2440.0
         assert day.quality["sales_t"].zero_shift == ("reported",)
         assert day.quality["sales_t"].eight_shift == ()
         assert day.quality["sales_t"].four_shift == ("not_applicable",)

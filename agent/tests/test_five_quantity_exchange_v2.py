@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
+import json
 import os
 import threading
 from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.error import HTTPError
 from uuid import uuid4
 
 import pytest
@@ -201,6 +204,76 @@ class _Response:
 
     def geturl(self) -> str:
         return self._url
+
+
+def test_client_preserves_safe_v3_problem_details() -> None:
+    problem = {
+        "type": "/problems/contract-validation-failed",
+        "title": "报文不符合生产数据契约",
+        "status": 400,
+        "code": "CONTRACT_VALIDATION_FAILED",
+        "detail": "payload.comparison_context 不应被要求提供",
+        "trace_id": "trace-v3-contract-1",
+    }
+
+    def opener(request: Any, timeout: float) -> _Response:
+        raise HTTPError(
+            request.full_url,
+            400,
+            "Bad Request",
+            hdrs=None,
+            fp=io.BytesIO(json.dumps(problem, ensure_ascii=False).encode()),
+        )
+
+    client = FiveQuantityPlatformClient(
+        FiveQuantityPlatformConfig(
+            base_url="https://regulator.example",
+            sender_id="agent-mine-test-001",
+            transport_hmac_secret=TRANSPORT_SECRET,
+        ),
+        opener=opener,
+    )
+    with pytest.raises(PlatformError) as captured:
+        client.submit({"contract_version": "ten-quantity-submission-v3"})
+
+    error = captured.value
+    assert "CONTRACT_VALIDATION_FAILED" in str(error)
+    assert "payload.comparison_context 不应被要求提供" in str(error)
+    assert "V2" not in str(error)
+    assert error.details == {
+        "retryable": False,
+        "http_status": 400,
+        "platform_code": "CONTRACT_VALIDATION_FAILED",
+        "platform_detail": "payload.comparison_context 不应被要求提供",
+        "trace_id": "trace-v3-contract-1",
+    }
+
+
+def test_client_does_not_echo_untrusted_error_body() -> None:
+    marker = "do-not-expose-upstream-body"
+
+    def opener(request: Any, timeout: float) -> _Response:
+        raise HTTPError(
+            request.full_url,
+            500,
+            "Internal Server Error",
+            hdrs=None,
+            fp=io.BytesIO(marker.encode()),
+        )
+
+    client = FiveQuantityPlatformClient(
+        FiveQuantityPlatformConfig(
+            base_url="https://regulator.example",
+            sender_id="agent-mine-test-001",
+            transport_hmac_secret=TRANSPORT_SECRET,
+        ),
+        opener=opener,
+    )
+    with pytest.raises(PlatformError) as captured:
+        client.submit({"contract_version": "ten-quantity-submission-v3"})
+
+    assert marker not in str(captured.value)
+    assert captured.value.details == {"retryable": True, "http_status": 500}
 
 
 def test_client_implements_all_seven_paths_and_preserves_opaque_cursor() -> None:

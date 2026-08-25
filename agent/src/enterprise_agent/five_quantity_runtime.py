@@ -243,7 +243,10 @@ def validate_five_quantity_payload(
         raise ValueError("草稿矿井/经营主体与本实例启动身份不一致")
     if "comparison_context" in payload:
         context = _object(payload["comparison_context"], "comparison_context")
-        if identity.comparison_context is None or context != identity.comparison_context:
+        if (
+            identity.comparison_context is None
+            or context != identity.comparison_context
+        ):
             raise ValueError("可选同类矿资料必须与本实例受控配置完全一致")
     elif identity.comparison_context is not None:
         raise ValueError("草稿缺少本实例已配置的可选同类矿资料")

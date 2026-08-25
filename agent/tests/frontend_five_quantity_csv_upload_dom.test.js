@@ -505,7 +505,8 @@ async function main() {
       "created draft detail",
     );
     const detail = document.getElementById("fqDraftDetail");
-    assert.match(detail.textContent, /旧版 V2 五量数据：已到 5\/10/);
+    assert.match(detail.textContent, /当前已填 5\/10，可部分报送/);
+    assert.match(detail.textContent, /未填项目保持 null 并标记为缺失/);
     assert.match(detail.textContent, /安全生产支撑/);
     assert.match(detail.textContent, /生产煤流/);
     assert.match(detail.textContent, /经营票据/);

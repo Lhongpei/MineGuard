@@ -195,7 +195,6 @@
         "period_start",
         "period_end",
         "closed_at",
-        "comparison_context",
         "days",
         "sources",
         "agent_processing",

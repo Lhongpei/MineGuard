@@ -38,6 +38,8 @@ _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_CURSOR = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_MAX_ERROR_BODY_BYTES = 128 * 1024
+_PROBLEM_CODE = re.compile(r"^[A-Z][A-Z0-9_]{1,127}$")
 
 
 _V3_MESSAGE_CONTRACTS = frozenset(
@@ -313,6 +315,69 @@ class _RejectRedirects(HTTPRedirectHandler):
         return None
 
 
+def _clean_problem_text(value: Any, maximum: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(
+        character if character >= " " and character != "\x7f" else " "
+        for character in value
+    ).strip()
+    return cleaned[:maximum] or None
+
+
+def _platform_problem_error(status: int, raw: bytes) -> PlatformError:
+    retryable = status in {408, 425, 429, 500, 502, 503, 504}
+    generic = PlatformError(
+        f"监管接口拒绝请求（HTTP {status}）",
+        details={"retryable": retryable, "http_status": status},
+    )
+    if len(raw) > _MAX_ERROR_BODY_BYTES:
+        return generic
+    try:
+        parsed = json.loads(raw) if raw else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return generic
+    if not isinstance(parsed, dict):
+        return generic
+    problem_type = _clean_problem_text(parsed.get("type"), 256)
+    code = _clean_problem_text(parsed.get("code"), 128)
+    response_status = parsed.get("status")
+    if (
+        problem_type is None
+        or not problem_type.startswith("/problems/")
+        or code is None
+        or _PROBLEM_CODE.fullmatch(code) is None
+        or isinstance(response_status, bool)
+        or response_status != status
+    ):
+        return generic
+    title = _clean_problem_text(parsed.get("title"), 256)
+    detail = _clean_problem_text(parsed.get("detail"), 1600)
+    summary = detail or title
+    message = f"监管接口拒绝请求（{code}，HTTP {status}）"
+    if summary is not None:
+        message += f"：{summary}"
+    details: dict[str, Any] = {
+        "retryable": retryable,
+        "http_status": status,
+        "platform_code": code,
+    }
+    if detail is not None:
+        details["platform_detail"] = detail
+    trace_id = _clean_problem_text(parsed.get("trace_id"), 128)
+    if trace_id is not None:
+        details["trace_id"] = trace_id
+    return PlatformError(message, details=details)
+
+
+def _platform_http_error(error: HTTPError) -> PlatformError:
+    try:
+        raw = error.read(_MAX_ERROR_BODY_BYTES + 1)
+    except (OSError, ValueError):
+        raw = b""
+    return _platform_problem_error(int(error.code), raw)
+
+
 def _message_material(message: dict[str, Any], payload_hash: str) -> bytes:
     signature = message["signature_envelope"]
     predecessor = message.get("predecessor") or {}
@@ -579,33 +644,29 @@ class FiveQuantityPlatformClient:
                 status = int(getattr(response, "status", 200))
                 final_url = response.geturl() if hasattr(response, "geturl") else url
                 if final_url != url:
-                    raise PlatformError("监管平台 V2 响应发生重定向，已拒绝")
+                    raise PlatformError("监管接口响应发生重定向，已拒绝")
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except HTTPError as error:
-            retryable = error.code in {408, 425, 429, 500, 502, 503, 504}
-            raise PlatformError(
-                f"监管平台拒绝 V2 请求（HTTP {error.code}）",
-                details={"retryable": retryable, "http_status": error.code},
-            ) from error
+            raise _platform_http_error(error) from error
         except (URLError, TimeoutError, OSError) as error:
             raise PlatformError(
-                "无法连接监管平台 V2 接口",
+                "无法连接监管接口",
                 details={"retryable": True, "failure_kind": "connection"},
             ) from error
         if len(raw) > _MAX_RESPONSE_BYTES:
-            raise PlatformError("监管平台 V2 响应超过 4 MiB")
+            raise PlatformError("监管接口响应超过 4 MiB")
         if status == 204:
             if raw:
                 raise PlatformError("HTTP 204 不得包含响应体")
             return None
         if not 200 <= status < 300:
-            raise PlatformError(f"监管平台拒绝 V2 请求（HTTP {status}）")
+            raise _platform_problem_error(status, raw)
         try:
             parsed = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise PlatformError("监管平台 V2 返回非法 JSON") from error
+            raise PlatformError("监管接口返回非法 JSON") from error
         if not isinstance(parsed, dict):
-            raise PlatformError("监管平台 V2 响应必须是 JSON 对象")
+            raise PlatformError("监管接口响应必须是 JSON 对象")
         return parsed
 
     def submit(self, message: dict[str, Any]) -> dict[str, Any]:

@@ -353,7 +353,7 @@
     "dailyMeasurementSet": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Daily totals require all eleven atomic measurements implementing exactly ten business groups.",
+      "description": "All eleven atomic measurement records are retained for a stable ten-group structure, but each value may be null with an explicit missing, unavailable, or not_applicable quality flag. A submission may therefore contain only the production metrics actually available for that date.",
       "required": [
         "ventilation_m3_min",
         "electricity_kwh",

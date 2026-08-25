@@ -184,6 +184,8 @@ def test_runtime_capabilities_are_visible_before_final_submission() -> None:
         assert element_id in HTML
     assert "启动命令所在终端保持不返回提示符是服务器正常运行状态" in JS
     assert "尚未配置监管平台接口，可继续编辑但不能提交" in JS
+    assert "可以填报，提交时自动验证" in JS
+    assert "监管接口已经配置但尚未完成连通性确认" not in JS
     assert "health.demo_account_enabled === true" in JS
 
 

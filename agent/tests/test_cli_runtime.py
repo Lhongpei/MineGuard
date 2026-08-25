@@ -343,6 +343,7 @@ def test_wheel_contains_single_frontend_source_as_installable_data(
             str(tmp_path),
         ],
         cwd=PROJECT_ROOT,
+        env={**os.environ, "PIP_DISABLE_PIP_VERSION_CHECK": "1"},
         capture_output=True,
         text=True,
         timeout=30,

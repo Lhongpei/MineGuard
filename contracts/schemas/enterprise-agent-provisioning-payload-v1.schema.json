@@ -32,8 +32,8 @@
     },
     "config": {
       "type": "object",
-      "minProperties": 24,
-      "maxProperties": 27,
+      "minProperties": 17,
+      "maxProperties": 25,
       "propertyNames": {
         "$ref": "#/$defs/lockedKey"
       },
@@ -46,23 +46,16 @@
       "required": [
         "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED",
         "ENTERPRISE_AGENT_PRODUCTION_MODE",
-        "ENTERPRISE_AGENT_PUBLIC_ORIGIN",
         "ENTERPRISE_AGENT_SECURE_COOKIE",
-        "ENTERPRISE_CAPACITY_BAND",
-        "ENTERPRISE_COAL_TYPE",
         "ENTERPRISE_EXCHANGE_HMAC_SECRET",
         "ENTERPRISE_EXCHANGE_KEY_ID",
         "ENTERPRISE_MINE_ID",
         "ENTERPRISE_MINE_NAME",
-        "ENTERPRISE_MINING_METHOD",
-        "ENTERPRISE_OPERATING_REGIME",
         "ENTERPRISE_OPERATOR_ID",
         "ENTERPRISE_OPERATOR_NAME",
         "ENTERPRISE_REPORTING_TIMEZONE",
-        "ENTERPRISE_SHIFT_SYSTEM",
         "ENTERPRISE_SYSTEM_ID",
         "PLATFORM_V3_BASE_URL",
-        "PLATFORM_V3_CA_BUNDLE",
         "PLATFORM_V3_SENDER_ID",
         "PLATFORM_V3_TRANSPORT_HMAC_SECRET",
         "REGULATORY_EXCHANGE_KEY_ID",
@@ -71,19 +64,13 @@
       ],
       "properties": {
         "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED": {
-          "const": "true"
+          "const": "false"
         },
         "ENTERPRISE_AGENT_PRODUCTION_MODE": {
           "const": "true"
         },
-        "ENTERPRISE_AGENT_PUBLIC_ORIGIN": {
-          "type": "string",
-          "format": "uri",
-          "pattern": "^https://[^/?#]+(?::[0-9]{1,5})?$",
-          "maxLength": 2048
-        },
         "ENTERPRISE_AGENT_SECURE_COOKIE": {
-          "const": "true"
+          "const": "false"
         },
         "ENTERPRISE_EXCHANGE_HMAC_SECRET": {
           "type": "string",
@@ -95,11 +82,6 @@
           "format": "uri",
           "pattern": "^https://[^/?#]+(?::[0-9]{1,5})?$",
           "maxLength": 2048
-        },
-        "PLATFORM_V3_CA_BUNDLE": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 1024
         },
         "PLATFORM_V3_TRANSPORT_HMAC_SECRET": {
           "type": "string",
@@ -115,8 +97,8 @@
     },
     "locked_keys": {
       "type": "array",
-      "minItems": 24,
-      "maxItems": 27,
+      "minItems": 17,
+      "maxItems": 25,
       "uniqueItems": true,
       "items": {
         "$ref": "#/$defs/lockedKey"
@@ -129,7 +111,6 @@
       "enum": [
         "ENTERPRISE_AGENT_FOUR_EYES_REQUIRED",
         "ENTERPRISE_AGENT_PRODUCTION_MODE",
-        "ENTERPRISE_AGENT_PUBLIC_ORIGIN",
         "ENTERPRISE_AGENT_SECURE_COOKIE",
         "ENTERPRISE_CAPACITY_BAND",
         "ENTERPRISE_COAL_TYPE",
@@ -146,7 +127,6 @@
         "ENTERPRISE_SHIFT_SYSTEM",
         "ENTERPRISE_SYSTEM_ID",
         "PLATFORM_V3_BASE_URL",
-        "PLATFORM_V3_CA_BUNDLE",
         "PLATFORM_V3_SENDER_ID",
         "PLATFORM_V3_TRANSPORT_HMAC_SECRET",
         "REGULATORY_EXCHANGE_KEY_ID",

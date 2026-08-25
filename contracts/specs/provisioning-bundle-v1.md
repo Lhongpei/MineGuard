@@ -245,9 +245,10 @@ Platform 明文精确为：
 }
 ```
 
-`client` 是一条严格的 `clients.json` 登记项，包含企业 sender/party/mine、矿名、五项
-正式分组、当前应用消息 key ID、最多当前加上一把历史消息密钥，以及最多当前加上一把
-历史运输密钥。`active_message_key_id` 必须存在于 `message_keys`。
+`client` 是一条严格的 `clients.json` 登记项，包含企业 sender/party/mine、矿名、当前应用
+消息 key ID、最多当前加上一把历史消息密钥，以及最多当前加上一把历史运输密钥。
+五项正式分组仅在启用同类矿分组分析时提供；普通生产数据接入不要求填写。
+`active_message_key_id` 必须存在于 `message_keys`。
 
 两类 payload 必须逐项配对：
 
@@ -257,7 +258,7 @@ Platform 明文精确为：
 | `ENTERPRISE_MINE_NAME` | `client.mine_name` |
 | `ENTERPRISE_OPERATOR_ID` | `client.party_id` |
 | `ENTERPRISE_SYSTEM_ID` | `client.sender_id` |
-| 五项 `ENTERPRISE_*` 分组 | `client.comparison_context` |
+| 可选的五项 `ENTERPRISE_*` 分组 | 可选的 `client.comparison_context` |
 | `ENTERPRISE_EXCHANGE_KEY_ID` | `client.active_message_key_id` |
 | 当前/历史应用消息密钥 | `client.message_keys` |
 | 当前/历史运输密钥 | `client.transport_secrets` |

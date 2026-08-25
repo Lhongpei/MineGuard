@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker
 
 import mineguard.provisioning as provisioning_module
 from mineguard.exchange_v2 import parse_exchange_clients
@@ -284,14 +285,26 @@ def test_pairing_does_not_require_comparison_metadata(
         issuer_public_key=public_key,
         expected_kind=REGISTRATION_BUNDLE_KIND,
     )
+    contract_root = Path(__file__).resolve().parents[2] / "contracts" / "schemas"
+    for payload, schema_name in (
+        (agent_payload, "enterprise-agent-provisioning-payload-v1.schema.json"),
+        (
+            registration_payload,
+            "platform-client-registration-payload-v1.schema.json",
+        ),
+    ):
+        schema = json.loads((contract_root / schema_name).read_text(encoding="utf-8"))
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(payload)
     assert "comparison_context" not in registration_payload["client"]
-    assert not {
+    comparison_keys = {
         "ENTERPRISE_CAPACITY_BAND",
         "ENTERPRISE_MINING_METHOD",
         "ENTERPRISE_SHIFT_SYSTEM",
         "ENTERPRISE_COAL_TYPE",
         "ENTERPRISE_OPERATING_REGIME",
-    } & set(agent_payload["config"])
+    }
+    assert not comparison_keys & set(agent_payload["config"])
+    assert not comparison_keys & set(agent_payload["locked_keys"])
 
 
 def test_tampered_bundle_and_wrong_activation_fail_without_registry_write(

@@ -231,6 +231,84 @@ def test_user_facing_chinese_quantity_names_import_without_manual_remapping() ->
     }
 
 
+def test_reordered_user_csv_headers_never_shift_metric_values() -> None:
+    imported = import_five_quantity_bytes(
+        filename="现场生产数据.csv",
+        content=(
+            "日期,开票量(t),风量(m3/min),电量(kWh),雷管(发),炸药(kg),"
+            "入井人员量(人次),产量_企业报表(t),开采量_采掘计量(t),"
+            "销售量(t),运输量(t),洗煤量_入洗原煤(t)\n"
+            "2026-08-25,2850,8200,186000,240,720,356,3200,3265,"
+            "2900,2870,3050\n"
+        ).encode(),
+        acquisition_mode="manual_import",
+        identity=identity(),
+        captured_at="2026-08-25T13:00:00Z",
+    )
+
+    daily = imported["payload"]["days"][0]["reported_quantity"]["daily_total"]
+    assert {metric: daily[metric]["value"] for metric in METRICS} == {
+        "ventilation_m3_min": 8200.0,
+        "electricity_kwh": 186000.0,
+        "detonators_count": 240.0,
+        "explosives_kg": 720.0,
+        "mine_entry_persons": 356.0,
+        "production_t": 3200.0,
+        "extraction_t": 3265.0,
+        "sales_t": 2900.0,
+        "transport_t": 2870.0,
+        "wash_feed_t": 3050.0,
+        "invoiced_quantity_t": 2850.0,
+    }
+
+
+def test_partial_production_metrics_can_be_confirmed_and_queued(tmp_path: Path) -> None:
+    runtime = FiveQuantityRuntime(
+        Repository(tmp_path / "partial-production.db"),
+        identity=identity(),
+        quarantine_directory=tmp_path / "quarantine",
+    )
+    draft = runtime.ingest_bytes(
+        filename="部分生产数据.csv",
+        content=(
+            "日期,产量_企业报表(t),销售量(t)\n"
+            "2026-08-25,3200,2900\n"
+        ).encode(),
+        acquisition_mode="manual_import",
+        actor="operator-partial",
+    )["draft"]
+
+    daily = draft["payload"]["days"][0]["reported_quantity"]["daily_total"]
+    assert daily["production_t"]["value"] == 3200.0
+    assert daily["sales_t"]["value"] == 2900.0
+    for metric in set(METRICS) - {"production_t", "sales_t"}:
+        assert daily[metric]["value"] is None
+        assert set(daily[metric]["quality_flags"]) & {
+            "missing",
+            "unavailable",
+            "not_applicable",
+        }
+
+    confirmed = runtime.confirm_draft(
+        draft["draft_id"],
+        expected_revision=draft["revision"],
+        actor_id="operator-partial",
+        confirmer_name="张三",
+        confirmer_role="企业填报员",
+        attestation="本人已核对现有生产数据，未取得的指标保持缺失。",
+        accepted=True,
+    )
+    assert confirmed["status"] == "queued"
+    message = runtime.store.due_outbox()[0]["body"]
+    assert message["contract_version"] == "ten-quantity-submission-v3"
+    queued_daily = message["payload"]["days"][0]["reported_quantity"][
+        "daily_total"
+    ]
+    assert queued_daily["production_t"]["value"] == 3200.0
+    assert queued_daily["sales_t"]["value"] == 2900.0
+    assert queued_daily["electricity_kwh"]["value"] is None
+
+
 def test_v3_shift_optional_fields_may_be_omitted_but_extraction_is_required() -> None:
     payload = imported_payload()
     for shift_key in SHIFT_KEYS:

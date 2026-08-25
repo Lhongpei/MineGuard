@@ -1400,7 +1400,7 @@
         els.platformStatusItem,
         els.platformStatusText,
         "warning",
-        "已配置，未探测",
+        "已配置，提交时验证",
       );
     }
     if (platform && platform.message) {
@@ -1457,8 +1457,10 @@
         : "保存和监管提交可用；自由文字智能提取暂未启用。";
     } else if (connected) {
       status = "warning";
-      label = "可以填报，提交前再检查";
-      hint = "监管接口已经配置但尚未完成连通性确认。";
+      label = "可以填报，提交时自动验证";
+      hint =
+        platform.message ||
+        "监管接口已配置；提交和风险拉取时自动进行签名连通性校验。";
     }
     setStatusItem(els.simpleStatusItem, els.simpleStatusText, status, label);
     els.simpleStatusHint.textContent = hint;
