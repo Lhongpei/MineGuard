@@ -4,7 +4,7 @@ import copy
 import hashlib
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -171,6 +171,53 @@ def test_fake_or_misbound_intake_receipt_is_never_archived(
         ).fetchone()
     assert (outbox["status"], outbox["receipt_json"]) == ("sending", None)
     assert (source["status"], source["receipt_json"]) == ("queued", None)
+
+
+def test_intake_receipt_allows_bounded_cross_host_clock_skew(
+    tmp_path: Path,
+) -> None:
+    repository, runtime, draft, message = _queued_submission(
+        tmp_path, "receipt-clock-skew.db"
+    )
+    submission_time = datetime.fromisoformat(
+        str(message["created_at"]).replace("Z", "+00:00")
+    )
+    government_time = submission_time - timedelta(minutes=4)
+    receipt = _signed_receipt(message, timestamp=government_time.isoformat())
+
+    runtime.store.outbox_succeeded(message["message_id"], receipt=receipt)
+
+    with repository._read() as db:
+        outbox = db.execute(
+            "SELECT status,receipt_json FROM fq_outbox WHERE message_id=?",
+            (message["message_id"],),
+        ).fetchone()
+        source = db.execute(
+            "SELECT status,receipt_json FROM fq_drafts WHERE draft_id=?",
+            (draft["draft_id"],),
+        ).fetchone()
+    assert outbox["status"] == "succeeded"
+    assert outbox["receipt_json"] is not None
+    assert source["status"] == "submitted"
+    assert source["receipt_json"] == outbox["receipt_json"]
+
+
+def test_intake_receipt_rejects_excessive_cross_host_clock_skew(
+    tmp_path: Path,
+) -> None:
+    repository, runtime, _draft, message = _queued_submission(
+        tmp_path, "receipt-excessive-clock-skew.db"
+    )
+    submission_time = datetime.fromisoformat(
+        str(message["created_at"]).replace("Z", "+00:00")
+    )
+    government_time = submission_time - timedelta(minutes=6)
+    receipt = _signed_receipt(message, timestamp=government_time.isoformat())
+
+    with pytest.raises(ConflictError, match="应用签名与契约校验"):
+        runtime.store.outbox_succeeded(message["message_id"], receipt=receipt)
+
+    repository.close()
 
 
 def test_queued_and_delivered_submission_projection_is_immutable(

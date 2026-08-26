@@ -61,6 +61,7 @@ from .util import jcs_json, parse_aware_datetime, sha256_jcs, utc_now, utc_text
 ZERO_HASH = "0" * 64
 _FQ_SCHEMA_VERSION = 4
 _FQ_SCHEMA_COMPONENT = "five_quantity_v2"
+_RECEIPT_CLOCK_SKEW = timedelta(minutes=5)
 
 _PUBLIC_AUDIT_EVENT_TYPES = {
     "five_quantity_csv_preview_created": "data_import_preview_created",
@@ -871,8 +872,10 @@ def _verify_stored_intake_receipt(
         submission_created_at = parse_aware_datetime(
             submission.get("created_at"), "报送 created_at"
         )
-        if received_at < submission_created_at or receipt_created_at < received_at:
-            raise ValueError("回执时间早于报送或政府接收时间")
+        if received_at + _RECEIPT_CLOCK_SKEW < submission_created_at:
+            raise ValueError("政府接收时间早于报送时间且超过允许的时钟偏差")
+        if receipt_created_at < received_at:
+            raise ValueError("回执创建时间早于政府接收时间")
         submission_revision = payload.get("submission_revision")
         if (
             isinstance(submission_revision, bool)

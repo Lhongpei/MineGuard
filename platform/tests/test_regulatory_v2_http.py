@@ -1293,6 +1293,13 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
         (CONTRACTS / "examples" / "ten-quantity-submission-v3.json").read_bytes()
     )
     submission["payload"].pop("comparison_context")
+    # A production batch is an as-of snapshot.  It may be confirmed while the
+    # final governed shift is still in progress; unobserved values remain null.
+    submission["payload"]["closed_at"] = "2026-07-31T12:00:00Z"
+    assert submission["payload"]["closed_at"] < (
+        submission["payload"]["days"][-1]["reported_quantity"]["shifts"]
+        ["four_shift"]["end_at"]
+    )
     reported = submission["payload"]["days"][0]["reported_quantity"]
     available_metrics = {"production_t", "sales_t"}
     for metric, measurement in reported["daily_total"].items():

@@ -1719,17 +1719,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         local_today = now.astimezone(ZoneInfo(message.payload.timezone)).date()
         if message.payload.period_end > local_today:
             raise ValueError("future reporting periods cannot be analysed")
-        last_shift_end = max(
-            shift.end_at
-            for day in message.payload.days
-            for shift in (
-                day.reported_quantity.shifts.zero_shift,
-                day.reported_quantity.shifts.eight_shift,
-                day.reported_quantity.shifts.four_shift,
-            )
-        )
-        if message.payload.closed_at < last_shift_end:
-            raise ValueError("report cannot close before its final shift ends")
+        # ``closed_at`` is the enterprise's as-of watermark, not a claim that
+        # every governed shift in the reporting date has finished.  A mine may
+        # report the observations currently available while later shifts and
+        # unavailable quantities remain explicit nulls.  The future-period and
+        # future-application checks above still prevent impossible data.
 
     def _government_principal(self) -> Principal:
         principal = self._session_principal()
