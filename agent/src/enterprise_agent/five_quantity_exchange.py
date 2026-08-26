@@ -689,6 +689,25 @@ class FiveQuantityPlatformClient:
             raise PlatformError("监管平台提交接口未返回接收回执")
         return result
 
+    def probe_connectivity(self) -> dict[str, Any]:
+        """Verify HTTPS, transport signing and the registered mine identity."""
+
+        result = self._request(
+            method="GET",
+            path="/v3/connectivity",
+            contract_version=GENERIC_GET_CONTRACT_V3,
+        )
+        if result is None:
+            raise PlatformError("监管平台连通性检测未返回结果")
+        expected = {
+            "contract_version": "ten-quantity-connectivity-v1",
+            "service": "mineguard-regulatory-platform",
+            "status": "ready",
+        }
+        if any(result.get(key) != value for key, value in expected.items()):
+            raise PlatformError("监管平台连通性响应不兼容")
+        return result
+
     def submission_receipt(
         self,
         message_id: str,

@@ -127,6 +127,32 @@ _AGGREGATIONS = {
     },
 }
 _METRIC_LABELS = METRIC_LABELS
+
+_ENTERPRISE_RISK_TERM_REPLACEMENTS = {
+    "l1_reconciliation": "多项数据一致性核对",
+    "minimal_conflict_set": "重点核对范围",
+    "robust_temporal_baseline": "历史变化核对",
+    "past_only_rolling_mad": "历史变化核对",
+    "past_only_ewma": "历史变化核对",
+    "past_only_cusum": "历史变化核对",
+    "past_only_page_hinkley": "历史变化核对",
+    "anonymous_peer_baseline": "同类条件对照",
+    "L1 求解器": "多项数据一致性核对",
+    "HiGHS": "一致性核对",
+    "Page-Hinkley": "历史变化核对",
+    "Rolling MAD": "历史变化核对",
+    "CUSUM": "历史变化核对",
+    "EWMA": "历史变化核对",
+}
+
+
+def _enterprise_risk_text(value: Any) -> str:
+    text = str(value or "").strip()
+    for internal, business_label in _ENTERPRISE_RISK_TERM_REPLACEMENTS.items():
+        text = text.replace(internal, business_label)
+    return text
+
+
 _COMPARISON_KEYS = {
     "capacity_band",
     "mining_method",
@@ -4404,6 +4430,7 @@ class FiveQuantityRuntime:
             watched=self.watched_directories,
         )
         self.csv_mapping_provider = llm_provider
+        self._risk_model_slots = threading.BoundedSemaphore(4)
         self._watch_state: dict[str, tuple[int, int, float]] = {}
         self._processed_paths: dict[str, tuple[int, int]] = {}
         self._machine_source_policies: tuple[dict[str, Any], ...] = ()
@@ -5399,6 +5426,8 @@ class FiveQuantityRuntime:
         self, report_id: str, question: str, *, actor: str
     ) -> dict[str, Any]:
         question = _text(question, "问题", 2000)
+        model_status = "not_requested"
+        model_name: str | None = None
         if any(
             phrase in question.casefold()
             for phrase in ("股票", "天气", "写代码", "游戏", "娱乐", "体育比分")
@@ -5407,7 +5436,7 @@ class FiveQuantityRuntime:
                 "该对话只解释当前煤矿十量风险报告，请围绕异常日期、指标、"
                 "证据、原因或回复材料提问。"
             )
-            tools: list[str] = []
+            tools: list[str] = ["本地范围检查"]
         else:
             record = self.store.get_report(report_id)
             payload = record["report"]["payload"]
@@ -5427,23 +5456,21 @@ class FiveQuantityRuntime:
                     for day in finding.get("affected_dates", [])
                 }
             )
-            methods = sorted(
-                {
-                    evidence.get("method")
-                    for finding in findings
-                    for evidence in finding.get("evidence", [])
-                    if evidence.get("method")
-                }
-            )
-            tools = ["report_summary", "affected_scope", "evidence_method_explainer"]
+            methods = {
+                evidence.get("method")
+                for finding in findings
+                for evidence in finding.get("evidence", [])
+                if evidence.get("method")
+            }
+            tools = ["本地报告摘要", "影响范围核对"]
             method_text = []
             if "l1_reconciliation" in methods:
                 method_text.append(
-                    "L1 求解器在联合约束下寻找最小必要调整；超阈值表示"
-                    "多项数据难以同时协调，不等于自动认定造假"
+                    "多项生产数据之间的关系未能同时协调，需要结合原始记录核对；"
+                    "这只是风险提示，不等于对企业事实作出认定"
                 )
             if "minimal_conflict_set" in methods:
-                method_text.append("最小冲突集用于缩小需要核对的日期和指标组合")
+                method_text.append("系统已把需要优先核对的日期和指标范围缩小")
             if any(
                 method in methods
                 for method in (
@@ -5457,12 +5484,11 @@ class FiveQuantityRuntime:
                 )
             ):
                 method_text.append(
-                    "时序模块只使用当前日期以前的本矿同工况历史：Rolling MAD"
-                    "检查稳健离群，EWMA 检查持续偏移，CUSUM 和 Page-Hinkley"
-                    "检查累积变化，并结合漂移与变化点复核"
+                    "系统将本期数据与本矿此前可用记录进行了历史变化核对，"
+                    "发现需要结合生产、检修和计量记录进一步确认的变化"
                 )
             if "anonymous_peer_baseline" in methods:
-                method_text.append("同类矿证据只使用匿名统计区间，不展示其他煤矿明细")
+                method_text.append("同类条件对照只使用匿名统计范围，不展示其他煤矿明细")
             checklist = "；".join(
                 [
                     "核对原表对应日期和班次",
@@ -5471,14 +5497,90 @@ class FiveQuantityRuntime:
                     "如数值有误先提交更正报表，再在回复中引用更正消息",
                 ]
             )
-            answer = (
-                f"报告结论：{payload['summary']}\n"
+            local_answer = (
+                f"监管分析提示：{_enterprise_risk_text(payload['summary'])}\n"
                 f"涉及日期：{'、'.join(dates) or '报告未列明'}；"
                 f"涉及指标：{'、'.join(metrics) or '报告未列明'}。\n"
                 + ("；".join(method_text) + "。\n" if method_text else "")
                 + f"建议核对：{checklist}。企业原因说明只会被记录，"
                 "不能直接消除风险；更正数据需由政府同一算法重算。"
             )
+            provider = self.csv_mapping_provider
+            answer_method = getattr(provider, "answer_risk_report", None)
+            if provider is None:
+                model_status = "not_configured"
+                answer = "智能模型尚未配置，以下为本地报告摘要。\n" + local_answer
+            elif not callable(answer_method):
+                model_status = "unsupported"
+                answer = "当前模型不支持风险解读，以下为本地报告摘要。\n" + local_answer
+            elif not self._risk_model_slots.acquire(blocking=False):
+                model_status = "busy"
+                answer = "智能模型当前繁忙，以下为本地报告摘要。\n" + local_answer
+            else:
+                try:
+                    model_name = (
+                        str(
+                            getattr(
+                                getattr(provider, "config", None), "model", ""
+                            )
+                        )
+                        or None
+                    )
+                    report_context = {
+                        "mine_name": _enterprise_risk_text(
+                            payload["mine"]["mine_name"]
+                        ),
+                        "period_start": payload["period_start"],
+                        "period_end": payload["period_end"],
+                        "outcome": payload["outcome"],
+                        "summary": _enterprise_risk_text(payload["summary"]),
+                        "findings": [
+                            {
+                                "title": _enterprise_risk_text(finding["title"]),
+                                "summary": _enterprise_risk_text(finding["summary"]),
+                                "severity": finding["severity"],
+                                "affected_dates": list(
+                                    finding.get("affected_dates", [])
+                                ),
+                                "affected_metrics": [
+                                    _METRIC_LABELS.get(metric, metric)
+                                    for metric in finding.get("affected_metrics", [])
+                                ],
+                                "evidence": [
+                                    {
+                                        "summary": _enterprise_risk_text(
+                                            evidence.get("summary")
+                                        ),
+                                        "observed_value": evidence.get(
+                                            "observed_value"
+                                        ),
+                                        "expected_min": evidence.get("expected_min"),
+                                        "expected_max": evidence.get("expected_max"),
+                                    }
+                                    for evidence in finding.get("evidence", [])[:20]
+                                ],
+                            }
+                            for finding in findings[:50]
+                        ],
+                    }
+                    answer = answer_method(
+                        question=question,
+                        report_context=report_context,
+                    )
+                    answer += (
+                        "\n\n以上为智能模型解读建议，"
+                        "企业仍需依据原始记录人工核实。"
+                    )
+                    model_status = "used"
+                    tools = ["智能模型风险解读", "本地报告范围核对"]
+                except Exception:
+                    model_status = "failed"
+                    answer = (
+                        "智能模型调用失败，已改用本地报告摘要；请联系系统管理员检查模型连接。\n"
+                        + local_answer
+                    )
+                finally:
+                    self._risk_model_slots.release()
         messages = self.store.append_chat(
             report_id=report_id,
             actor_id=actor,
@@ -5486,7 +5588,14 @@ class FiveQuantityRuntime:
             answer=answer,
             tools=tools,
         )
-        return {"answer": answer, "tools": tools, "messages": messages}
+        return {
+            "answer": answer,
+            "tools": tools,
+            "messages": messages,
+            "model_used": model_status == "used",
+            "model_status": model_status,
+            "model": model_name,
+        }
 
     def save_response(
         self,

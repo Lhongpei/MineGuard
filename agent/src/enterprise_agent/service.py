@@ -1329,14 +1329,32 @@ class EnterpriseAgentService:
         five_quantity_runtime = getattr(self, "_five_quantity", None)
         v3_platform_client = getattr(five_quantity_runtime, "platform_client", None)
         if v3_platform_client is not None:
+            probe = getattr(v3_platform_client, "probe_connectivity", None)
+            if not callable(probe):
+                return {
+                    "configured": True,
+                    "reachable": None,
+                    "compatible": None,
+                    "message": "监管平台已配置；当前客户端版本不支持主动检测",
+                }
+            try:
+                probe()
+            except PlatformError as error:
+                failure_kind = error.details.get("failure_kind")
+                result = {
+                    "configured": True,
+                    "reachable": failure_kind != "connection",
+                    "compatible": False,
+                    "message": str(error),
+                }
+                if error.details:
+                    result["error"] = deep_copy_json(error.details)
+                return result
             return {
                 "configured": True,
-                "reachable": None,
-                "compatible": None,
-                "message": (
-                    "监管平台生产数据 V3 接口已配置；"
-                    "实际提交和风险拉取时进行签名连通性校验"
-                ),
+                "reachable": True,
+                "compatible": True,
+                "message": "监管平台已连接，网络、签名和矿井身份验证通过",
             }
         if self.platform_client is None:
             return {

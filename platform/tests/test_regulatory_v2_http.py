@@ -1364,6 +1364,18 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
         return response.status, json.loads(raw) if raw else None
 
     try:
+        status, connectivity = request(
+            "GET",
+            "/v3/connectivity",
+            contract_version="ten-quantity-exchange-v3",
+        )
+        assert status == 200
+        assert connectivity == {
+            "contract_version": "ten-quantity-connectivity-v1",
+            "service": "mineguard-regulatory-platform",
+            "status": "ready",
+        }
+
         status, intake = request(
             "POST",
             "/v3/ten-quantity-submissions",

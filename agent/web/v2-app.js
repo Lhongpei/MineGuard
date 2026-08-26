@@ -158,6 +158,48 @@
   };
   const statusText = (value) => STATUS[value] || value || "—";
   const metricLabel = (value) => METRIC_LABELS[value] || value || "未列明";
+  const enterpriseRiskText = (value) => {
+    let text = String(value == null ? "" : value);
+    const replacements = [
+      [/l1_reconciliation/gi, "多项数据一致性核对"],
+      [/minimal_conflict_set/gi, "重点核对范围"],
+      [/robust_temporal_baseline/gi, "历史变化核对"],
+      [/past_only_[a-z_]+/gi, "历史变化核对"],
+      [/L1\s*求解器/gi, "多项数据一致性核对"],
+      [/\bL1\b/gi, "多项数据一致性核对"],
+      [/HiGHS/gi, "一致性核对"],
+      [/Page-Hinkley/gi, "历史变化核对"],
+      [/Rolling MAD/gi, "历史变化核对"],
+      [/CUSUM/gi, "历史变化核对"],
+      [/EWMA/gi, "历史变化核对"],
+    ];
+    replacements.forEach(([pattern, label]) => {
+      text = text.replace(pattern, label);
+    });
+    return text;
+  };
+  const evidenceMethodLabel = (value) => {
+    const method = String(value || "");
+    if (method === "l1_reconciliation") return "多项数据一致性核对";
+    if (method === "minimal_conflict_set") return "重点核对范围";
+    if (method.includes("temporal") || method.startsWith("past_only_")) {
+      return "历史变化核对";
+    }
+    if (method === "anonymous_peer_baseline") return "同类条件对照";
+    return "数据核对依据";
+  };
+  const assistantSourceLabel = (value) => {
+    const labels = {
+      report_summary: "本地报告摘要",
+      affected_scope: "影响范围核对",
+      evidence_method_explainer: "核对依据说明",
+    };
+    const source = String(value || "");
+    if (labels[source]) return labels[source];
+    if (source.includes("智能模型")) return source;
+    if (source.includes("本地") || source.includes("核对")) return source;
+    return "本地只读核对";
+  };
   const reportingWindow = (payload) => {
     return {
       label: "生产数据批次",
@@ -1825,20 +1867,20 @@
       .map(
         (finding, index) => `<article class="fq-finding">
           <div class="fq-finding-head"><span class="fq-severity is-${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span><div><small>风险 ${index + 1}</small><h4>${escapeHtml(finding.title)}</h4></div></div>
-          <p>${escapeHtml(finding.summary)}</p>
+          <p>${escapeHtml(enterpriseRiskText(finding.summary))}</p>
           <dl class="fq-definition-list"><div><dt>日期</dt><dd>${escapeHtml((finding.affected_dates || []).join("、") || "未列明")}</dd></div><div><dt>指标</dt><dd>${escapeHtml((finding.affected_metrics || []).map(metricLabel).join("、") || "未列明")}</dd></div></dl>
-          <details><summary>查看算法证据</summary>${(finding.evidence || []).map((evidence) => `<div class="fq-evidence"><strong>${escapeHtml(evidence.method)}</strong><span>${escapeHtml(evidence.summary)}</span><small>观测 ${escapeHtml(evidence.observed_value == null ? "—" : evidence.observed_value)}；参考 ${escapeHtml(evidence.expected_min == null ? "—" : evidence.expected_min)}～${escapeHtml(evidence.expected_max == null ? "—" : evidence.expected_max)}；分数 ${escapeHtml(evidence.score == null ? "—" : evidence.score)}</small></div>`).join("")}</details>
+          <details><summary>查看核对依据</summary>${(finding.evidence || []).map((evidence) => `<div class="fq-evidence"><strong>${escapeHtml(evidenceMethodLabel(evidence.method))}</strong><span>${escapeHtml(enterpriseRiskText(evidence.summary))}</span><small>观测 ${escapeHtml(evidence.observed_value == null ? "—" : evidence.observed_value)}；参考 ${escapeHtml(evidence.expected_min == null ? "—" : evidence.expected_min)}～${escapeHtml(evidence.expected_max == null ? "—" : evidence.expected_max)}；偏离程度 ${escapeHtml(evidence.score == null ? "—" : evidence.score)}</small></div>`).join("")}</details>
         </article>`,
       )
       .join("");
     const messages = state.messages.length
-      ? state.messages.map((item) => `<div class="fq-chat-message is-${escapeHtml(item.role)}"><strong>${item.role === "assistant" ? "煤矿风险助手" : "企业人员"}</strong><p>${escapeHtml(item.content)}</p>${item.tools && item.tools.length ? `<small>只读工具：${escapeHtml(item.tools.join("、"))}</small>` : ""}</div>`).join("")
+      ? state.messages.map((item) => `<div class="fq-chat-message is-${escapeHtml(item.role)}"><strong>${item.role === "assistant" ? "煤矿风险助手" : "企业人员"}</strong><p>${escapeHtml(enterpriseRiskText(item.content))}</p>${item.tools && item.tools.length ? `<small>解读来源：${escapeHtml(item.tools.map(assistantSourceLabel).join("、"))}</small>` : ""}</div>`).join("")
       : '<p class="fq-empty">可询问“为什么提示这个风险”“该核对哪些原始记录”等。</p>';
     target.innerHTML = `
       <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(payload.mine.mine_name)}</p><h3>生产数据分析报告</h3><p>数据范围 ${escapeHtml(payload.period_start === payload.period_end ? payload.period_start : `${payload.period_start} 至 ${payload.period_end}`)} · 政府签发 ${escapeHtml(formatTime(payload.issued_at))} · 回复期限 ${escapeHtml(formatTime(payload.response_due_at))}</p></div><span class="fq-status is-risk">${payload.outcome === "risk" ? "需回复" : "数据不足"}</span></div>
-      <div class="fq-risk-summary"><strong>算法结论</strong><p>${escapeHtml(payload.summary)}</p><small>引擎 ${escapeHtml(payload.algorithm.engine_id)} ${escapeHtml(payload.algorithm.engine_version)}；模块：${escapeHtml(payload.algorithm.modules.join("、"))}</small></div>
+      <div class="fq-risk-summary"><strong>监管分析提示</strong><p>${escapeHtml(enterpriseRiskText(payload.summary))}</p><small>这是需要企业核对和回复的风险提示，不代表已经作出事实认定。</small></div>
       <div class="fq-findings">${findings}</div>
-      <section class="fq-chat"><div class="fq-section-head"><div><h4>围绕本报告对话</h4><p>不能查新闻、闲聊或替企业编造原因。</p></div></div><div class="fq-chat-log" id="fqChatLog">${messages}</div><form id="fqChatForm" class="fq-chat-form"><textarea id="fqChatQuestion" rows="2" maxlength="2000" placeholder="例如：L1 求解器为什么把 7 月 31 日列入核对范围？" required></textarea><button class="button button-secondary" type="submit">询问</button></form></section>
+      <section class="fq-chat"><div class="fq-section-head"><div><h4>围绕本报告对话</h4><p>优先调用已配置的智能模型；不能替企业编造原因或作出确认。</p></div></div><div class="fq-chat-log" id="fqChatLog">${messages}</div><form id="fqChatForm" class="fq-chat-form"><textarea id="fqChatQuestion" rows="2" maxlength="2000" placeholder="例如：为什么提示这一天需要核对？应该查看哪些原始记录？" required></textarea><button class="button button-secondary" type="submit">询问智能助手</button></form></section>
       <section id="fqResponseArea">${state.response ? responseHtml(state.response) : `<div class="fq-response-start"><div><h4>形成企业回执</h4><p>逐项填写事实原因、证据索引和措施，人工确认后发送。</p></div><button class="button button-primary" type="button" data-risk-action="create-response" ${!can("write") ? "disabled" : ""}>开始填写回执</button></div>`}</section>`;
   }
 
@@ -1886,7 +1928,12 @@
       const payload = await api(`/api/v2/risks/${encodeURIComponent(state.currentRisk.report_id)}/chat`, { method: "POST", body: { question } });
       state.messages = payload.messages || [];
       renderRisk();
-      message("已基于当前风险报告完成解释。", "success");
+      message(
+        payload.model_used
+          ? "智能模型已基于当前风险报告完成解读。"
+          : "当前使用本地报告摘要；回复中已注明模型未调用的原因。",
+        payload.model_used ? "success" : "notice",
+      );
     } catch (error) {
       message(error.message, "error");
       button.disabled = false;

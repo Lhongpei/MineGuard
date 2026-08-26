@@ -1248,6 +1248,16 @@
     await loadPublicHealth();
     await loadPlatformStatus();
     setBusy(els.refreshStatusButton, false);
+    const platform = state.platformStatus;
+    if (!state.principal || !hasPermission("read")) {
+      showToast("请先登录企业账号，再检测监管网络。", "error");
+    } else if (!platform || !platform.configured) {
+      showToast("监管接口尚未配置。", "error");
+    } else if (platform.reachable === true && platform.compatible === true) {
+      showToast("监管网络正常：签名和矿井身份验证均已通过。", "success");
+    } else {
+      showToast(platform.message || "监管网络检测未通过。", "error");
+    }
   }
 
   function renderOperationalStatus() {

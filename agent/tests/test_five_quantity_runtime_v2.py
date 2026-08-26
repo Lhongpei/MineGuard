@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -345,6 +346,25 @@ class FakeGovernment:
         )
 
 
+class FakeRiskModel:
+    config = SimpleNamespace(model="risk-assistant-test")
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def answer_risk_report(
+        self, *, question: str, report_context: dict[str, Any]
+    ) -> str:
+        self.calls.append({"question": question, "report_context": report_context})
+        serialized = str(report_context)
+        assert "l1_reconciliation" not in serialized
+        assert "past_only_page_hinkley" not in serialized
+        return (
+            "用电与产量关系出现需要核对的变化，"
+            "建议查看当日日报、班次记录和检修记录。"
+        )
+
+
 def test_durable_full_workflow_and_agent_assistance_trace(tmp_path: Path) -> None:
     repository = Repository(tmp_path / "agent.db")
     first = FiveQuantityRuntime(
@@ -379,11 +399,13 @@ def test_durable_full_workflow_and_agent_assistance_trace(tmp_path: Path) -> Non
     assert claimed[0]["message_kind"] == "submission"
 
     government = FakeGovernment(identity())
+    risk_model = FakeRiskModel()
     restarted = FiveQuantityRuntime(
         Repository(tmp_path / "agent.db"),
         identity=identity(),
         platform_client=government,  # type: ignore[arg-type]
         quarantine_directory=tmp_path / "state" / "quarantine",
+        llm_provider=risk_model,
     )
     assert restarted.process_outbox_once()[0]["status"] == "succeeded"
     assert restarted.poll_analysis_once()["duplicate"] is False  # type: ignore[index]
@@ -397,14 +419,18 @@ def test_durable_full_workflow_and_agent_assistance_trace(tmp_path: Path) -> Non
 
     chat = restarted.risk_explanation(
         report["report_id"],
-        "L1 求解器和历史基线为什么同时提示风险？",
+        "为什么提示这一天需要核对，应该查看哪些原始记录？",
         actor="operator-1",
     )
-    assert "evidence_method_explainer" in chat["tools"]
-    assert "L1 求解器" in chat["answer"]
-    assert "Page-Hinkley" in chat["answer"]
-    assert "涉及指标：电量、产量" in chat["answer"]
+    assert chat["model_used"] is True
+    assert chat["model_status"] == "used"
+    assert chat["model"] == "risk-assistant-test"
+    assert "智能模型风险解读" in chat["tools"]
+    assert "日报、班次记录和检修记录" in chat["answer"]
+    assert "L1" not in chat["answer"]
+    assert "Page-Hinkley" not in chat["answer"]
     assert "electricity_kwh" not in chat["answer"]
+    assert len(risk_model.calls) == 1
     response = restarted.store.create_response(report["report_id"], actor="operator-1")
     document = response["document"]
     document["finding_responses"][0].update(

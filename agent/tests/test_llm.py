@@ -203,6 +203,54 @@ def test_llm_may_legitimately_return_no_suggestions() -> None:
     assert "未找到可引用" in result["message"]
 
 
+def test_risk_report_assistant_returns_bounded_enterprise_language() -> None:
+    captured: list[dict] = []
+
+    def opener(request, **_kwargs):
+        captured.append(json.loads(request.data))
+        return Response(
+            envelope(
+                {
+                    "answer": (
+                        "本次提示涉及产量与电量关系变化，请核对当日日报、"
+                        "班次记录和检修记录。"
+                    )
+                }
+            )
+        )
+
+    provider = OpenAICompatibleProvider(
+        LLMConfig(api_key="not-a-real-key", model="risk-model"),
+        opener=opener,
+    )
+    answer = provider.answer_risk_report(
+        question="为什么需要核对？",
+        report_context={
+            "mine_name": "测试矿",
+            "period_start": "2026-08-25",
+            "period_end": "2026-08-25",
+            "summary": "产量与电量关系需要核对",
+            "findings": [],
+        },
+    )
+
+    assert "日报、班次记录和检修记录" in answer
+    assert captured[0]["response_format"] == {"type": "json_object"}
+    assert "不得展示内部算法名" in captured[0]["messages"][0]["content"]
+
+
+def test_risk_report_assistant_rejects_internal_algorithm_names() -> None:
+    provider = provider_returning(
+        {"answer": "HiGHS 的 L1 求解器给出了这个结果。"}
+    )
+
+    with pytest.raises(ProviderError, match="内部实现名称"):
+        provider.answer_risk_report(
+            question="为什么需要核对？",
+            report_context={"summary": "需要核对", "findings": []},
+        )
+
+
 def test_tool_calling_preserves_deepseek_v4_reasoning_contract() -> None:
     captured: list[dict] = []
 

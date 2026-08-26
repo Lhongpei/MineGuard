@@ -7,6 +7,7 @@ from pathlib import Path
 WEB_ROOT = Path(__file__).resolve().parents[1] / "web"
 HTML = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
 JS = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+V2_JS = (WEB_ROOT / "v2-app.js").read_text(encoding="utf-8")
 CSS = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
 
 
@@ -744,13 +745,32 @@ def test_quick_reporting_mode_is_default_and_professional_tools_remain() -> None
     assert 'document.body.classList.toggle("is-simple-mode"' in JS
     assert 'document.body.classList.toggle("is-professional-mode"' in JS
     assert ".is-simple-mode #agentTaskButton" in CSS
-    assert ".is-simple-mode #coalChatButton" in CSS
+    assert ".is-simple-mode #coalChatButton" not in CSS
     assert ".is-professional-mode .simple-task-card" in CSS
+    assert "检测监管网络" in HTML
+    assert "智能助手" in HTML
     for retained in ("煤炭智能任务", "煤炭业务对话", "当前账号操作说明"):
         assert retained in HTML
     for forbidden in ("localStorage", "sessionStorage"):
         assert forbidden not in HTML
         assert forbidden not in JS
+
+
+def test_enterprise_risk_view_hides_internal_algorithms_and_discloses_ai_mode() -> None:
+    for required in (
+        "监管分析提示",
+        "查看核对依据",
+        "智能模型已基于当前风险报告完成解读",
+        "当前使用本地报告摘要",
+    ):
+        assert required in V2_JS
+    for removed in (
+        "escapeHtml(evidence.method)",
+        'item.tools.join("、")',
+        "payload.algorithm.engine_id",
+        "L1 求解器为什么把",
+    ):
+        assert removed not in V2_JS
 
 
 def test_agent_autofill_is_source_grounded_and_never_auto_submits() -> None:

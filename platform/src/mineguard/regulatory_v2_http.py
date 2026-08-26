@@ -1065,6 +1065,25 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, payload, head_only=head_only)
             return
 
+        if path == "/v3/connectivity":
+            self._reject_query(parsed.query)
+            transport = self._authenticate_machine_transport(
+                body=b"",
+                expected_contract="ten-quantity-exchange-v3",
+            )
+            with self.server.store.controlled_write_scope():
+                self._claim_machine_transport(transport)
+            self._send_json(
+                200,
+                {
+                    "contract_version": "ten-quantity-connectivity-v1",
+                    "service": "mineguard-regulatory-platform",
+                    "status": "ready",
+                },
+                head_only=head_only,
+            )
+            return
+
         if path in {"/v2/analysis-reports/next", "/v3/analysis-reports/next"}:
             ten_route = path.startswith("/v3/")
             transport = self._authenticate_machine_transport(

@@ -399,8 +399,7 @@ body.is-model-api-admin #coalChatButton {
   display: none;
 }
 
-.is-simple-mode #agentTaskButton,
-.is-simple-mode #coalChatButton {
+.is-simple-mode #agentTaskButton {
   display: none;
 }
 

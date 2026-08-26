@@ -671,13 +671,19 @@ def test_platform_status_distinguishes_offline_reachable_and_compatible() -> Non
 
 def test_platform_status_reports_configured_ten_quantity_v3_client() -> None:
     service = EnterpriseAgentService(Repository(":memory:"))
-    service._five_quantity = SimpleNamespace(platform_client=object())
+    service._five_quantity = SimpleNamespace(
+        platform_client=SimpleNamespace(
+            probe_connectivity=lambda: {
+                "contract_version": "ten-quantity-connectivity-v1",
+                "service": "mineguard-regulatory-platform",
+                "status": "ready",
+            }
+        )
+    )
 
     assert service.platform_status() == {
         "configured": True,
-        "reachable": None,
-        "compatible": None,
-        "message": (
-            "监管平台生产数据 V3 接口已配置；实际提交和风险拉取时进行签名连通性校验"
-        ),
+        "reachable": True,
+        "compatible": True,
+        "message": "监管平台已连接，网络、签名和矿井身份验证通过",
     }

@@ -276,14 +276,24 @@ def test_client_does_not_echo_untrusted_error_body() -> None:
     assert captured.value.details == {"retryable": True, "http_status": 500}
 
 
-def test_client_implements_all_seven_paths_and_preserves_opaque_cursor() -> None:
+def test_client_implements_all_paths_and_preserves_opaque_cursor() -> None:
     requests: list[tuple[str, str]] = []
 
     def opener(request: Any, timeout: float) -> _Response:
         assert timeout == 5
         requests.append((request.get_method(), request.full_url))
         is_ack = request.full_url.endswith("/delivery-ack")
-        return _Response(request, 204 if is_ack else 200, b"" if is_ack else b"{}")
+        if request.full_url.endswith("/v3/connectivity"):
+            body = json.dumps(
+                {
+                    "contract_version": "ten-quantity-connectivity-v1",
+                    "service": "mineguard-regulatory-platform",
+                    "status": "ready",
+                }
+            ).encode()
+        else:
+            body = b"{}"
+        return _Response(request, 204 if is_ack else 200, b"" if is_ack else body)
 
     client = FiveQuantityPlatformClient(
         FiveQuantityPlatformConfig(
@@ -297,6 +307,7 @@ def test_client_implements_all_seven_paths_and_preserves_opaque_cursor() -> None
     message_id = str(uuid4())
     report_id = str(uuid4())
     response_id = str(uuid4())
+    client.probe_connectivity()
     client.submit({"contract_version": "ten-quantity-submission-v3", "payload": {}})
     client.submission_receipt(message_id)
     client.pull_next(after_cursor="opaque.cursor:0001-next")
@@ -314,6 +325,7 @@ def test_client_implements_all_seven_paths_and_preserves_opaque_cursor() -> None
         (method, url.removeprefix("https://regulator.example"))
         for method, url in requests
     ] == [
+        ("GET", "/v3/connectivity"),
         ("POST", "/v3/ten-quantity-submissions"),
         ("GET", f"/v3/ten-quantity-submissions/{message_id}/receipt"),
         ("GET", "/v3/analysis-reports/next?after_cursor=opaque.cursor:0001-next"),
