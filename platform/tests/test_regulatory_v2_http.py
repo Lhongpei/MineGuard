@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import hmac
 from http.client import HTTPConnection
@@ -1311,6 +1311,18 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
             if metric not in available_metrics:
                 measurement["value"] = None
                 measurement["quality_flags"] = ["missing"]
+    # Exercise the complete signed HTTP path with a sparse batch that spans
+    # two calendar months.  V3 production batches are not monthly reports.
+    previous_month_day = deepcopy(submission["payload"]["days"][0])
+    previous_month_day["date"] = "2026-06-30"
+    for shift in previous_month_day["reported_quantity"]["shifts"].values():
+        for field in ("start_at", "end_at"):
+            shifted = datetime.fromisoformat(
+                shift[field].replace("Z", "+00:00")
+            ) - timedelta(days=31)
+            shift[field] = shifted.isoformat().replace("+00:00", "Z")
+    submission["payload"]["period_start"] = "2026-06-30"
+    submission["payload"]["days"].insert(0, previous_month_day)
     submission_body = _signed_enterprise_message(submission, secret=V3_EXAMPLE_SECRET)
     _assert_contract(submission, "ten-quantity-submission-v3.schema.json")
     client = ExchangeClient(
@@ -1389,6 +1401,12 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
 
         stored = server.store.get_submission(submission["message_id"])
         assert stored.quantity_scope == "ten_quantity_v3"
+        assert stored.period_start.isoformat() == "2026-06-30"
+        assert stored.period_end.isoformat() == "2026-07-31"
+        assert [item.date.isoformat() for item in stored.days] == [
+            "2026-06-30",
+            "2026-07-31",
+        ]
         day = stored.days[0]
         assert day.extraction_t is not None
         assert day.extraction_t.daily_total is None

@@ -666,7 +666,11 @@ class FiveQuantitySubmission(StrictModel):
         expected_span = (self.period_end - self.period_start).days + 1
         if expected_span > 366:
             raise ValueError("submission period cannot exceed 366 days")
-        if self.period_start.strftime("%Y-%m") != self.period_end.strftime("%Y-%m"):
+        if (
+            self.quantity_scope == "five_quantity_v2"
+            and self.period_start.strftime("%Y-%m")
+            != self.period_end.strftime("%Y-%m")
+        ):
             raise ValueError("one five-quantity submission must stay in one month")
         try:
             ZoneInfo(self.reporting_timezone)

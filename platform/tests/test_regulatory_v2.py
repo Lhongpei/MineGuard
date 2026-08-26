@@ -405,6 +405,35 @@ def test_v3_sparse_batch_analyzes_only_values_actually_submitted() -> None:
     ]
 
 
+def test_v3_production_batch_can_cross_calendar_months() -> None:
+    document = _ten_submission(day_count=2).model_dump(mode="python")
+    document["period_start"] = date(2026, 1, 31)
+    document["period_end"] = date(2026, 2, 2)
+    document["days"][0]["date"] = date(2026, 1, 31)
+    document["days"][1]["date"] = date(2026, 2, 2)
+
+    submission = FiveQuantitySubmission.model_validate(document)
+    result = analyze_five_quantity(submission)
+
+    assert submission.period_start == date(2026, 1, 31)
+    assert submission.period_end == date(2026, 2, 2)
+    assert result.coverage.expected_day_count == 3
+    assert result.coverage.reported_day_count == 2
+    assert result.decision is DecisionStatus.NORMAL_CANDIDATE
+    assert result.data_sufficiency_reasons == []
+
+
+def test_legacy_v2_monthly_submission_still_rejects_cross_month_window() -> None:
+    document = _submission(day_count=2).model_dump(mode="python")
+    document["period_start"] = date(2026, 1, 31)
+    document["period_end"] = date(2026, 2, 1)
+    document["days"][0]["date"] = date(2026, 1, 31)
+    document["days"][1]["date"] = date(2026, 2, 1)
+
+    with pytest.raises(ValueError, match="stay in one month"):
+        FiveQuantitySubmission.model_validate(document)
+
+
 def test_v3_batch_with_no_usable_value_remains_insufficient() -> None:
     submission = _ten_submission(day_count=1)
     submission.days[0] = submission.days[0].model_copy(
