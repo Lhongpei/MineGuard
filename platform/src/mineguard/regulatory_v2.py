@@ -49,7 +49,7 @@ from .temporal import (
 )
 
 
-REGULATORY_V2_METHOD_VERSION = "regulatory-ten-quantity-v3.2.0"
+REGULATORY_V2_METHOD_VERSION = "regulatory-ten-quantity-v3.3.0"
 AGGREGATION_RULE_VERSION = "ten-quantity-aggregation-v3.0"
 BASELINE_ADMISSION_RULE_VERSION = "baseline-admission-v3.0"
 BUSINESS_QUANTITY_GROUP_VERSION = "ten-business-quantities-v3.0"
@@ -1171,27 +1171,26 @@ def analyze_five_quantity(
         temporal_signals = _deduplicate_signals(temporal_signals)
 
     insufficient_reasons: list[str] = []
-    if coverage.complete_day_count < parameters.minimum_complete_days:
-        insufficient_reasons.append(
-            "完整十量日不足"
-            if submission.quantity_scope == "ten_quantity_v3"
-            else "完整五量日不足"
-        )
-    if coverage.completeness_ratio < parameters.minimum_completeness_ratio:
+    if legacy_scope and coverage.complete_day_count < parameters.minimum_complete_days:
+        insufficient_reasons.append("完整五量日不足")
+    if legacy_scope and coverage.completeness_ratio < parameters.minimum_completeness_ratio:
         insufficient_reasons.append("统计期数据覆盖率不足")
-    if not reconciliation.success:
-        insufficient_reasons.append("线性协调求解失败")
-    if (
-        advanced_result is not None
-        and advanced_result.decision
-        is advanced_v3.DecisionStatus.INSUFFICIENT_DATA
+    # V3 submissions are arbitrary production-data batches, not fixed seven-day
+    # or calendar-complete reports.  Missing dates and metrics remain explicit in
+    # coverage/signals, but they must not invalidate the values that were actually
+    # supplied.  Only a batch with no usable production value is unanalyzable.
+    if not legacy_scope and not any(
+        value is not None
+        for values in effective.values()
+        for value in values.values()
     ):
-        insufficient_reasons.extend(
-            f"高级十量证据层：{reason}"
-            for reason in advanced_result.decision_reasons
-            if f"高级十量证据层：{reason}" not in insufficient_reasons
+        insufficient_reasons.append("本批次没有可分析的生产数据")
+    if not reconciliation.success:
+        insufficient_reasons.append(
+            "已提供数据的一致性核对未完成"
+            if not legacy_scope
+            else "线性协调求解失败"
         )
-
     risk_signals = [
         item
         for item in [
@@ -1212,7 +1211,13 @@ def analyze_five_quantity(
         reasons = insufficient_reasons
     else:
         decision = DecisionStatus.NORMAL_CANDIDATE
-        reasons = ["未发现超过当前数据质量、时序及软参考区间的未解释线索"]
+        reasons = [
+            (
+                "已按本次提交的实际数据范围完成核对；未提供的日期和字段未参与判断"
+                if not legacy_scope and coverage.completeness_ratio < 0.999999
+                else "未发现超过当前数据质量、时序及软参考区间的未解释线索"
+            )
+        ]
 
     algorithm_payload = {
         "mine_id": submission.mine_id,

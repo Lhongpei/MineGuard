@@ -96,8 +96,12 @@ mineguard-ten-quantity-engine
 - 计量设备误差、称重净重/毛重口径和来源时间对齐。
 
 上述关系只能形成带容差、工况和历史基线的可解释证据，不能把简单不相等直接认定为
-违法、瞒报或违规。`normal_candidate` 也只是当前证据下的正常候选，不是法律结论。
-历史或来源不足必须输出 `data_insufficient`，不能用模型估算缺项后再判正常。
+违法、瞒报或违规。`normal_candidate` 也只是本批次实际提供数据范围内的正常候选，
+不是法律结论。V3 报送是任意日期行组成的生产数据批次，不要求固定 7 天、自然月完整，
+也不要求每个日期填满全部指标；未提供的日期和字段保持 `null` 并退出对应核对。缺少
+历史只会使历史模块不参与本次判断，不能把整批数据自动判为不足。只有整批没有任何
+可分析的生产值，或已提供数据的必需核对本身无法完成时，才输出
+`data_insufficient`。任何情况下都不能用模型估算缺项后再参与判断。
 
 分析报告中的 `production_extraction_reconciliation`、
 `production_sales_reconciliation`、`production_transport_reconciliation`、

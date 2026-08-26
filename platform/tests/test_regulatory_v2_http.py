@@ -1418,30 +1418,27 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
             "/v3/analysis-reports/next",
             contract_version="ten-quantity-exchange-v3",
         )
-        assert status == 200
-        assert report is not None
-        _assert_contract(report, "analysis-report-v3.schema.json")
-        _assert_application_signature(report, secret=V3_EXAMPLE_SECRET)
-        assert report["payload"]["algorithm"]["engine_id"] == (
-            "mineguard-ten-quantity-engine"
+        # The pull route intentionally returns only reports that require an
+        # enterprise response.  Partial batches with usable values are analyzed
+        # and retained, but no false "data to complete" task is sent back.
+        assert status == 204
+        assert report is None
+        reports = server.store.list_analysis_reports(
+            mine_id=submission["mine_id"], limit=10
         )
-        assert report["payload"]["algorithm"]["engine_version"].startswith("3.")
-        assert report["payload"]["algorithm"]["input_snapshot_sha256"] == (
-            submission["signature_envelope"]["payload_sha256"]
+        assert len(reports) == 1
+        stored_report = reports[0]
+        assert stored_report.outcome.value == "normal_candidate"
+        assert stored_report.response_required is False
+        assert stored_report.finding_ids == []
+        assert stored_report.result.method_version == "regulatory-ten-quantity-v3.3.0"
+        assert "本次提交的实际数据范围" in (
+            stored_report.result.decision_reasons[0]
         )
-        assert report["payload"]["outcome"] == "data_insufficient"
-        assert report["payload"]["findings"]
-        assert all(
-            finding["title"].startswith("十量")
-            for finding in report["payload"]["findings"]
-        )
-        assert "inventory_flow_reconciliation" not in report["payload"][
-            "algorithm"
-        ]["modules"]
 
         wrong_route_status, wrong_route_problem = request(
             "GET",
-            f"/v2/analysis-reports/{report['payload']['report_id']}",
+            f"/v2/analysis-reports/{stored_report.report_id}",
             contract_version="five-quantity-exchange-v2",
         )
         assert wrong_route_status == 404

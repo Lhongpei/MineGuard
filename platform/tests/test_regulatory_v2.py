@@ -212,7 +212,7 @@ def test_complete_v3_daily_report_does_not_require_commercial_shift_values() -> 
         if item.metric in {"sales_t", "transport_t", "wash_feed_t", "invoiced_quantity_t"}
     )
     assert {item.metric for item in result.reconciliation.adjustments} == set(METRICS)
-    assert result.method_version == "regulatory-ten-quantity-v3.2.0"
+    assert result.method_version == "regulatory-ten-quantity-v3.3.0"
     assert result.runtime_manifest["advanced_evidence_method_version"] == (
         "regulatory-ten-quantity-v3.1.0"
     )
@@ -364,6 +364,11 @@ def test_v3_missing_relationship_denominator_is_skipped_safely() -> None:
 
     assert result.reconciliation.success
     assert result.coverage.complete_day_count == 13
+    assert result.decision is DecisionStatus.NORMAL_CANDIDATE
+    assert result.data_sufficiency_reasons == []
+    assert result.decision_reasons == [
+        "已按本次提交的实际数据范围完成核对；未提供的日期和字段未参与判断"
+    ]
     assert not any(
         item.date == submission.days[0].date
         and item.relationship
@@ -373,6 +378,43 @@ def test_v3_missing_relationship_denominator_is_skipped_safely() -> None:
         }
         for item in result.reconciliation.soft_constraint_diagnostics
     )
+
+
+def test_v3_one_day_batch_does_not_require_seven_complete_days() -> None:
+    result = analyze_five_quantity(_ten_submission(day_count=1))
+
+    assert result.coverage.complete_day_count == 1
+    assert result.coverage.completeness_ratio == 1.0
+    assert result.decision is DecisionStatus.NORMAL_CANDIDATE
+    assert result.data_sufficiency_reasons == []
+
+
+def test_v3_sparse_batch_analyzes_only_values_actually_submitted() -> None:
+    submission = _ten_submission(day_count=2).model_copy(
+        update={"period_end": date(2026, 1, 10)}
+    )
+
+    result = analyze_five_quantity(submission)
+
+    assert result.coverage.expected_day_count == 10
+    assert result.coverage.reported_day_count == 2
+    assert result.decision is DecisionStatus.NORMAL_CANDIDATE
+    assert result.data_sufficiency_reasons == []
+    assert result.decision_reasons == [
+        "已按本次提交的实际数据范围完成核对；未提供的日期和字段未参与判断"
+    ]
+
+
+def test_v3_batch_with_no_usable_value_remains_insufficient() -> None:
+    submission = _ten_submission(day_count=1)
+    submission.days[0] = submission.days[0].model_copy(
+        update={metric: _quantity(None) for metric in METRICS}
+    )
+
+    result = analyze_five_quantity(submission)
+
+    assert result.decision is DecisionStatus.INSUFFICIENT_DATA
+    assert "本批次没有可分析的生产数据" in result.data_sufficiency_reasons
 
 
 def test_v3_l1_solver_uses_eleven_metric_dimensions(
