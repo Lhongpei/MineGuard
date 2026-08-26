@@ -198,8 +198,8 @@ state.wallboard.rotationIndex = 0;
 const cases = [
   [{mine_id:"STATUS-RISK", mine_name:"风险矿", status:"normal_candidate", open_finding_count:1},
    "status-risk", "存在风险"],
-  [{mine_id:"STATUS-INSUFFICIENT", mine_name:"数据不足矿", status:"insufficient_data", open_finding_count:0},
-   "status-warning", "数据不足"],
+  [{mine_id:"STATUS-INSUFFICIENT", mine_name:"覆盖待积累矿", status:"insufficient_data", open_finding_count:0},
+   "status-warning", "覆盖待积累"],
   [{mine_id:"STATUS-NORMAL", mine_name:"正常矿", status:"normal_candidate", open_finding_count:0},
    "status-positive", "暂未发现异常"],
 ];

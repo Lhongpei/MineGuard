@@ -364,6 +364,27 @@ class FakeRiskModel:
             "建议查看当日日报、班次记录和检修记录。"
         )
 
+    def draft_risk_response(
+        self,
+        *,
+        report_context: dict[str, Any],
+        conversation: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {"draft_report_context": report_context, "conversation": conversation}
+        )
+        return {
+            "finding_responses": [
+                {
+                    "finding_id": report_context["findings"][0]["finding_id"],
+                    "response_kind": "unable_to_determine",
+                    "reason_code": "unknown_under_investigation",
+                    "facts": "管理员尚未在对话中提供足够事实，需继续核对原始记录。",
+                }
+            ],
+            "model": self.config.model,
+        }
+
 
 def test_durable_full_workflow_and_agent_assistance_trace(tmp_path: Path) -> None:
     repository = Repository(tmp_path / "agent.db")
@@ -431,7 +452,14 @@ def test_durable_full_workflow_and_agent_assistance_trace(tmp_path: Path) -> Non
     assert "Page-Hinkley" not in chat["answer"]
     assert "electricity_kwh" not in chat["answer"]
     assert len(risk_model.calls) == 1
-    response = restarted.store.create_response(report["report_id"], actor="operator-1")
+    drafted = restarted.draft_risk_response(report["report_id"], actor="operator-1")
+    response = drafted["response"]
+    assert drafted["model"] == "risk-assistant-test"
+    assert response["document"]["agent_assistance"]["used"] is True
+    assert response["document"]["finding_responses"][0]["response_kind"] == (
+        "unable_to_determine"
+    )
+    assert len(risk_model.calls) == 2
     document = response["document"]
     document["finding_responses"][0].update(
         response_kind="explanation",
@@ -494,6 +522,102 @@ def test_watcher_quarantines_in_agent_state_not_read_only_source(
     quarantined = list(quarantine.iterdir())
     assert len(quarantined) == 1
     assert quarantined[0].read_bytes() == source.read_bytes()
+
+
+class AutomaticReviewModel:
+    config = SimpleNamespace(model="automatic-review-test")
+
+    def __init__(self) -> None:
+        self.contexts: list[dict[str, Any]] = []
+
+    def review_production_batch(
+        self, *, batch_context: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.contexts.append(batch_context)
+        return {
+            "contract_version": "production-batch-ai-review/v1",
+            "decision": "auto_send",
+            "reason_codes": ["none"],
+            "summary": ["结构稳定，已提供的数据未发现冲突"],
+            "reviewed_at": utc_text(),
+            "model": self.config.model,
+        }
+
+
+def test_watcher_ai_checks_partial_batch_and_automatically_reports(
+    tmp_path: Path,
+) -> None:
+    watched = tmp_path / "automatic-inbox"
+    watched.mkdir()
+    model = AutomaticReviewModel()
+    government = FakeGovernment(identity())
+    runtime = FiveQuantityRuntime(
+        Repository(tmp_path / "automatic-state" / "agent.db"),
+        identity=identity(),
+        platform_client=government,
+        watched_directories=(str(watched),),
+        quarantine_directory=tmp_path / "automatic-state" / "quarantine",
+        stable_seconds=0.5,
+        llm_provider=model,
+    )
+    (watched / "production.csv").write_bytes(csv_bytes())
+
+    assert runtime.scan_watched_directories() == []
+    time.sleep(0.55)
+    result = runtime.scan_watched_directories()[0]
+
+    assert result["automatic_review"]["decision"] == "auto_send"
+    assert result["automatic_dispatch"] == "queued"
+    assert result["draft"]["status"] == "submitted"
+    assert government.submission is not None
+    assert model.contexts[0]["coverage"]["missing_value_count"] > 0
+    assert model.contexts[0]["coverage"]["provided_metrics_may_be_partial"] is True
+    imports = runtime.store.list_imports()
+    assert imports[0]["status"] == "submitted"
+    reviews = [
+        item
+        for item in imports[0]["suggestions"]
+        if item.get("kind") == "automatic_dispatch_review"
+    ]
+    assert reviews[-1]["decision"] == "auto_send"
+
+
+def test_duplicate_watcher_pass_recovers_interrupted_automatic_dispatch(
+    tmp_path: Path,
+) -> None:
+    model = AutomaticReviewModel()
+    government = FakeGovernment(identity())
+    runtime = FiveQuantityRuntime(
+        Repository(tmp_path / "automatic-recovery" / "agent.db"),
+        identity=identity(),
+        platform_client=government,
+        quarantine_directory=tmp_path / "automatic-recovery" / "quarantine",
+        llm_provider=model,
+    )
+    imported = runtime._smart_import_bytes(
+        filename="production.csv",
+        content=csv_bytes(),
+        acquisition_mode="direct_collection",
+    )
+    interrupted = runtime.store.create_import(
+        imported,
+        source_path=str(tmp_path / "production.csv"),
+        actor="system-watcher",
+    )
+    assert interrupted["status"] == "ready_review"
+
+    recovered = runtime.ingest_bytes(
+        filename="production.csv",
+        content=csv_bytes(),
+        acquisition_mode="direct_collection",
+        actor="system-watcher",
+        source_path=str(tmp_path / "production.csv"),
+    )
+
+    assert recovered["duplicate"] is True
+    assert recovered["automatic_dispatch"] == "queued"
+    assert recovered["draft"]["status"] == "submitted"
+    assert government.submission is not None
 
 
 def test_quarantine_directory_cannot_be_inside_a_watched_source(tmp_path: Path) -> None:

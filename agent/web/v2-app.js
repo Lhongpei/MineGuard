@@ -69,6 +69,8 @@
   ]);
   const STATUS = Object.freeze({
     ready_review: "待复核",
+    needs_review: "待人工核验",
+    automatic_ready: "自动检查通过",
     queued: "已确认，待发送",
     submitted: "已送达政府",
     quarantined: "已隔离",
@@ -94,6 +96,19 @@
     "洗煤量_入洗原煤(t)",
     "开票量(t)",
   ].join(",") + "\r\n";
+  const MANUAL_COLUMNS = Object.freeze([
+    ["ventilation_m3_min", "风量(m3/min)"],
+    ["electricity_kwh", "电量(kWh)"],
+    ["detonators_count", "雷管(发)"],
+    ["explosives_kg", "炸药(kg)"],
+    ["mine_entry_persons", "入井人员量(人次)"],
+    ["production_t", "产量_企业报表(t)"],
+    ["extraction_t", "开采量_采掘计量(t)"],
+    ["sales_t", "销售量(t)"],
+    ["transport_t", "运输量(t)"],
+    ["wash_feed_t", "洗煤量_入洗原煤(t)"],
+    ["invoiced_quantity_t", "开票量(t)"],
+  ]);
   const IMPORT_TARGETS = Object.freeze([
     ["ventilation_m3_min", "风量", "m³/min", true],
     ["electricity_kwh", "电量", "kWh", true],
@@ -242,6 +257,9 @@
     $("fqCancelPreviewBottom").addEventListener("click", cancelUploadPreview);
     $("fqMaterializeButton").addEventListener("click", materializeUploadPreview);
     $("fqScanWatch").addEventListener("click", scanWatchedDirectories);
+    $("fqManualAddRow").addEventListener("click", () => addManualRow());
+    $("fqManualForm").addEventListener("submit", submitManualRows);
+    $("fqManualRows").addEventListener("click", handleManualRowAction);
     $("fqPollRisks").addEventListener("click", pollRisks);
     $("fqDraftList").addEventListener("click", handleDraftListClick);
     $("fqImportRows").addEventListener("click", handleImportClick);
@@ -259,6 +277,7 @@
     if (logoutButton) logoutButton.addEventListener("click", () => window.setTimeout(resetSession, 200));
     if (loginButton) loginButton.addEventListener("click", () => window.setTimeout(() => refreshSession(true), 300));
     syncImportCapability();
+    addManualRow();
     void refreshSession(true);
     window.setInterval(() => void refreshSession(false), 15000);
   }
@@ -400,7 +419,7 @@
     const scanButton = $("fqScanWatch");
     if (!fileInput || !uploadButton || !scanButton) return;
     const writable = can("write");
-    const previewActive = Boolean(state.uploadPreview);
+    const previewActive = false;
     const file = fileInput.files && fileInput.files[0];
     const validFile = Boolean(file && file.size > 0 && file.size <= MAX_UPLOAD_BYTES);
     fileInput.disabled =
@@ -413,12 +432,13 @@
     $("fqCancelPreview").disabled = previewBusy;
     $("fqCancelPreviewBottom").disabled = previewBusy;
     $("fqSaveMappingProfile").disabled = !writable || previewBusy;
-    validatePreviewMappings();
+    $("fqManualAddRow").disabled = !writable;
+    $("fqManualSubmit").disabled = !writable || state.busy.has("fqManualSubmit");
     if (!writable && state.principal) {
       $("fqSelectedFileSummary").textContent =
         "当前账号只能查看；请交给具有填报权限的经办人上传。";
     } else if (!writable) {
-      $("fqSelectedFileSummary").textContent = "登录后即可选择十量文件。";
+      $("fqSelectedFileSummary").textContent = "登录后即可选择生产数据文件。";
     }
   }
 
@@ -427,7 +447,7 @@
     const file = $("fqUploadFile").files && $("fqUploadFile").files[0];
     if (!file) {
       $("fqSelectedFileSummary").textContent = "尚未选择文件。";
-      $("fqUploadButton").textContent = "让 Agent 读取并预览映射";
+      $("fqUploadButton").textContent = "读取文件";
       setUploadResult("");
       syncImportCapability();
       return;
@@ -442,9 +462,7 @@
     } else {
       $("fqSelectedFileSummary").textContent =
         `已选择：${file.name} · ${formatFileSize(file.size)} · 等待 Agent 识别`;
-      $("fqUploadButton").textContent = file.name.toLowerCase().endsWith(".csv")
-        ? "让 Agent 读取并预览映射"
-        : "让 Agent 读取并生成草稿";
+      $("fqUploadButton").textContent = "读取文件";
       setUploadResult("");
     }
     syncImportCapability();
@@ -785,11 +803,16 @@
 
   async function completeImportedDraft(
     result,
-    { reviewedMappings = false } = {},
+    { sourceLabel = "文件" } = {},
   ) {
     resetUploadPreview({ resetFile: true });
     $("fqSelectedFileSummary").textContent = "尚未选择文件。";
-    await Promise.all([loadInbox(false), loadDrafts(false), loadAudit(false)]);
+    await Promise.all([
+      loadStatus(),
+      loadInbox(false),
+      loadDrafts(false),
+      loadAudit(false),
+    ]);
     const dayCount = Number(
       result.draft && result.draft.payload && result.draft.payload.days
         ? result.draft.payload.days.length
@@ -797,10 +820,8 @@
     );
     const dayText = dayCount > 0 ? `${dayCount} 天数据` : "文件内数据";
     const successText = result.duplicate
-      ? `Agent 已找到该文件对应的 ${dayText} 草稿；本次未重复建稿，当前尚未报送。`
-      : reviewedMappings
-        ? `Agent 已按确认映射读取 ${dayText}并生成复核草稿；当前尚未报送。`
-        : `Agent 已识别 ${dayText}并生成复核草稿；当前尚未报送。`;
+      ? `已找到该${sourceLabel}对应的 ${dayText}记录，本次未重复创建。`
+      : `已读取 ${dayText}并生成待人工核验记录；空白值保持为空。`;
     setUploadResult(successText, "success");
     message(successText, "success");
     if (result.draft_id) {
@@ -816,13 +837,13 @@
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = "十量填报标准模板（日汇总）.csv";
+    anchor.download = "生产数据填报模板.csv";
     document.body.append(anchor);
     anchor.click();
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
     setUploadResult(
-      "十量日汇总 CSV 模板已下载；每行填写一天，班次明细可在复核页按需展开。",
+      "生产数据 CSV 模板已下载；每行填写一个日期，没有的数据保持空白。",
       "success",
     );
   }
@@ -854,6 +875,31 @@
         : connectorEnabled === false
           ? "自动连接器接口未启用；管理员配置后可从业务 API 或只读数据库自动建稿。"
           : "自动连接器状态由服务端管理；自动导入成功后会显示在收件记录和草稿依据中。";
+    const automatic = state.status.automatic_reporting || {};
+    const coverage = automatic.latest_coverage || null;
+    const automaticRunning = automatic.state === "running";
+    $("fqAutomaticState").textContent = automaticRunning ? "运行中" : "待配置";
+    $("fqAutomaticState").className = automaticRunning ? "is-ok" : "is-warn";
+    $("fqAutomaticDetail").textContent = automaticRunning
+      ? "发现数据后自动检查，通过即发送"
+      : "可继续使用文件导入或手工填写";
+    $("fqReportingConnection").textContent = state.status.platform_configured
+      ? "已配置"
+      : "未配置";
+    $("fqReportingConnection").className = state.status.platform_configured
+      ? "is-ok"
+      : "is-warn";
+    $("fqNeedsReviewCount").textContent = String(
+      Number(automatic.needs_review_count || 0),
+    );
+    if (coverage) {
+      $("fqLatestCoverage").textContent = `${Number(coverage.provided_quantity_count || 0)}/10 项`;
+      $("fqLatestCoverageDetail").textContent = `${coverage.period_start === coverage.period_end ? coverage.period_start : `${coverage.period_start} 至 ${coverage.period_end}`} · ${Number(coverage.day_count || 0)} 条日期记录`;
+    } else {
+      $("fqLatestCoverage").textContent = "—";
+      $("fqLatestCoverageDetail").textContent = "尚无生产数据";
+    }
+    renderProductionSituation(coverage);
     $("fqIdentityCard").innerHTML = `
       <h3>本实例身份</h3>
       <dl class="fq-definition-list">
@@ -891,16 +937,53 @@
     }
     rows.innerHTML = state.imports
       .map(
-        (item) => `<tr>
+        (item) => {
+          const review = (item.suggestions || []).find(
+            (entry) => entry && entry.kind === "automatic_dispatch_review",
+          );
+          const summary = review && Array.isArray(review.summary)
+            ? review.summary.join("；")
+            : shortHash(item.content_sha256);
+          const next = item.status === "submitted" || item.status === "acknowledged"
+            ? "已自动报送"
+            : item.status === "queued"
+              ? "后台发送中"
+              : item.draft_id && item.status !== "discarded"
+                ? `<button class="fq-link-button" data-open-draft="${escapeHtml(item.draft_id)}" type="button">核验</button>`
+                : "—";
+          return `<tr>
           <td>${escapeHtml(formatTime(item.created_at))}</td>
           <td><strong>${escapeHtml(item.filename)}</strong>${item.error_message ? `<small class="fq-error-text">${escapeHtml(item.error_message)}</small>` : ""}</td>
           <td>${item.acquisition_mode === "direct_collection" ? "直采" : "人工导入"}</td>
           <td><span class="fq-status is-${escapeHtml(item.status)}">${escapeHtml(statusText(item.status))}</span></td>
-          <td><code title="${escapeHtml(item.content_sha256)}">${escapeHtml(shortHash(item.content_sha256))}</code></td>
-          <td>${item.draft_id && item.status !== "discarded" ? `<button class="fq-link-button" data-open-draft="${escapeHtml(item.draft_id)}" type="button">去复核</button>` : "—"}</td>
-        </tr>`,
+          <td><span title="${escapeHtml(item.content_sha256)}">${escapeHtml(summary)}</span></td>
+          <td>${next}</td>
+        </tr>`;
+        },
       )
       .join("");
+  }
+
+  function renderProductionSituation(coverage) {
+    const provided = new Set(
+      coverage && Array.isArray(coverage.provided_metrics)
+        ? coverage.provided_metrics
+        : [],
+    );
+    $("fqSituationPeriod").textContent = coverage
+      ? `${coverage.period_start === coverage.period_end ? coverage.period_start : `${coverage.period_start} 至 ${coverage.period_end}`} · 未提供仅表示本批覆盖范围，不构成风险。`
+      : "最近一批数据覆盖情况；未提供不等于异常。";
+    $("fqSituationGrid").innerHTML = TEN_QUANTITIES.map((quantity) => {
+      const metrics = quantity.metrics.map(([metric]) => metric);
+      const providedCount = metrics.filter((metric) => provided.has(metric)).length;
+      const tone = providedCount === metrics.length && metrics.length
+        ? "ok"
+        : providedCount > 0
+          ? "partial"
+          : "neutral";
+      const label = tone === "ok" ? "已提供" : tone === "partial" ? "部分提供" : "未提供";
+      return `<article class="is-${tone}"><span>${escapeHtml(quantity.label)}</span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(quantity.metrics.map(([, metricLabelText]) => metricLabelText).join("、"))}</small></article>`;
+    }).join("");
   }
 
   async function uploadFile(event) {
@@ -912,7 +995,7 @@
     }
     const file = $("fqUploadFile").files[0];
     if (!file) {
-      setUploadResult("请先选择十量文件。", "error");
+      setUploadResult("请先选择生产数据文件。", "error");
       return message("请先选择文件。", "error");
     }
     if (file.size <= 0 || file.size > MAX_UPLOAD_BYTES) {
@@ -922,46 +1005,26 @@
         "error",
       );
     }
-    if (state.uploadPreview) return;
-    const csvPreview = file.name.toLowerCase().endsWith(".csv");
     setBusy(
       "fqUploadButton",
       true,
-      csvPreview ? "Agent 正在生成预览…" : "Agent 正在识别并建稿…",
+      "Agent 正在识别并建稿…",
     );
-    setUploadResult(
-      csvPreview
-        ? "正在识别表头、日期和单位；此时还不会写入草稿…"
-        : "正在安全读取文件并生成待复核草稿…",
-      "notice",
-    );
+    setUploadResult("正在安全读取文件并生成待人工核验记录…", "notice");
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       let binary = "";
       for (let offset = 0; offset < bytes.length; offset += 32768) {
         binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
       }
-      const requestBody = { filename: file.name, content_base64: btoa(binary) };
-      if (csvPreview) {
-        const preview = await api("/api/v2/imports/preview", {
-          method: "POST",
-          body: requestBody,
-        });
-        renderUploadPreview(preview, file.name);
-        message("映射预览已生成；未映射或低置信度列需要人工确认。", "notice");
-      } else {
-        const result = await api("/api/v2/imports", {
-          method: "POST",
-          body: requestBody,
-        });
-        await completeImportedDraft(result);
-      }
+      const result = await api("/api/v2/imports", {
+        method: "POST",
+        body: { filename: file.name, content_base64: btoa(binary) },
+      });
+      await completeImportedDraft(result);
     } catch (error) {
       resetUploadPreview();
-      setUploadResult(
-        `${csvPreview ? "未能生成映射预览" : "未能生成草稿"}：${error.message}`,
-        "error",
-      );
+      setUploadResult(`未能生成待核验记录：${error.message}`, "error");
       message(error.message, "error");
     } finally {
       setBusy("fqUploadButton", false);
@@ -1010,14 +1073,104 @@
     }
   }
 
+  function manualDateValue() {
+    const now = new Date();
+    const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+    return local.toISOString().slice(0, 10);
+  }
+
+  function addManualRow(values = {}) {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td><label class="sr-only">日期</label><input class="fq-manual-input" data-manual-date type="date" value="${escapeHtml(values.date || manualDateValue())}"></td>${MANUAL_COLUMNS.map(([metric]) => `<td><label class="sr-only">${escapeHtml(metricLabel(metric))}</label><input class="fq-manual-input" data-manual-metric="${escapeHtml(metric)}" type="number" min="0" step="any" inputmode="decimal" value="${escapeHtml(values[metric] == null ? "" : values[metric])}"></td>`).join("")}<td><button class="fq-link-button" data-manual-action="remove" type="button">删除</button></td>`;
+    $("fqManualRows").append(row);
+  }
+
+  function handleManualRowAction(event) {
+    const button = event.target.closest('[data-manual-action="remove"]');
+    if (!button) return;
+    const rows = $("fqManualRows").querySelectorAll("tr");
+    if (rows.length === 1) {
+      rows[0].querySelectorAll('[data-manual-metric]').forEach((input) => {
+        input.value = "";
+      });
+      return;
+    }
+    button.closest("tr").remove();
+  }
+
+  function setManualResult(text, kind = "notice") {
+    const target = $("fqManualResult");
+    target.hidden = !text;
+    target.textContent = text || "";
+    target.className = `fq-upload-result is-${kind}`;
+  }
+
+  function manualCsvBytes() {
+    const seenDates = new Set();
+    const dataRows = [];
+    $("fqManualRows").querySelectorAll("tr").forEach((row) => {
+      const values = MANUAL_COLUMNS.map(([metric]) =>
+        row.querySelector(`[data-manual-metric="${metric}"]`).value.trim(),
+      );
+      if (!values.some((value) => value !== "")) return;
+      const date = row.querySelector("[data-manual-date]").value.trim();
+      if (!date) throw new Error("每条已填写的数据都必须选择日期。");
+      if (seenDates.has(date)) throw new Error(`日期 ${date} 重复，请合并到同一行。`);
+      seenDates.add(date);
+      dataRows.push([date, ...values]);
+    });
+    if (!dataRows.length) throw new Error("请至少填写一个生产数据指标。");
+    dataRows.sort((left, right) => left[0].localeCompare(right[0]));
+    const text = `${CSV_TEMPLATE_HEADER}${dataRows.map((row) => row.join(",")).join("\r\n")}\r\n`;
+    return new TextEncoder().encode(`\ufeff${text}`);
+  }
+
+  async function submitManualRows(event) {
+    event.preventDefault();
+    if (!can("write")) return message("当前账号没有填报权限。", "error");
+    let bytes;
+    try {
+      bytes = manualCsvBytes();
+    } catch (error) {
+      setManualResult(error.message, "error");
+      return message(error.message, "error");
+    }
+    setBusy("fqManualSubmit", true, "正在生成…");
+    syncImportCapability();
+    setManualResult("正在生成待人工核验记录…", "notice");
+    try {
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 32768) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+      }
+      const result = await api("/api/v2/imports", {
+        method: "POST",
+        body: {
+          filename: `manual-production-data-${Date.now()}.csv`,
+          content_base64: btoa(binary),
+        },
+      });
+      $("fqManualRows").replaceChildren();
+      addManualRow();
+      setManualResult("已生成待人工核验记录。", "success");
+      await completeImportedDraft(result, { sourceLabel: "手工填写" });
+    } catch (error) {
+      setManualResult(`生成失败：${error.message}`, "error");
+      message(error.message, "error");
+    } finally {
+      setBusy("fqManualSubmit", false);
+      syncImportCapability();
+    }
+  }
+
   async function scanWatchedDirectories() {
     setBusy("fqScanWatch", true, "正在扫描…");
     try {
       const payload = await api("/api/v2/watch/scan", { method: "POST", body: {} });
-      await Promise.all([loadInbox(false), loadDrafts(false)]);
+      await Promise.all([loadStatus(), loadInbox(false), loadDrafts(false)]);
       message(
         payload.count
-          ? `本次处理 ${payload.count} 个稳定文件；请进入复核页检查。`
+          ? `本次处理 ${payload.count} 个稳定文件；检查通过的已自动报送，有疑问的已进入待人工核验。`
           : "未发现新的稳定文件；新文件会在连续两次扫描保持不变后处理。",
         payload.count ? "success" : "notice",
       );
@@ -1595,7 +1748,7 @@
       ${reviewGate.required ? `<div class="fq-import-warning" role="status"><strong>四眼复核：${awaitingHumanPreparer ? "先由经办人接收核对" : currentIsLastEditor ? "待另一账号接手" : reviewActorMissing ? "经办人记录缺失" : "当前账号可独立复核"}</strong><p>${escapeHtml(reviewGate.message || "最后创建/编辑人不能确认或入发送队列。")}</p></div>` : ""}
       ${draft.predecessor ? `<div class="fq-import-warning" role="status"><strong>这是第 ${escapeHtml(draft.submission_revision)} 版正式更正草稿</strong><p>同一报送链继续编号；直接前序消息 ${escapeHtml(shortHash(draft.predecessor.message_id))} 及其签名摘要已锁定，保存本草稿不会覆盖历史报文。为避免修订链中断，更正草稿创建后不能放弃或删除，可暂存并在后续继续复核。</p></div>` : ""}
       ${importWarnings.length ? `<div class="fq-import-warning"><strong>导入映射需要人工核对</strong><ul>${importWarnings.slice(0, 20).map((item) => `<li>${escapeHtml(item.reason || "存在未明确的来源字段")}</li>`).join("")}</ul></div>` : ""}
-      <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。每天先核对十量日报合计；只有需要时再展开三个班次，销售量、运输量、洗煤量和开票量不强制提供班次实值。</div>
+      <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。每天先核对已提供的生产数据日报合计；只有需要时再展开三个班次，销售量、运输量、洗煤量和开票量不强制提供班次实值。</div>
       ${autofillEvidenceHtml(draft)}
       <div class="fq-day-list">${days}</div>
       <div class="fq-sticky-actions">
@@ -1611,7 +1764,7 @@
           <label class="field"><span>确认人姓名</span><input id="fqDraftConfirmerName" value="${escapeHtml((state.principal && state.principal.name) || "")}" ${locked ? "disabled" : ""}></label>
           <label class="field"><span>岗位/角色</span><input id="fqDraftConfirmerRole" value="${escapeHtml((state.principal && state.principal.role) || "企业填报员")}" ${locked ? "disabled" : ""}></label>
         </div>
-        <label class="field"><span>确认说明</span><textarea id="fqDraftAttestation" rows="3" ${locked ? "disabled" : ""}>本人已对照十量原始日报、适用班次记录及单位口径逐项核对。</textarea></label>
+        <label class="field"><span>确认说明</span><textarea id="fqDraftAttestation" rows="3" ${locked ? "disabled" : ""}>本人已对照生产数据原始记录、适用班次记录及单位口径逐项核对。</textarea></label>
         <label class="check-row"><input id="fqDraftAccepted" type="checkbox" ${locked ? "disabled" : ""}><span>我确认上述申报窗口内的完整内容真实反映企业核对结果，并同意发送至政府监管平台。</span></label>
         <button class="button button-primary" type="button" data-fq-action="confirm-draft" ${locked || !finalizeAllowed ? "disabled" : ""}>确认并进入发送队列</button>
         ${draft.receipt ? `<div class="fq-receipt"><strong>政府已接收</strong><span>回执：${escapeHtml((draft.receipt.payload && draft.receipt.payload.receipt_id) || draft.receipt.message_id)}</span><small>政府接收并排队，不等于监管结论。</small></div>` : ""}
@@ -1823,7 +1976,7 @@
         const payload = record.report.payload;
         const selected =
           state.currentRisk && state.currentRisk.report_id === record.report_id;
-        return `<button class="fq-list-item ${selected ? "is-selected" : ""}" data-report-id="${escapeHtml(record.report_id)}" type="button"><span><strong>${escapeHtml(payload.period_start === payload.period_end ? payload.period_start : `${payload.period_start} 至 ${payload.period_end}`)} · ${payload.outcome === "risk" ? "风险" : "数据不足"}</strong><small>${escapeHtml(payload.summary)}</small></span><span class="fq-status is-risk">${payload.findings.length} 项</span></button>`;
+        return `<button class="fq-list-item ${selected ? "is-selected" : ""}" data-report-id="${escapeHtml(record.report_id)}" type="button"><span><strong>${escapeHtml(payload.period_start === payload.period_end ? payload.period_start : `${payload.period_start} 至 ${payload.period_end}`)} · ${payload.outcome === "risk" ? "风险" : "覆盖状态"}</strong><small>${escapeHtml(payload.summary)}</small></span><span class="fq-status is-risk">${payload.findings.length} 项</span></button>`;
       })
       .join("");
   }
@@ -1877,11 +2030,11 @@
       ? state.messages.map((item) => `<div class="fq-chat-message is-${escapeHtml(item.role)}"><strong>${item.role === "assistant" ? "煤矿风险助手" : "企业人员"}</strong><p>${escapeHtml(enterpriseRiskText(item.content))}</p>${item.tools && item.tools.length ? `<small>解读来源：${escapeHtml(item.tools.map(assistantSourceLabel).join("、"))}</small>` : ""}</div>`).join("")
       : '<p class="fq-empty">可询问“为什么提示这个风险”“该核对哪些原始记录”等。</p>';
     target.innerHTML = `
-      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(payload.mine.mine_name)}</p><h3>生产数据分析报告</h3><p>数据范围 ${escapeHtml(payload.period_start === payload.period_end ? payload.period_start : `${payload.period_start} 至 ${payload.period_end}`)} · 政府签发 ${escapeHtml(formatTime(payload.issued_at))} · 回复期限 ${escapeHtml(formatTime(payload.response_due_at))}</p></div><span class="fq-status is-risk">${payload.outcome === "risk" ? "需回复" : "数据不足"}</span></div>
+      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(payload.mine.mine_name)}</p><h3>生产数据分析报告</h3><p>数据范围 ${escapeHtml(payload.period_start === payload.period_end ? payload.period_start : `${payload.period_start} 至 ${payload.period_end}`)} · 政府签发 ${escapeHtml(formatTime(payload.issued_at))} · 回复期限 ${escapeHtml(formatTime(payload.response_due_at))}</p></div><span class="fq-status is-risk">${payload.outcome === "risk" ? "需回复" : "覆盖状态"}</span></div>
       <div class="fq-risk-summary"><strong>监管分析提示</strong><p>${escapeHtml(enterpriseRiskText(payload.summary))}</p><small>这是需要企业核对和回复的风险提示，不代表已经作出事实认定。</small></div>
       <div class="fq-findings">${findings}</div>
       <section class="fq-chat"><div class="fq-section-head"><div><h4>围绕本报告对话</h4><p>优先调用已配置的智能模型；不能替企业编造原因或作出确认。</p></div></div><div class="fq-chat-log" id="fqChatLog">${messages}</div><form id="fqChatForm" class="fq-chat-form"><textarea id="fqChatQuestion" rows="2" maxlength="2000" placeholder="例如：为什么提示这一天需要核对？应该查看哪些原始记录？" required></textarea><button class="button button-secondary" type="submit">询问智能助手</button></form></section>
-      <section id="fqResponseArea">${state.response ? responseHtml(state.response) : `<div class="fq-response-start"><div><h4>形成企业回执</h4><p>逐项填写事实原因、证据索引和措施，人工确认后发送。</p></div><button class="button button-primary" type="button" data-risk-action="create-response" ${!can("write") ? "disabled" : ""}>开始填写回执</button></div>`}</section>`;
+      <section id="fqResponseArea">${state.response ? responseHtml(state.response) : `<div class="fq-response-start"><div><h4>形成企业回执</h4><p>可先与助手说明企业已核实的事实，再让 AI 生成可编辑草稿；最终仍由管理员确认发送。</p></div><div class="fq-head-actions"><button class="button button-secondary" type="button" data-risk-action="draft-response" ${!can("write") ? "disabled" : ""}>AI 起草回执</button><button class="button button-primary" type="button" data-risk-action="create-response" ${!can("write") ? "disabled" : ""}>手工填写回执</button></div></div>`}</section>`;
   }
 
   function responseHtml(response) {
@@ -1914,7 +2067,7 @@
         : reviewGate.required
           ? "四眼复核已满足账号分离：请核对后确认发送。"
           : "确认后进入可靠发送队列。";
-    return `<div class="fq-response-editor"><div class="fq-section-head"><div><h4>结构化企业回执</h4><p>状态：${escapeHtml(statusText(response.status))} · 修订 ${response.revision}</p></div></div>${reviewGate.required ? `<div class="fq-import-warning" role="status"><strong>四眼复核</strong><p>${escapeHtml(reviewHint)}</p></div>` : ""}${cards}<div class="fq-section-head"><div><h5>证据索引</h5><p>不在这里上传原件；原件保留于企业受控位置。</p></div>${locked ? "" : '<button class="button button-secondary" type="button" data-risk-action="add-attachment">添加证据索引</button>'}</div><div id="fqAttachments">${attachments}</div><div class="fq-sticky-actions"><button class="button button-secondary" type="button" data-risk-action="save-response" ${locked || !can("write") ? "disabled" : ""}>保存回执草稿</button></div><section class="fq-confirm-card"><h4>人工确认回复</h4><p>${escapeHtml(reviewHint)}</p><div class="fq-form-grid"><label class="field"><span>确认人姓名</span><input id="fqResponseConfirmerName" value="${escapeHtml((state.principal && state.principal.name) || "")}" ${locked ? "disabled" : ""}></label><label class="field"><span>岗位/角色</span><input id="fqResponseConfirmerRole" value="${escapeHtml((state.principal && state.principal.role) || "企业负责人")}" ${locked ? "disabled" : ""}></label></div><label class="field"><span>确认说明</span><textarea id="fqResponseAttestation" rows="3" ${locked ? "disabled" : ""}>本人确认上述事实、证据索引和措施已经企业核实。</textarea></label><label class="check-row"><input id="fqResponseAccepted" type="checkbox" ${locked ? "disabled" : ""}><span>我确认并同意向政府发送本回复；理解接收回执不代表风险已消除。</span></label><button class="button button-primary" type="button" data-risk-action="confirm-response" ${locked || !finalizeAllowed ? "disabled" : ""}>确认并发送回复</button>${response.receipt ? `<div class="fq-receipt"><strong>政府已记录回复</strong><span>${escapeHtml((response.receipt.payload && response.receipt.payload.receipt_id) || response.receipt.message_id)}</span><small>风险状态：未因接收回执自动消除。</small></div>` : ""}</section></div>`;
+    return `<div class="fq-response-editor"><div class="fq-section-head"><div><h4>结构化企业回执</h4><p>状态：${escapeHtml(statusText(response.status))} · 修订 ${response.revision}</p></div>${locked ? "" : '<button class="button button-secondary" type="button" data-risk-action="draft-response">根据对话重新起草</button>'}</div><p class="fq-safe-note">AI 草稿只整理管理员在对话中明确提供的事实，不能代替核实；请逐项修改后再确认。</p>${reviewGate.required ? `<div class="fq-import-warning" role="status"><strong>四眼复核</strong><p>${escapeHtml(reviewHint)}</p></div>` : ""}${cards}<div class="fq-section-head"><div><h5>证据索引</h5><p>不在这里上传原件；原件保留于企业受控位置。</p></div>${locked ? "" : '<button class="button button-secondary" type="button" data-risk-action="add-attachment">添加证据索引</button>'}</div><div id="fqAttachments">${attachments}</div><div class="fq-sticky-actions"><button class="button button-secondary" type="button" data-risk-action="save-response" ${locked || !can("write") ? "disabled" : ""}>保存回执草稿</button></div><section class="fq-confirm-card"><h4>人工确认回复</h4><p>${escapeHtml(reviewHint)}</p><div class="fq-form-grid"><label class="field"><span>确认人姓名</span><input id="fqResponseConfirmerName" value="${escapeHtml((state.principal && state.principal.name) || "")}" ${locked ? "disabled" : ""}></label><label class="field"><span>岗位/角色</span><input id="fqResponseConfirmerRole" value="${escapeHtml((state.principal && state.principal.role) || "企业负责人")}" ${locked ? "disabled" : ""}></label></div><label class="field"><span>确认说明</span><textarea id="fqResponseAttestation" rows="3" ${locked ? "disabled" : ""}>本人确认上述事实、证据索引和措施已经企业核实。</textarea></label><label class="check-row"><input id="fqResponseAccepted" type="checkbox" ${locked ? "disabled" : ""}><span>我确认并同意向政府发送本回复；理解接收回执不代表风险已消除。</span></label><button class="button button-primary" type="button" data-risk-action="confirm-response" ${locked || !finalizeAllowed ? "disabled" : ""}>确认并发送回复</button>${response.receipt ? `<div class="fq-receipt"><strong>政府已记录回复</strong><span>${escapeHtml((response.receipt.payload && response.receipt.payload.receipt_id) || response.receipt.message_id)}</span><small>风险状态：未因接收回执自动消除。</small></div>` : ""}</section></div>`;
   }
 
   async function handleRiskSubmit(event) {
@@ -1976,6 +2129,11 @@
     try {
       if (action === "create-response") {
         state.response = await api(`/api/v2/risks/${encodeURIComponent(state.currentRisk.report_id)}/response`, { method: "POST", body: {} });
+      } else if (action === "draft-response") {
+        button.disabled = true;
+        const result = await api(`/api/v2/risks/${encodeURIComponent(state.currentRisk.report_id)}/response-draft`, { method: "POST", body: {} });
+        state.response = result.response;
+        message("AI 已根据当前报告和对话生成可编辑回执草稿，请逐项核实。", "success");
       } else if (action === "add-attachment") {
         state.response.document.attachments.push({ evidence_id: `EVID-${Date.now()}`, title: "待填写证据标题", media_type: "application/pdf", size_bytes: 0, sha256: "", retention_location: "enterprise_local" });
       } else if (action === "remove-attachment") {
@@ -2015,6 +2173,8 @@
       data_import_preview_created: "已生成生产数据导入预览",
       data_import_preview_confirmed: "已确认生产数据导入预览",
       production_data_imported: "已导入生产数据",
+      submission_automatic_check_completed: "自动报送检查已完成",
+      submission_automatically_queued: "检查通过并已自动进入报送队列",
       submission_confirmed_and_queued: "生产数据已确认并进入报送队列",
       submission_delivered: "监管平台已接收生产数据",
       submission_review_saved: "已保存人工复核",

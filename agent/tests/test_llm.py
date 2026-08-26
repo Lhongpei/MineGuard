@@ -251,6 +251,137 @@ def test_risk_report_assistant_rejects_internal_algorithm_names() -> None:
         )
 
 
+def test_production_batch_review_allows_partial_data_without_inventing_values() -> None:
+    captured: list[dict] = []
+
+    def opener(request, **_kwargs):
+        captured.append(json.loads(request.data))
+        return Response(
+            envelope(
+                {
+                    "decision": "auto_send",
+                    "reason_codes": ["none"],
+                    "summary": ["已提供字段未发现结构或数值冲突"],
+                }
+            )
+        )
+
+    provider = OpenAICompatibleProvider(
+        LLMConfig(api_key="not-a-real-key", model="review-model"),
+        opener=opener,
+    )
+    result = provider.review_production_batch(
+        batch_context={
+            "period_start": "2026-08-25",
+            "period_end": "2026-08-25",
+            "coverage": {
+                "missing_value_count": 7,
+                "provided_metrics_may_be_partial": True,
+            },
+            "days": [{"date": "2026-08-25", "daily_total": {"production_t": 10}}],
+        }
+    )
+
+    assert result["decision"] == "auto_send"
+    assert result["reason_codes"] == ["none"]
+    system = captured[0]["messages"][0]["content"]
+    assert "缺少部分指标" in system
+    assert "不得修改、补齐、估算" in system
+    for reason_code in (
+        "none",
+        "structure_changed",
+        "ambiguous_field",
+        "conflicting_values",
+        "impossible_value",
+        "date_conflict",
+        "unit_conflict",
+        "source_warning",
+    ):
+        assert reason_code in system
+
+
+def test_production_batch_review_rejects_inconsistent_contract() -> None:
+    provider = provider_returning(
+        {
+            "decision": "auto_send",
+            "reason_codes": ["structure_changed"],
+            "summary": ["结构发生变化"],
+        }
+    )
+
+    with pytest.raises(ProviderError, match="reason_codes"):
+        provider.review_production_batch(batch_context={"days": []})
+
+
+def test_risk_response_draft_is_bounded_to_all_report_findings() -> None:
+    finding_id = "FINDING-001"
+    captured: list[dict] = []
+
+    def opener(request, **_kwargs):
+        captured.append(json.loads(request.data))
+        return Response(
+            envelope(
+                {
+                    "finding_responses": [
+                        {
+                            "finding_id": finding_id,
+                            "response_kind": "explanation",
+                            "reason_code": "equipment_maintenance",
+                            "facts": (
+                                "管理员说明当日设备检修，相关原始记录仍需逐项核对。"
+                            ),
+                        }
+                    ]
+                }
+            )
+        )
+
+    provider = OpenAICompatibleProvider(
+        LLMConfig(api_key="not-a-real-key"),
+        opener=opener,
+        allowed_capabilities=frozenset({"chat"}),
+    )
+
+    result = provider.draft_risk_response(
+        report_context={"findings": [{"finding_id": finding_id}]},
+        conversation=[{"role": "user", "content": "当日设备检修。"}],
+    )
+
+    assert result["finding_responses"][0]["finding_id"] == finding_id
+    assert result["finding_responses"][0]["reason_code"] == "equipment_maintenance"
+    assert result["model"] == provider.config.model
+    system_prompt = captured[0]["messages"][0]["content"]
+    for reason_code in (
+        "equipment_maintenance",
+        "power_outage",
+        "planned_shutdown",
+        "restart_transition",
+        "geology_change",
+        "production_plan_change",
+        "shift_arrangement",
+        "ventilation_adjustment",
+        "blasting_plan_change",
+        "meter_or_source_error",
+        "transcription_or_mapping_error",
+        "other",
+        "unknown_under_investigation",
+    ):
+        assert reason_code in system_prompt
+
+
+def test_risk_response_draft_rejects_missing_or_duplicate_findings() -> None:
+    provider = provider_returning(
+        {"finding_responses": []},
+        allowed_capabilities=frozenset({"chat"}),
+    )
+
+    with pytest.raises(ProviderError, match="逐项覆盖"):
+        provider.draft_risk_response(
+            report_context={"findings": [{"finding_id": "FINDING-001"}]},
+            conversation=[],
+        )
+
+
 def test_tool_calling_preserves_deepseek_v4_reasoning_contract() -> None:
     captured: list[dict] = []
 

@@ -1491,6 +1491,18 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
         mine_name="示例一号煤矿",
         comparison_context=submission["payload"]["comparison_context"],
     )
+    # This integration path exercises an actual anomaly report.  Completeness-
+    # only analysis is intentionally not delivered to the enterprise anymore.
+    for day in submission["payload"]["days"]:
+        for shift in day["reported_quantity"]["shifts"].values():
+            for measurement in shift["measurements"].values():
+                if measurement["value"] is None:
+                    measurement["value"] = 0
+                    measurement["quality_flags"] = ["reported"]
+    submission["payload"]["days"][0]["reported_quantity"]["daily_total"][
+        "production_t"
+    ]["value"] += 1000
+    submission_body = _signed_enterprise_message(submission)
     server = create_server(
         "127.0.0.1",
         0,
@@ -1570,7 +1582,7 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
         assert report is not None
         _assert_contract(report, "analysis-report-v2.schema.json")
         _assert_application_signature(report)
-        assert report["payload"]["outcome"] == "data_insufficient"
+        assert report["payload"]["outcome"] == "risk"
         assert report["payload"]["response_required"] is True
         assert report["payload"]["algorithm"]["engine_id"] == (
             "mineguard-five-quantity-engine"
@@ -1678,7 +1690,7 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
         response_message["payload"]["responded_at"] = "2026-08-01T00:22:59Z"
         response_message["payload"]["finding_responses"] = [
             {
-                "finding_id": report["payload"]["findings"][0]["finding_id"],
+                "finding_id": finding["finding_id"],
                 "response_kind": "explanation",
                 "reason_code": "planned_shutdown",
                 "facts": "企业已核对停产检修记录；本说明只作留痕，不申请直接消除风险。",
@@ -1692,6 +1704,7 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
                 ],
                 "corrected_submission_message_id": None,
             }
+            for finding in report["payload"]["findings"]
         ]
         response_message["payload"]["attachments"] = []
         response_message["payload"]["agent_assistance"] = {
@@ -1752,15 +1765,19 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
         overview = json.loads(overview_response.read())
         assert overview_response.status == 200
         assert overview["counts"]["configured_mines"] == 1
-        assert overview["counts"]["insufficient_data"] == 1
+        assert overview["counts"]["risk"] == 1
+        assert overview["counts"]["insufficient_data"] == 0
+        # Every finding has an enterprise response, so nothing is awaiting the
+        # enterprise; the actual risk remains unresolved for regulator review.
         assert overview["counts"]["awaiting_response"] == 0
+        risk_finding_count = len(report["payload"]["findings"])
         assert overview["attention_counts"] == {
-            "risk_findings": 0,
-            "data_to_complete": 1,
+            "risk_findings": risk_finding_count,
+            "data_to_complete": 0,
             "awaiting_enterprise_response": 0,
-            "enterprise_responded_unresolved": 1,
+            "enterprise_responded_unresolved": risk_finding_count,
             "cleared_by_reanalysis": 0,
-            "total_unresolved": 1,
+            "total_unresolved": risk_finding_count,
         }
         assert "severity_counts" not in overview
         assert "highest_severity" not in overview
@@ -1795,7 +1812,7 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
         assert detail["latest_analysis"]["algorithm_version"].startswith(
             "regulatory-five-quantity-v2"
         )
-        assert detail["findings"][0]["finding_type"] == "data_insufficient"
+        assert detail["findings"][0]["finding_type"] == "risk"
         assert detail["findings"][0]["state"] == "explanation_recorded"
 
         connection.request(
@@ -1863,11 +1880,11 @@ def test_overview_attention_and_business_events_respect_mine_scope(
         assert overview["counts"]["configured_mines"] == 1
         assert overview["attention_counts"] == {
             "risk_findings": 0,
-            "data_to_complete": 1,
-            "awaiting_enterprise_response": 1,
+            "data_to_complete": 0,
+            "awaiting_enterprise_response": 0,
             "enterprise_responded_unresolved": 0,
             "cleared_by_reanalysis": 0,
-            "total_unresolved": 1,
+            "total_unresolved": 0,
         }
         assert len(overview["latest_events"]) == 1
         assert overview["latest_events"][0]["mine_id"] == first.mine_id
@@ -1885,7 +1902,7 @@ def test_overview_attention_and_business_events_respect_mine_scope(
         )
         admin_overview = handler._overview(admin)
         assert admin_overview["counts"]["configured_mines"] == 2
-        assert admin_overview["attention_counts"]["data_to_complete"] == 2
+        assert admin_overview["attention_counts"]["data_to_complete"] == 0
         assert len(admin_overview["latest_events"]) == 2
         assert {item["mine_id"] for item in admin_overview["latest_events"]} == {
             first.mine_id,

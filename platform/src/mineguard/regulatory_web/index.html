@@ -63,7 +63,7 @@
           <span>风险煤矿</span><strong id="metricRisk">—</strong><small id="metricHighest">待核事项 —</small>
         </article>
         <article class="metric-card tone-amber">
-          <span>数据不足</span><strong id="metricInsufficient">—</strong><small>不能形成确定判断</small>
+          <span>覆盖待积累</span><strong id="metricInsufficient">—</strong><small>仅作状态展示，不形成风险</small>
         </article>
         <article class="metric-card tone-violet">
           <span>待企业回复</span><strong id="metricAwaiting">—</strong><small id="metricOverdue">超时 —</small>
@@ -150,7 +150,7 @@
         </div>
         <article class="panel ten-quantity-summary-panel">
           <header class="panel-header"><div><p class="panel-kicker">TEN QUANTITY STATUS</p><h2>十量一眼看懂</h2></div><span id="tenQuantityCoverage" class="status-pill status-neutral">十量已到 0/10</span></header>
-          <p id="tenQuantitySummary" class="ten-quantity-summary">正在汇总本期十量状态。</p>
+          <p id="tenQuantitySummary" class="ten-quantity-summary">正在汇总本批生产数据状态。</p>
           <p id="tenQuantityLegacyNote" class="ten-quantity-legacy-note"></p>
           <div id="tenQuantityStatusGroups" class="ten-quantity-status-groups" aria-label="十量分组状态"></div>
         </article>
@@ -172,7 +172,7 @@
       <article class="panel finding-ledger-panel">
         <header class="panel-header table-header">
           <div><p class="panel-kicker">FINDING LEDGER</p><h2>不可变风险台账</h2></div>
-          <div class="filters"><select id="findingSeverity" aria-label="事项类型"><option value="">全部事项类型</option><option value="risk">风险线索</option><option value="data_insufficient">数据待补</option></select><select id="findingState"><option value="">全部状态</option><option value="open">待企业回复</option><option value="explanation_recorded">企业已回复（未解除）</option><option value="risk_persists">复核后风险仍存在</option><option value="cleared_by_reanalysis">修订复核已解除</option></select></div>
+          <div class="filters"><select id="findingSeverity" aria-label="事项类型"><option value="">全部风险</option><option value="risk">风险线索</option></select><select id="findingState"><option value="">全部状态</option><option value="open">待企业回复</option><option value="explanation_recorded">企业已回复（未解除）</option><option value="risk_persists">复核后风险仍存在</option><option value="cleared_by_reanalysis">修订复核已解除</option></select></div>
         </header>
         <div id="findingLedger" class="finding-ledger"></div>
       </article>
@@ -273,7 +273,7 @@
         <article class="wallboard-metric tone-cyan"><span>已有报送</span><strong id="wallboardMetricReported">—</strong><small id="wallboardMetricCoverage">覆盖率 —</small></article>
         <article class="wallboard-metric tone-green"><span>暂未发现异常</span><strong id="wallboardMetricNormal">—</strong><small>本期自动核验结果</small></article>
         <article class="wallboard-metric tone-red"><span>待关注煤矿</span><strong id="wallboardMetricRisk">—</strong><small id="wallboardMetricRiskItems">待核事项 —</small></article>
-        <article class="wallboard-metric tone-amber"><span>数据不足</span><strong id="wallboardMetricInsufficient">—</strong><small>需补充或核对数据</small></article>
+        <article class="wallboard-metric tone-amber"><span>覆盖待积累</span><strong id="wallboardMetricInsufficient">—</strong><small>不形成风险或回复任务</small></article>
         <article class="wallboard-metric tone-violet"><span>待企业回复</span><strong id="wallboardMetricAwaiting">—</strong><small>需企业说明或提交修订</small></article>
       </div>
 
@@ -289,7 +289,7 @@
           </div>
           <div class="wallboard-attention-summary">
             <div><span>风险线索</span><strong id="wallboardRiskFindings">—</strong></div>
-            <div><span>数据待补</span><strong id="wallboardDataToComplete">—</strong></div>
+            <div><span>覆盖状态</span><strong id="wallboardDataToComplete">—</strong></div>
             <div><span>已回复未解除</span><strong id="wallboardResponded">—</strong></div>
             <div><span>修订复核已解除</span><strong id="wallboardCleared">—</strong></div>
           </div>

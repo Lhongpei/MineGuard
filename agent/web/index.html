@@ -8,18 +8,18 @@
       name="description"
       content="企业可信数据智能填报助手。自动提取、逐项溯源、人工确认后提交监管平台。"
     >
-    <title>煤矿十量报送智能体</title>
+    <title>煤矿生产数据报送智能体</title>
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body class="is-simple-mode">
-    <a class="skip-link" href="#fiveQuantityWorkspace">跳到十量工作区</a>
+    <a class="skip-link" href="#fiveQuantityWorkspace">跳到生产数据工作区</a>
 
     <header class="topbar">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">矿</span>
         <div>
           <p class="eyebrow">一矿一智能体 · 与政府监管平台独立运行</p>
-          <h1>煤矿十量报送智能体</h1>
+          <h1>煤矿生产数据报送智能体</h1>
         </div>
       </div>
       <div class="topbar-actions">
@@ -167,15 +167,15 @@
     </main>
 
     <main class="fq-shell" id="fiveQuantityWorkspace">
-      <nav class="fq-nav" aria-label="十量报送工作区">
+      <nav class="fq-nav" aria-label="生产数据工作区">
         <button class="fq-nav-button is-active" type="button" data-fq-tab="inbox" aria-pressed="true">
-          <span>1</span> 数据收件箱
+          <span>1</span> 数据报送
         </button>
         <button class="fq-nav-button" type="button" data-fq-tab="review" aria-pressed="false">
-          <span>2</span> 规范化复核与报送
+          <span>2</span> 待人工核验
         </button>
         <button class="fq-nav-button" type="button" data-fq-tab="risk" aria-pressed="false">
-          <span>3</span> 风险解读与回复
+          <span>3</span> 监管风险
           <em id="fqRiskCount" hidden>0</em>
         </button>
         <button class="fq-nav-button" type="button" data-fq-tab="audit" aria-pressed="false">
@@ -190,28 +190,36 @@
       <section class="fq-panel is-active" id="fqPanelInbox" data-fq-panel="inbox">
         <div class="fq-page-head">
           <div>
-            <p class="eyebrow">第一步 · 获取十量</p>
-            <h2>数据收件箱</h2>
-            <p>十量包括风量、电量、火工品量、入井人员量、产量、开采量、销售量、运输量、洗煤量和开票量；火工品量仍按雷管、炸药两个子项填写。</p>
+            <p class="eyebrow">自动发现 · 智能检查 · 可靠报送</p>
+            <h2>数据报送</h2>
+            <p>系统自动发现生产数据并在每次发送前检查结构、口径和数值冲突；通过后直接报送，有疑问时保留为待人工核验。缺少部分指标不等于异常，空白始终保持为空。</p>
           </div>
           <button class="button button-secondary" id="fqRefreshInbox" type="button">刷新</button>
         </div>
 
+        <section class="fq-reporting-overview" aria-label="本矿生产数据态势">
+          <article><span>自动报送</span><strong id="fqAutomaticState">正在读取</strong><small id="fqAutomaticDetail">—</small></article>
+          <article><span>监管连接</span><strong id="fqReportingConnection">正在读取</strong><small>可随时使用页面顶部“检测监管网络”验证</small></article>
+          <article><span>待人工核验</span><strong id="fqNeedsReviewCount">—</strong><small>仅结构变化、歧义或冲突进入这里</small></article>
+          <article><span>最近一批覆盖</span><strong id="fqLatestCoverage">—</strong><small id="fqLatestCoverageDetail">尚无生产数据</small></article>
+        </section>
+
+        <section class="fq-production-situation" aria-labelledby="fqSituationTitle">
+          <div class="fq-section-head">
+            <div><h3 id="fqSituationTitle">本矿生产数据态势</h3><p id="fqSituationPeriod">最近一批数据覆盖情况；未提供不等于异常。</p></div>
+          </div>
+          <div class="fq-situation-grid" id="fqSituationGrid"><p class="fq-empty">尚无生产数据</p></div>
+        </section>
+
         <div class="fq-card-grid fq-card-grid-two">
           <form class="fq-card fq-upload-card" id="fqUploadForm">
             <span class="fq-card-icon" aria-hidden="true">↑</span>
-            <h3>上传 CSV，自动生成填报草稿</h3>
-            <p>把企业系统导出的十量表交给 Agent，系统会识别表头、日期和单位，并将可核对内容写入草稿。</p>
-            <ol class="fq-upload-steps" aria-label="CSV 智能建稿流程">
-              <li><span>1</span><strong>选择 CSV</strong><small>使用标准模板最稳妥</small></li>
-              <li><span>2</span><strong>预览映射</strong><small>黄色项必须人工选择</small></li>
-              <li><span>3</span><strong>确认建稿</strong><small>确认后才写入草稿</small></li>
-              <li><span>4</span><strong>人工复核</strong><small>最终确认后才能报送</small></li>
-            </ol>
+            <h3>手工导入文件</h3>
+            <p>自动采集暂不可用时，可把企业系统导出的生产数据交给 Agent。系统自动识别字段，不要求企业配置映射。</p>
             <button class="button button-secondary fq-template-button" id="fqDownloadCsvTemplate" type="button">
-              下载十量日汇总 CSV 模板
+              下载生产数据 CSV 模板
             </button>
-            <small class="fq-template-hint">默认模板只有“日期 + 11 个原子字段”共 12 列，适合日常填报；班次明细在草稿复核页按需展开，没有的数据保持空白。</small>
+            <small class="fq-template-hint">每行是一条日期记录，可只填实际具备的指标，也可跨自然月；没有的数据保持空白。</small>
             <label class="field">
               <span>选择 CSV 文件（最大 20 MiB）</span>
               <input id="fqUploadFile" type="file" accept=".et,.xls,.xlsx,.csv,.json,.jsonl" required disabled>
@@ -224,11 +232,11 @@
               <p>ET、XLS、XLSX、JSON 和 JSONL 仍可从上方选择，它们与 CSV 进入同一复核流程。</p>
             </details>
             <div class="fq-upload-boundary">
-              <strong>只生成草稿，不会自动报送</strong>
-              <span>空白值保持空白；Agent 不会填 0，也不会用历史数据猜测。</span>
+              <strong>手工导入会进入待核验</strong>
+              <span>Agent 不会补 0、猜值或改写原始数据；核验后由企业人员发送。</span>
             </div>
-            <button class="button button-primary" id="fqUploadButton" type="submit" aria-label="让 Agent 读取并生成草稿前，先预览字段映射" disabled>
-              让 Agent 读取并预览映射
+            <button class="button button-primary" id="fqUploadButton" type="submit" aria-label="让 Agent 读取文件并生成待核验记录" disabled>
+              读取文件
             </button>
             <p class="fq-upload-result" id="fqUploadResult" role="status" aria-live="polite" hidden></p>
             <section class="fq-mapping-preview" id="fqMappingPreview" aria-labelledby="fqMappingPreviewTitle" hidden>
@@ -268,21 +276,39 @@
           </form>
           <article class="fq-card">
             <span class="fq-card-icon" aria-hidden="true">↻</span>
-            <h3>固定目录 / 自动连接器</h3>
+            <h3>自动发现与报送</h3>
             <p id="fqWatchSummary">正在读取已配置目录…</p>
             <p class="fq-connector-summary" id="fqConnectorSummary">
               正在检查企业系统自动采集接口…
             </p>
             <button class="button button-secondary" id="fqScanWatch" type="button">立即扫描一次</button>
             <small>
-              系统会等待文件写入稳定、按内容去重；外部连接器只读访问白名单来源。
-              所有自动数据先进入草稿，仍需企业人员复核确认。
+              系统会等待文件写入稳定、按内容去重，并在发送前执行确定性检查和一次 AI 检查。
+              两层检查都通过才会自动报送；结构变化、歧义或冲突会暂停并进入待人工核验。
             </small>
           </article>
         </div>
 
+        <details class="fq-manual-entry fq-card">
+          <summary><span><strong>手工填写生产数据</strong><small>自动发现或文件导入不可用时的兜底方式</small></span><span>展开填写</span></summary>
+          <form id="fqManualForm">
+            <p class="fq-safe-note">可填写任意日期范围和任意已掌握指标；至少填写一项数值。空白不会被替换为 0。</p>
+            <div class="fq-table-wrap">
+              <table class="fq-table fq-manual-table">
+                <thead><tr><th>日期</th><th>风量</th><th>电量</th><th>雷管</th><th>炸药</th><th>入井人员量</th><th>产量</th><th>开采量</th><th>销售量</th><th>运输量</th><th>洗煤量</th><th>开票量</th><th></th></tr></thead>
+                <tbody id="fqManualRows"></tbody>
+              </table>
+            </div>
+            <div class="fq-manual-actions">
+              <button class="button button-secondary" id="fqManualAddRow" type="button">添加一行</button>
+              <button class="button button-primary" id="fqManualSubmit" type="submit">生成待核验记录</button>
+            </div>
+            <p class="fq-upload-result" id="fqManualResult" role="status" aria-live="polite" hidden></p>
+          </form>
+        </details>
+
         <div class="fq-section-head">
-          <div><h3>最近接收记录</h3><p>人工导入和直采的数据均进入同一复核与报送流程。</p></div>
+          <div><h3>最近报送记录</h3><p>自动通过、待人工核验、发送中和已送达状态都在这里显示。</p></div>
           <label class="fq-show-discarded" for="fqShowDiscarded">
             <input id="fqShowDiscarded" type="checkbox">
             <span>查看已放弃记录</span>
@@ -299,21 +325,21 @@
       <section class="fq-panel" id="fqPanelReview" data-fq-panel="review" hidden>
         <div class="fq-page-head">
           <div>
-            <p class="eyebrow">第二步 · 人工把关</p>
-            <h2>规范化复核与报送</h2>
-            <p>智能体只做结构识别和规范化建议；缺失值保持为空，必须由企业人员确认后才会发送。</p>
+            <p class="eyebrow">仅处理自动检查未通过的批次</p>
+            <h2>待人工核验</h2>
+            <p>这里集中展示结构变化、字段歧义、数值冲突或手工导入记录。缺失部分指标本身不会触发核验。</p>
           </div>
           <button class="button button-secondary" id="fqRefreshDrafts" type="button">刷新草稿</button>
         </div>
         <div class="fq-split">
           <aside class="fq-list-card">
-            <h3>生产数据批次</h3>
+            <h3>待处理批次</h3>
             <div id="fqDraftList" class="fq-item-list"><p class="fq-empty">暂无草稿</p></div>
           </aside>
           <div class="fq-detail-card" id="fqDraftDetail">
             <div class="fq-empty-state">
               <strong>请选择一份草稿</strong>
-              <span>先从收件箱导入文件，再按“安全生产支撑、生产煤流、经营票据”三组逐日核对十量；火工品量需核对雷管、炸药子项。</span>
+              <span>先导入生产数据，再按“安全生产支撑、生产煤流、经营票据”三组逐日核对；火工品量需分别核对雷管和炸药。</span>
             </div>
           </div>
         </div>

@@ -177,6 +177,42 @@ def test_every_run_has_one_analysis_report_outbox_and_delivery_ack() -> None:
         assert store.get_delivery_ack_receipt(ack.ack_id).report_id == report.report_id
 
 
+def test_v3_incomplete_data_is_coverage_state_not_enterprise_risk() -> None:
+    submission = _ten_submission(str(uuid4()))
+    empty = _q(None)  # type: ignore[arg-type]
+    days = [
+        day.model_copy(
+            update={
+                "ventilation_m3_min": empty,
+                "electricity_kwh": empty,
+                "detonators_count": empty,
+                "explosives_kg": empty,
+                "mine_entry_persons": empty,
+                "production_t": empty,
+                "extraction_t": empty,
+                "sales_t": empty,
+                "transport_t": empty,
+                "wash_feed_t": empty,
+                "invoiced_quantity_t": empty,
+            }
+        )
+        for day in submission.days
+    ]
+    submission = submission.model_copy(update={"days": days})
+
+    with RegulatoryV2Store(":memory:", now=lambda: NOW) as store:
+        store.bind_agent_to_mine("agent-a", "mine-a")
+        receipt = store.submit_and_analyze(submission, agent_id="agent-a")
+
+        assert receipt.decision is DecisionStatus.INSUFFICIENT_DATA
+        assert receipt.finding_id is None
+        assert store.list_findings(mine_id="mine-a") == []
+        report = store.list_analysis_reports(mine_id="mine-a", limit=10)[0]
+        assert report.outcome is DecisionStatus.INSUFFICIENT_DATA
+        assert report.response_required is False
+        assert report.finding_ids == []
+
+
 def test_explanation_does_not_clear_and_normal_revision_reanalysis_does() -> None:
     first_id = str(uuid4())
     with RegulatoryV2Store(":memory:", now=lambda: NOW) as store:

@@ -68,7 +68,9 @@ _CHAT_SESSION_ROUTE = re.compile(r"^/api/v1/chat/sessions/([^/]+)(?:/(messages))
 _FQ_DRAFT_ROUTE = re.compile(
     r"^/api/v2/drafts/([^/]+)(?:/(confirm|send-now|ingestions|machine-resume|correction))?$"
 )
-_FQ_RISK_ROUTE = re.compile(r"^/api/v2/risks/([^/]+)(?:/(chat|response))?$")
+_FQ_RISK_ROUTE = re.compile(
+    r"^/api/v2/risks/([^/]+)(?:/(chat|response|response-draft))?$"
+)
 _FQ_RESPONSE_ROUTE = re.compile(r"^/api/v2/responses/([^/]+)(?:/(confirm))?$")
 _FQ_IMPORT_MATERIALIZE_ROUTE = re.compile(
     r"^/api/v2/imports/([0-9a-fA-F-]{36})/materialize$"
@@ -1532,13 +1534,22 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 return True
             if not self._require(context, "read"):
                 return True
+            status = runtime.status()
+            connector_enabled = bool(self.server.connector_clients)
+            automatic = status.get("automatic_reporting")
+            if (
+                isinstance(automatic, dict)
+                and connector_enabled
+                and runtime.csv_mapping_provider is not None
+                and not runtime.four_eyes_required
+            ):
+                automatic["enabled"] = True
+                automatic["state"] = "running"
             self._json(
                 HTTPStatus.OK,
                 {
-                    **runtime.status(),
-                    "machine_connector_enabled": bool(
-                        self.server.connector_clients
-                    ),
+                    **status,
+                    "machine_connector_enabled": connector_enabled,
                     "connector_client_count": len(
                         self.server.connector_clients
                     ),
@@ -1976,6 +1987,15 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 self._json(
                     HTTPStatus.CREATED,
                     runtime.store.create_response(report_id, actor=actor),
+                )
+                return True
+            if action == "response-draft" and method == "POST":
+                if not self._require(context, "write"):
+                    return True
+                self._body(optional=True)
+                self._json(
+                    HTTPStatus.OK,
+                    runtime.draft_risk_response(report_id, actor=actor),
                 )
                 return True
             self._method_not_allowed(("GET",) if action is None else ("GET", "POST"))

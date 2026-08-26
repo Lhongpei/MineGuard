@@ -47,6 +47,7 @@ from .five_quantity_import import (
 from .five_quantity_mapping import ApprovedColumnMapping, map_csv_inspection
 from .quantity_catalog import (
     AGGREGATIONS,
+    BUSINESS_GROUPS,
     LEGACY_V2_METRICS,
     METRIC_LABELS,
     METRICS,
@@ -68,6 +69,8 @@ _PUBLIC_AUDIT_EVENT_TYPES = {
     "five_quantity_csv_preview_consumed": "data_import_preview_confirmed",
     "five_quantity_imported": "production_data_imported",
     "five_quantity_confirmed_and_queued": "submission_confirmed_and_queued",
+    "five_quantity_automatic_review_completed": "submission_automatic_check_completed",
+    "five_quantity_automatically_queued": "submission_automatically_queued",
     "five_quantity_outbox_delivered": "submission_delivered",
 }
 
@@ -688,10 +691,12 @@ def _v2_machine_preflight(
             if is_ten_quantity
             else "five-quantity-machine-preflight/v1"
         ),
+        # Partial production batches are valid. Missing values are exposed as
+        # neutral coverage information and must not block automatic reporting.
         "status": (
             "attention_required"
-            if missing_count or missing_day_count or mismatches
-            else "ready_for_human_review"
+            if missing_day_count or mismatches
+            else "ready_for_dispatch"
         ),
         "bound_revision": revision,
         "payload_sha256": payload_sha256,
@@ -2623,13 +2628,99 @@ class FiveQuantityStore:
         return [
             {
                 **dict(row),
-                "status": row["draft_status"] or row["status"],
+                "status": (
+                    row["status"]
+                    if row["draft_status"] == "ready_review"
+                    and row["status"] in {"needs_review", "automatic_ready"}
+                    else row["draft_status"] or row["status"]
+                ),
                 "draft_status": None,
                 "suggestions": self._loads(row["suggestions_json"]),
                 "suggestions_json": None,
             }
             for row in rows
         ]
+
+    def latest_automatic_structure_fingerprint(self) -> str | None:
+        """Return the latest successfully queued direct-source structure."""
+
+        with self.repository._read() as db:
+            rows = db.execute(
+                """
+                SELECT imports.suggestions_json
+                FROM fq_imports AS imports
+                JOIN fq_drafts AS drafts ON drafts.draft_id=imports.draft_id
+                WHERE imports.acquisition_mode='direct_collection'
+                  AND drafts.status IN ('queued','submitted','acknowledged')
+                ORDER BY drafts.updated_at DESC, imports.created_at DESC
+                LIMIT 50
+                """
+            ).fetchall()
+        for row in rows:
+            try:
+                suggestions = self._loads(row["suggestions_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(suggestions, list):
+                continue
+            for item in reversed(suggestions):
+                if (
+                    isinstance(item, dict)
+                    and item.get("kind") == "automatic_structure"
+                    and isinstance(item.get("fingerprint"), str)
+                ):
+                    return str(item["fingerprint"])
+        return None
+
+    def annotate_automatic_review(
+        self,
+        import_id: str,
+        *,
+        review: dict[str, Any],
+        actor: str = "system-watcher",
+    ) -> None:
+        """Bind one immutable-hash AI review summary to an imported artifact."""
+
+        with self.repository._transaction() as db:
+            row = db.execute(
+                "SELECT suggestions_json,draft_id FROM fq_imports WHERE import_id=?",
+                (import_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("自动采集记录不存在")
+            suggestions = self._loads(row["suggestions_json"])
+            if not isinstance(suggestions, list):
+                raise ConflictError("自动采集建议记录格式非法")
+            review_record = {
+                "kind": "automatic_dispatch_review",
+                **json.loads(jcs_json(review)),
+                "review_sha256": sha256_jcs(review),
+            }
+            suggestions.append(review_record)
+            db.execute(
+                "UPDATE fq_imports SET suggestions_json=?,status=? WHERE import_id=?",
+                (
+                    jcs_json(suggestions),
+                    (
+                        "automatic_ready"
+                        if review.get("decision") == "auto_send"
+                        else "needs_review"
+                    ),
+                    import_id,
+                ),
+            )
+            self._append_audit(
+                db,
+                "five_quantity_automatic_review_completed",
+                actor,
+                {
+                    "import_id": import_id,
+                    "draft_id": row["draft_id"],
+                    "decision": review.get("decision"),
+                    "reason_codes": review.get("reason_codes", []),
+                    "review_sha256": review_record["review_sha256"],
+                },
+            )
 
     def _draft(self, row: Any) -> dict[str, Any]:
         contract_version = str(row["contract_version"])
@@ -3680,7 +3771,11 @@ class FiveQuantityStore:
             )
             self._append_audit(
                 db,
-                "five_quantity_confirmed_and_queued",
+                (
+                    "five_quantity_automatically_queued"
+                    if actor == "system-watcher"
+                    else "five_quantity_confirmed_and_queued"
+                ),
                 actor,
                 {
                     "draft_id": draft_id,
@@ -3923,9 +4018,14 @@ class FiveQuantityStore:
     def list_reports(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.repository._read() as db:
             rows = db.execute(
-                "SELECT * FROM fq_inbox ORDER BY received_at DESC LIMIT ?", (limit,)
+                "SELECT * FROM fq_inbox ORDER BY received_at DESC LIMIT ?", (limit * 5,)
             ).fetchall()
-        return [self._report(row) for row in rows]
+        reports = [self._report(row) for row in rows]
+        return [
+            item
+            for item in reports
+            if item["report"]["payload"].get("outcome") == "risk"
+        ][:limit]
 
     def get_report(self, report_id: str) -> dict[str, Any]:
         with self.repository._read() as db:
@@ -4860,12 +4960,14 @@ class FiveQuantityRuntime:
         actor: str,
         source_path: str | None = None,
     ) -> dict[str, Any]:
-        imported = import_five_quantity_bytes(
+        imported = self._smart_import_bytes(
             filename=filename,
             content=content,
             acquisition_mode=acquisition_mode,
-            identity=self.identity,
         )
+        automatic_review: dict[str, Any] | None = None
+        if acquisition_mode == "direct_collection":
+            automatic_review = self._review_automatic_import(imported)
         validate_five_quantity_payload(
             imported["payload"],
             identity=self.identity,
@@ -4875,9 +4977,343 @@ class FiveQuantityRuntime:
         result = self.store.create_import(
             imported, source_path=source_path, actor=actor
         )
+        recoverable_automatic_import = not result.get("duplicate")
+        if automatic_review is not None and result.get("duplicate"):
+            existing_draft = self.store.get_draft(result["draft_id"])
+            recoverable_automatic_import = (
+                result.get("acquisition_mode") == "direct_collection"
+                and existing_draft["status"] == "ready_review"
+                and result.get("status") in {"ready_review", "automatic_ready"}
+            )
+        if automatic_review is not None and recoverable_automatic_import:
+            # This also closes the small crash window between importing a file,
+            # recording its AI review, and queueing it.  A duplicate watcher
+            # pass may resume only its own untouched direct-collection draft;
+            # manual imports and previously held batches are never promoted.
+            self.store.annotate_automatic_review(
+                result["import_id"],
+                review=automatic_review,
+                actor=actor,
+            )
+            result["automatic_review"] = automatic_review
+            if automatic_review["decision"] == "auto_send":
+                draft = self.store.get_draft(result["draft_id"])
+                try:
+                    queued = self.confirm_draft(
+                        result["draft_id"],
+                        expected_revision=draft["revision"],
+                        actor_id="system-watcher",
+                        confirmer_name="MineGuard 自动报送策略",
+                        confirmer_role="企业生产数据智能体",
+                        attestation=(
+                            "已完成来源固化、确定性校验与报送前智能检查；"
+                            f"检查记录 {sha256_jcs(automatic_review)}。"
+                        ),
+                        accepted=True,
+                    )
+                except Exception as error:
+                    stopped_review = {
+                        **automatic_review,
+                        "decision": "needs_review",
+                        "reason_codes": ["source_warning"],
+                        "summary": [
+                            "自动进入发送队列失败，数据已保留待人工核验："
+                            f"{str(error)[:300]}"
+                        ],
+                    }
+                    self.store.annotate_automatic_review(
+                        result["import_id"],
+                        review=stopped_review,
+                        actor=actor,
+                    )
+                    result["automatic_review"] = stopped_review
+                    result["automatic_dispatch"] = "needs_review"
+                    result["draft"] = self.store.get_draft(result["draft_id"])
+                    return result
+                result["draft"] = queued
+                result["automatic_dispatch"] = "queued"
+                delivery = self.process_outbox_once(
+                    aggregate_id=result["draft_id"]
+                )
+                if delivery:
+                    result["delivery"] = delivery
         if result.get("draft_id"):
             result["draft"] = self.store.get_draft(result["draft_id"])
         return result
+
+    def _smart_import_bytes(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        acquisition_mode: str,
+    ) -> dict[str, Any]:
+        """Use validated automatic header mapping without exposing a setup step."""
+
+        if not str(filename).casefold().endswith(".csv"):
+            imported = import_five_quantity_bytes(
+                filename=filename,
+                content=content,
+                acquisition_mode=acquisition_mode,
+                identity=self.identity,
+            )
+            imported["suggestions"].append(
+                {
+                    "kind": "automatic_structure",
+                    "fingerprint": self._structure_fingerprint(imported),
+                }
+            )
+            return imported
+
+        inspection = inspect_five_quantity_csv(filename=filename, content=content)
+        approved, _ = self._approved_csv_mappings(
+            inspection["schema_fingerprint"]
+        )
+        mapping_result = map_csv_inspection(
+            inspection,
+            approved_mappings=approved,
+            llm_provider=self.csv_mapping_provider,
+        )
+        mappings = []
+        for candidate in mapping_result["candidates"]:
+            target = candidate["target"]
+            mappings.append(
+                {
+                    "source_index": int(candidate["source_column"]),
+                    "target_metric": str(target["metric"]),
+                    "target_period": (
+                        "daily_total"
+                        if target["scope"] == "daily_total"
+                        else str(target["shift"])
+                    ),
+                }
+            )
+        if not mappings:
+            raise ValidationBlockedError(
+                "智能体没有识别出可安全转换的生产数据列；文件已保留待核验"
+            )
+        model_used = any(
+            item.get("source") == "llm" for item in mapping_result["candidates"]
+        )
+        imported = import_five_quantity_bytes(
+            filename=filename,
+            content=content,
+            acquisition_mode=acquisition_mode,
+            identity=self.identity,
+            column_mappings=mappings,
+            model_assistance_used=model_used,
+            model_output_sha256=(
+                mapping_result["llm"].get("output_sha256")
+                if model_used
+                else None
+            ),
+        )
+        nonempty_by_index = {
+            int(item["source_index"]): int(item["non_empty_sample_count"])
+            for item in inspection["columns"]
+        }
+        unresolved_nonempty = [
+            item
+            for item in mapping_result["unmapped_columns"]
+            if nonempty_by_index.get(int(item["source_column"]), 0) > 0
+        ]
+        imported["suggestions"].append(
+            {
+                "kind": "automatic_mapping_check",
+                "schema_fingerprint": inspection["schema_fingerprint"],
+                "mapped_column_count": len(mappings),
+                "unmapped_nonempty_columns": unresolved_nonempty[:50],
+                "blocked_columns": list(mapping_result["blocked_columns"]),
+                "warnings": [
+                    str(item)[:500] for item in mapping_result["warnings"][:20]
+                ],
+                "model_mapping_used": model_used,
+            }
+        )
+        imported["suggestions"].append(
+            {
+                "kind": "automatic_structure",
+                "fingerprint": str(inspection["schema_fingerprint"]),
+            }
+        )
+        return imported
+
+    @staticmethod
+    def _structure_fingerprint(imported: dict[str, Any]) -> str:
+        mappings = [
+            {
+                "kind": item.get("kind"),
+                "source_column": item.get("source_column"),
+                "metric": item.get("metric"),
+                "period": item.get("period"),
+            }
+            for item in imported.get("suggestions", [])
+            if isinstance(item, dict)
+            and item.get("kind")
+            in {
+                "column_mapping",
+                "structured_json_mapping",
+                "structured_jsonl_mapping",
+            }
+        ]
+        return sha256_jcs(
+            {
+                "suffix": Path(str(imported.get("filename", ""))).suffix.casefold(),
+                "mappings": mappings,
+            }
+        )
+
+    def _review_automatic_import(self, imported: dict[str, Any]) -> dict[str, Any]:
+        payload = imported["payload"]
+        preflight = _v2_machine_preflight(
+            payload,
+            revision=1,
+            contract_version=CURRENT_SUBMISSION_CONTRACT,
+        )
+        structure = next(
+            (
+                item
+                for item in reversed(imported.get("suggestions", []))
+                if isinstance(item, dict)
+                and item.get("kind") == "automatic_structure"
+            ),
+            None,
+        )
+        fingerprint = str(structure.get("fingerprint")) if structure else ""
+        previous = self.store.latest_automatic_structure_fingerprint()
+        deterministic_reasons: list[str] = []
+        deterministic_summary: list[str] = []
+        if self.four_eyes_required:
+            deterministic_reasons.append("source_warning")
+            deterministic_summary.append("当前实例启用了双人复核，自动报送策略未生效")
+        if previous is not None and fingerprint != previous:
+            deterministic_reasons.append("structure_changed")
+            deterministic_summary.append("来源文件结构与最近一次成功自动报送不同")
+        if preflight["arithmetic_mismatch_count"]:
+            deterministic_reasons.append("conflicting_values")
+            deterministic_summary.extend(preflight["warnings"][:5])
+        blocking_kinds = {
+            "duplicate_column_mapping",
+            "skipped_row",
+            "formula_like_cell",
+            "invalid_numeric_cell",
+            "legacy_mine_entry_alias",
+        }
+        blocked_suggestions = [
+            item
+            for item in imported.get("suggestions", [])
+            if isinstance(item, dict) and item.get("kind") in blocking_kinds
+        ]
+        mapping_check = next(
+            (
+                item
+                for item in reversed(imported.get("suggestions", []))
+                if isinstance(item, dict)
+                and item.get("kind") == "automatic_mapping_check"
+            ),
+            None,
+        )
+        if blocked_suggestions or (
+            isinstance(mapping_check, dict) and mapping_check.get("blocked_columns")
+        ):
+            deterministic_reasons.append("source_warning")
+            deterministic_summary.append("来源中存在未安全采用的歧义、重复或非法内容")
+
+        days = []
+        for day in payload["days"]:
+            quantity = day["reported_quantity"]
+            days.append(
+                {
+                    "date": day["date"],
+                    "operating_state": day["operating_state"],
+                    "daily_total": {
+                        metric: quantity["daily_total"][metric]["value"]
+                        for metric in METRICS
+                    },
+                    "shifts": {
+                        shift: {
+                            metric: quantity["shifts"][shift]["measurements"]
+                            .get(metric, {})
+                            .get("value")
+                            for metric in METRICS
+                        }
+                        for shift in SHIFT_KEYS
+                    },
+                }
+            )
+        context = {
+            "contract_version": "production-batch-ai-review-context/v1",
+            "mine": {
+                "mine_id": self.identity.mine_id,
+                "mine_name": self.identity.mine_name,
+            },
+            "period_start": payload["period_start"],
+            "period_end": payload["period_end"],
+            "days": days,
+            "coverage": {
+                "missing_value_count": preflight["missing_count"],
+                "provided_metrics_may_be_partial": True,
+            },
+            "structure": {
+                "fingerprint": fingerprint,
+                "previous_successful_fingerprint": previous,
+                "changed": previous is not None and fingerprint != previous,
+            },
+            "normalization_notices": [
+                *deterministic_summary,
+                *(
+                    list(mapping_check.get("warnings", []))
+                    if isinstance(mapping_check, dict)
+                    else []
+                ),
+            ][:20],
+        }
+        provider = self.csv_mapping_provider
+        review_method = getattr(provider, "review_production_batch", None)
+        if provider is None or not callable(review_method):
+            model_review = {
+                "contract_version": "production-batch-ai-review/v1",
+                "decision": "needs_review",
+                "reason_codes": ["source_warning"],
+                "summary": ["智能模型尚未配置，自动报送已安全暂停"],
+                "reviewed_at": utc_text(),
+                "model": None,
+            }
+        else:
+            try:
+                model_review = review_method(batch_context=context)
+            except Exception:
+                model_review = {
+                    "contract_version": "production-batch-ai-review/v1",
+                    "decision": "needs_review",
+                    "reason_codes": ["source_warning"],
+                    "summary": ["智能检查暂时不可用，自动报送将在人工核验前保持暂停"],
+                    "reviewed_at": utc_text(),
+                    "model": getattr(getattr(provider, "config", None), "model", None),
+                }
+        reasons = list(
+            dict.fromkeys([*deterministic_reasons, *model_review["reason_codes"]])
+        )
+        if deterministic_reasons or model_review["decision"] != "auto_send":
+            decision = "needs_review"
+            reasons = [reason for reason in reasons if reason != "none"] or [
+                "source_warning"
+            ]
+        else:
+            decision = "auto_send"
+            reasons = ["none"]
+        review = {
+            **model_review,
+            "decision": decision,
+            "reason_codes": reasons,
+            "summary": list(
+                dict.fromkeys([*deterministic_summary, *model_review["summary"]])
+            )[:8],
+            "deterministic_preflight_sha256": sha256_jcs(preflight),
+            "source_content_sha256": imported["content_sha256"],
+            "structure_fingerprint": fingerprint,
+        }
+        return review
 
     def ingest_machine_source(
         self,
@@ -4909,11 +5345,10 @@ class FiveQuantityRuntime:
             raise ValueError(
                 f"机器来源文件名必须以 {expected_suffix} 结尾并与 format 一致"
             )
-        imported = import_five_quantity_bytes(
+        imported = self._smart_import_bytes(
             filename=filename,
             content=content,
             acquisition_mode="direct_collection",
-            identity=self.identity,
         )
         if (
             coverage_as_of != imported["payload"]["period_end"]
@@ -4941,7 +5376,7 @@ class FiveQuantityRuntime:
             confirmed=False,
             contract_version=CURRENT_SUBMISSION_CONTRACT,
         )
-        return self.store.create_or_update_machine_import(
+        result = self.store.create_or_update_machine_import(
             imported,
             ingestion_id=ingestion_id,
             lease_owner=lease_owner,
@@ -4956,6 +5391,60 @@ class FiveQuantityRuntime:
             actor=actor_id,
             identity=self.identity,
         )
+        draft = self.store.get_draft(result["draft_id"])
+        review_input = {
+            **imported,
+            "payload": draft["payload"],
+            "content_sha256": result["payload_sha256"],
+        }
+        automatic_review = self._review_automatic_import(review_input)
+        import_id = result["import_summary"]["import_id"]
+        self.store.annotate_automatic_review(
+            import_id,
+            review=automatic_review,
+            actor=actor_id,
+        )
+        result["automatic_review"] = automatic_review
+        if automatic_review["decision"] != "auto_send":
+            result["automatic_dispatch"] = "needs_review"
+            return result
+        try:
+            queued = self.confirm_draft(
+                result["draft_id"],
+                expected_revision=draft["revision"],
+                actor_id="system-watcher",
+                confirmer_name="MineGuard 自动报送策略",
+                confirmer_role="企业生产数据智能体",
+                attestation=(
+                    "已完成来源固化、确定性校验与报送前智能检查；"
+                    f"检查记录 {sha256_jcs(automatic_review)}。"
+                ),
+                accepted=True,
+            )
+        except Exception as error:
+            stopped_review = {
+                **automatic_review,
+                "decision": "needs_review",
+                "reason_codes": ["source_warning"],
+                "summary": [
+                    "自动进入发送队列失败，数据已保留待人工核验："
+                    f"{str(error)[:300]}"
+                ],
+            }
+            self.store.annotate_automatic_review(
+                import_id,
+                review=stopped_review,
+                actor=actor_id,
+            )
+            result["automatic_review"] = stopped_review
+            result["automatic_dispatch"] = "needs_review"
+            return result
+        result["draft"] = queued
+        result["automatic_dispatch"] = "queued"
+        result["delivery"] = self.process_outbox_once(
+            aggregate_id=result["draft_id"]
+        )
+        return result
 
     @staticmethod
     def _read_no_follow(path: Path) -> bytes:
@@ -5562,6 +6051,15 @@ class FiveQuantityRuntime:
                             }
                             for finding in findings[:50]
                         ],
+                        "conversation": [
+                            {
+                                "role": item["role"],
+                                "content": _enterprise_risk_text(item["content"])[
+                                    :3000
+                                ],
+                            }
+                            for item in self.store.chat_messages(report_id)[-8:]
+                        ],
                     }
                     answer = answer_method(
                         question=question,
@@ -5616,6 +6114,80 @@ class FiveQuantityRuntime:
             document=document,
             actor=actor,
         )
+
+    def draft_risk_response(self, report_id: str, *, actor: str) -> dict[str, Any]:
+        """Create an editable response draft from administrator-provided chat facts."""
+
+        provider = self.csv_mapping_provider
+        draft_method = getattr(provider, "draft_risk_response", None)
+        if provider is None or not callable(draft_method):
+            raise ValidationBlockedError("智能模型尚未配置或不支持回执起草")
+        response = self.store.create_response(report_id, actor=actor)
+        if response["status"] in {"queued", "submitted"}:
+            raise ConflictError("已发送的风险回复不能重新起草")
+        report = self.store.get_report(report_id)["report"]["payload"]
+        conversation = self.store.chat_messages(report_id)
+        report_context = {
+            "mine_name": _enterprise_risk_text(report["mine"]["mine_name"]),
+            "period_start": report["period_start"],
+            "period_end": report["period_end"],
+            "summary": _enterprise_risk_text(report["summary"]),
+            "findings": [
+                {
+                    "finding_id": finding["finding_id"],
+                    "title": _enterprise_risk_text(finding["title"]),
+                    "summary": _enterprise_risk_text(finding["summary"]),
+                    "affected_dates": list(finding.get("affected_dates", [])),
+                    "affected_metrics": [
+                        _METRIC_LABELS.get(metric, metric)
+                        for metric in finding.get("affected_metrics", [])
+                    ],
+                }
+                for finding in report["findings"]
+            ],
+        }
+        if not self._risk_model_slots.acquire(blocking=False):
+            raise ValidationBlockedError("智能模型当前繁忙，请稍后重试")
+        try:
+            proposal = draft_method(
+                report_context=report_context,
+                conversation=[
+                    {
+                        "role": item["role"],
+                        "content": _enterprise_risk_text(item["content"]),
+                    }
+                    for item in conversation[-12:]
+                ],
+            )
+        except Exception as error:
+            raise ValidationBlockedError(
+                "智能回执起草失败；现有回执草稿未被修改"
+            ) from error
+        finally:
+            self._risk_model_slots.release()
+        proposed_by_id = {
+            item["finding_id"]: item for item in proposal["finding_responses"]
+        }
+        document = json.loads(jcs_json(response["document"]))
+        for item in document["finding_responses"]:
+            proposed = proposed_by_id[item["finding_id"]]
+            item["response_kind"] = proposed["response_kind"]
+            item["reason_code"] = proposed["reason_code"]
+            item["facts"] = proposed["facts"]
+        document["agent_assistance"] = {
+            "used": True,
+            "conversation_id": f"risk-chat:{report_id}",
+            "assistance_record_sha256": sha256_jcs(
+                {"conversation": conversation, "proposal": proposal}
+            ),
+        }
+        updated = self.save_response(
+            response["response_id"],
+            expected_revision=response["revision"],
+            document=document,
+            actor=actor,
+        )
+        return {"response": updated, "model": proposal.get("model")}
 
     def confirm_response(
         self,
@@ -5683,6 +6255,40 @@ class FiveQuantityRuntime:
         )
 
     def status(self) -> dict[str, Any]:
+        drafts = self.store.list_drafts(limit=100)
+        imports = self.store.list_imports(limit=100)
+        latest = drafts[0] if drafts else None
+        latest_coverage: dict[str, Any] | None = None
+        if latest is not None:
+            payload = latest["payload"]
+            provided = {
+                metric
+                for day in payload.get("days", [])
+                for metric, measurement in day.get("reported_quantity", {})
+                .get("daily_total", {})
+                .items()
+                if isinstance(measurement, dict)
+                and measurement.get("value") is not None
+            }
+            latest_coverage = {
+                "period_start": payload.get("period_start"),
+                "period_end": payload.get("period_end"),
+                "day_count": len(payload.get("days", [])),
+                "provided_metric_count": len(provided),
+                "provided_quantity_count": sum(
+                    any(metric in provided for metric in metrics)
+                    for metrics in BUSINESS_GROUPS.values()
+                ),
+                "provided_metrics": sorted(provided),
+                "not_provided_metrics": [
+                    metric for metric in METRICS if metric not in provided
+                ],
+                "status": latest["status"],
+            }
+        status_counts: dict[str, int] = {}
+        for draft in drafts:
+            code = str(draft["status"])
+            status_counts[code] = status_counts.get(code, 0) + 1
         return {
             "enabled": True,
             "mine_id": self.identity.mine_id,
@@ -5694,6 +6300,30 @@ class FiveQuantityRuntime:
             "quarantine_directory": str(self.quarantine_directory),
             "csv_mapping_preview_enabled": True,
             "csv_mapping_ai_configured": self.csv_mapping_provider is not None,
+            "automatic_reporting": {
+                "enabled": bool(self.watched_directories)
+                and self.csv_mapping_provider is not None
+                and not self.four_eyes_required,
+                "state": (
+                    "running"
+                    if self.watched_directories
+                    and self.csv_mapping_provider is not None
+                    and not self.four_eyes_required
+                    else "needs_configuration"
+                ),
+                "ai_check_required": True,
+                "watched_file_count": sum(
+                    item.get("acquisition_mode") == "direct_collection"
+                    for item in imports
+                ),
+                "needs_review_count": sum(
+                    item.get("status") in {"needs_review", "ready_review"}
+                    for item in imports
+                    if item.get("acquisition_mode") == "direct_collection"
+                ),
+                "draft_status_counts": status_counts,
+                "latest_coverage": latest_coverage,
+            },
             "four_eyes_required": self.four_eyes_required,
             "acquisition_modes": ["manual_import", "direct_collection"],
             "acquisition_trust_tiering": False,

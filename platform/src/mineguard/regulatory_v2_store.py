@@ -242,11 +242,14 @@ class AnalysisReport(StrictModel):
 
     @model_validator(mode="after")
     def validate_outcome(self) -> "AnalysisReport":
-        expected = self.outcome is not DecisionStatus.NORMAL_CANDIDATE
-        if self.response_required != expected:
+        # Data coverage and evidence sufficiency are government-side status
+        # information, not enterprise risk work.  Only an actual risk decision
+        # may create a response-required report.
+        is_risk = self.outcome is DecisionStatus.RISK
+        if self.response_required != is_risk:
             raise ValueError("response_required must match the analysis outcome")
-        if expected != bool(self.finding_ids):
-            raise ValueError("non-normal report requires at least one finding")
+        if is_risk != bool(self.finding_ids):
+            raise ValueError("risk report requires at least one finding")
         return self
 
 
@@ -1695,7 +1698,10 @@ class RegulatoryV2Store:
             )
 
             finding_ids: list[str] = []
-            if result.decision is not DecisionStatus.NORMAL_CANDIDATE:
+            # Coverage and evidence sufficiency stay visible as neutral analysis
+            # status.  They must never create an enterprise risk task.  Only a
+            # positive anomaly decision is allowed to open a finding.
+            if result.decision is DecisionStatus.RISK:
                 for category, reasons in _finding_groups(result):
                     finding_ids.append(
                         self._issue_finding(
@@ -2570,19 +2576,27 @@ class RegulatoryV2Store:
         self,
         *,
         mine_id: str | None = None,
+        finding_type: Literal["risk", "data_insufficient"] | None = None,
         include_resolved: bool = True,
         limit: int = 100,
     ) -> list[FindingProjection]:
         limit = _validated_limit(limit)
-        where = " WHERE mine_id = ?" if mine_id is not None else ""
-        values: tuple[Any, ...] = (mine_id, limit) if mine_id is not None else (limit,)
+        clauses: list[str] = []
+        values: list[Any] = []
+        if mine_id is not None:
+            clauses.append("mine_id = ?")
+            values.append(mine_id)
+        if finding_type is not None:
+            clauses.append("finding_type = ?")
+            values.append(finding_type)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._lock:
             rows = self._connection.execute(
                 f"""
                 SELECT finding_id FROM v2_findings{where}
                 ORDER BY issued_at DESC, finding_id DESC LIMIT ?
                 """,
-                values,
+                (*values, limit),
             ).fetchall()
         projections = [
             self.get_finding(row["finding_id"], mine_id=mine_id) for row in rows
@@ -4425,7 +4439,7 @@ class RegulatoryV2Store:
             mine_id=submission.mine_id,
             outcome=result.decision,
             finding_ids=finding_ids,
-            response_required=result.decision is not DecisionStatus.NORMAL_CANDIDATE,
+            response_required=result.decision is DecisionStatus.RISK,
             delivery_cursor=delivery_cursor,
             result=result,
             issued_at=_parse_datetime(issued_at),
@@ -4449,6 +4463,11 @@ class RegulatoryV2Store:
                 issued_at,
             ),
         )
+        # A technical intake receipt is always returned by the HTTP boundary.
+        # The report outbox remains an internal trace of every analysis, while
+        # the exchange pull route exposes only response-required risk reports.
+        # In particular, a V3 evidence-insufficient result has no finding and
+        # is never returned to the enterprise as a risk task.
         self._append_outbox(
             connection,
             audience_mine_id=submission.mine_id,
@@ -4806,7 +4825,7 @@ def _finding_groups(
     ]
 ]:
     if result.decision is DecisionStatus.INSUFFICIENT_DATA:
-        return [("data_completeness", result.decision_reasons)]
+        return []
     groups: list[tuple[Any, list[str]]] = []
     for category, signals in (
         ("data_quality", result.data_quality_signals),
@@ -4820,8 +4839,6 @@ def _finding_groups(
         )
         if reasons:
             groups.append((category, reasons))
-    if result.data_sufficiency_reasons:
-        groups.append(("data_completeness", result.data_sufficiency_reasons))
     if not groups:
         groups.append(("relationship_consistency", result.decision_reasons))
     return groups

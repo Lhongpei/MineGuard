@@ -272,7 +272,7 @@ function createDom(permissions) {
           import_id: draft.import_id,
           draft_id: draft.draft_id,
           status: "ready_review",
-          duplicate: true,
+          duplicate: false,
           draft,
         },
         200,
@@ -326,6 +326,7 @@ function createDom(permissions) {
     url: "http://127.0.0.1:8090/",
     beforeParse(window) {
       window.fetch = fakeFetch;
+      window.TextEncoder = TextEncoder;
       window.URL.createObjectURL = (blob) => {
         downloadedBlob = blob;
         return "blob:csv-template";
@@ -384,7 +385,7 @@ async function main() {
     assert.equal(uploadButton.disabled, true, "upload waits for a selected file");
 
     document.getElementById("fqDownloadCsvTemplate").click();
-    assert.equal(writer.getDownloadedName(), "十量填报标准模板（日汇总）.csv");
+    assert.equal(writer.getDownloadedName(), "生产数据填报模板.csv");
     assert.equal(writer.getDownloadedBlob().type, "text/csv;charset=utf-8");
     assert(writer.getDownloadedBlob().size > 20);
     const templateText = await readBlob(window, writer.getDownloadedBlob());
@@ -399,7 +400,7 @@ async function main() {
     ]) {
       assert(templateColumns.includes(label), `default template includes ${label}`);
     }
-    assert.match(document.getElementById("fqUploadResult").textContent, /十量日汇总 CSV 模板已下载/);
+    assert.match(document.getElementById("fqUploadResult").textContent, /生产数据 CSV 模板已下载/);
 
     const csv = Buffer.from(
       "日期,风量(m3/min),电量(kWh),雷管(发),炸药(kg),入井人员量(人次),产量(t)\n" +
@@ -422,83 +423,34 @@ async function main() {
       new window.Event("submit", { bubbles: true, cancelable: true }),
     );
     await waitFor(
-      () => document.querySelectorAll("#fqPreviewRows tr").length === 5,
-      "CSV mapping preview",
+      () =>
+        writer.requests.filter(
+          (item) => item.method === "POST" && item.path === "/api/v2/imports",
+        ).length === 1,
+      "CSV direct import",
     );
-    assert.equal(document.getElementById("fqMappingPreview").hidden, false);
-    assert.equal(input.disabled, true, "file is bound while its preview is open");
-    assert.equal(uploadButton.hidden, true);
-    assert.match(document.getElementById("fqPreviewSummary").textContent, /2026-07/);
-    assert.match(document.getElementById("fqPreviewSummary").textContent, /2 个有效日期/);
-    assert.match(document.getElementById("fqPreviewWarnings").textContent, /原煤/);
+    const importPost = writer.requests.find(
+      (item) => item.method === "POST" && item.path === "/api/v2/imports",
+    );
+    assert(importPost, "CSV import must use the one-step automatic recognition endpoint");
+    assert.equal(importPost.options.headers["X-CSRF-Token"], "csrf-csv-user");
+    const importBody = JSON.parse(importPost.options.body);
+    assert.equal(importBody.filename, "七月五量.csv");
     assert.equal(
-      document.getElementById("fqPreviewWarnings").querySelector("img"),
-      null,
-      "preview warnings must be escaped",
-    );
-    assert(document.querySelector('[data-preview-row="2"]').classList.contains("is-review"));
-    assert(document.querySelector('[data-preview-row="3"]').classList.contains("is-review"));
-    assert(document.querySelector('[data-preview-row="4"]').classList.contains("is-blocked"));
-    assert.match(document.querySelector('[data-preview-row="2"]').textContent, /置信度 61%/);
-
-    const previewPost = writer.requests.find(
-      (item) => item.method === "POST" && item.path === "/api/v2/imports/preview",
-    );
-    assert(previewPost, "CSV selection must call the preview API first");
-    assert.equal(previewPost.options.headers["X-CSRF-Token"], "csrf-csv-user");
-    const previewBody = JSON.parse(previewPost.options.body);
-    assert.equal(previewBody.filename, "七月五量.csv");
-    assert.equal(
-      Buffer.from(previewBody.content_base64, "base64").toString("utf8"),
+      Buffer.from(importBody.content_base64, "base64").toString("utf8"),
       csv.toString("utf8"),
     );
     assert.equal(
       writer.requests.filter(
-        (item) => item.method === "POST" && item.path === "/api/v2/imports",
+        (item) => item.method === "POST" && item.path === "/api/v2/imports/preview",
       ).length,
       0,
-      "preview must not use the old one-step materialization endpoint",
+      "enterprise users must not be forced through a mapping preview",
     );
-
-    const materializeButton = document.getElementById("fqMaterializeButton");
-    assert.equal(materializeButton.disabled, true);
-    assert.equal(document.getElementById("fqSaveMappingProfile").checked, false);
-    assert.match(document.getElementById("fqPreviewValidation").textContent, /2 列未确认/);
-    const unmapped = document.querySelector('[data-source-index="3"]');
-    const blocked = document.querySelector('[data-source-index="4"]');
-    assert(
-      [...unmapped.options].every(
-        (option) =>
-          option.value === "" ||
-          option.value === "__ignore__" ||
-          /^(ventilation_m3_min|electricity_kwh|detonators_count|explosives_kg|mine_entry_persons|production_t|extraction_t|sales_t|transport_t|wash_feed_t|invoiced_quantity_t)\|(daily_total|zero_shift|eight_shift|four_shift)$/.test(
-            option.value,
-          ),
-      ),
-      "mapping choices must remain inside the fixed whitelist",
-    );
-    blocked.value = "__ignore__";
-    blocked.dispatchEvent(new window.Event("change", { bubbles: true }));
-    unmapped.value = "ventilation_m3_min|daily_total";
-    unmapped.dispatchEvent(new window.Event("change", { bubbles: true }));
-    assert.equal(materializeButton.disabled, true, "duplicate targets must be blocked");
-    assert.match(document.getElementById("fqPreviewValidation").textContent, /不能同时指向/);
-    assert(document.querySelector('[data-preview-row="1"]').classList.contains("is-duplicate"));
-    assert(document.querySelector('[data-preview-row="3"]').classList.contains("is-duplicate"));
-
-    unmapped.value = "production_t|daily_total";
-    unmapped.dispatchEvent(new window.Event("change", { bubbles: true }));
-    assert.equal(materializeButton.disabled, false);
-    assert.match(document.getElementById("fqPreviewValidation").textContent, /映射已完整/);
-    document.getElementById("fqSaveMappingProfile").checked = true;
-    materializeButton.click();
     await waitFor(
-      () => /Agent 已按确认映射读取 2 天数据/.test(
-        document.getElementById("fqGlobalMessage").textContent,
-      ),
-      "CSV draft materialization",
+      () => /待人工核验记录/.test(document.getElementById("fqGlobalMessage").textContent),
+      "CSV draft creation",
     );
-    assert.match(document.getElementById("fqGlobalMessage").textContent, /当前尚未报送/);
     assert.equal(document.getElementById("fqPanelReview").hidden, false);
     await waitFor(
       () => /2026-07-01 至 2026-07-02/.test(document.getElementById("fqDraftDetail").textContent),
@@ -521,32 +473,6 @@ async function main() {
       "missing V2 fields are shown but never fabricated into the payload",
     );
 
-    const materializePost = writer.requests.find(
-      (item) =>
-        item.method === "POST" &&
-        item.path === "/api/v2/imports/11111111-1111-4111-8111-111111111111/materialize",
-    );
-    assert(materializePost, "confirmed mappings must call materialize");
-    assert.equal(materializePost.options.headers["X-CSRF-Token"], "csrf-csv-user");
-    const materializeBody = JSON.parse(materializePost.options.body);
-    assert.equal(materializeBody.save_profile, true);
-    assert.deepEqual(materializeBody.mappings, [
-      {
-        source_index: 1,
-        target_metric: "ventilation_m3_min",
-        target_period: "daily_total",
-      },
-      {
-        source_index: 2,
-        target_metric: "electricity_kwh",
-        target_period: "daily_total",
-      },
-      {
-        source_index: 3,
-        target_metric: "production_t",
-        target_period: "daily_total",
-      },
-    ]);
     assert.equal(
       writer.requests.filter(
         (item) => item.method === "POST" && /\/(confirm|send-now)$/.test(item.path),
@@ -576,7 +502,7 @@ async function main() {
         );
       },
     });
-    assert.match(uploadButton.textContent, /生成草稿/);
+    assert.match(uploadButton.textContent, /读取文件/);
     document.getElementById("fqUploadForm").dispatchEvent(
       new window.Event("submit", { bubbles: true, cancelable: true }),
     );
@@ -584,20 +510,43 @@ async function main() {
       () =>
         writer.requests.filter(
           (item) => item.method === "POST" && item.path === "/api/v2/imports",
-        ).length === 1,
+        ).length === 2,
       "non-CSV legacy import",
     );
-    const directImport = writer.requests.find(
+    const directImport = writer.requests.filter(
       (item) => item.method === "POST" && item.path === "/api/v2/imports",
-    );
+    )[1];
     assert.equal(JSON.parse(directImport.options.body).filename, "五量.json");
     assert.equal(
       writer.requests.filter(
         (item) => item.method === "POST" && item.path === "/api/v2/imports/preview",
       ).length,
-      1,
-      "non-CSV formats must keep the existing direct-import path",
+      0,
+      "all formats use the same direct automatic-recognition path",
     );
+
+    const manualRow = document.querySelector("#fqManualRows tr");
+    assert(manualRow, "manual fallback starts with one editable row");
+    manualRow.querySelector('[data-manual-date]').value = "2026-07-15";
+    manualRow.querySelector('[data-manual-metric="production_t"]').value = "123.5";
+    document.getElementById("fqManualForm").dispatchEvent(
+      new window.Event("submit", { bubbles: true, cancelable: true }),
+    );
+    await waitFor(
+      () =>
+        writer.requests.filter(
+          (item) => item.method === "POST" && item.path === "/api/v2/imports",
+        ).length === 3 && document.getElementById("fqManualSubmit").disabled === false,
+      "manual production data import",
+    );
+    const manualPost = writer.requests.filter(
+      (item) => item.method === "POST" && item.path === "/api/v2/imports",
+    )[2];
+    const manualBody = JSON.parse(manualPost.options.body);
+    assert.match(manualBody.filename, /^manual-production-data-\d+\.csv$/);
+    const manualCsv = Buffer.from(manualBody.content_base64, "base64").toString("utf8");
+    assert.match(manualCsv, /2026-07-15/);
+    assert.match(manualCsv, /123\.5/);
     assert.equal(writer.runtimeErrors.length, 0, String(writer.runtimeErrors[0] || ""));
   } finally {
     writer.dom.window.close();

@@ -315,10 +315,10 @@ def test_leader_overview_has_plain_language_sections_and_dom_contract() -> None:
     assert "最高风险" not in overview
     for pseudo_grade in ("重大", "高", "中", "低"):
         assert f">{pseudo_grade}<" not in overview
-    assert "全部事项类型" in index
+    assert "全部风险" in index
     assert "全部等级" not in index
     assert '<option value="risk">风险线索</option>' in index
-    assert '<option value="data_insufficient">数据待补</option>' in index
+    assert '<option value="data_insufficient">' not in index
 
 
 def test_mine_detail_discloses_demo_workbook_origin_without_raw_payload() -> None:
@@ -366,17 +366,18 @@ renderOverview({
   latest_events: [],
 });
 let bars = element("severityBars").innerHTML;
-if (element("metricHighest").textContent !== "待核事项 9 项") process.exit(2);
-if (element("attentionTotal").textContent !== "当前 9 项未解除") process.exit(3);
-if (!bars.includes('aria-label="风险线索 8 项，占 88.9%"')) process.exit(4);
-if (!bars.includes('aria-label="数据待补 1 项，占 11.1%"')) process.exit(5);
-if (!bars.includes('width="88.89"') || !bars.includes('width="11.11"')) process.exit(6);
+if (element("metricHighest").textContent !== "风险线索 8 项") process.exit(2);
+if (element("attentionTotal").textContent !== "当前 8 项未解除") process.exit(3);
+if (!bars.includes('aria-label="风险线索 8 项，占 100.0%"')) process.exit(4);
+if (bars.includes("数据待补")) process.exit(5);
+if (!bars.includes('width="100.00"')) process.exit(6);
 if (bars.includes("style=") || bars.includes("NaN") || bars.includes("Infinity")) process.exit(7);
 for (const grade of [">重大<", ">高<", ">中<", ">低<"]) {
   if (bars.includes(grade)) process.exit(8);
 }
 if (!element("attentionStatus").innerHTML.includes("企业已回复<br>风险未解除")) process.exit(9);
-if (!element("riskGuidance").textContent.includes("8 项风险线索、1 项数据待补")) process.exit(10);
+if (!element("riskGuidance").textContent.includes("8 项风险线索")) process.exit(10);
+if (!element("riskGuidance").textContent.includes("数据覆盖状态单独展示")) process.exit(16);
 
 renderOverview({
   counts: {
@@ -400,8 +401,8 @@ renderOverview({
 bars = element("severityBars").innerHTML;
 if (element("metricCoverage").textContent !== "覆盖率 0.0%") process.exit(11);
 if (element("attentionTotal").textContent !== "当前无未解除事项") process.exit(12);
-if ((bars.match(/width="0.00"/g) || []).length !== 2) process.exit(13);
-if (!bars.includes("风险线索 0 项，占 0.0%") || !bars.includes("数据待补 0 项，占 0.0%")) process.exit(14);
+if ((bars.match(/width="0.00"/g) || []).length !== 1) process.exit(13);
+if (!bars.includes("风险线索 0 项，占 0.0%") || bars.includes("数据待补")) process.exit(14);
 if (bars.includes("style=") || bars.includes("NaN") || bars.includes("Infinity")) process.exit(15);
 """
     )
@@ -453,7 +454,7 @@ let html = element("activityList").innerHTML;
 if ((html.match(/<li\b/g) || []).length !== 1) process.exit(3);
 if (!html.includes("沁源一号煤矿&lt;script&gt;alert(1)&lt;/script&gt;")) process.exit(4);
 if (html.includes("<script>") || html.includes("alert(1)</script>")) process.exit(5);
-if (!html.includes("本期十量核验发现风险线索")) process.exit(6);
+if (!html.includes("生产数据核验发现风险线索")) process.exit(6);
 const visibleText = html.replace(/<[^>]*>/g, " ");
 for (const rawCode of [
   "analysis_report_automatically_issued",
@@ -1209,12 +1210,12 @@ sandbox.__renderStatus(partialBlasting, [], "ten_quantity_v3");
 if (element("tenQuantityCoverage").textContent !== "十量已到 9/10") process.exit(14);
 const partialStatus = element("tenQuantityStatusGroups").innerHTML;
 const blastingStart = partialStatus.indexOf('data-quantity-code="blasting_materials"');
-if (blastingStart < 0 || !partialStatus.slice(blastingStart, blastingStart + 260).includes("数据不足")) process.exit(15);
+if (blastingStart < 0 || !partialStatus.slice(blastingStart, blastingStart + 260).includes("未提供")) process.exit(15);
 
 // V3 required fields that are explicitly null are data-insufficient, not a V2 report.
 sandbox.__renderStatus(v2WithNullKeys, [], "ten_quantity_v3");
 if (element("tenQuantityLegacyNote").textContent.includes("旧版 V2")) process.exit(16);
-if (element("tenQuantityStatusGroups").innerHTML.split(">数据不足</small>").length - 1 !== 5) process.exit(17);
+if (element("tenQuantityStatusGroups").innerHTML.split(">未提供</small>").length - 1 !== 5) process.exit(17);
 """
     subprocess.run(
         ["node", "-e", probe],

@@ -101,12 +101,12 @@ const BUSINESS_TERM_LABELS = Object.freeze({
   strict_profile_mcs_diagnostic_not_causation: "最小冲突集诊断",
   state_aware_context_rule_not_physical_violation: "工况上下文规则",
   qualified_measurement_requires_review: "测量值需复核",
-  incomplete_five_quantity_days: "十量日数据不完整",
+  incomplete_five_quantity_days: "本批生产数据覆盖不完整",
   soft_reference_interval_exceeded: "超出软参考区间",
   robust_temporal_outlier: "稳健时序偏离",
   strict_counterfactual_conflict_set: "最小放宽组合",
   normal_candidate: "暂未发现异常",
-  insufficient_data: "数据不足",
+  insufficient_data: "覆盖待积累",
   risk_persists: "风险仍存在",
   cleared_by_reanalysis: "修订复核已解除",
   explanation_recorded: "企业已回复、风险未解除",
@@ -173,7 +173,7 @@ const formatTime = (value) => {
 const statusInfo = (status) => ({
   normal_candidate: ["暂未发现异常", "#36dfa1", "positive"],
   risk: ["存在风险", "#ff6474", "risk"],
-  insufficient_data: ["数据不足", "#ffbd59", "warning"],
+  insufficient_data: ["覆盖待积累", "#ffbd59", "warning"],
   analyzing: ["正在分析", "#45d7ff", "info"],
   not_reported: ["尚未报送", "#71889a", "neutral"],
   open: ["待企业回复", "#ff6474", "risk"],
@@ -184,7 +184,7 @@ const statusInfo = (status) => ({
 
 const findingType = (item) => item.finding_type || (item.severity === "medium" ? "data_insufficient" : "risk");
 const findingTypeInfo = (type) => type === "data_insufficient"
-  ? ["数据待补", "warning"]
+  ? ["历史覆盖记录", "warning"]
   : ["风险线索", "risk"];
 const findingCategoryLabel = (category) => ({
   data_quality: "数据质量",
@@ -264,19 +264,19 @@ function activityPresentation(item) {
   let summary = "系统已记录一项业务变化，详细信息可在交换留痕中查看。";
   let tone = "info";
   if (eventType === "submission_received" || eventType === "exchange_inbound_recorded") {
-    title = "本期十量数据已收到";
+    title = "生产数据已收到";
     summary = "数据已通过基本验收，并进入统一监管算法分析。";
   } else if (eventType === "analysis_completed" || eventType === "analysis_report_automatically_issued") {
     if (decision === "risk") {
-      title = "本期十量核验发现风险线索";
+      title = "生产数据核验发现风险线索";
       summary = "风险报告已发送企业，等待企业说明原因或修订数据。";
       tone = "risk";
     } else if (decision === "insufficient_data") {
-      title = "本期十量数据不足，暂不能形成判断";
-      summary = "已通知企业补充或核对缺失数据。";
-      tone = "warning";
+      title = "本批生产数据覆盖状态已记录";
+      summary = "覆盖范围仅用于监管态势展示，未生成风险或企业回复任务。";
+      tone = "info";
     } else {
-      title = "本期十量核验完成：暂未发现异常";
+      title = "生产数据核验完成：暂未发现异常";
       summary = "本期自动核验已完成，继续按期观察后续数据。";
       tone = "positive";
     }
@@ -633,19 +633,17 @@ function renderOverview(payload) {
     cleared_by_reanalysis: 0,
   };
   const riskFindings = number(attention.risk_findings);
-  const dataToComplete = number(attention.data_to_complete);
-  const unresolved = riskFindings + dataToComplete;
-  $("metricHighest").textContent = `待核事项 ${formatNumber(unresolved)} 项`;
+  const unresolved = riskFindings;
+  $("metricHighest").textContent = `风险线索 ${formatNumber(unresolved)} 项`;
   $("asOf").textContent = formatTime((payload && payload.as_of) || (payload && payload.updated_at) || new Date().toISOString());
 
   const legend = [
-    ["暂未发现风险", counts.normal, "positive"], ["存在风险", counts.risk, "risk"], ["数据不足", counts.insufficient, "warning"], ["未报送", Math.max(0, counts.expected - counts.reported), "neutral"],
+    ["暂未发现风险", counts.normal, "positive"], ["存在风险", counts.risk, "risk"], ["覆盖待积累", counts.insufficient, "warning"], ["未报送", Math.max(0, counts.expected - counts.reported), "neutral"],
   ];
   $("statusLegend").innerHTML = legend.map(([label, value, tone]) => `<div class="legend-row legend-${tone}"><i></i><span>${label}</span><strong>${formatNumber(value)}</strong></div>`).join("");
 
   const attentionRows = [
     ["风险线索", riskFindings, "#ff6474"],
-    ["数据待补", dataToComplete, "#ffbd59"],
   ];
   const attentionTotal = attentionRows.reduce((sum, row) => sum + row[1], 0);
   $("attentionTotal").textContent = attentionTotal ? `当前 ${formatNumber(attentionTotal)} 项未解除` : "当前无未解除事项";
@@ -659,9 +657,9 @@ function renderOverview(payload) {
   $("attentionStatus").innerHTML = `<div><span>待企业回复</span><strong>${formatNumber(awaiting)}</strong></div><div><span>企业已回复<br>风险未解除</span><strong>${formatNumber(responded)}</strong></div><div><span>修订数据复核<br>已解除</span><strong>${formatNumber(cleared)}</strong></div>`;
   if (unresolved) {
     const responseText = awaiting ? `；其中 ${formatNumber(awaiting)} 项等待企业回复` : responded ? `；${formatNumber(responded)} 项已收到企业回复` : "";
-    $("riskGuidance").textContent = `辖区当前共 ${formatNumber(unresolved)} 项待关注事项：${formatNumber(riskFindings)} 项风险线索、${formatNumber(dataToComplete)} 项数据待补${responseText}。`;
+    $("riskGuidance").textContent = `辖区当前共 ${formatNumber(unresolved)} 项风险线索${responseText}。数据覆盖状态单独展示，不会形成风险。`;
   } else {
-    $("riskGuidance").textContent = "当前没有未解除的风险线索或待补数据，请继续关注未报送和新产生的异常。";
+    $("riskGuidance").textContent = "当前没有未解除的风险线索。数据覆盖状态仅作态势展示，请继续关注未报送和新产生的异常。";
   }
 
   const latest = (payload && payload.latest_events) || (payload && payload.events) || [];
@@ -891,17 +889,16 @@ function renderWallboard() {
     cleared_by_reanalysis: 0,
   };
   const riskFindings = number(attention.risk_findings);
-  const dataToComplete = number(attention.data_to_complete);
-  $("wallboardMetricRiskItems").textContent = `待核事项 ${formatNumber(riskFindings + dataToComplete)} 项`;
+  $("wallboardMetricRiskItems").textContent = `风险线索 ${formatNumber(riskFindings)} 项`;
   $("wallboardRiskFindings").textContent = formatNumber(riskFindings);
-  $("wallboardDataToComplete").textContent = formatNumber(dataToComplete);
+  $("wallboardDataToComplete").textContent = formatNumber(counts.insufficient);
   $("wallboardResponded").textContent = formatNumber(firstDefined(attention.enterprise_responded_unresolved, attention.explanation_recorded, 0));
   $("wallboardCleared").textContent = formatNumber(attention.cleared_by_reanalysis);
   const unreported = Math.max(0, counts.expected - counts.reported);
   $("wallboardStatusLegend").innerHTML = [
     ["暂未发现风险", counts.normal, "positive"],
     ["存在风险", counts.risk, "risk"],
-    ["数据不足", counts.insufficient, "warning"],
+    ["覆盖待积累", counts.insufficient, "warning"],
     ["尚未报送", unreported, "neutral"],
   ].map(([label, value, tone]) => `<div class="wallboard-status-row status-${tone}"><i aria-hidden="true"></i><span>${label}</span><strong>${formatNumber(value)}</strong></div>`).join("");
 
@@ -1146,10 +1143,10 @@ function tenQuantityStatuses(rows, findings, declaredScope) {
     const structurallyPresent = quantityStructurallyPresent(rows, group);
     if (!hasAnyData) {
       return structurallyPresent || quantityScope === "ten_quantity_v3"
-        ? {group, state:"warning", label:"数据不足"}
+        ? {group, state:"warning", label:"未提供"}
         : {group, state:"neutral", label:"未提供"};
     }
-    if (!hasData) return {group, state:"warning", label:"数据不足"};
+    if (!hasData) return {group, state:"warning", label:"未提供"};
     const risk = findingAffectsQuantity(riskMetrics, group);
     if (risk) return {group, state:"risk", label:"需关注"};
     return {group, state:"info", label:"已提供"};
@@ -1164,14 +1161,14 @@ function renderQuantityStatusSummary(rows, findings, declaredScope) {
   const insufficient = statuses.filter((item) => ["warning", "neutral"].includes(item.state)).length;
   $("tenQuantityCoverage").textContent = `十量已到 ${received}/10`;
   $("tenQuantitySummary").textContent = risk
-    ? `本期 ${risk} 项需关注，${provided} 项已提供，${insufficient} 项数据不足或未提供。请先看红色项目。`
-    : `本期暂无可定位到单项的风险；${provided} 项已提供，${insufficient} 项数据不足或未提供。`;
+    ? `本批 ${risk} 项需关注，${provided} 项已提供，${insufficient} 项未提供。请先看红色项目。`
+    : `本批暂无可定位到单项的风险；${provided} 项已提供，${insufficient} 项未提供。未提供仅表示覆盖范围，不构成风险。`;
   const quantityScope = effectiveQuantityScope(rows, declaredScope);
   $("tenQuantityLegacyNote").textContent = quantityScope === "five_quantity_v2"
     ? "当前为旧版 V2 五量报文：新增的开采量、销售量、运输量、洗煤量和开票量未提供，平台不会补数。"
     : received < 10
       ? `当前仍有 ${10 - received} 项未提供；缺数不能解释为 0 或正常。`
-      : "十量字段已接入；是否可形成判断仍取决于来源、口径和时间覆盖。";
+      : "生产指标已接入；是否可形成判断仍取决于来源、口径和时间覆盖。";
   $("tenQuantityStatusGroups").innerHTML = TEN_QUANTITY_SECTIONS.map((section) => {
     const items = statuses.filter((item) => item.group.section === section.code);
     return `<section class="ten-quantity-status-section" data-quantity-section="${section.code}"><h3>${escapeHtml(section.label)}<small>${items.length} 项</small></h3><div>${items.map((item) => `<span class="ten-quantity-status status-${item.state}" data-quantity-code="${item.group.code}"><strong>${escapeHtml(item.group.label)}</strong><small>${escapeHtml(item.label)}</small></span>`).join("")}</div></section>`;
@@ -1220,7 +1217,7 @@ function renderSeriesLegend() {
   }).join("");
   $("seriesSelectionNote").textContent = selected.length
     ? `当前显示 ${selected.length} 项；最多同时选择 3 项，优先展示风险项目。`
-    : "当前报文没有可展示的十量时序。";
+    : "当前报文没有可展示的生产数据时序。";
 }
 
 function renderSelectedSeriesChart() {
@@ -1231,7 +1228,7 @@ function renderSelectedSeriesChart() {
     .flatMap((group) => group.series);
   const chartElement = $("seriesChart");
   chartElement.className = `series-chart tracks-${Math.max(1, Math.min(4, definitions.length))}`;
-  if (!rows.length || !definitions.length) { chartElement.innerHTML = `<div class="empty-state">暂无可展示的逐日十量数据</div>`; return; }
+  if (!rows.length || !definitions.length) { chartElement.innerHTML = `<div class="empty-state">暂无可展示的逐日生产数据</div>`; return; }
   const measuredWidth = Number(chartElement.clientWidth);
   const width = Math.max(760, Number.isFinite(measuredWidth) && measuredWidth > 0 ? Math.round(measuredWidth) : 1100);
   const left = 132, right = 78, top = 8, bottom = 38;
@@ -1338,12 +1335,15 @@ function findingCard(item) {
   return `<article class="finding-card finding-type-${typeTone}" data-finding-type="${escapeHtml(type)}" data-state="${escapeHtml(item.state || item.status)}"><header><h3>${escapeHtml(humanizeBusinessText(item.title || item.code || "风险线索"))}</h3><span class="status-pill status-${typeTone}">${escapeHtml(typeLabel)}</span></header><p>${escapeHtml(findingSummaryForDisplay(item.summary || item.description || ""))}</p><div class="finding-meta"><span>${escapeHtml(item.mine_name || item.mine_id || "")}</span><span>${escapeHtml(findingCategoryLabel(item.category))}</span><span>${escapeHtml(formatTime(item.issued_at || item.created_at))}</span><span class="status-text-${stateLabel[2]}">${escapeHtml(stateLabel[0])}</span></div>${evidence.length ? `<div class="finding-evidence">${evidence.slice(0,3).map((fact) => `<p>• ${escapeHtml(evidenceText(fact))}</p>`).join("")}</div>` : ""}</article>`;
 }
 
-function renderMineFindings(items) { $("mineFindings").innerHTML = items.length ? items.map(findingCard).join("") : `<div class="empty-state">当前没有风险线索</div>`; }
+function renderMineFindings(items) {
+  const risks = items.filter((item) => findingType(item) === "risk");
+  $("mineFindings").innerHTML = risks.length ? risks.map(findingCard).join("") : `<div class="empty-state">当前没有风险线索</div>`;
+}
 function renderTimeline(items) { $("mineTimeline").innerHTML = items.length ? items.map((item) => { const presentation = activityPresentation(item); return `<li><strong>${escapeHtml(humanizeBusinessText(item.event_label || item.title || presentation.title))}</strong><p>${escapeHtml(activitySummaryForDisplay(item, presentation))}</p><time>${escapeHtml(formatTime(item.occurred_at || item.created_at))}</time></li>`; }).join("") : `<li><strong>暂无时间线记录</strong></li>`; }
 
 function renderFindings() {
   const type = $("findingSeverity").value, findingState = $("findingState").value;
-  const filtered = state.findings.filter((item) => (!type || findingType(item) === type) && (!findingState || (item.state || item.status) === findingState));
+  const filtered = state.findings.filter((item) => findingType(item) === "risk" && (!type || findingType(item) === type) && (!findingState || (item.state || item.status) === findingState));
   $("findingLedger").innerHTML = filtered.length ? filtered.map(findingCard).join("") : `<div class="empty-state">没有符合筛选条件的风险记录</div>`;
 }
 

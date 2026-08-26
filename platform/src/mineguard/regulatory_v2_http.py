@@ -2373,6 +2373,8 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 report = self.server.store.get_analysis_report(
                     item.aggregate_id, mine_id=mine_id
                 )
+                if report.outcome is not DecisionStatus.RISK:
+                    continue
                 submission = self.server.store.get_submission(report.submission_id)
                 if submission.quantity_scope == quantity_scope:
                     return item
@@ -2496,13 +2498,13 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         }
         attention_counts = {
             "risk_findings": finding_counts["risk"],
-            "data_to_complete": finding_counts["data_insufficient"],
+            # Completeness is a neutral coverage dimension, not a finding and
+            # never an enterprise response task.
+            "data_to_complete": 0,
             "awaiting_enterprise_response": finding_counts["open"],
             "enterprise_responded_unresolved": finding_counts["explanation_recorded"],
             "cleared_by_reanalysis": finding_counts["cleared_by_reanalysis"],
-            "total_unresolved": (
-                finding_counts["risk"] + finding_counts["data_insufficient"]
-            ),
+            "total_unresolved": finding_counts["risk"],
         }
         mine_names = {item["mine_id"]: item["mine_name"] for item in rows}
         events = self._latest_business_events(
@@ -2635,14 +2637,9 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                     else "本期报送数据研判发现风险线索，等待企业核实或提交修订数据。"
                 )
             elif decision == "insufficient_data":
-                event_label = "数据待补充"
+                event_label = "覆盖状态已记录"
                 status = "insufficient_data"
-                summary = (
-                    "本期数据不完整，暂不能作出判断；"
-                    f"已形成 {finding_count} 项数据补充要求。"
-                    if finding_count
-                    else "本期数据不完整，暂不能作出判断，请企业补充或核对数据。"
-                )
+                summary = "本批数据覆盖范围已记录；未生成风险或企业回复任务。"
             elif decision == "normal_candidate":
                 event_label = "研判完成"
                 status = "normal_candidate"
@@ -2808,7 +2805,9 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             if latest_submission_id
             else None
         )
-        finding_projections = list(detail.findings)
+        finding_projections = [
+            item for item in detail.findings if item.finding.finding_type == "risk"
+        ]
         findings = [self._finding_projection(item) for item in finding_projections]
         current_findings = [
             self._finding_projection(item)
@@ -2818,7 +2817,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         ]
         responses = [
             response.model_dump(mode="json")
-            for item in detail.findings
+            for item in finding_projections
             for response in item.responses
         ]
         result = report.result if report is not None else None
@@ -3000,13 +2999,15 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
     ) -> list[dict[str, Any]]:
         visible = self._visible_mines(principal)
         if visible is None:
-            projections = self.server.store.list_findings(limit=limit)
+            projections = self.server.store.list_findings(
+                finding_type="risk", limit=limit
+            )
         else:
             projections = [
                 finding
                 for mine_id in visible
                 for finding in self.server.store.list_findings(
-                    mine_id=mine_id, limit=limit
+                    mine_id=mine_id, finding_type="risk", limit=limit
                 )
             ]
             projections.sort(
@@ -3017,7 +3018,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 reverse=True,
             )
             projections = projections[:limit]
-        rows = [self._finding_projection(item) for item in projections]
+        rows = [
+            self._finding_projection(item)
+            for item in projections
+            if item.finding.finding_type == "risk"
+        ]
         mine_names = {
             item.mine_id: item.mine_name
             for item in self.server.store.list_mine_overviews()
@@ -3489,8 +3494,8 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                 "本期报送数据研判发现风险线索，等待企业核实或提交修订数据。",
             ),
             "insufficient_data": (
-                "数据待补充",
-                "本期数据不完整，暂不能作出判断，请企业补充或核对数据。",
+                "覆盖状态已记录",
+                "本批数据覆盖范围已记录；未据此生成风险或企业回复任务。",
             ),
         }
         if (
@@ -3508,11 +3513,6 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                     summary = (
                         f"本期报送数据研判发现 {len(finding_ids)} 项风险线索，"
                         "等待企业核实或提交修订数据。"
-                    )
-                elif decision == "insufficient_data":
-                    summary = (
-                        "本期数据不完整，暂不能作出判断；"
-                        f"已形成 {len(finding_ids)} 项数据补充要求。"
                     )
             return label, str(decision), summary
 

@@ -600,9 +600,9 @@ def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
     html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
     script = (ROOT / "web" / "v2-app.js").read_text(encoding="utf-8")
     for label in (
-        "数据收件箱",
-        "规范化复核与报送",
-        "风险解读与回复",
+        "数据报送",
+        "待人工核验",
+        "监管风险",
         "留痕与设置",
     ):
         assert label in html
@@ -619,19 +619,22 @@ def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
     assert "/correction" in script
     assert "系统没有创建分叉" in script
     assert "直接前序消息" in script
-    assert "人工导入和直采均进入同一复核与报送流程" in script
-    assert "上传 CSV，自动生成填报草稿" in html
+    assert "发现数据后自动检查，通过即发送" in script
+    assert "自动发现与报送" in html
     assert 'id="fqDownloadCsvTemplate"' in html
     assert 'id="fqSelectedFileSummary" role="status"' in html
     assert 'id="fqUploadResult" role="status"' in html
-    assert "只生成草稿，不会自动报送" in html
-    assert "让 Agent 读取并生成草稿" in html
+    assert "手工导入会进入待核验" in html
+    assert "读取文件" in html
+    assert 'id="fqManualForm"' in html
+    assert 'id="fqSituationGrid"' in html
+    assert "本矿生产数据态势" in html
+    assert "缺失部分指标本身不会触发核验" in html
     assert "CSV_TEMPLATE_HEADER" in script
     assert "零点班" in script and "八点班" in script and "四点班" in script
-    assert "日期 + 11 个原子字段" in html
-    assert "十量日汇总 CSV 模板" in script
+    assert "生产数据 CSV 模板" in script
     assert "syncImportCapability" in script
-    assert "当前尚未报送" in script
+    assert "待人工核验记录" in script
     assert "可信度分层" not in script
     assert "入井人员量" in html
     assert "入井人员量" in script

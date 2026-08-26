@@ -7164,6 +7164,153 @@ body.is-model-api-admin #coalChatButton {
   margin: 3px 0 0;
 }
 
+.fq-reporting-overview {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0 0 16px;
+}
+
+.fq-reporting-overview article {
+  background: linear-gradient(145deg, #f8fbf9, #eef6f1);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  min-height: 112px;
+  padding: 16px;
+}
+
+.fq-reporting-overview span,
+.fq-reporting-overview small {
+  color: var(--ink-soft);
+  display: block;
+}
+
+.fq-reporting-overview strong {
+  display: block;
+  font-size: 23px;
+  margin: 8px 0 5px;
+}
+
+.fq-reporting-overview strong.is-ok {
+  color: var(--green-dark);
+}
+
+.fq-reporting-overview strong.is-warn {
+  color: #8a5a10;
+}
+
+.fq-production-situation {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+  padding: 0 18px 18px;
+}
+
+.fq-production-situation .fq-section-head {
+  margin-top: 18px;
+}
+
+.fq-situation-grid {
+  display: grid;
+  gap: 9px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.fq-situation-grid article {
+  border: 1px solid var(--line);
+  border-left: 4px solid #9aa9a0;
+  border-radius: 10px;
+  min-height: 94px;
+  padding: 12px;
+}
+
+.fq-situation-grid article.is-ok {
+  background: var(--green-pale);
+  border-left-color: var(--green);
+}
+
+.fq-situation-grid article.is-partial {
+  background: #fff8e8;
+  border-left-color: #c68a1b;
+}
+
+.fq-situation-grid span,
+.fq-situation-grid strong,
+.fq-situation-grid small {
+  display: block;
+}
+
+.fq-situation-grid strong {
+  margin: 6px 0 3px;
+}
+
+.fq-situation-grid small {
+  color: var(--ink-soft);
+}
+
+.fq-manual-entry {
+  margin-top: 16px;
+  min-height: 0;
+}
+
+.fq-manual-entry > summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  list-style: none;
+}
+
+.fq-manual-entry > summary::-webkit-details-marker {
+  display: none;
+}
+
+.fq-manual-entry > summary strong,
+.fq-manual-entry > summary small {
+  display: block;
+}
+
+.fq-manual-entry > summary small {
+  color: var(--ink-soft);
+  margin-top: 4px;
+}
+
+.fq-manual-entry[open] > summary {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+}
+
+.fq-manual-table {
+  min-width: 1540px;
+}
+
+.fq-manual-table th,
+.fq-manual-table td {
+  padding: 8px;
+}
+
+.fq-manual-input {
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  font: inherit;
+  min-width: 92px;
+  padding: 8px;
+  width: 100%;
+}
+
+.fq-manual-table input[type="date"] {
+  min-width: 138px;
+}
+
+.fq-manual-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
 @media (max-width: 980px) {
   .fq-shell {
     padding: 14px;
@@ -7176,6 +7323,14 @@ body.is-model-api-admin #coalChatButton {
   .fq-card-grid-two,
   .fq-split {
     grid-template-columns: 1fr;
+  }
+
+  .fq-reporting-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fq-situation-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .fq-list-card {
@@ -7253,6 +7408,19 @@ body.is-model-api-admin #coalChatButton {
   .fq-summary-strip,
   .fq-chat-form {
     grid-template-columns: 1fr;
+  }
+
+  .fq-reporting-overview {
+    grid-template-columns: 1fr;
+  }
+
+  .fq-situation-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .fq-manual-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 
