@@ -20,7 +20,7 @@ the governed production boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 import hashlib
 import json
@@ -28,7 +28,7 @@ import math
 from statistics import fmean, median
 from typing import Annotated, Any, Literal, Mapping, Sequence
 
-from pydantic import Field, model_validator
+from pydantic import AwareDatetime, Field, model_validator
 
 from .models import StrictModel
 
@@ -43,6 +43,18 @@ except (ImportError, OSError):  # pragma: no cover - exercised by monkeypatch
 REGULATORY_V3_METHOD_VERSION = "regulatory-ten-quantity-v3.1.0"
 FLOW_NETWORK_VERSION = "ten-quantity-window-flow-l1-v1"
 HISTORICAL_RULE_VERSION = "ten-quantity-past-only-median-mad-v1"
+
+
+def _aligned_calendar_point(
+    value: datetime | date,
+    reference: datetime | date,
+) -> datetime | date:
+    if isinstance(reference, datetime):
+        if isinstance(value, datetime):
+            return value.astimezone(reference.tzinfo)
+        return datetime.combine(value, datetime.min.time(), tzinfo=reference.tzinfo)
+    return value.date() if isinstance(value, datetime) else value
+
 
 METRICS: tuple[str, ...] = (
     "ventilation_m3_min",
@@ -185,14 +197,12 @@ class ShiftDurations(StrictModel):
 
 class ReportedQuantity(StrictModel):
     daily_total: float | None = None
-    daily_aggregation: Literal[
-        "time_weighted_average", "sum", "snapshot"
-    ] | None = None
+    daily_aggregation: Literal["time_weighted_average", "sum", "snapshot"] | None = None
     shifts: ShiftValues | None = None
 
 
 class TenQuantityDay(StrictModel):
-    date: date
+    date: AwareDatetime | date
     ventilation_m3_min: ReportedQuantity
     electricity_kwh: ReportedQuantity
     detonators_count: ReportedQuantity
@@ -335,11 +345,11 @@ class TenQuantitySubmission(StrictModel):
     )
     submission_id: Annotated[str, Field(min_length=8, max_length=128)]
     mine_id: Annotated[str, Field(min_length=1, max_length=128)]
-    period_start: date
-    period_end: date
-    coverage_as_of: date | None = None
+    period_start: AwareDatetime | date
+    period_end: AwareDatetime | date
+    coverage_as_of: AwareDatetime | date | None = None
     operating_regime: Annotated[str, Field(min_length=1, max_length=64)] = "normal"
-    days: Annotated[list[TenQuantityDay], Field(min_length=1, max_length=366)]
+    days: Annotated[list[TenQuantityDay], Field(min_length=1, max_length=4096)]
     applicability: ModuleApplicability = Field(default_factory=ModuleApplicability)
     raw_coal_support: RawCoalBalanceSupport | None = None
     wash_support: WashBalanceSupport | None = None
@@ -347,13 +357,31 @@ class TenQuantitySubmission(StrictModel):
 
     @model_validator(mode="after")
     def validate_window(self) -> "TenQuantitySubmission":
+        points = (
+            self.period_start,
+            self.period_end,
+            *(item.date for item in self.days),
+        )
+        if any(isinstance(item, datetime) for item in points):
+            if any(
+                not isinstance(item, datetime) or item.tzinfo is None for item in points
+            ):
+                raise ValueError(
+                    "minute records and batch bounds must all include timezone"
+                )
+            if any(
+                item.second or item.microsecond
+                for item in points
+                if isinstance(item, datetime)
+            ):
+                raise ValueError("production record times must align to a minute")
         if self.period_end < self.period_start:
             raise ValueError("period_end cannot predate period_start")
         if (self.period_end - self.period_start).days >= 366:
             raise ValueError("analysis window cannot exceed 366 days")
         dates = [item.date for item in self.days]
         if len(dates) != len(set(dates)):
-            raise ValueError("daily dates must be unique")
+            raise ValueError("production record times must be unique")
         if any(item < self.period_start or item > self.period_end for item in dates):
             raise ValueError("daily date is outside the analysis window")
         as_of = self.coverage_as_of or self.period_end
@@ -361,11 +389,23 @@ class TenQuantitySubmission(StrictModel):
             raise ValueError("coverage_as_of cannot predate period_end")
         if self.credential_support is not None:
             for cohort in self.credential_support.cohorts:
-                if not self.period_start <= cohort.sales_date <= self.period_end:
+                sales_date = _aligned_calendar_point(
+                    cohort.sales_date, self.period_start
+                )
+                transport_date = _aligned_calendar_point(
+                    cohort.transport_date, self.period_start
+                )
+                invoiced_at = (
+                    _aligned_calendar_point(cohort.invoiced_at, self.period_start)
+                    if cohort.invoiced_at is not None
+                    else None
+                )
+                aligned_as_of = _aligned_calendar_point(as_of, self.period_start)
+                if not self.period_start <= sales_date <= self.period_end:
                     raise ValueError("credential sale date must be in the window")
-                if cohort.transport_date > as_of:
+                if transport_date > aligned_as_of:
                     raise ValueError("transport date cannot exceed coverage_as_of")
-                if cohort.invoiced_at is not None and cohort.invoiced_at > as_of:
+                if invoiced_at is not None and invoiced_at > aligned_as_of:
                     raise ValueError("invoice date cannot exceed coverage_as_of")
         return self
 
@@ -390,8 +430,8 @@ class TenQuantityTotals(StrictModel):
 
 class HistoricalReferenceWindow(StrictModel):
     reference_id: Annotated[str, Field(min_length=1, max_length=128)]
-    period_end: date
-    available_at: date
+    period_end: AwareDatetime | date
+    available_at: AwareDatetime | date
     operating_regime: Annotated[str, Field(min_length=1, max_length=64)]
     baseline_eligible: bool = True
     totals: TenQuantityTotals
@@ -408,9 +448,9 @@ class TenQuantityParameters(StrictModel):
     flow_slack_penalty: Annotated[float, Field(gt=0.0, le=1e9)] = 100.0
     minimum_history_windows: Annotated[int, Field(ge=3, le=365)] = 7
     historical_robust_z: Annotated[float, Field(gt=1.0, le=10.0)] = 3.5
-    historical_minimum_relative_half_width: Annotated[
-        float, Field(gt=0.0, le=1.0)
-    ] = 0.15
+    historical_minimum_relative_half_width: Annotated[float, Field(gt=0.0, le=1.0)] = (
+        0.15
+    )
 
 
 class AnalysisSignal(StrictModel):
@@ -424,7 +464,7 @@ class AnalysisSignal(StrictModel):
     observed: float | None = None
     expected_lower: float | None = None
     expected_upper: float | None = None
-    observed_date: date | None = None
+    observed_date: AwareDatetime | date | None = None
     basis: str
 
 
@@ -531,10 +571,12 @@ def _shift_aggregate(
         return math.fsum(values)
     durations = day.shift_durations.values
     total_minutes = math.fsum(durations)
-    return math.fsum(
-        value * duration
-        for value, duration in zip(values, durations, strict=True)
-    ) / total_minutes
+    return (
+        math.fsum(
+            value * duration for value, duration in zip(values, durations, strict=True)
+        )
+        / total_minutes
+    )
 
 
 def effective_reported_value(day: TenQuantityDay, metric: str) -> float | None:
@@ -569,8 +611,7 @@ def _prepare_submission(
                 quantity.shifts is not None
                 and quantity.shifts.provided_count in {1, 2}
                 and (
-                    metric not in SHIFT_OPTIONAL_METRICS
-                    or quantity.daily_total is None
+                    metric not in SHIFT_OPTIONAL_METRICS or quantity.daily_total is None
                 )
             ):
                 signals.append(
@@ -630,7 +671,11 @@ def _prepare_submission(
                     )
         effective[day.date] = values
 
-    expected = (submission.period_end - submission.period_start).days + 1
+    expected = (
+        len(submission.days)
+        if isinstance(submission.period_start, datetime)
+        else (submission.period_end - submission.period_start).days + 1
+    )
     coverage = [
         MetricCoverage(
             metric=metric,
@@ -646,9 +691,7 @@ def _prepare_submission(
         module="daily_shift_aggregation",
         status=(ModuleStatus.INSUFFICIENT if incomplete else ModuleStatus.EVALUATED),
         coverage_ratio=min(item.ratio for item in coverage),
-        reasons=(
-            ["缺少完整日报值：" + "、".join(incomplete)] if incomplete else []
-        ),
+        reasons=(["缺少完整日报值：" + "、".join(incomplete)] if incomplete else []),
     )
 
     totals_payload: dict[str, float | None] = {}
@@ -755,12 +798,16 @@ def _raw_balance(
         check = _not_evaluated_check(
             "raw_coal_balance", metrics, "本矿受控配置未启用原煤平衡", skipped=True
         )
-        return ModuleAssessment(
-            module="raw_coal_balance",
-            status=ModuleStatus.SKIPPED,
-            coverage_ratio=1.0,
-            reasons=[check.message],
-        ), check, None
+        return (
+            ModuleAssessment(
+                module="raw_coal_balance",
+                status=ModuleStatus.SKIPPED,
+                coverage_ratio=1.0,
+                reasons=[check.message],
+            ),
+            check,
+            None,
+        )
     support = submission.raw_coal_support
     if support is None or totals.production_t is None or totals.wash_feed_t is None:
         check = _not_evaluated_check(
@@ -768,12 +815,16 @@ def _raw_balance(
             metrics,
             "缺少期初/期末库存、原煤直接出库或完整产量/入洗量，未形成物理冲突",
         )
-        return ModuleAssessment(
-            module="raw_coal_balance",
-            status=ModuleStatus.INSUFFICIENT,
-            coverage_ratio=0.0,
-            reasons=[check.message],
-        ), check, None
+        return (
+            ModuleAssessment(
+                module="raw_coal_balance",
+                status=ModuleStatus.INSUFFICIENT,
+                coverage_ratio=0.0,
+                reasons=[check.message],
+            ),
+            check,
+            None,
+        )
     residual = (
         support.opening_inventory_t
         + totals.production_t
@@ -799,11 +850,15 @@ def _raw_balance(
         metrics=metrics,
         label="原煤收发存平衡",
     )
-    return ModuleAssessment(
-        module="raw_coal_balance",
-        status=ModuleStatus.EVALUATED,
-        coverage_ratio=1.0,
-    ), check, _physical_signal(check, support.evidence)
+    return (
+        ModuleAssessment(
+            module="raw_coal_balance",
+            status=ModuleStatus.EVALUATED,
+            coverage_ratio=1.0,
+        ),
+        check,
+        _physical_signal(check, support.evidence),
+    )
 
 
 def _wash_balance(
@@ -816,12 +871,16 @@ def _wash_balance(
         check = _not_evaluated_check(
             "wash_mass_balance", metrics, "本矿受控配置标记洗选不适用", skipped=True
         )
-        return ModuleAssessment(
-            module="wash_mass_balance",
-            status=ModuleStatus.SKIPPED,
-            coverage_ratio=1.0,
-            reasons=[check.message],
-        ), check, None
+        return (
+            ModuleAssessment(
+                module="wash_mass_balance",
+                status=ModuleStatus.SKIPPED,
+                coverage_ratio=1.0,
+                reasons=[check.message],
+            ),
+            check,
+            None,
+        )
     support = submission.wash_support
     if support is None or totals.wash_feed_t is None:
         check = _not_evaluated_check(
@@ -829,12 +888,16 @@ def _wash_balance(
             metrics,
             "缺少洗后产品、矸石/煤泥、损耗或在制边界，未形成洗选冲突",
         )
-        return ModuleAssessment(
-            module="wash_mass_balance",
-            status=ModuleStatus.INSUFFICIENT,
-            coverage_ratio=0.0,
-            reasons=[check.message],
-        ), check, None
+        return (
+            ModuleAssessment(
+                module="wash_mass_balance",
+                status=ModuleStatus.INSUFFICIENT,
+                coverage_ratio=0.0,
+                reasons=[check.message],
+            ),
+            check,
+            None,
+        )
     residual = (
         support.opening_wip_t
         + totals.wash_feed_t
@@ -856,11 +919,15 @@ def _wash_balance(
         metrics=metrics,
         label="洗选投入产出平衡",
     )
-    return ModuleAssessment(
-        module="wash_mass_balance",
-        status=ModuleStatus.EVALUATED,
-        coverage_ratio=1.0,
-    ), check, _physical_signal(check, support.evidence)
+    return (
+        ModuleAssessment(
+            module="wash_mass_balance",
+            status=ModuleStatus.EVALUATED,
+            coverage_ratio=1.0,
+        ),
+        check,
+        _physical_signal(check, support.evidence),
+    )
 
 
 def _credential_tolerance(
@@ -879,12 +946,16 @@ def _credential_analysis(
     parameters: TenQuantityParameters,
 ) -> tuple[ModuleAssessment, CredentialSummary | None, list[AnalysisSignal]]:
     if not submission.applicability.credential_chain:
-        return ModuleAssessment(
-            module="sales_transport_invoice_credentials",
-            status=ModuleStatus.SKIPPED,
-            coverage_ratio=1.0,
-            reasons=["本矿受控配置未启用经营凭证链"],
-        ), None, []
+        return (
+            ModuleAssessment(
+                module="sales_transport_invoice_credentials",
+                status=ModuleStatus.SKIPPED,
+                coverage_ratio=1.0,
+                reasons=["本矿受控配置未启用经营凭证链"],
+            ),
+            None,
+            [],
+        )
     support = submission.credential_support
     complete = bool(
         support is not None
@@ -893,12 +964,16 @@ def _credential_analysis(
         and support.invoice_register_complete
     )
     if not complete:
-        return ModuleAssessment(
-            module="sales_transport_invoice_credentials",
-            status=ModuleStatus.INSUFFICIENT,
-            coverage_ratio=0.0,
-            reasons=["销售、运输、开票事件台账未声明完整，未制造凭证冲突"],
-        ), None, []
+        return (
+            ModuleAssessment(
+                module="sales_transport_invoice_credentials",
+                status=ModuleStatus.INSUFFICIENT,
+                coverage_ratio=0.0,
+                reasons=["销售、运输、开票事件台账未声明完整，未制造凭证冲突"],
+            ),
+            None,
+            [],
+        )
     assert support is not None
     checks: list[BalanceCheck] = []
     signals: list[AnalysisSignal] = []
@@ -930,8 +1005,7 @@ def _credential_analysis(
         checks.append(transport_check)
         if transport_check.status is CheckStatus.CONFLICT:
             independent = (
-                cohort.sales_dependency_domain
-                != cohort.transport_dependency_domain
+                cohort.sales_dependency_domain != cohort.transport_dependency_domain
             )
             signals.append(
                 AnalysisSignal(
@@ -1043,35 +1117,36 @@ def _credential_analysis(
         else ModuleStatus.EVALUATED
     )
     reasons = (
-        [
-            f"{missing_closed_invoice_count} 个已闭账批次缺少开票事件，"
-            "相关批次未判为冲突"
-        ]
+        [f"{missing_closed_invoice_count} 个已闭账批次缺少开票事件，相关批次未判为冲突"]
         if missing_closed_invoice_count
         else []
     )
-    return ModuleAssessment(
-        module="sales_transport_invoice_credentials",
-        status=module_status,
-        coverage_ratio=(
-            (closed - missing_closed_invoice_count) / max(closed, 1)
-            if closed
-            else 1.0
+    return (
+        ModuleAssessment(
+            module="sales_transport_invoice_credentials",
+            status=module_status,
+            coverage_ratio=(
+                (closed - missing_closed_invoice_count) / max(closed, 1)
+                if closed
+                else 1.0
+            ),
+            reasons=reasons,
         ),
-        reasons=reasons,
-    ), CredentialSummary(
-        cohort_count=len(support.cohorts),
-        closed_settlement_count=closed,
-        pending_invoice_count=pending,
-        overdue_invoice_count=overdue,
-        cumulative_sales_t=sales_total,
-        cumulative_transport_t=transport_total,
-        cumulative_closed_sales_t=closed_sales,
-        cumulative_closed_invoiced_quantity_t=closed_invoices,
-        maximum_transport_lag_days=max(transport_lags) if transport_lags else None,
-        maximum_invoice_lag_days=max(invoice_lags) if invoice_lags else None,
-        checks=checks,
-    ), signals
+        CredentialSummary(
+            cohort_count=len(support.cohorts),
+            closed_settlement_count=closed,
+            pending_invoice_count=pending,
+            overdue_invoice_count=overdue,
+            cumulative_sales_t=sales_total,
+            cumulative_transport_t=transport_total,
+            cumulative_closed_sales_t=closed_sales,
+            cumulative_closed_invoiced_quantity_t=closed_invoices,
+            maximum_transport_lag_days=max(transport_lags) if transport_lags else None,
+            maximum_invoice_lag_days=max(invoice_lags) if invoice_lags else None,
+            checks=checks,
+        ),
+        signals,
+    )
 
 
 def _flow_reconciliation(
@@ -1265,10 +1340,7 @@ def _flow_reconciliation(
             message=message,
         )
     reconciled = {name: float(solved.x[index[name]]) for name in names}
-    adjustments = {
-        name: reconciled[name] - observations[name]
-        for name in names
-    }
+    adjustments = {name: reconciled[name] - observations[name] for name in names}
     slacks = {
         code: float(
             solved.x[balance_positive_start + position]
@@ -1317,8 +1389,10 @@ def _historical_analysis(
         item
         for item in unique_history.values()
         if item.baseline_eligible
-        and item.available_at < submission.period_start
-        and item.period_end < submission.period_start
+        and _aligned_calendar_point(item.available_at, submission.period_start)
+        < submission.period_start
+        and _aligned_calendar_point(item.period_end, submission.period_start)
+        < submission.period_start
         and item.operating_regime == submission.operating_regime
     ]
     diagnostics: list[HistoricalDiagnostic] = []
@@ -1401,17 +1475,23 @@ def _historical_analysis(
                 )
             )
     status = ModuleStatus.EVALUATED if evaluated else ModuleStatus.INSUFFICIENT
-    return ModuleAssessment(
-        module="historical_soft_baseline",
-        status=status,
-        coverage_ratio=evaluated / len(_HISTORICAL_RELATIONSHIPS),
-        reasons=(
-            [] if evaluated else ["没有足够的同工况、过去可用且已准入历史窗口"]
+    return (
+        ModuleAssessment(
+            module="historical_soft_baseline",
+            status=status,
+            coverage_ratio=evaluated / len(_HISTORICAL_RELATIONSHIPS),
+            reasons=(
+                [] if evaluated else ["没有足够的同工况、过去可用且已准入历史窗口"]
+            ),
         ),
-    ), diagnostics, signals
+        diagnostics,
+        signals,
+    )
 
 
-def _priority(signals: Sequence[AnalysisSignal], required_data_gap: bool) -> ReviewPriority:
+def _priority(
+    signals: Sequence[AnalysisSignal], required_data_gap: bool
+) -> ReviewPriority:
     if any(item.priority is ReviewPriority.P1 for item in signals):
         return ReviewPriority.P1
     if any(item.priority is ReviewPriority.P2 for item in signals):
@@ -1439,8 +1519,12 @@ def _stable_signals(signals: Sequence[AnalysisSignal]) -> list[AnalysisSignal]:
             signal.message,
         )
         unique.setdefault(key, signal)
-    rank = {ReviewPriority.P1: 0, ReviewPriority.P2: 1, ReviewPriority.DATA: 2,
-            ReviewPriority.NONE: 3}
+    rank = {
+        ReviewPriority.P1: 0,
+        ReviewPriority.P2: 1,
+        ReviewPriority.DATA: 2,
+        ReviewPriority.NONE: 3,
+    }
     return sorted(
         unique.values(),
         key=lambda item: (
@@ -1478,22 +1562,18 @@ def analyze_ten_quantity(
         for item in history
     ]
     prepared = _prepare_submission(validated, policy)
-    raw_module, raw_check, raw_signal = _raw_balance(
-        validated, prepared.totals, policy
-    )
+    raw_module, raw_check, raw_signal = _raw_balance(validated, prepared.totals, policy)
     wash_module, wash_check, wash_signal = _wash_balance(
         validated, prepared.totals, policy
     )
-    credential_module, credential_summary, credential_signals = (
-        _credential_analysis(validated, policy)
+    credential_module, credential_summary, credential_signals = _credential_analysis(
+        validated, policy
     )
     flow_module, reconciliation = _flow_reconciliation(
         validated, prepared.totals, policy
     )
     historical_module, historical_diagnostics, historical_signals = (
-        _historical_analysis(
-            validated, prepared.totals, references, policy
-        )
+        _historical_analysis(validated, prepared.totals, references, policy)
     )
     modules = [
         prepared.module,
@@ -1514,16 +1594,8 @@ def analyze_ten_quantity(
     )
     required_modules = {
         "daily_shift_aggregation",
-        *(
-            {"raw_coal_balance"}
-            if validated.applicability.raw_coal_balance
-            else set()
-        ),
-        *(
-            {"wash_mass_balance"}
-            if validated.applicability.wash_balance
-            else set()
-        ),
+        *({"raw_coal_balance"} if validated.applicability.raw_coal_balance else set()),
+        *({"wash_mass_balance"} if validated.applicability.wash_balance else set()),
         *(
             {"sales_transport_invoice_credentials"}
             if validated.applicability.credential_chain
@@ -1603,11 +1675,13 @@ def _sha256(value: object) -> str:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
-        default=lambda item: item.isoformat()
-        if isinstance(item, date)
-        else item.value
-        if isinstance(item, StrEnum)
-        else str(item),
+        default=lambda item: (
+            item.isoformat()
+            if isinstance(item, date)
+            else item.value
+            if isinstance(item, StrEnum)
+            else str(item)
+        ),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 

@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from contextlib import suppress
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +82,8 @@ def _public_audit_event_type(event_type: str) -> str:
     if event_type.startswith("five_quantity_"):
         return "submission_" + event_type.removeprefix("five_quantity_")
     return event_type
+
+
 LEGACY_SUBMISSION_CONTRACT = "five-quantity-submission-v2"
 CURRENT_SUBMISSION_CONTRACT = TEN_QUANTITY_SUBMISSION_CONTRACT
 _DRAFT_PAYLOAD_KEYS = {
@@ -213,6 +215,13 @@ def _iso_date(value: Any, label: str) -> date:
         raise ValueError(f"{label} 必须是 ISO 日期") from error
 
 
+def _iso_minute(value: Any, label: str) -> datetime:
+    parsed = parse_aware_datetime(value, label)
+    if parsed.second or parsed.microsecond:
+        raise ValueError(f"{label} 必须精确到分钟，不得包含秒或微秒")
+    return parsed
+
+
 def _uuid_text(value: Any, label: str) -> str:
     text = _text(value, label, 64)
     try:
@@ -240,6 +249,10 @@ def _sha256_text(value: Any, label: str) -> str:
     ):
         raise ValueError(f"{label} 必须是小写 SHA-256")
     return value
+
+
+def _filename_time_fragment(value: Any) -> str:
+    return str(value).replace(":", "-").replace("+", "p")
 
 
 def validate_five_quantity_payload(
@@ -280,17 +293,21 @@ def validate_five_quantity_payload(
             raise ValueError("可选同类矿资料必须与本实例受控配置完全一致")
     elif identity.comparison_context is not None:
         raise ValueError("草稿缺少本实例已配置的可选同类矿资料")
-    start = _iso_date(payload["period_start"], "period_start")
-    end = _iso_date(payload["period_end"], "period_end")
+    if is_ten_quantity:
+        start: date | datetime = _iso_minute(payload["period_start"], "period_start")
+        end: date | datetime = _iso_minute(payload["period_end"], "period_end")
+    else:
+        start = _iso_date(payload["period_start"], "period_start")
+        end = _iso_date(payload["period_end"], "period_end")
     if end < start:
         raise ValueError("period_end 不能早于 period_start")
     if payload["timezone"] != identity.timezone:
         raise ValueError("timezone 与本实例配置不一致")
     parse_aware_datetime(payload["closed_at"], "closed_at")
     days = payload["days"]
-    if not isinstance(days, list) or not 1 <= len(days) <= 366:
-        raise ValueError("days 必须包含 1-366 个日报")
-    dates: list[date] = []
+    if not isinstance(days, list) or not 1 <= len(days) <= 4096:
+        raise ValueError("days 必须包含 1-4096 条生产记录")
+    dates: list[date | datetime] = []
     sources = payload["sources"]
     maximum_sources = 256 if is_ten_quantity else 512
     if not isinstance(sources, list) or not 1 <= len(sources) <= maximum_sources:
@@ -343,9 +360,13 @@ def validate_five_quantity_payload(
         day = _object(day_value, f"days[{day_index}]")
         if set(day) != {"date", "operating_state", "reported_quantity"}:
             raise ValueError(f"days[{day_index}] 字段非法")
-        current_date = _iso_date(day["date"], f"days[{day_index}].date")
+        current_date = (
+            _iso_minute(day["date"], f"days[{day_index}].date")
+            if is_ten_quantity
+            else _iso_date(day["date"], f"days[{day_index}].date")
+        )
         if not start <= current_date <= end:
-            raise ValueError("生产数据日期超出声明批次范围")
+            raise ValueError("生产数据时间超出声明批次范围")
         dates.append(current_date)
         if day["operating_state"] not in {
             "producing",
@@ -402,9 +423,7 @@ def validate_five_quantity_payload(
                     raise ValueError(f"{metric} 编码或单位非法")
                 if measurement["aggregation"] not in _AGGREGATIONS[metric]:
                     allowed = " / ".join(sorted(_AGGREGATIONS[metric]))
-                    raise ValueError(
-                        f"{metric}.aggregation 非法，应为 {allowed}"
-                    )
+                    raise ValueError(f"{metric}.aggregation 非法，应为 {allowed}")
                 value = measurement["value"]
                 if value is not None:
                     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -439,9 +458,9 @@ def validate_five_quantity_payload(
                 ):
                     raise ValueError(f"{metric}.source_refs 引用了未知来源")
     if dates != sorted(dates) or len(dates) != len(set(dates)):
-        raise ValueError("days 必须按日期升序且不得重复")
+        raise ValueError("days 必须按数据时间升序且同一分钟不得重复")
     if dates[0] != start or dates[-1] != end:
-        raise ValueError("period_start/end 必须等于首尾日报日期")
+        raise ValueError("period_start/end 必须等于首尾生产记录时间")
     processing = _object(payload["agent_processing"], "agent_processing")
     required_processing = {
         "normalization_performed",
@@ -524,12 +543,10 @@ def _merge_machine_measurement(
     ):
         raise ConflictError(f"不同来源对 {location} 提供了冲突数值")
     result["quality_flags"] = sorted(
-        set(previous.get("quality_flags", []))
-        | set(incoming.get("quality_flags", []))
+        set(previous.get("quality_flags", [])) | set(incoming.get("quality_flags", []))
     )
     result["source_refs"] = sorted(
-        set(previous.get("source_refs", []))
-        | set(incoming.get("source_refs", []))
+        set(previous.get("source_refs", [])) | set(incoming.get("source_refs", []))
     )
     return result
 
@@ -541,8 +558,7 @@ def _merge_machine_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
         raise ValueError("机器来源贡献不能为空")
     result = _json_copy(payloads[0])
     source_by_id = {
-        str(source["source_id"]): _json_copy(source)
-        for source in result["sources"]
+        str(source["source_id"]): _json_copy(source) for source in result["sources"]
     }
     day_by_date = {str(day["date"]): _json_copy(day) for day in result["days"]}
     for payload in payloads[1:]:
@@ -589,12 +605,10 @@ def _merge_machine_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
                             f"不同来源对 {day_text}.{shift_key}.{field} 存在冲突"
                         )
                 for metric in METRICS:
-                    old_shift["measurements"][metric] = (
-                        _merge_machine_measurement(
-                            old_shift["measurements"][metric],
-                            new_shift["measurements"][metric],
-                            location=f"{day_text}.{shift_key}.{metric}",
-                        )
+                    old_shift["measurements"][metric] = _merge_machine_measurement(
+                        old_shift["measurements"][metric],
+                        new_shift["measurements"][metric],
+                        location=f"{day_text}.{shift_key}.{metric}",
                     )
     days = [day_by_date[key] for key in sorted(day_by_date)]
     result["days"] = days
@@ -631,14 +645,20 @@ def _v2_machine_preflight(
 
     missing_count = 0
     mismatches: list[str] = []
-    period_start = date.fromisoformat(str(payload["period_start"]))
-    period_end = date.fromisoformat(str(payload["period_end"]))
+    if contract_version == CURRENT_SUBMISSION_CONTRACT:
+        period_start: date | datetime = _iso_minute(
+            payload["period_start"], "period_start"
+        )
+        period_end: date | datetime = _iso_minute(payload["period_end"], "period_end")
+    else:
+        period_start = date.fromisoformat(str(payload["period_start"]))
+        period_end = date.fromisoformat(str(payload["period_end"]))
     missing_day_count = 0
     calendar_coverage = {
         "kind": "production_batch",
         "declared_period_start": period_start.isoformat(),
         "declared_period_end": period_end.isoformat(),
-        "declared_day_count": len(payload["days"]),
+        "declared_record_count": len(payload["days"]),
     }
     is_ten_quantity = contract_version == CURRENT_SUBMISSION_CONTRACT
     if contract_version not in {
@@ -648,14 +668,10 @@ def _v2_machine_preflight(
         raise ValueError("机器预检 contract_version 不受支持")
     active_metrics = METRICS if is_ten_quantity else LEGACY_V2_METRICS
     required_shift_metrics = (
-        REQUIRED_SHIFT_METRICS
-        if is_ten_quantity
-        else frozenset(LEGACY_V2_METRICS)
+        REQUIRED_SHIFT_METRICS if is_ten_quantity else frozenset(LEGACY_V2_METRICS)
     )
     sum_metrics = tuple(
-        metric
-        for metric in required_shift_metrics
-        if metric != "ventilation_m3_min"
+        metric for metric in required_shift_metrics if metric != "ventilation_m3_min"
     )
     for day in payload["days"]:
         quantity = day["reported_quantity"]
@@ -1044,10 +1060,14 @@ class FiveQuantityStore:
         anchor = db.execute(
             "SELECT event_count,head_hash FROM fq_audit_anchor WHERE singleton=1"
         ).fetchone()
-        if valid and require_anchor and (
-            anchor is None
-            or int(anchor["event_count"]) != len(rows)
-            or not hmac.compare_digest(str(anchor["head_hash"]), previous)
+        if (
+            valid
+            and require_anchor
+            and (
+                anchor is None
+                or int(anchor["event_count"]) != len(rows)
+                or not hmac.compare_digest(str(anchor["head_hash"]), previous)
+            )
         ):
             valid = False
             failure = "audit_tail_or_anchor_mismatch"
@@ -1179,9 +1199,7 @@ class FiveQuantityStore:
         with self.repository._read() as db:
             integrity = self._verify_audit_in_transaction(db)
             if not integrity["valid"]:
-                raise ConflictError(
-                    "报送审计链或审计锚点异常；本次未向监管端发送"
-                )
+                raise ConflictError("报送审计链或审计锚点异常；本次未向监管端发送")
             outbox = db.execute(
                 "SELECT * FROM fq_outbox WHERE message_id=?", (message_id,)
             ).fetchone()
@@ -1190,8 +1208,7 @@ class FiveQuantityStore:
             failure = self._outbox_four_eyes_failure(db, outbox)
             if failure is not None:
                 raise ConflictError(
-                    "发送消息未满足持久化四眼复核条件；"
-                    f"本次未向监管端发送（{failure}）"
+                    f"发送消息未满足持久化四眼复核条件；本次未向监管端发送（{failure}）"
                 )
 
     def _initialize(self) -> None:
@@ -1424,9 +1441,8 @@ class FiveQuantityStore:
                 "AND tbl_name IN ('fq_outbox','fq_drafts')"
             ).fetchall()
             if (
-                (schema_version >= 4 or archive_trigger_rows)
-                and not self._archive_guards_intact(db)
-            ):
+                schema_version >= 4 or archive_trigger_rows
+            ) and not self._archive_guards_intact(db):
                 raise ValueError(
                     "十量签名归档保护索引或触发器缺失、被替换或存在额外对象；"
                     "正式流程已拒绝启动"
@@ -1454,24 +1470,19 @@ class FiveQuantityStore:
                 event_type = str(audit_row["event_type"])
                 actor = str(audit_row["actor"])
                 draft_id = details.get("draft_id")
-                if (
-                    isinstance(draft_id, str)
-                    and event_type
-                    in {
-                        "five_quantity_imported",
-                        "five_quantity_machine_autofilled",
-                        "five_quantity_review_saved",
-                        "five_quantity_machine_sync_resumed",
-                    }
-                ):
+                if isinstance(draft_id, str) and event_type in {
+                    "five_quantity_imported",
+                    "five_quantity_machine_autofilled",
+                    "five_quantity_review_saved",
+                    "five_quantity_machine_sync_resumed",
+                }:
                     created, _ = draft_actors.get(draft_id, (actor, actor))
                     draft_actors[draft_id] = (created, actor)
                 response_id = details.get("response_id")
-                if (
-                    isinstance(response_id, str)
-                    and event_type
-                    in {"risk_response_draft_created", "risk_response_saved"}
-                ):
+                if isinstance(response_id, str) and event_type in {
+                    "risk_response_draft_created",
+                    "risk_response_saved",
+                }:
                     created, _ = response_actors.get(response_id, (actor, actor))
                     response_actors[response_id] = (created, actor)
             for draft_id, (created, latest) in draft_actors.items():
@@ -1567,9 +1578,7 @@ class FiveQuantityStore:
                             {
                                 identifier: aggregate_id,
                                 "cancelled_message_id": (
-                                    outbox["message_id"]
-                                    if outbox is not None
-                                    else None
+                                    outbox["message_id"] if outbox is not None else None
                                 ),
                                 "reason": failure,
                             },
@@ -1972,8 +1981,7 @@ class FiveQuantityStore:
                 ).fetchone()
                 if (
                     existing_draft is not None
-                    and existing_draft["contract_version"]
-                    == LEGACY_SUBMISSION_CONTRACT
+                    and existing_draft["contract_version"] == LEGACY_SUBMISSION_CONTRACT
                 ):
                     raise ConflictError(
                         "相同原件已有只读五量 V2 草稿；系统不会覆盖或升级其审计记录，"
@@ -2114,9 +2122,7 @@ class FiveQuantityStore:
                 (client_id, draft_key),
             ).fetchone()
             draft_id = (
-                str(binding["draft_id"])
-                if binding is not None
-                else str(uuid.uuid4())
+                str(binding["draft_id"]) if binding is not None else str(uuid.uuid4())
             )
             draft_row = db.execute(
                 "SELECT * FROM fq_drafts WHERE draft_id = ?",
@@ -2137,11 +2143,10 @@ class FiveQuantityStore:
                     draft_row = None
                 else:
                     current_payload = json.loads(draft_row["payload_json"])
-                    if (
-                        int(draft_row["revision"])
-                        != int(binding["last_machine_revision"])
-                        or sha256_jcs(current_payload)
-                        != str(binding["last_machine_payload_sha256"])
+                    if int(draft_row["revision"]) != int(
+                        binding["last_machine_revision"]
+                    ) or sha256_jcs(current_payload) != str(
+                        binding["last_machine_payload_sha256"]
                     ):
                         raise ConflictError(
                             "草稿已有人工编辑；机器来源不能覆盖；"
@@ -2161,9 +2166,7 @@ class FiveQuantityStore:
                         or draft_row["submission_message_id"] is not None
                         or pending is not None
                     ):
-                        raise ConflictError(
-                            "已确认或已发送的报送草稿不能自动改写"
-                        )
+                        raise ConflictError("已确认或已发送的报送草稿不能自动改写")
 
             same_content = (
                 previous is not None
@@ -2296,7 +2299,9 @@ class FiveQuantityStore:
                     (
                         draft_import_id,
                         replacement_hash,
-                        f"machine-replacement-{merged['period_start']}-{merged['period_end']}.json",
+                        "machine-replacement-"
+                        f"{_filename_time_fragment(merged['period_start'])}-"
+                        f"{_filename_time_fragment(merged['period_end'])}.json",
                         f"connector:replacement:{replacement_of}"[:1000],
                         draft_id,
                         jcs_json(imported["suggestions"]),
@@ -2617,11 +2622,7 @@ class FiveQuantityStore:
                 "SELECT imports.*, drafts.status AS draft_status "
                 "FROM fq_imports AS imports "
                 "LEFT JOIN fq_drafts AS drafts ON drafts.draft_id=imports.draft_id "
-                + (
-                    ""
-                    if include_discarded
-                    else "WHERE imports.status!='discarded' "
-                )
+                + ("" if include_discarded else "WHERE imports.status!='discarded' ")
                 + "ORDER BY imports.created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -2808,10 +2809,7 @@ class FiveQuantityStore:
                 isinstance(reviewer, str)
                 and reviewer
                 and reviewer != last_actor
-                and (
-                    not require_human_preparer
-                    or reviewer != human_preparer_actor
-                )
+                and (not require_human_preparer or reviewer != human_preparer_actor)
             )
             return {
                 "required": True,
@@ -2932,9 +2930,7 @@ class FiveQuantityStore:
                     "message": "机器来源可继续更新此待复核草稿",
                     "can_resume": False,
                     "authoritative_client_id": str(binding["client_id"]),
-                    "last_machine_revision": int(
-                        binding["last_machine_revision"]
-                    ),
+                    "last_machine_revision": int(binding["last_machine_revision"]),
                 }
             return {
                 "state": "paused",
@@ -3189,9 +3185,7 @@ class FiveQuantityStore:
         with self.repository._transaction() as db:
             integrity = self._verify_audit_in_transaction(db)
             if not integrity["valid"]:
-                raise ConflictError(
-                    "报送审计链或审计锚点异常；已拒绝创建更正草稿"
-                )
+                raise ConflictError("报送审计链或审计锚点异常；已拒绝创建更正草稿")
             source = db.execute(
                 "SELECT * FROM fq_drafts WHERE draft_id=?",
                 (source_draft_id,),
@@ -3214,9 +3208,7 @@ class FiveQuantityStore:
             )
             source_message = archive["message"]
             source_message_id = source_message["message_id"]
-            predecessor_hash = source_message["signature_envelope"][
-                "payload_sha256"
-            ]
+            predecessor_hash = source_message["signature_envelope"]["payload_sha256"]
             signed_business_payload = archive["business_payload"]
 
             children = db.execute(
@@ -3281,7 +3273,9 @@ class FiveQuantityStore:
                 ).encode()
             ).hexdigest()
             filename = (
-                f"correction-{correction_payload['period_start']}-{correction_payload['period_end']}"
+                "correction-"
+                f"{_filename_time_fragment(correction_payload['period_start'])}-"
+                f"{_filename_time_fragment(correction_payload['period_end'])}"
                 f"-r{submission_revision}.json"
             )
             db.execute(
@@ -3458,10 +3452,8 @@ class FiveQuantityStore:
                     identity=identity,
                 )["message"]
                 if (
-                    predecessor_message["message_id"]
-                    != row["predecessor_message_id"]
-                    or predecessor_message["correlation_id"]
-                    != row["correlation_id"]
+                    predecessor_message["message_id"] != row["predecessor_message_id"]
+                    or predecessor_message["correlation_id"] != row["correlation_id"]
                     or predecessor_message["signature_envelope"]["payload_sha256"]
                     != row["predecessor_payload_sha256"]
                 ):
@@ -3556,8 +3548,7 @@ class FiveQuantityStore:
                     or None in expected_predecessor.values()
                     or message.get("correlation_id") != row["correlation_id"]
                     or message.get("predecessor") != expected_predecessor
-                    or message.get("causation_id")
-                    != row["predecessor_message_id"]
+                    or message.get("causation_id") != row["predecessor_message_id"]
                 ):
                     raise ConflictError("十量 V3 更正消息与草稿前序血缘不一致")
                 predecessor_source = db.execute(
@@ -3572,13 +3563,9 @@ class FiveQuantityStore:
                     identity=identity,
                 )["message"]
                 if (
-                    predecessor_message["revision"] + 1
-                    != submission_revision
-                    or predecessor_message["correlation_id"]
-                    != row["correlation_id"]
-                    or predecessor_message["signature_envelope"][
-                        "payload_sha256"
-                    ]
+                    predecessor_message["revision"] + 1 != submission_revision
+                    or predecessor_message["correlation_id"] != row["correlation_id"]
+                    or predecessor_message["signature_envelope"]["payload_sha256"]
                     != row["predecessor_payload_sha256"]
                 ):
                     raise ConflictError("十量 V3 更正未直接延续上一报送版本")
@@ -3646,9 +3633,7 @@ class FiveQuantityStore:
                 or payload_confirmation.get("content_sha256")
                 != sha256_jcs(confirmation)
             ):
-                raise ConflictError(
-                    "待发送消息、当前草稿与人工确认记录未精确绑定"
-                )
+                raise ConflictError("待发送消息、当前草稿与人工确认记录未精确绑定")
             same_business_submission = db.execute(
                 "SELECT aggregate_id FROM fq_outbox "
                 "WHERE idempotency_key=? AND message_kind='submission' LIMIT 1",
@@ -3662,26 +3647,20 @@ class FiveQuantityStore:
                     "本矿该月份的同一报送版本已经确认；请放弃重复草稿。"
                     "如需更正，必须从已提交版本发起正式更正流程。"
                 )
-            health = (
-                self.repository
-                .connector_source_health_for_draft_in_transaction(
-                    db,
-                    draft_id,
-                    policies=machine_source_policies,
-                    now_epoch=health_now_epoch,
-                )
+            health = self.repository.connector_source_health_for_draft_in_transaction(
+                db,
+                draft_id,
+                policies=machine_source_policies,
+                now_epoch=health_now_epoch,
             )
             if health["freshness"]["overall_state"] not in {
                 "fresh",
                 "not_applicable",
             }:
-                stale_sources = health["freshness"][
-                    "stale_required_source_ids"
-                ]
+                stale_sources = health["freshness"]["stale_required_source_ids"]
                 source_text = "、".join(stale_sources) or "未配置来源"
                 raise ValidationBlockedError(
-                    "必需机器来源未通过动态新鲜度与当前快照绑定检查："
-                    f"{source_text}"
+                    f"必需机器来源未通过动态新鲜度与当前快照绑定检查：{source_text}"
                 )
             binding = db.execute(
                 "SELECT 1 FROM connector_draft_bindings WHERE draft_id=?",
@@ -3704,9 +3683,7 @@ class FiveQuantityStore:
                 stored_preflight: dict[str, Any] | None = None
                 if latest is not None:
                     try:
-                        candidate = json.loads(
-                            str(latest["workflow_result_json"])
-                        )
+                        candidate = json.loads(str(latest["workflow_result_json"]))
                     except (TypeError, json.JSONDecodeError):
                         candidate = None
                     if isinstance(candidate, dict):
@@ -3715,10 +3692,8 @@ class FiveQuantityStore:
                     stored_preflight is not None
                     and stored_preflight.get("contract_version")
                     == "ten-quantity-machine-preflight/v2"
-                    and stored_preflight.get("bound_revision")
-                    == int(row["revision"])
-                    and stored_preflight.get("payload_sha256")
-                    == current_payload_sha256
+                    and stored_preflight.get("bound_revision") == int(row["revision"])
+                    and stored_preflight.get("payload_sha256") == current_payload_sha256
                 )
                 if not preflight_is_current:
                     recalculated = _v2_machine_preflight(
@@ -3733,9 +3708,7 @@ class FiveQuantityStore:
                         {
                             "draft_id": draft_id,
                             "reason": (
-                                "missing"
-                                if stored_preflight is None
-                                else "obsolete"
+                                "missing" if stored_preflight is None else "obsolete"
                             ),
                             "preflight": recalculated,
                         },
@@ -3939,6 +3912,48 @@ class FiveQuantityStore:
                 "WHERE setting_key='analysis_cursor'"
             ).fetchone()
         return str(row["setting_value"]) if row else None
+
+    def watched_directories_setting(self) -> tuple[str, ...] | None:
+        with self.repository._read() as db:
+            row = db.execute(
+                "SELECT setting_value FROM fq_settings "
+                "WHERE setting_key='watched_directories'"
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            values = json.loads(str(row["setting_value"]))
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("自动发现目录配置已损坏，请联系管理员") from error
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) for value in values
+        ):
+            raise ValueError("自动发现目录配置格式非法，请联系管理员")
+        return tuple(values)
+
+    def save_watched_directories_setting(
+        self,
+        directories: tuple[str, ...],
+        *,
+        actor: str,
+    ) -> None:
+        now = utc_text()
+        values = list(directories)
+        with self.repository._transaction() as db:
+            db.execute(
+                """INSERT INTO fq_settings(setting_key,setting_value,updated_at)
+                   VALUES ('watched_directories',?,?)
+                   ON CONFLICT(setting_key) DO UPDATE SET
+                     setting_value=excluded.setting_value,
+                     updated_at=excluded.updated_at""",
+                (jcs_json(values), now),
+            )
+            self._append_audit(
+                db,
+                "production_watch_directories_configured",
+                actor,
+                {"directories": values, "directory_count": len(values)},
+            )
 
     def store_report_with_ack(
         self, report: dict[str, Any], ack: dict[str, Any]
@@ -4523,7 +4538,13 @@ class FiveQuantityRuntime:
         self.platform_client = platform_client
         self.poll_seconds = max(0.5, min(float(poll_seconds), 60.0))
         self.stable_seconds = max(0.5, min(float(stable_seconds), 60.0))
-        self.watched_directories = self._watched(watched_directories)
+        saved_watched_directories = self.store.watched_directories_setting()
+        effective_watched_directories = (
+            saved_watched_directories
+            if saved_watched_directories is not None
+            else watched_directories
+        )
+        self.watched_directories = self._watched(effective_watched_directories)
         self.quarantine_directory = self._quarantine_directory(
             quarantine_directory,
             repository=repository,
@@ -4554,18 +4575,59 @@ class FiveQuantityRuntime:
 
     @staticmethod
     def _watched(values: tuple[str, ...]) -> tuple[Path, ...]:
+        if len(values) > 8:
+            raise ValueError("自动发现目录最多配置 8 个")
         result = []
         for value in values:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("自动发现目录不能为空")
+            if len(value) > 1024:
+                raise ValueError("自动发现目录路径过长")
             path = Path(value).expanduser()
+            if not path.is_absolute():
+                raise ValueError(f"自动发现目录必须使用完整路径：{path}")
             if path.is_symlink() or not path.is_dir():
-                raise ValueError(f"十量监听目录无效或为符号链接：{path}")
+                raise ValueError(f"自动发现目录不存在、不可访问或为符号链接：{path}")
             resolved = path.resolve()
             if resolved == Path(resolved.anchor):
-                raise ValueError("拒绝把文件系统根目录设为监听目录")
+                raise ValueError("不能把磁盘根目录设为自动发现目录")
+            try:
+                next(resolved.iterdir(), None)
+            except OSError as error:
+                raise ValueError(
+                    f"Agent 服务账号无权读取自动发现目录：{resolved}"
+                ) from error
             result.append(resolved)
         if len(result) != len(set(result)):
-            raise ValueError("十量监听目录不得重复")
+            raise ValueError("自动发现目录不得重复")
         return tuple(result)
+
+    def configure_watched_directories(
+        self,
+        values: list[str],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        if not isinstance(values, list):
+            raise ValueError("directories 必须是路径数组")
+        cleaned = tuple(
+            value.strip() if isinstance(value, str) else value for value in values
+        )
+        watched = self._watched(cleaned)
+        self._quarantine_directory(
+            self.quarantine_directory,
+            repository=self.store.repository,
+            watched=watched,
+        )
+        serialised = tuple(str(path) for path in watched)
+        self.store.save_watched_directories_setting(serialised, actor=actor)
+        self.watched_directories = watched
+        self._watch_state.clear()
+        self._processed_paths.clear()
+        return {
+            "watched_directories": list(serialised),
+            "enabled": bool(serialised),
+        }
 
     @staticmethod
     def _quarantine_directory(
@@ -4603,12 +4665,7 @@ class FiveQuantityRuntime:
 
     @staticmethod
     def _write_quarantine_file(path: Path, content: bytes) -> None:
-        flags = (
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_BINARY", 0)
-        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
@@ -4671,11 +4728,7 @@ class FiveQuantityRuntime:
         # to different targets.
         preferred_name = f"csv-schema-{schema_fingerprint[:24]}"
         profile = next(
-            (
-                item
-                for item in profiles
-                if item.get("profile_name") == preferred_name
-            ),
+            (item for item in profiles if item.get("profile_name") == preferred_name),
             profiles[0],
         )
         approved = [
@@ -4699,8 +4752,7 @@ class FiveQuantityRuntime:
     ) -> dict[str, Any]:
         enriched = json.loads(jcs_json(inspection))
         candidates = {
-            int(item["source_index"]): item
-            for item in mapping_result["candidates"]
+            int(item["source_index"]): item for item in mapping_result["candidates"]
         }
         blocked = {int(value) for value in mapping_result["blocked_columns"]}
         for column in enriched["columns"]:
@@ -4928,9 +4980,7 @@ class FiveQuantityRuntime:
         profile: dict[str, Any] | None = None
         if save_profile:
             profile = self.csv_persistence.approve_mapping_profile(
-                profile_name=(
-                    f"csv-schema-{inspection['schema_fingerprint'][:24]}"
-                ),
+                profile_name=(f"csv-schema-{inspection['schema_fingerprint'][:24]}"),
                 schema_fingerprint=inspection["schema_fingerprint"],
                 mapping=self._csv_mapping_profile_document(inspection, mappings),
                 approved_by=actor,
@@ -5032,9 +5082,7 @@ class FiveQuantityRuntime:
                     return result
                 result["draft"] = queued
                 result["automatic_dispatch"] = "queued"
-                delivery = self.process_outbox_once(
-                    aggregate_id=result["draft_id"]
-                )
+                delivery = self.process_outbox_once(aggregate_id=result["draft_id"])
                 if delivery:
                     result["delivery"] = delivery
         if result.get("draft_id"):
@@ -5066,9 +5114,7 @@ class FiveQuantityRuntime:
             return imported
 
         inspection = inspect_five_quantity_csv(filename=filename, content=content)
-        approved, _ = self._approved_csv_mappings(
-            inspection["schema_fingerprint"]
-        )
+        approved, _ = self._approved_csv_mappings(inspection["schema_fingerprint"])
         mapping_result = map_csv_inspection(
             inspection,
             approved_mappings=approved,
@@ -5103,9 +5149,7 @@ class FiveQuantityRuntime:
             column_mappings=mappings,
             model_assistance_used=model_used,
             model_output_sha256=(
-                mapping_result["llm"].get("output_sha256")
-                if model_used
-                else None
+                mapping_result["llm"].get("output_sha256") if model_used else None
             ),
         )
         nonempty_by_index = {
@@ -5174,8 +5218,7 @@ class FiveQuantityRuntime:
             (
                 item
                 for item in reversed(imported.get("suggestions", []))
-                if isinstance(item, dict)
-                and item.get("kind") == "automatic_structure"
+                if isinstance(item, dict) and item.get("kind") == "automatic_structure"
             ),
             None,
         )
@@ -5350,12 +5393,8 @@ class FiveQuantityRuntime:
             content=content,
             acquisition_mode="direct_collection",
         )
-        if (
-            coverage_as_of != imported["payload"]["period_end"]
-        ):
-            raise ValueError(
-                "source.coverage_as_of 必须等于规范化快照的 period_end"
-            )
+        if coverage_as_of != imported["payload"]["period_end"]:
+            raise ValueError("source.coverage_as_of 必须等于规范化快照的 period_end")
         for evidence_source in imported["payload"]["sources"]:
             internal_source_id = str(evidence_source["source_id"])
             evidence_source["source_system"] = source_system
@@ -5427,8 +5466,7 @@ class FiveQuantityRuntime:
                 "decision": "needs_review",
                 "reason_codes": ["source_warning"],
                 "summary": [
-                    "自动进入发送队列失败，数据已保留待人工核验："
-                    f"{str(error)[:300]}"
+                    f"自动进入发送队列失败，数据已保留待人工核验：{str(error)[:300]}"
                 ],
             }
             self.store.annotate_automatic_review(
@@ -5441,9 +5479,7 @@ class FiveQuantityRuntime:
             return result
         result["draft"] = queued
         result["automatic_dispatch"] = "queued"
-        result["delivery"] = self.process_outbox_once(
-            aggregate_id=result["draft_id"]
-        )
+        result["delivery"] = self.process_outbox_once(aggregate_id=result["draft_id"])
         return result
 
     @staticmethod
@@ -5673,10 +5709,14 @@ class FiveQuantityRuntime:
                 "signature": ZERO_HASH,
             },
         }
-        if message_type in {
-            "five_quantity_submission",
-            TEN_QUANTITY_SUBMISSION_MESSAGE_TYPE,
-        } and revision == 1:
+        if (
+            message_type
+            in {
+                "five_quantity_submission",
+                TEN_QUANTITY_SUBMISSION_MESSAGE_TYPE,
+            }
+            and revision == 1
+        ):
             message["correlation_id"] = message_id
         return sign_message(message, secret=self.identity.message_hmac_secret)
 
@@ -5703,14 +5743,11 @@ class FiveQuantityRuntime:
         sync_state = self.store.machine_sync_state(draft_id)
         if sync_state is not None:
             health = self.machine_source_health(draft_id)
-            stale_sources = health["freshness"][
-                "stale_required_source_ids"
-            ]
+            stale_sources = health["freshness"]["stale_required_source_ids"]
             if health["freshness"]["overall_state"] != "fresh":
                 source_text = "、".join(stale_sources) or "未配置来源"
                 raise ValidationBlockedError(
-                    "必需机器来源未通过动态新鲜度与当前快照绑定检查："
-                    f"{source_text}"
+                    f"必需机器来源未通过动态新鲜度与当前快照绑定检查：{source_text}"
                 )
         payload = json.loads(jcs_json(draft["payload"]))
         confirmed_at = utc_text()
@@ -5824,9 +5861,7 @@ class FiveQuantityRuntime:
                             item["aggregate_id"], message, legacy=True
                         )
                     else:
-                        self.platform_client.acknowledge(
-                            item["aggregate_id"], message
-                        )
+                        self.platform_client.acknowledge(item["aggregate_id"], message)
                     receipt = None
                 elif item["message_kind"] == "risk_response":
                     response = self.store.get_response(item["aggregate_id"])
@@ -5981,7 +6016,7 @@ class FiveQuantityRuntime:
             checklist = "；".join(
                 [
                     "核对原表对应日期和班次",
-                    "确认单位及日报与班次口径",
+                    "确认单位及生产记录与班次口径",
                     "查找检修、停复产、供电或生产计划记录",
                     "如数值有误先提交更正报表，再在回复中引用更正消息",
                 ]
@@ -6008,11 +6043,7 @@ class FiveQuantityRuntime:
             else:
                 try:
                     model_name = (
-                        str(
-                            getattr(
-                                getattr(provider, "config", None), "model", ""
-                            )
-                        )
+                        str(getattr(getattr(provider, "config", None), "model", ""))
                         or None
                     )
                     report_context = {
@@ -6066,8 +6097,7 @@ class FiveQuantityRuntime:
                         report_context=report_context,
                     )
                     answer += (
-                        "\n\n以上为智能模型解读建议，"
-                        "企业仍需依据原始记录人工核实。"
+                        "\n\n以上为智能模型解读建议，企业仍需依据原始记录人工核实。"
                     )
                     model_status = "used"
                     tools = ["智能模型风险解读", "本地报告范围核对"]

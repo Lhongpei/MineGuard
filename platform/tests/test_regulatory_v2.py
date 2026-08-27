@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 import json
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -102,6 +103,11 @@ def _ten_submission(
     days = [
         day.model_copy(
             update={
+                "date": datetime.combine(
+                    day.date,
+                    datetime.min.time(),
+                    tzinfo=ZoneInfo("Asia/Shanghai"),
+                ),
                 "extraction_t": _quantity(110.0),
                 "sales_t": _quantity(90.0),
                 "transport_t": _quantity(90.0),
@@ -116,6 +122,8 @@ def _ten_submission(
             **base.model_dump(mode="python"),
             "contract_version": "enterprise-ten-quantity-submission-v3",
             "quantity_scope": "ten_quantity_v3",
+            "period_start": days[0].date,
+            "period_end": days[-1].date,
             "days": days,
         }
     )
@@ -209,16 +217,15 @@ def test_complete_v3_daily_report_does_not_require_commercial_shift_values() -> 
     assert all(
         item.code != "partial_shift_values"
         for item in result.data_quality_signals
-        if item.metric in {"sales_t", "transport_t", "wash_feed_t", "invoiced_quantity_t"}
+        if item.metric
+        in {"sales_t", "transport_t", "wash_feed_t", "invoiced_quantity_t"}
     )
     assert {item.metric for item in result.reconciliation.adjustments} == set(METRICS)
     assert result.method_version == "regulatory-ten-quantity-v3.3.0"
     assert result.runtime_manifest["advanced_evidence_method_version"] == (
         "regulatory-ten-quantity-v3.1.0"
     )
-    advanced_modules = json.loads(
-        result.runtime_manifest["advanced_evidence_modules"]
-    )
+    advanced_modules = json.loads(result.runtime_manifest["advanced_evidence_modules"])
     assert advanced_modules["daily_shift_aggregation"] == "evaluated"
     assert advanced_modules["raw_coal_balance"] == "skipped"
     assert advanced_modules["wash_mass_balance"] == "skipped"
@@ -389,35 +396,38 @@ def test_v3_one_day_batch_does_not_require_seven_complete_days() -> None:
     assert result.data_sufficiency_reasons == []
 
 
-def test_v3_sparse_batch_analyzes_only_values_actually_submitted() -> None:
-    submission = _ten_submission(day_count=2).model_copy(
-        update={"period_end": date(2026, 1, 10)}
-    )
+def test_v3_nonconsecutive_calendar_days_are_only_two_production_records() -> None:
+    zone = ZoneInfo("Asia/Shanghai")
+    document = _ten_submission(day_count=2).model_dump(mode="python")
+    document["period_end"] = datetime(2026, 1, 10, 12, 0, tzinfo=zone)
+    document["days"][1]["date"] = document["period_end"]
+    submission = FiveQuantitySubmission.model_validate(document)
 
     result = analyze_five_quantity(submission)
 
-    assert result.coverage.expected_day_count == 10
+    assert result.coverage.expected_day_count == 2
     assert result.coverage.reported_day_count == 2
     assert result.decision is DecisionStatus.NORMAL_CANDIDATE
     assert result.data_sufficiency_reasons == []
     assert result.decision_reasons == [
-        "已按本次提交的实际数据范围完成核对；未提供的日期和字段未参与判断"
+        "未发现超过当前数据质量、时序及软参考区间的未解释线索"
     ]
 
 
 def test_v3_production_batch_can_cross_calendar_months() -> None:
+    zone = ZoneInfo("Asia/Shanghai")
     document = _ten_submission(day_count=2).model_dump(mode="python")
-    document["period_start"] = date(2026, 1, 31)
-    document["period_end"] = date(2026, 2, 2)
-    document["days"][0]["date"] = date(2026, 1, 31)
-    document["days"][1]["date"] = date(2026, 2, 2)
+    document["period_start"] = datetime(2026, 1, 31, 8, 30, tzinfo=zone)
+    document["period_end"] = datetime(2026, 2, 2, 17, 45, tzinfo=zone)
+    document["days"][0]["date"] = document["period_start"]
+    document["days"][1]["date"] = document["period_end"]
 
     submission = FiveQuantitySubmission.model_validate(document)
     result = analyze_five_quantity(submission)
 
-    assert submission.period_start == date(2026, 1, 31)
-    assert submission.period_end == date(2026, 2, 2)
-    assert result.coverage.expected_day_count == 3
+    assert submission.period_start == datetime(2026, 1, 31, 8, 30, tzinfo=zone)
+    assert submission.period_end == datetime(2026, 2, 2, 17, 45, tzinfo=zone)
+    assert result.coverage.expected_day_count == 2
     assert result.coverage.reported_day_count == 2
     assert result.decision is DecisionStatus.NORMAL_CANDIDATE
     assert result.data_sufficiency_reasons == []

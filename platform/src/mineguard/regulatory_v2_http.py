@@ -192,9 +192,7 @@ _TEN_QUANTITY_RELATIONSHIP_MODULES: dict[RelationshipCode, str] = {
         "production_extraction_reconciliation"
     ),
     RelationshipCode.SALES_PER_PRODUCTION: "production_sales_reconciliation",
-    RelationshipCode.TRANSPORT_PER_PRODUCTION: (
-        "production_transport_reconciliation"
-    ),
+    RelationshipCode.TRANSPORT_PER_PRODUCTION: ("production_transport_reconciliation"),
     RelationshipCode.WASH_FEED_PER_PRODUCTION: "production_wash_reconciliation",
     RelationshipCode.TRANSPORT_PER_SALES: "sales_transport_reconciliation",
     RelationshipCode.INVOICED_QUANTITY_PER_SALES: "sales_invoice_reconciliation",
@@ -1735,8 +1733,14 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
             or message.payload.closed_at > maximum_future
         ):
             raise ValueError("submission contains a future application timestamp")
-        local_today = now.astimezone(ZoneInfo(message.payload.timezone)).date()
-        if message.payload.period_end > local_today:
+        local_now = now.astimezone(ZoneInfo(message.payload.timezone))
+        period_end = message.payload.period_end
+        if isinstance(period_end, datetime):
+            if period_end.astimezone(ZoneInfo(message.payload.timezone)) > (
+                local_now + timedelta(minutes=5)
+            ):
+                raise ValueError("future production record times cannot be analysed")
+        elif period_end > local_now.date():
             raise ValueError("future reporting periods cannot be analysed")
         # ``closed_at`` is the enterprise's as-of watermark, not a claim that
         # every governed shift in the reporting date has finished.  A mine may
@@ -2107,9 +2111,9 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         # that genuinely unlocatable case the conservative wire representation
         # remains the full governed scope; relationship and multi-atom signals
         # above must never be broadened this way.
-        metrics = _affected_metrics_from_signals(
-            signals, applicable_metrics
-        ) or list(applicable_metrics)
+        metrics = _affected_metrics_from_signals(signals, applicable_metrics) or list(
+            applicable_metrics
+        )
         deterministic_conflict = any(
             signal.basis.startswith("deterministic_")
             or signal.code == "daily_shift_arithmetic_mismatch"
@@ -2117,8 +2121,7 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         )
         severity = (
             "high"
-            if finding.finding_type != "data_insufficient"
-            and deterministic_conflict
+            if finding.finding_type != "data_insufficient" and deterministic_conflict
             else "medium"
         )
         return {
@@ -2747,7 +2750,11 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
         if visible is not None and mine_id not in visible:
             raise RegulatoryV2NotFoundError("mine is outside principal scope")
         registered_client = next(
-            (client for client in self.server.clients.values() if client.mine_id == mine_id),
+            (
+                client
+                for client in self.server.clients.values()
+                if client.mine_id == mine_id
+            ),
             None,
         )
         if registered_client is not None and not any(
@@ -2769,7 +2776,9 @@ class RegulatoryV2RequestHandler(BaseHTTPRequestHandler):
                     "quantity_scope": None,
                     "report_month": "",
                     "data_as_of": None,
-                    "source_disclosure": self._submission_source_disclosure(mine_id, ""),
+                    "source_disclosure": self._submission_source_disclosure(
+                        mine_id, ""
+                    ),
                 },
                 "latest_analysis": {
                     "status": None,

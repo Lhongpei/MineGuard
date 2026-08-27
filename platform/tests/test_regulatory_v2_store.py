@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 from typing import Literal
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -101,6 +102,11 @@ def _ten_submission(
     days = [
         day.model_copy(
             update={
+                "date": datetime.combine(
+                    day.date,
+                    datetime.min.time(),
+                    tzinfo=ZoneInfo("Asia/Shanghai"),
+                ),
                 "extraction_t": _q(105),
                 "sales_t": _q(90),
                 "transport_t": _q(90),
@@ -115,6 +121,8 @@ def _ten_submission(
             **base.model_dump(mode="python"),
             "contract_version": "enterprise-ten-quantity-submission-v3",
             "quantity_scope": "ten_quantity_v3",
+            "period_start": days[0].date,
+            "period_end": days[-1].date,
             "days": days,
         }
     )
@@ -630,7 +638,9 @@ def test_transport_nonce_rows_have_a_strict_per_sender_bound(
         "_MAX_ACTIVE_TRANSPORT_NONCES_PER_SENDER",
         2,
     )
-    with RegulatoryV2Store(tmp_path / "bounded-nonces.sqlite3", now=lambda: NOW) as store:
+    with RegulatoryV2Store(
+        tmp_path / "bounded-nonces.sqlite3", now=lambda: NOW
+    ) as store:
         expiry = NOW + timedelta(minutes=10)
         assert store.claim_transport_nonce(
             "agent-a", "bounded-nonce-1", request_time=NOW, expires_at=expiry
@@ -715,7 +725,9 @@ def test_missing_ledger_on_any_other_nonempty_database_fails_without_writes(
     with pytest.raises(RegulatoryV2SchemaVersionError, match="ledger is missing"):
         RegulatoryV2Store(database, now=lambda: NOW)
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT value FROM unrelated").fetchone()[0] == "keep-me"
+        assert (
+            connection.execute("SELECT value FROM unrelated").fetchone()[0] == "keep-me"
+        )
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name GLOB 'v2_*'"
@@ -742,8 +754,7 @@ def test_managed_schema_rejects_noop_trigger_extra_or_weakened_index(
     extra_database = tmp_path / "extra-index.sqlite3"
     with RegulatoryV2Store(extra_database, now=lambda: NOW) as store:
         store._connection.execute(
-            "CREATE INDEX injected_v2_submission_index "
-            "ON v2_submissions(received_at)"
+            "CREATE INDEX injected_v2_submission_index ON v2_submissions(received_at)"
         )
     with pytest.raises(RegulatoryV2SchemaVersionError, match="schema contract"):
         RegulatoryV2Store(extra_database, now=lambda: NOW)
@@ -752,8 +763,7 @@ def test_managed_schema_rejects_noop_trigger_extra_or_weakened_index(
     with RegulatoryV2Store(weak_database, now=lambda: NOW) as store:
         store._connection.execute("DROP INDEX idx_v2_submissions_mine_period")
         store._connection.execute(
-            "CREATE INDEX idx_v2_submissions_mine_period "
-            "ON v2_submissions(mine_id)"
+            "CREATE INDEX idx_v2_submissions_mine_period ON v2_submissions(mine_id)"
         )
     with pytest.raises(RegulatoryV2SchemaVersionError, match="schema contract"):
         RegulatoryV2Store(weak_database, now=lambda: NOW)
@@ -765,8 +775,7 @@ def test_managed_schema_rejects_weakened_check_constraint(tmp_path: Path) -> Non
         pass
     with sqlite3.connect(database) as connection:
         original = connection.execute(
-            "SELECT sql FROM sqlite_master "
-            "WHERE type='table' AND name='v2_submissions'"
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='v2_submissions'"
         ).fetchone()[0]
         weakened = original.replace(
             "revision INTEGER NOT NULL CHECK (revision >= 1)",

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -367,7 +367,7 @@ class MineOverview(StrictModel):
     mine_id: str
     mine_name: str
     latest_submission_id: str | None
-    latest_period_end: date | None
+    latest_period_end: AwareDatetime | date | None
     latest_decision: DecisionStatus | None
     open_finding_count: Annotated[int, Field(ge=0)]
     explanation_recorded_finding_count: Annotated[int, Field(ge=0)]
@@ -1458,12 +1458,15 @@ class RegulatoryV2Store:
         payload_sha256 = _hash_text(payload_json)
         idempotency_key = idempotency_key or submission.submission_id
         received_instant = _as_utc(self._now())
-        if (
-            submission.period_end
-            > received_instant.astimezone(
-                ZoneInfo(submission.reporting_timezone)
-            ).date()
-        ):
+        received_local = received_instant.astimezone(
+            ZoneInfo(submission.reporting_timezone)
+        )
+        future_period = (
+            submission.period_end > received_local
+            if isinstance(submission.period_end, datetime)
+            else submission.period_end > received_local.date()
+        )
+        if future_period:
             raise RegulatoryV2ConflictError(
                 "future reporting periods cannot enter regulatory history"
             )
@@ -2650,8 +2653,8 @@ class RegulatoryV2Store:
             clauses.append("d.observed_date >= ?")
             values.append(date_from.isoformat())
         if date_to is not None:
-            clauses.append("d.observed_date <= ?")
-            values.append(date_to.isoformat())
+            clauses.append("d.observed_date < ?")
+            values.append((date_to + timedelta(days=1)).isoformat())
         with self._lock:
             rows = self._connection.execute(
                 f"""
@@ -2866,7 +2869,7 @@ class RegulatoryV2Store:
                         else None
                     ),
                     latest_period_end=(
-                        date.fromisoformat(latest_submission["period_end"])
+                        _parse_date_or_datetime(latest_submission["period_end"])
                         if latest_submission is not None
                         else None
                     ),
@@ -4091,7 +4094,7 @@ class RegulatoryV2Store:
         connection: sqlite3.Connection,
         mine_id: str,
         *,
-        before: date,
+        before: AwareDatetime | date,
         excluded_submission_id: str,
         comparison_group: str,
         quantity_scope: str,
@@ -4921,6 +4924,12 @@ def _as_utc(value: datetime) -> datetime:
 def _parse_datetime(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
     return _as_utc(parsed)
+
+
+def _parse_date_or_datetime(value: str) -> date | datetime:
+    if "T" in value:
+        return _parse_datetime(value)
+    return date.fromisoformat(value)
 
 
 def _validated_limit(value: int) -> int:

@@ -151,10 +151,9 @@ def _correction(
 
 def _move_payload_to_august(payload: dict[str, Any]) -> dict[str, Any]:
     changed = copy.deepcopy(payload)
-    changed["reporting_month"] = "2026-08"
-    changed["period_start"] = "2026-08-01"
-    changed["period_end"] = "2026-08-01"
-    changed["days"][0]["date"] = "2026-08-01"
+    changed["period_start"] = "2026-08-01T00:00:00+08:00"
+    changed["period_end"] = "2026-08-01T00:00:00+08:00"
+    changed["days"][0]["date"] = "2026-08-01T00:00:00+08:00"
     return changed
 
 
@@ -184,7 +183,7 @@ def test_correction_cannot_be_discarded_or_change_reporting_window(
     unchanged = runtime.store.get_draft(correction["draft_id"])
     assert unchanged["status"] == "ready_review"
     assert unchanged["revision"] == correction["revision"]
-    assert unchanged["payload"]["reporting_month"] == "2026-07"
+    assert unchanged["payload"]["period_start"] == "2026-07-01T00:00:00+08:00"
 
 
 def test_confirm_rechecks_predecessor_window_after_direct_row_tamper(

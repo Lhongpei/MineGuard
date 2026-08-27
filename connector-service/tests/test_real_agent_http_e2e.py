@@ -145,7 +145,11 @@ def test_connector_writes_and_revises_one_real_v3_monthly_draft(
         payload = json.loads(drafts[0]["payload_json"])
         assert drafts[0]["contract_version"] == "ten-quantity-submission-v3"
         assert payload["reporting_month"] == "2026-07"
-        day_29 = next(item for item in payload["days"] if item["date"] == "2026-07-29")
+        day_29 = next(
+            item
+            for item in payload["days"]
+            if item["date"] == "2026-07-29T23:59:00+08:00"
+        )
         assert day_29["reported_quantity"]["daily_total"]["production_t"]["value"] == 350.0
         assert day_29["reported_quantity"]["daily_total"]["extraction_t"]["value"] == 355.0
         assert (
@@ -175,7 +179,11 @@ def test_connector_writes_and_revises_one_real_v3_monthly_draft(
         assert len(drafts) == 1 and drafts[0]["draft_id"] == draft_id
         assert drafts[0]["revision"] == 2
         revised = json.loads(drafts[0]["payload_json"])
-        revised_day_29 = next(item for item in revised["days"] if item["date"] == "2026-07-29")
+        revised_day_29 = next(
+            item
+            for item in revised["days"]
+            if item["date"] == "2026-07-29T23:59:00+08:00"
+        )
         assert revised_day_29["reported_quantity"]["daily_total"]["production_t"]["value"] == 355.0
         assert (
             connection.execute(

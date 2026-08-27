@@ -649,9 +649,15 @@ class WireTenReportedQuantity(WireContractModel):
 
 
 class WireTenDay(WireContractModel):
-    date: WireDate
+    date: WireDateTime
     operating_state: OperatingState
     reported_quantity: WireTenReportedQuantity
+
+    @model_validator(mode="after")
+    def validate_observation_minute(self) -> "WireTenDay":
+        if self.date.second or self.date.microsecond:
+            raise ValueError("production record time must be aligned to a minute")
+        return self
 
 
 def _validate_three_shift_day(day: WireDay | WireTenDay, timezone_name: str) -> None:
@@ -665,11 +671,20 @@ def _validate_three_shift_day(day: WireDay | WireTenDay, timezone_name: str) -> 
         raise ValueError("one day requires three unique shift_code values")
 
     zone = _timezone_info(timezone_name)
-    next_date = day.date + timedelta(days=1)
+    calendar_day = (
+        day.date.astimezone(zone).date() if isinstance(day.date, datetime) else day.date
+    )
+    next_date = calendar_day + timedelta(days=1)
     boundaries = (
-        datetime(day.date.year, day.date.month, day.date.day, 0, tzinfo=zone),
-        datetime(day.date.year, day.date.month, day.date.day, 8, tzinfo=zone),
-        datetime(day.date.year, day.date.month, day.date.day, 16, tzinfo=zone),
+        datetime(
+            calendar_day.year, calendar_day.month, calendar_day.day, 0, tzinfo=zone
+        ),
+        datetime(
+            calendar_day.year, calendar_day.month, calendar_day.day, 8, tzinfo=zone
+        ),
+        datetime(
+            calendar_day.year, calendar_day.month, calendar_day.day, 16, tzinfo=zone
+        ),
         datetime(next_date.year, next_date.month, next_date.day, 0, tzinfo=zone),
     )
     for index, shift in enumerate(shifts):
@@ -840,34 +855,38 @@ class TenQuantitySubmissionPayload(WireContractModel):
     """V3 submission payload for ten business quantities / eleven atoms."""
 
     mine: WireMine
-    reporting_month: Annotated[
-        str, Field(pattern=r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")
-    ] | None = None
+    reporting_month: (
+        Annotated[str, Field(pattern=r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")] | None
+    ) = None
     timezone: TimezoneText
-    period_start: WireDate
-    period_end: WireDate
+    period_start: WireDateTime
+    period_end: WireDateTime
     closed_at: WireDateTime
     comparison_context: WireComparisonContext | None = None
-    days: Annotated[list[WireTenDay], Field(min_length=1, max_length=366)]
+    days: Annotated[list[WireTenDay], Field(min_length=1, max_length=4096)]
     sources: Annotated[list[WireSource], Field(min_length=1, max_length=256)]
     agent_processing: WireAgentProcessing
     human_confirmation: WireHumanConfirmation
 
     @model_validator(mode="after")
     def validate_reporting_window(self) -> "TenQuantitySubmissionPayload":
+        if any(
+            value.second or value.microsecond
+            for value in (self.period_start, self.period_end)
+        ):
+            raise ValueError("production batch bounds must be aligned to a minute")
         if self.period_end < self.period_start:
             raise ValueError("period_end cannot predate period_start")
         dates = [item.date for item in self.days]
         if dates != sorted(dates) or len(dates) != len(set(dates)):
-            raise ValueError("days must be unique and chronological")
-        if dates[0] != self.period_start or dates[-1] != self.period_end:
-            raise ValueError("period window must equal the first and last batch dates")
-        if any(
-            item < self.period_start or item > self.period_end
-            for item in dates
-        ):
             raise ValueError(
-                "daily date is outside the declared production batch window"
+                "production record minutes must be unique and chronological"
+            )
+        if dates[0] != self.period_start or dates[-1] != self.period_end:
+            raise ValueError("period window must equal the first and last record times")
+        if any(item < self.period_start or item > self.period_end for item in dates):
+            raise ValueError(
+                "production record time is outside the declared batch window"
             )
         source_ids = [item.source_id for item in self.sources]
         if len(source_ids) != len(set(source_ids)):

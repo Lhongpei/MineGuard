@@ -229,7 +229,7 @@
           "minItems": 1,
           "maxItems": 366,
           "uniqueItems": true,
-          "items": {"type": "string", "format": "date"}
+          "items": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"}
         },
         "affected_shifts": {
           "type": "array",
@@ -277,8 +277,8 @@
           "$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/safePositiveInteger"
         },
         "mine": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/mine"},
-        "period_start": {"type": "string", "format": "date"},
-        "period_end": {"type": "string", "format": "date"},
+        "period_start": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"},
+        "period_end": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"},
         "issued_at": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"},
         "algorithm": {"$ref": "#/$defs/algorithm"},
         "outcome": {

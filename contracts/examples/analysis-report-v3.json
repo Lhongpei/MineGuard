@@ -29,15 +29,15 @@
       "operator_id": "operator-qy-001",
       "operator_name": "示例一号煤业有限公司"
     },
-    "period_start": "2026-07-31",
-    "period_end": "2026-07-31",
+    "period_start": "2026-07-31T23:30:00+08:00",
+    "period_end": "2026-07-31T23:30:00+08:00",
     "issued_at": "2026-08-01T00:06:30Z",
     "algorithm": {
       "engine_id": "mineguard-ten-quantity-engine",
       "engine_version": "3.2.0",
       "algorithm_run_id": "73333333-3333-4333-8333-333333333333",
       "config_sha256": "8181818181818181818181818181818181818181818181818181818181818181",
-      "input_snapshot_sha256": "2e22623b7c9303cd3d26698533d8c26ac39d93e803b0fb1954a64ad7d9be885a",
+      "input_snapshot_sha256": "9d3265f8952c1d3ef1c3e54c3bad3e6a65948dac031cb6c78c841b129fd7da36",
       "own_history_snapshot_sha256": "8383838383838383838383838383838383838383838383838383838383838383",
       "peer_snapshot_sha256": "8484848484848484848484848484848484848484848484848484848484848484",
       "started_at": "2026-08-01T00:05:05Z",
@@ -74,7 +74,7 @@
         "severity": "medium",
         "title": "十量数据补充要求",
         "summary": "完整十量日不足",
-        "affected_dates": ["2026-07-31"],
+        "affected_dates": ["2026-07-31T23:30:00+08:00"],
         "affected_shifts": [],
         "affected_metrics": [
           "ventilation_m3_min",
@@ -114,7 +114,7 @@
     "key_id": "regulator-key-2026-02",
     "signed_at": "2026-08-01T00:06:30Z",
     "nonce": "VGVuUXVhbnRpdHlWZWN0b3IwMg",
-    "payload_sha256": "1a4d5b433daa6ffaaa705e658b88a6929fbc56b75b3bbc972ba942d505f7df2c",
-    "signature": "a1ed980a381cabef728761ade76ac3a5956097f4f5e044d0e635ed69492c1ab2"
+    "payload_sha256": "5ab2f0ec1f2c839b409391f35d3398c08d2021119c0d677c7a2c7260c8fa7346",
+    "signature": "4bd4a50b412d49135c6fd1e8b1e6911c5afdd79516f9b26d8886d4aae8d63b86"
   }
 }

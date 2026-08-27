@@ -265,9 +265,9 @@ def normalize_batches(
     *,
     now: datetime | None = None,
 ) -> tuple[NormalizedEvent, ...]:
-    """Create one complete ten-quantity V3 source snapshot per month.
+    """Create one minute-granularity ten-quantity V3 source snapshot per month.
 
-    Every daily total carries all eleven atomic fields. Missing cells stay
+    Every production record carries all eleven atomic fields. Missing cells stay
     explicit null/missing, including fields absent from a legacy six-column
     source. The Agent merges latest snapshots from different ``source_id``
     values; this connector never overwrites one source with another or
@@ -294,7 +294,7 @@ def normalize_batches(
     cells: dict[str, dict[tuple[str, str, str], list[tuple[datetime, int | float]]]] = defaultdict(
         lambda: defaultdict(list)
     )
-    dates: dict[str, set[date]] = defaultdict(set)
+    instants: dict[str, set[datetime]] = defaultdict(set)
     filenames: dict[str, set[str]] = defaultdict(set)
     mapping_seen: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     observed_scopes: dict[str, set[str]] = defaultdict(set)
@@ -310,10 +310,10 @@ def normalize_batches(
             month = timestamp.strftime("%Y-%m")
             latest_observed_at[month] = max(latest_observed_at.get(month, timestamp), timestamp)
             record_counts[month] += 1
-            day = timestamp.date()
+            instant = timestamp.replace(second=0, microsecond=0)
             row_scope = _scope_for(record, timestamp, pipeline)
             observed_scopes[month].add(row_scope)
-            dates[month].add(day)
+            instants[month].add(instant)
             filenames[month].add(batch.original_filename)
             for mapping in pipeline.mappings:
                 try:
@@ -325,14 +325,14 @@ def normalize_batches(
                 scope, metric = _target(mapping, row_scope)
                 if scope not in SCOPES or metric not in METRICS:
                     raise SourceError(f"映射目标不是正式十量 V3 单元格：{mapping.target}")
-                cells[month][(day.isoformat(), scope, metric)].append(
+                cells[month][(instant.isoformat(timespec="seconds"), scope, metric)].append(
                     (timestamp, _convert(raw_value, mapping, metric))
                 )
                 mapping_seen[month][mapping.target] += 1
 
     events: list[NormalizedEvent] = []
     source_ref = f"CSRC-{hashlib.sha256(source.id.encode()).hexdigest()[:16]}"
-    for month in sorted(dates):
+    for month in sorted(instants):
         if not any(mapping_seen[month].values()):
             raise SourceError(
                 f"月份 {month} 未映射到任何非空规范值；"
@@ -354,27 +354,11 @@ def normalize_batches(
             )
             reduced[key] = _reduce(values, mapping)
 
-        observed_days = sorted(dates[month])
-        month_start = date.fromisoformat(f"{month}-01")
+        observed_instants = sorted(instants[month])
         if month > cutoff_month:
             raise SourceError("来源包含企业应报截止日之后的未来月份，拒绝自动建稿")
-        if month == cutoff_month:
-            expected_end = cutoff
-            if observed_days[-1] > expected_end:
-                raise SourceError("来源日期晚于当前 pipeline 配置的应报截止日")
-        else:
-            next_month = (
-                date(month_start.year + 1, 1, 1)
-                if month_start.month == 12
-                else date(month_start.year, month_start.month + 1, 1)
-            )
-            expected_end = next_month - timedelta(days=1)
-        complete_days: list[date] = []
-        cursor = month_start
-        while cursor <= expected_end:
-            complete_days.append(cursor)
-            cursor += timedelta(days=1)
-        missing_days = sorted(set(complete_days) - set(observed_days))
+        if any(item.date() > cutoff for item in observed_instants):
+            raise SourceError("来源数据时间晚于当前 pipeline 配置的应报截止日")
         configured_cells = {
             (scope, mapping.target.split(".", 1)[-1])
             for mapping in pipeline.mappings
@@ -388,7 +372,8 @@ def normalize_batches(
             )
         }
         day_documents: list[dict[str, Any]] = []
-        for day in complete_days:
+        for instant in observed_instants:
+            instant_text = instant.isoformat(timespec="seconds")
             daily: dict[str, dict[str, Any]] = {}
             shifts: dict[str, dict[str, dict[str, Any]]] = {
                 scope: {} for scope in SCOPES if scope != "daily_total"
@@ -396,7 +381,7 @@ def normalize_batches(
             for scope in SCOPES:
                 target_set = daily if scope == "daily_total" else shifts[scope]
                 for metric in METRICS:
-                    value = reduced.get((day.isoformat(), scope, metric))
+                    value = reduced.get((instant_text, scope, metric))
                     null_flag = (
                         "not_applicable"
                         if scope != "daily_total"
@@ -416,7 +401,7 @@ def normalize_batches(
                 ("eight_shift", "EIGHT"),
                 ("four_shift", "FOUR"),
             ):
-                start_at, end_at = _shift_window(day, scope, zone)
+                start_at, end_at = _shift_window(instant.date(), scope, zone)
                 shift_documents[scope] = {
                     "shift_code": code,
                     "start_at": start_at,
@@ -425,7 +410,7 @@ def normalize_batches(
                 }
             day_documents.append(
                 {
-                    "date": day.isoformat(),
+                    "date": instant_text,
                     # Production volume alone cannot prove whether a mine was
                     # producing, stopped, under maintenance or restarting.
                     "operating_state": "unknown",
@@ -447,14 +432,14 @@ def normalize_batches(
                 "data_watermark": latest_observed_at[month].isoformat(timespec="seconds"),
                 "original_filenames": sorted(filenames[month]),
                 "coverage": {
-                    "period_start": complete_days[0].isoformat(),
-                    "period_end": complete_days[-1].isoformat(),
-                    "coverage_as_of": expected_end.isoformat(),
+                    "period_start": day_documents[0]["date"],
+                    "period_end": day_documents[-1]["date"],
+                    "coverage_as_of": day_documents[-1]["date"],
                     "reporting_lag_days": pipeline.reporting_lag_days,
-                    "observed_date_count": len(observed_days),
-                    "expected_date_count": len(complete_days),
-                    "observed_dates": [day.isoformat() for day in observed_days],
-                    "missing_dates": [day.isoformat() for day in missing_days],
+                    "observed_record_count": len(observed_instants),
+                    "observed_times": [
+                        item.isoformat(timespec="seconds") for item in observed_instants
+                    ],
                 },
                 "source_declaration": source.truth_statement,
                 "normalization": (
@@ -496,7 +481,7 @@ def normalize_batches(
                 "original_filename": filename,
                 "truth_statement": True,
                 "observed_at": current_local.isoformat(timespec="microseconds"),
-                "coverage_as_of": expected_end.isoformat(),
+                "coverage_as_of": day_documents[-1]["date"],
             },
             "trigger_workflow": False,
             "workflow_name": "daily_coal_health",

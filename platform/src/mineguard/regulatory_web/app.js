@@ -1228,7 +1228,7 @@ function renderSelectedSeriesChart() {
     .flatMap((group) => group.series);
   const chartElement = $("seriesChart");
   chartElement.className = `series-chart tracks-${Math.max(1, Math.min(4, definitions.length))}`;
-  if (!rows.length || !definitions.length) { chartElement.innerHTML = `<div class="empty-state">暂无可展示的逐日生产数据</div>`; return; }
+  if (!rows.length || !definitions.length) { chartElement.innerHTML = `<div class="empty-state">暂无可展示的分钟级生产数据</div>`; return; }
   const measuredWidth = Number(chartElement.clientWidth);
   const width = Math.max(760, Number.isFinite(measuredWidth) && measuredWidth > 0 ? Math.round(measuredWidth) : 1100);
   const left = 132, right = 78, top = 8, bottom = 38;
@@ -1238,7 +1238,7 @@ function renderSelectedSeriesChart() {
   const x = (index) => left + index / Math.max(1, rows.length - 1) * plotWidth;
   const trackBottom = top + definitions.length * trackHeight + (definitions.length - 1) * trackGap;
   let svg = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-labelledby="seriesChartTitle seriesChartDescription">`;
-  svg += `<title id="seriesChartTitle">十量风险优先趋势图</title><desc id="seriesChartDescription">默认最多展示三个十量业务项；火工品量的雷管和炸药保持独立轨道，各轨道共用日期轴并按当前窗口缩放。</desc>`;
+  svg += `<title id="seriesChartTitle">十量风险优先趋势图</title><desc id="seriesChartDescription">默认最多展示三个十量业务项；火工品量的雷管和炸药保持独立轨道，各轨道共用分钟级时间轴并按当前窗口缩放。</desc>`;
   const labelIndexes = [...new Set([0, Math.floor((rows.length-1)/2), rows.length-1])];
   svg += labelIndexes.map((index) => `<line class="date-grid" x1="${x(index)}" y1="${top}" x2="${x(index)}" y2="${trackBottom}"/>`).join("");
   definitions.forEach((definition, trackIndex) => {
@@ -1285,11 +1285,11 @@ function renderSelectedSeriesChart() {
       if (points.length >= 2) {
         svg += `<polyline class="series-line${constant ? " is-constant" : ""}" data-series-code="${code}" data-segment-index="${segmentIndex}" data-constant="${constant}" stroke="${color}"${constant ? ' stroke-dasharray="7 4"' : ""} points="${points.map((point)=>`${point.x},${point.y}`).join(" ")}"/>`;
       }
-      svg += points.map((point) => `<circle class="point" data-series-code="${code}" cx="${point.x}" cy="${point.y}" r="2.8" fill="${color}"><title>${escapeHtml(point.date || "")} ${label}: ${formatNumber(point.value,2)} ${escapeHtml(unit || legend)}</title></circle>`).join("");
+      svg += points.map((point) => `<circle class="point" data-series-code="${code}" cx="${point.x}" cy="${point.y}" r="2.8" fill="${color}"><title>${escapeHtml(formatTime(point.date))} ${label}: ${formatNumber(point.value,2)} ${escapeHtml(unit || legend)}</title></circle>`).join("");
     });
     svg += `</g>`;
   });
-  svg += labelIndexes.map((index, position) => `<text class="axis-label" x="${x(index)}" y="${height-10}" text-anchor="${position === 0 ? "start" : position === labelIndexes.length-1 ? "end" : "middle"}">${escapeHtml((rows[index] && rows[index].date) || "")}</text>`).join("") + `</svg>`;
+  svg += labelIndexes.map((index, position) => `<text class="axis-label" x="${x(index)}" y="${height-10}" text-anchor="${position === 0 ? "start" : position === labelIndexes.length-1 ? "end" : "middle"}">${escapeHtml(formatTime(rows[index] && rows[index].date))}</text>`).join("") + `</svg>`;
   chartElement.innerHTML = svg;
 }
 

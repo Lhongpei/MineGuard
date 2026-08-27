@@ -32,7 +32,11 @@ def _event(tmp_path: Path, source_db: Path):
 def _changed(event, value: float):
     payload = copy.deepcopy(event.payload)
     content = json.loads(payload["source"]["content"])
-    day = next(item for item in content["days"] if item["date"] == "2026-07-29")
+    day = next(
+        item
+        for item in content["days"]
+        if item["date"] == "2026-07-29T23:59:00+08:00"
+    )
     day["reported_quantity"]["daily_total"]["production_t"]["value"] = value
     text = canonical_json(content)
     return replace(
@@ -105,9 +109,9 @@ def test_month_snapshot_is_complete_v3_and_deterministic(tmp_path: Path, source_
         == "enterprise-connector-ten-quantity-source/v1"
     )
     assert content["connector_snapshot"]["source_id"] == source.id
-    assert content["days"][0]["date"] == "2026-07-01"
-    assert content["days"][-1]["date"] == "2026-07-31"
-    assert len(content["days"]) == 31
+    assert content["days"][0]["date"] == "2026-07-29T00:00:00+08:00"
+    assert content["days"][-1]["date"] == "2026-07-30T23:59:00+08:00"
+    assert len(content["days"]) == 8
     for day in content["days"]:
         quantity = day["reported_quantity"]
         assert set(quantity["daily_total"]) == set(METRICS)
@@ -286,7 +290,11 @@ def test_missing_values_are_null_not_imputed(tmp_path: Path, source_db: Path) ->
     content = json.loads(
         normalize_batches(pipeline, source, (batch,))[0].payload["source"]["content"]
     )
-    day_29 = next(item for item in content["days"] if item["date"] == "2026-07-29")
+    day_29 = next(
+        item
+        for item in content["days"]
+        if item["date"] == "2026-07-29T00:00:00+08:00"
+    )
     measurements = day_29["reported_quantity"]["shifts"]["zero_shift"]["measurements"]
     assert measurements["production_t"]["value"] == 10.0
     assert measurements["electricity_kwh"]["value"] is None
@@ -323,7 +331,11 @@ def test_unconfigured_optional_shift_metrics_are_not_applicable(
     content = json.loads(
         normalize_batches(pipeline, source, (batch,))[0].payload["source"]["content"]
     )
-    day = next(item for item in content["days"] if item["date"] == "2026-07-29")
+    day = next(
+        item
+        for item in content["days"]
+        if item["date"] == "2026-07-29T23:59:00+08:00"
+    )
     assert day["reported_quantity"]["daily_total"]["sales_t"]["value"] == 300.0
     for shift in day["reported_quantity"]["shifts"].values():
         measurements = shift["measurements"]
@@ -365,7 +377,11 @@ def test_configured_optional_shift_metric_without_value_remains_missing(
     content = json.loads(
         normalize_batches(pipeline, source, (batch,))[0].payload["source"]["content"]
     )
-    day = next(item for item in content["days"] if item["date"] == "2026-07-29")
+    day = next(
+        item
+        for item in content["days"]
+        if item["date"] == "2026-07-29T00:00:00+08:00"
+    )
     shifts = day["reported_quantity"]["shifts"]
     assert shifts["zero_shift"]["measurements"]["sales_t"]["value"] is None
     assert shifts["zero_shift"]["measurements"]["sales_t"]["quality_flags"] == [
@@ -401,7 +417,11 @@ def test_legacy_six_field_source_becomes_v3_with_new_fields_explicitly_missing(
     event = normalize_batches(pipeline, source, collect_sqlite_query(source))[0]
     content = json.loads(event.payload["source"]["content"])
     assert content["contract_version"] == "ten-quantity-submission-v3"
-    day = next(item for item in content["days"] if item["date"] == "2026-07-29")
+    day = next(
+        item
+        for item in content["days"]
+        if item["date"] == "2026-07-29T23:59:00+08:00"
+    )
     daily = day["reported_quantity"]["daily_total"]
     assert daily["production_t"]["value"] == 350.0
     for metric in (
@@ -477,7 +497,9 @@ def test_complete_source_field_drift_cannot_create_a_fresh_all_null_snapshot(
         normalize_batches(pipeline, source, (drifted,))
 
 
-def test_conflicting_values_never_last_write_win(tmp_path: Path, source_db: Path) -> None:
+def test_values_from_different_minutes_remain_separate_records(
+    tmp_path: Path, source_db: Path
+) -> None:
     config = load_config(write_config(tmp_path / "connector.toml", source_db))
     pipeline = config.pipelines[0]
     source = pipeline.sources[0]
@@ -497,8 +519,19 @@ def test_conflicting_values_never_last_write_win(tmp_path: Path, source_db: Path
             },
         ),
     )
-    with pytest.raises(SourceError, match="冲突值"):
-        normalize_batches(pipeline, source, (batch,))
+    content = json.loads(
+        normalize_batches(pipeline, source, (batch,))[0].payload["source"]["content"]
+    )
+    assert [item["date"] for item in content["days"]] == [
+        "2026-07-29T00:00:00+08:00",
+        "2026-07-29T00:01:00+08:00",
+    ]
+    assert [
+        item["reported_quantity"]["shifts"]["zero_shift"]["measurements"][
+            "production_t"
+        ]["value"]
+        for item in content["days"]
+    ] == [10.0, 11.0]
 
 
 @pytest.mark.parametrize("malicious", ["1,2,3", "1e999", "9" * 129])
@@ -541,11 +574,17 @@ def test_legal_thousands_separator_is_supported(tmp_path: Path, source_db: Path)
     content = json.loads(
         normalize_batches(pipeline, source, (batch,))[0].payload["source"]["content"]
     )
-    day = next(item for item in content["days"] if item["date"] == "2026-07-29")
+    day = next(
+        item
+        for item in content["days"]
+        if item["date"] == "2026-07-29T00:00:00+08:00"
+    )
     assert day["reported_quantity"]["daily_total"]["production_t"]["value"] == 1234.5
 
 
-def test_missing_whole_day_is_explicitly_represented(tmp_path: Path, source_db: Path) -> None:
+def test_unobserved_minutes_and_days_are_not_fabricated(
+    tmp_path: Path, source_db: Path
+) -> None:
     config = load_config(write_config(tmp_path / "connector.toml", source_db))
     pipeline = config.pipelines[0]
     source = pipeline.sources[0]
@@ -560,17 +599,16 @@ def test_missing_whole_day_is_explicitly_represented(tmp_path: Path, source_db: 
     content = json.loads(
         normalize_batches(pipeline, source, (batch,))[0].payload["source"]["content"]
     )
-    assert content["days"][0]["date"] == "2026-07-01"
-    assert content["days"][-1]["date"] == "2026-07-31"
-    missing = next(item for item in content["days"] if item["date"] == "2026-07-30")
-    assert missing["operating_state"] == "unknown"
-    assert all(
-        item["value"] is None for item in missing["reported_quantity"]["daily_total"].values()
-    )
+    assert [item["date"] for item in content["days"]] == [
+        "2026-07-29T00:00:00+08:00",
+        "2026-07-31T00:00:00+08:00",
+    ]
     coverage = content["connector_snapshot"]["coverage"]
-    assert coverage["expected_date_count"] == 31
-    assert coverage["observed_date_count"] == 2
-    assert "2026-07-30" in coverage["missing_dates"]
+    assert coverage["observed_record_count"] == 2
+    assert coverage["observed_times"] == [
+        "2026-07-29T00:00:00+08:00",
+        "2026-07-31T00:00:00+08:00",
+    ]
 
 
 def test_current_month_cutoff_and_future_month_are_explicit(
@@ -593,13 +631,10 @@ def test_current_month_cutoff_and_future_month_are_explicit(
         )[0].payload["source"]["content"]
     )
     assert [item["date"] for item in content["days"]] == [
-        "2026-08-01",
-        "2026-08-02",
-        "2026-08-03",
-        "2026-08-04",
+        "2026-08-02T00:00:00+08:00",
     ]
     coverage = content["connector_snapshot"]["coverage"]
-    assert coverage["coverage_as_of"] == "2026-08-04"
+    assert coverage["coverage_as_of"] == "2026-08-02T00:00:00+08:00"
     assert coverage["reporting_lag_days"] == 0
     future = replace(
         current,
@@ -615,14 +650,14 @@ def test_current_month_cutoff_and_future_month_are_explicit(
 
 
 @pytest.mark.parametrize(
-    ("lag_days", "expected_end"),
+    ("lag_days", "expected_cutoff"),
     [(1, "2026-07-31"), (2, "2026-07-30"), (31, "2026-07-01")],
 )
 def test_month_boundary_lag_uses_one_enterprise_cutoff_for_target_and_snapshot(
     tmp_path: Path,
     source_db: Path,
     lag_days: int,
-    expected_end: str,
+    expected_cutoff: str,
 ) -> None:
     config = load_config(write_config(tmp_path / "connector.toml", source_db))
     pipeline = replace(config.pipelines[0], reporting_lag_days=lag_days)
@@ -647,15 +682,16 @@ def test_month_boundary_lag_uses_one_enterprise_cutoff_for_target_and_snapshot(
     )[0]
     content = json.loads(event.payload["source"]["content"])
     coverage = content["connector_snapshot"]["coverage"]
-    assert content["days"][-1]["date"] == expected_end
-    assert coverage["period_end"] == expected_end
-    assert coverage["coverage_as_of"] == expected_end
-    assert event.payload["source"]["coverage_as_of"] == expected_end
+    observed_time = "2026-07-01T00:00:00+08:00"
+    assert content["days"][-1]["date"] == observed_time
+    assert coverage["period_end"] == observed_time
+    assert coverage["coverage_as_of"] == observed_time
+    assert event.payload["source"]["coverage_as_of"] == observed_time
     draft_key, target_month, target_cutoff = _current_reporting_target(
         pipeline, collected_at.timestamp()
     )
     assert target_month == "2026-07"
-    assert target_cutoff == expected_end
+    assert target_cutoff == expected_cutoff
     assert draft_key == event.draft_key
 
 

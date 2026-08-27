@@ -7,7 +7,6 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-
 from enterprise_agent.five_quantity_exchange import MineIdentity, sign_message
 from enterprise_agent.five_quantity_runtime import (
     CURRENT_SUBMISSION_CONTRACT,
@@ -62,9 +61,9 @@ def test_mine_entry_persons_requires_integer_sum_aggregation(tmp_path: Path) -> 
         acquisition_mode="manual_import",
         actor="operator-1",
     )["draft"]
-    measurement = draft["payload"]["days"][0]["reported_quantity"][
-        "daily_total"
-    ]["mine_entry_persons"]
+    measurement = draft["payload"]["days"][0]["reported_quantity"]["daily_total"][
+        "mine_entry_persons"
+    ]
     measurement["aggregation"] = "snapshot"
     with pytest.raises(ValueError, match="mine_entry_persons.aggregation"):
         validate_five_quantity_payload(
@@ -83,6 +82,76 @@ def test_mine_entry_persons_requires_integer_sum_aggregation(tmp_path: Path) -> 
             confirmed=False,
             contract_version=CURRENT_SUBMISSION_CONTRACT,
         )
+
+
+def test_watch_directories_can_be_configured_and_survive_restart(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "watch-settings.db"
+    source_a = tmp_path / "source-a"
+    source_b = tmp_path / "source-b"
+    source_a.mkdir()
+    source_b.mkdir()
+    quarantine = tmp_path / "quarantine-watch"
+    runtime = FiveQuantityRuntime(
+        Repository(database),
+        identity=identity(),
+        quarantine_directory=quarantine,
+        stable_seconds=0.5,
+    )
+
+    result = runtime.configure_watched_directories(
+        [str(source_a), str(source_b)],
+        actor="operator-1",
+    )
+
+    assert result["enabled"] is True
+    assert result["watched_directories"] == [
+        str(source_a.resolve()),
+        str(source_b.resolve()),
+    ]
+    (source_a / "minute-data.csv").write_bytes(
+        b"date,production_t\n2026-08-27T08:15,100\n"
+    )
+    assert runtime.scan_watched_directories() == []
+    time.sleep(0.55)
+    scanned = runtime.scan_watched_directories()
+    assert len(scanned) == 1
+    assert scanned[0]["draft"]["payload"]["days"][0]["date"] == (
+        "2026-08-27T08:15:00+08:00"
+    )
+    restarted = FiveQuantityRuntime(
+        Repository(database),
+        identity=identity(),
+        watched_directories=(),
+        quarantine_directory=quarantine,
+    )
+    assert restarted.status()["watched_directories"] == result["watched_directories"]
+    assert restarted.store.verify_audit()["valid"] is True
+
+    disabled = restarted.configure_watched_directories([], actor="operator-1")
+    assert disabled == {"watched_directories": [], "enabled": False}
+
+
+def test_watch_directory_rejects_relative_missing_and_state_parent_paths(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    quarantine = state / "quarantine"
+    runtime = FiveQuantityRuntime(
+        Repository(state / "watch-validation.db"),
+        identity=identity(),
+        quarantine_directory=quarantine,
+    )
+    with pytest.raises(ValueError, match="完整路径"):
+        runtime.configure_watched_directories(["relative-data"], actor="operator-1")
+    with pytest.raises(ValueError, match="不存在"):
+        runtime.configure_watched_directories(
+            [str(tmp_path / "missing")], actor="operator-1"
+        )
+    with pytest.raises(ValueError, match="不能放在来源目录"):
+        runtime.configure_watched_directories([str(tmp_path)], actor="operator-1")
 
 
 def test_production_batch_has_read_only_assistant_view(tmp_path: Path) -> None:
@@ -111,10 +180,7 @@ def test_production_batch_has_read_only_assistant_view(tmp_path: Path) -> None:
     assert view["mine_id"] == identity().mine_id
     assert view["window_start"].startswith("2026-07-01")
     assert view["window_end"].startswith("2026-07-02")
-    assert any(
-        item["metric_code"] == "production_t"
-        for item in view["observations"]
-    )
+    assert any(item["metric_code"] == "production_t" for item in view["observations"])
 
     service.enable_harness()
     try:
@@ -185,7 +251,8 @@ class FakeGovernment:
                 "signature_envelope": {
                     "algorithm": (
                         "hmac-sha256-v3"
-                        if contract in {
+                        if contract
+                        in {
                             "ten-quantity-submission-v3",
                             "analysis-report-v3",
                         }
@@ -285,7 +352,7 @@ class FakeGovernment:
                             "expected_max": None,
                             "score": None,
                             "evidence_sha256": "6" * 64,
-                        }
+                        },
                     ],
                     "requires_response": True,
                 }
@@ -360,8 +427,7 @@ class FakeRiskModel:
         assert "l1_reconciliation" not in serialized
         assert "past_only_page_hinkley" not in serialized
         return (
-            "用电与产量关系出现需要核对的变化，"
-            "建议查看当日日报、班次记录和检修记录。"
+            "用电与产量关系出现需要核对的变化，建议查看当日日报、班次记录和检修记录。"
         )
 
     def draft_risk_response(

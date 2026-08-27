@@ -5885,6 +5885,28 @@ body.is-model-api-admin #coalChatButton {
   padding: 9px 10px;
 }
 
+.fq-watch-config {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 16px;
+}
+
+.fq-watch-config textarea {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  line-height: 1.45;
+  min-height: 82px;
+  padding: 10px;
+  resize: vertical;
+  width: 100%;
+}
+
+.fq-watch-config > small {
+  color: var(--ink-soft);
+}
+
 .fq-upload-card {
   min-height: 0;
 }

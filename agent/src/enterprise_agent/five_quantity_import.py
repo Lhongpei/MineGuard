@@ -205,7 +205,17 @@ _HEADER_DANGEROUS_UNIT_ALIASES = {
         )
     },
 }
-_DATE_ALIASES = {"日期", "date", "统计日期"}
+_DATE_ALIASES = {
+    "数据时间",
+    "记录时间",
+    "观测时间",
+    "时间",
+    "datetime",
+    "timestamp",
+    "日期",
+    "date",
+    "统计日期",
+}
 _INFERRED_DATE_HEADER_HINTS = (
     "businessdate",
     "reportdate",
@@ -560,8 +570,7 @@ def _csv_rows(content: bytes) -> tuple[list[list[str]], str, str]:
         dialect = csv.excel
     try:
         rows = [
-            list(row)
-            for row in csv.reader(io.StringIO(text), dialect, strict=True)
+            list(row) for row in csv.reader(io.StringIO(text), dialect, strict=True)
         ]
     except csv.Error as error:
         raise ImportContentError("CSV 引号、分隔符或字段长度格式非法") from error
@@ -655,23 +664,62 @@ def _formula_like(value: Any) -> bool:
     return clean.startswith((*_FORMULA_PREFIXES, "-"))
 
 
-def _date_value(value: Any) -> date | None:
+def _date_value(value: Any) -> date | datetime | None:
     if isinstance(value, datetime):
-        return value.date()
+        return value
     if isinstance(value, date):
         return value
     if isinstance(value, (int, float)) and 1 <= float(value) <= 2958465:
         # Excel's 1900 epoch including its historical leap-year bug.
-        return date(1899, 12, 30) + timedelta(days=int(float(value)))
+        excel_value = float(value)
+        parsed = datetime(1899, 12, 30) + timedelta(days=excel_value)
+        return parsed if not excel_value.is_integer() else parsed.date()
     if not isinstance(value, str):
         return None
     clean = value.strip()
-    for pattern in ("%Y.%m.%d", "%Y-%m-%d", "%Y/%m/%d", "%Y年%m月%d日"):
+    try:
+        parsed_iso = datetime.fromisoformat(clean.replace("Z", "+00:00"))
+    except ValueError:
+        parsed_iso = None
+    if parsed_iso is not None and ("T" in clean or ":" in clean):
+        return parsed_iso
+    for pattern in (
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M",
+        "%Y.%m.%d %H:%M",
+        "%Y年%m月%d日 %H:%M",
+        "%Y.%m.%d",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y年%m月%d日",
+    ):
         try:
-            return datetime.strptime(clean, pattern).date()
+            parsed = datetime.strptime(clean, pattern)
+            return parsed if "%H" in pattern else parsed.date()
         except ValueError:
             continue
     return None
+
+
+def _minute_value(value: Any, timezone: str) -> datetime | None:
+    """Return one governed local minute without silently keeping seconds."""
+
+    parsed = _date_value(value)
+    if parsed is None:
+        return None
+    zone = ZoneInfo(timezone)
+    if isinstance(parsed, datetime):
+        instant = (
+            parsed.replace(tzinfo=zone)
+            if parsed.tzinfo is None
+            else parsed.astimezone(zone)
+        )
+    else:
+        instant = datetime.combine(parsed, time.min, tzinfo=zone)
+    if instant.second or instant.microsecond:
+        return None
+    return instant.replace(second=0, microsecond=0)
 
 
 def _measurement(metric: str, value: Any, source_id: str) -> dict[str, Any]:
@@ -689,19 +737,18 @@ def _measurement(metric: str, value: Any, source_id: str) -> dict[str, Any]:
 def _empty_set(
     source_id: str, *, shift_scope: bool = False
 ) -> dict[str, dict[str, Any]]:
-    measurements = {
-        metric: _measurement(metric, None, source_id) for metric in METRICS
-    }
+    measurements = {metric: _measurement(metric, None, source_id) for metric in METRICS}
     if shift_scope:
         for metric in OPTIONAL_SHIFT_METRICS:
             measurements[metric]["quality_flags"] = ["not_applicable"]
     return measurements
 
 
-def _shift_window(day: date, key: str, timezone: str) -> tuple[str, str]:
+def _shift_window(day: date | datetime, key: str, timezone: str) -> tuple[str, str]:
     zone = ZoneInfo(timezone)
     start_hours = {"zero_shift": 0, "eight_shift": 8, "four_shift": 16}
-    start = datetime.combine(day, time(start_hours[key]), tzinfo=zone)
+    calendar_day = day.date() if isinstance(day, datetime) else day
+    start = datetime.combine(calendar_day, time(start_hours[key]), tzinfo=zone)
     end = start + timedelta(hours=8)
     return start.isoformat(), end.isoformat()
 
@@ -816,10 +863,7 @@ def _extract_header_annotations(
             active_content = []
             continue
         if character in _HEADER_BRACKET_PAIRS.values():
-            if (
-                active_open is None
-                or _HEADER_BRACKET_PAIRS[active_open] != character
-            ):
+            if active_open is None or _HEADER_BRACKET_PAIRS[active_open] != character:
                 return "", [], "来源表头注记括号不匹配或未闭合"
             annotations.append("".join(active_content))
             active_open = None
@@ -872,13 +916,13 @@ def _target_metric_aliases(metric: str) -> tuple[str, ...]:
 
 def _header_modifiers(metric: str) -> frozenset[str]:
     modifiers = {
-            *_normal_values(_HEADER_NON_UNIT_QUALIFIERS),
-            *_normal_values(_HEADER_SEMANTIC_QUALIFIERS.get(metric, ())),
-            *_normal_values(_SHIFT_ALIASES),
-            "daily_total",
-            "daily",
-            "日统计",
-            "合计",
+        *_normal_values(_HEADER_NON_UNIT_QUALIFIERS),
+        *_normal_values(_HEADER_SEMANTIC_QUALIFIERS.get(metric, ())),
+        *_normal_values(_SHIFT_ALIASES),
+        "daily_total",
+        "daily",
+        "日统计",
+        "合计",
     }
     if metric in {"detonators_count", "explosives_kg"}:
         modifiers.update(
@@ -958,8 +1002,7 @@ def _header_detail_issue(metric: str, detail: str) -> str | None:
         return None
     if state == "dangerous":
         return (
-            f"来源多层表头单位“{detail}”不是固定单位 {UNITS[metric]}；"
-            "系统不会静默换算"
+            f"来源多层表头单位“{detail}”不是固定单位 {UNITS[metric]}；系统不会静默换算"
         )
     return (
         f"来源多层表头注记“{detail}”未获批准；系统不会猜测单位，"
@@ -1057,9 +1100,10 @@ def _looks_like_header_detail(
             or _formula_like(value)
         ):
             return False
-        if not inherited_headers[index] or _metric_match(
-            inherited_headers[index]
-        ) is None:
+        if (
+            not inherited_headers[index]
+            or _metric_match(inherited_headers[index]) is None
+        ):
             return False
         found = True
     return found
@@ -1101,14 +1145,18 @@ def _build_layout(
         raise ImportContentError("日期数据之前没有可读取的表头")
     width = min(MAX_COLUMNS, max(len(header) for header in header_rows))
     normalized_rows = [
-        _filled_header_row(header, width) if len(header_rows) > 1 else [
+        _filled_header_row(header, width)
+        if len(header_rows) > 1
+        else [
             _normal_text(header[column]) if column < len(header) else ""
             for column in range(width)
         ]
         for header in header_rows
     ]
     display_rows = [
-        _display_filled_header_row(header, width) if len(header_rows) > 1 else [
+        _display_filled_header_row(header, width)
+        if len(header_rows) > 1
+        else [
             str(header[column]).strip()
             if column < len(header) and header[column] is not None
             else ""
@@ -1121,9 +1169,9 @@ def _build_layout(
         for column in range(width)
     )
     display_headers = tuple(
-        " / ".join(
-            dict.fromkeys(row[column] for row in display_rows if row[column])
-        )[:240]
+        " / ".join(dict.fromkeys(row[column] for row in display_rows if row[column]))[
+            :240
+        ]
         for column in range(width)
     )
     header_segments = tuple(
@@ -1196,9 +1244,7 @@ def _safe_declared_header_row(
 
 def _safe_inferred_date_header(value: Any) -> bool:
     normal = _normal_text(value)
-    return bool(normal) and any(
-        hint in normal for hint in _INFERRED_DATE_HEADER_HINTS
-    )
+    return bool(normal) and any(hint in normal for hint in _INFERRED_DATE_HEADER_HINTS)
 
 
 def _find_table_layout(sheet: ParsedSheet) -> TableLayout:
@@ -1261,17 +1307,13 @@ def _find_table_layout(sheet: ParsedSheet) -> TableLayout:
             continue
         for column in range(width):
             header_value = (
-                rows[header_start][column]
-                if column < len(rows[header_start])
-                else None
+                rows[header_start][column] if column < len(rows[header_start]) else None
             )
             if not _safe_inferred_date_header(header_value):
                 continue
             if any(
                 _date_value(
-                    rows[previous][column]
-                    if column < len(rows[previous])
-                    else None
+                    rows[previous][column] if column < len(rows[previous]) else None
                 )
                 is not None
                 for previous in range(header_start)
@@ -1431,10 +1473,10 @@ def _find_table(
             )
             continue
         unit_issue = csv_header_unit_issue(
-                metric,
-                layout.display_headers[column],
-                header_segments=layout.header_segments[column],
-            )
+            metric,
+            layout.display_headers[column],
+            header_segments=layout.header_segments[column],
+        )
         if unit_issue is not None:
             warnings.append(
                 {
@@ -1524,7 +1566,7 @@ def _normalise_sheet(
     for row_index in range(start_row, min(len(sheet.rows), MAX_ROWS)):
         row = sheet.rows[row_index]
         raw_date = row[date_column] if date_column < len(row) else None
-        day_value = _date_value(raw_date)
+        day_value = _minute_value(raw_date, timezone)
         if day_value is None:
             if any(value not in {None, ""} for value in row):
                 suggestions.append(
@@ -1549,9 +1591,7 @@ def _normalise_sheet(
         )
         sources.append(source)
         daily = _empty_set(source_id)
-        shifts = {
-            key: _empty_set(source_id, shift_scope=True) for key in SHIFT_KEYS
-        }
+        shifts = {key: _empty_set(source_id, shift_scope=True) for key in SHIFT_KEYS}
         for column, (group, period) in mapping.items():
             if column in blocked_columns:
                 continue
@@ -1574,13 +1614,9 @@ def _normalise_sheet(
                         "metric": group,
                         "period": period,
                         "reason": (
-                            "单元格疑似公式、命令前缀或非法数值格式，"
-                            "未执行且未写入数值"
+                            "单元格疑似公式、命令前缀或非法数值格式，未执行且未写入数值"
                             if formula_like
-                            else (
-                                "单元格不符合该字段的安全数值范围，"
-                                "未猜测或写入数值"
-                            )
+                            else ("单元格不符合该字段的安全数值范围，未猜测或写入数值")
                         ),
                         "requires_human_review": True,
                     }
@@ -1608,7 +1644,7 @@ def _normalise_sheet(
         )
         days.append(
             {
-                "date": day_value.isoformat(),
+                "date": day_value.isoformat(timespec="seconds"),
                 "operating_state": operating_state,
                 "reported_quantity": {
                     "daily_total": daily,
@@ -1640,9 +1676,11 @@ def _json_payload(
         raise ImportContentError(
             "已签名的五量 V2 报文不能补字段升级为十量 V3；请从原始凭证重新生成"
         )
-    if isinstance(parsed, dict) and "contract_version" in parsed and parsed.get(
-        "contract_version"
-    ) != "ten-quantity-submission-v3":
+    if (
+        isinstance(parsed, dict)
+        and "contract_version" in parsed
+        and parsed.get("contract_version") != "ten-quantity-submission-v3"
+    ):
         raise ImportContentError("JSON 报文 contract_version 不受支持")
     candidate = parsed.get("payload") if isinstance(parsed, dict) else None
     if candidate is None and isinstance(parsed, dict) and "days" in parsed:
@@ -1669,15 +1707,18 @@ def _json_payload(
     for index, item in enumerate(days):
         if not isinstance(item, dict):
             raise ImportContentError(f"JSON days[{index}] 必须是对象")
-        day_value = _date_value(item.get("date"))
+        day_value = _minute_value(item.get("date"), identity.timezone)
         if day_value is None:
-            raise ImportContentError(f"JSON days[{index}].date 非法")
+            raise ImportContentError(
+                f"JSON days[{index}].date 必须是带时区、精确到分钟的数据时间"
+            )
         quantity = item.get("reported_quantity")
         if not isinstance(quantity, dict):
             raise ImportContentError(f"JSON days[{index}] 缺少 reported_quantity")
         # Round-trip through the strict local validator later.  Replace all
         # source refs so the imported document cannot claim another authority.
         copied = json.loads(jcs_json(item))
+        copied["date"] = day_value.isoformat(timespec="seconds")
         measurement_sets = [
             ("daily_total", copied["reported_quantity"]["daily_total"]),
             *[
@@ -1706,9 +1747,7 @@ def _json_payload(
                         raise ImportContentError(f"JSON 缺少规范数据项 {metric}")
                     measurement_set[metric] = _measurement(metric, None, source_id)
                     if scope != "daily_total":
-                        measurement_set[metric]["quality_flags"] = [
-                            "not_applicable"
-                        ]
+                        measurement_set[metric]["quality_flags"] = ["not_applicable"]
                 measurement_set[metric]["source_refs"] = [source_id]
         clean_days.append(copied)
     clean_days.sort(key=lambda item: item["date"])
@@ -1772,8 +1811,8 @@ def _jsonl_payload(
             raise ImportContentError(
                 f"JSONL 第 {line_number} 行必须是日报，或包含 payload.days/days"
             )
-        if len(days) > 366:
-            raise ImportContentError("JSONL 一次最多导入 366 个日报")
+        if len(days) > 4096:
+            raise ImportContentError("JSONL 一次最多导入 4096 条生产记录")
     if not days:
         raise ImportContentError("JSONL 没有可读取的日报")
     payload = _json_payload(
@@ -1803,11 +1842,11 @@ def _draft_payload(
     processing_rule: str = "ten-quantity-deterministic-normalizer-v3",
 ) -> dict[str, Any]:
     if not days:
-        raise ImportContentError("未提取到任何有效日报")
+        raise ImportContentError("未提取到任何有效生产记录")
     days.sort(key=lambda item: item["date"])
     dates = [item["date"] for item in days]
     if len(dates) != len(set(dates)):
-        raise ImportContentError("文件中存在重复日期，请人工处理后重新导入")
+        raise ImportContentError("文件中存在重复的数据时间，请合并后重新导入")
     months = {value[:7] for value in dates}
     processing_record = {
         "captured_at": captured_at,
@@ -1827,8 +1866,7 @@ def _draft_payload(
             not isinstance(model_output_sha256, str)
             or len(model_output_sha256) != 64
             or any(
-                character not in "0123456789abcdef"
-                for character in model_output_sha256
+                character not in "0123456789abcdef" for character in model_output_sha256
             )
         ):
             raise ImportContentError("模型参与字段映射时必须记录模型输出 SHA-256")
@@ -1885,7 +1923,7 @@ def inspect_five_quantity_csv(
     layout = _find_table_layout(sheet)
     valid_dates: list[date] = []
     row_count = 0
-    for row in rows[layout.data_start:]:
+    for row in rows[layout.data_start :]:
         if any(value not in {None, ""} for value in row):
             row_count += 1
         raw_date = row[layout.date_column] if layout.date_column < len(row) else None

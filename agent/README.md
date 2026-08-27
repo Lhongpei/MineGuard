@@ -204,10 +204,11 @@ API Key 使用机器级 DPAPI 加密并受实例 ACL 保护，不进入 `agent.e
 
 ## 获取数据
 
-前端人工上传支持 `.et`、`.xls`、`.xlsx`、`.csv`、`.json`、`.jsonl`。标准日汇总
-CSV 是“日期 + 11 个原子字段”的 12 列模板；旧五量文件只可生成历史复核内容，缺少
-的新字段不会补数。固定目录
-直采在启动前配置，例如：
+前端人工上传支持 `.et`、`.xls`、`.xlsx`、`.csv`、`.json`、`.jsonl`。标准
+CSV 是“数据时间 + 11 个原子字段”的 12 列模板；数据时间精确到分钟，允许同日多条、
+跳过日期和跨自然月，缺少的新字段不会补数。企业账号可在“数据报送 → 自动发现与报送”
+中直接保存当前矿井的一个或多个本机目录，服务会立即验证实际读取权限并持久保存。
+也可在首次启动前通过环境变量预置：
 
 ```bash
 export ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS=/srv/mine-readonly/five-quantity-inbox
@@ -238,8 +239,9 @@ export ENTERPRISE_FIVE_QUANTITY_WATCH_DIRS=/srv/mine-readonly/five-quantity-inbo
 | `GET` | `/api/v2/status` | 固定矿井、接口、监听目录和 cursor 状态 |
 | `GET/POST` | `/api/v2/imports` | 收件记录 / 人工导入 base64 文件；`include_discarded=true` 可追溯已放弃项 |
 | `POST` | `/api/v2/direct-ingest` | 受控设备/API 直采入口 |
+| `PUT` | `/api/v2/watch/config` | 验证并保存当前矿井的自动发现目录；空数组关闭目录发现 |
 | `POST` | `/api/v2/watch/scan` | 立即扫描固定目录 |
-| `GET` | `/api/v2/drafts` | 月报复核稿列表；`include_discarded=true` 可追溯已放弃项 |
+| `GET` | `/api/v2/drafts` | 生产数据批次复核稿列表；`include_discarded=true` 可追溯已放弃项 |
 | `GET/PATCH/DELETE` | `/api/v2/drafts/{id}` | 读取 / 保存 / 带修订号和原因软放弃普通未确认稿；正式更正草稿不可放弃 |
 | `GET` | `/api/v2/drafts/{id}/ingestions` | 查看机器导入批次、来源、拒绝原因和数据就绪预检 |
 | `POST` | `/api/v2/drafts/{id}/correction` | 从已获政府回执的 V3 末版幂等创建唯一后继更正草稿；需 `write` 和 CSRF |

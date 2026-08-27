@@ -219,7 +219,7 @@
             <button class="button button-secondary fq-template-button" id="fqDownloadCsvTemplate" type="button">
               下载生产数据 CSV 模板
             </button>
-            <small class="fq-template-hint">每行是一条日期记录，可只填实际具备的指标，也可跨自然月；没有的数据保持空白。</small>
+            <small class="fq-template-hint">每行是一条精确到分钟的生产记录，同一天可填写多条；可只填实际具备的指标，也可跨自然月。</small>
             <label class="field">
               <span>选择 CSV 文件（最大 20 MiB）</span>
               <input id="fqUploadFile" type="file" accept=".et,.xls,.xlsx,.csv,.json,.jsonl" required disabled>
@@ -281,7 +281,16 @@
             <p class="fq-connector-summary" id="fqConnectorSummary">
               正在检查企业系统自动采集接口…
             </p>
-            <button class="button button-secondary" id="fqScanWatch" type="button">立即扫描一次</button>
+            <form class="fq-watch-config" id="fqWatchConfigForm">
+              <label for="fqWatchDirectories"><strong>自动发现目录</strong></label>
+              <textarea id="fqWatchDirectories" rows="3" spellcheck="false" placeholder="每行一个完整路径，例如：C:\企业生产数据"></textarea>
+              <small>每行填写一个本机完整目录。保存后立即生效并仅用于当前矿井实例；留空保存可关闭目录自动发现。</small>
+              <div class="fq-manual-actions">
+                <button class="button button-secondary" id="fqSaveWatchConfig" type="submit">保存目录</button>
+                <button class="button button-secondary" id="fqScanWatch" type="button">立即扫描一次</button>
+              </div>
+              <p class="fq-upload-result" id="fqWatchConfigResult" role="status" aria-live="polite" hidden></p>
+            </form>
             <small>
               系统会等待文件写入稳定、按内容去重，并在发送前执行确定性检查和一次 AI 检查。
               两层检查都通过才会自动报送；结构变化、歧义或冲突会暂停并进入待人工核验。
@@ -292,10 +301,10 @@
         <details class="fq-manual-entry fq-card">
           <summary><span><strong>手工填写生产数据</strong><small>自动发现或文件导入不可用时的兜底方式</small></span><span>展开填写</span></summary>
           <form id="fqManualForm">
-            <p class="fq-safe-note">可填写任意日期范围和任意已掌握指标；至少填写一项数值。空白不会被替换为 0。</p>
+            <p class="fq-safe-note">可填写任意时间范围和任意已掌握指标；数据时间精确到分钟，至少填写一项数值。空白不会被替换为 0。</p>
             <div class="fq-table-wrap">
               <table class="fq-table fq-manual-table">
-                <thead><tr><th>日期</th><th>风量</th><th>电量</th><th>雷管</th><th>炸药</th><th>入井人员量</th><th>产量</th><th>开采量</th><th>销售量</th><th>运输量</th><th>洗煤量</th><th>开票量</th><th></th></tr></thead>
+                <thead><tr><th>数据时间</th><th>风量</th><th>电量</th><th>雷管</th><th>炸药</th><th>入井人员量</th><th>产量</th><th>开采量</th><th>销售量</th><th>运输量</th><th>洗煤量</th><th>开票量</th><th></th></tr></thead>
                 <tbody id="fqManualRows"></tbody>
               </table>
             </div>

@@ -27,8 +27,8 @@
       "operator_name": "示例一号煤业有限公司"
     },
     "timezone": "Asia/Shanghai",
-    "period_start": "2026-07-31",
-    "period_end": "2026-07-31",
+    "period_start": "2026-07-31T23:30:00+08:00",
+    "period_end": "2026-07-31T23:30:00+08:00",
     "closed_at": "2026-08-01T00:00:00Z",
     "comparison_context": {
       "capacity_band": "large",
@@ -39,7 +39,7 @@
     },
     "days": [
       {
-        "date": "2026-07-31",
+        "date": "2026-07-31T23:30:00+08:00",
         "operating_state": "producing",
         "reported_quantity": {
           "daily_total": {
@@ -154,7 +154,7 @@
     "key_id": "enterprise-key-2026-02",
     "signed_at": "2026-08-01T00:05:00Z",
     "nonce": "VGVuUXVhbnRpdHlWZWN0b3IwMQ",
-    "payload_sha256": "2e22623b7c9303cd3d26698533d8c26ac39d93e803b0fb1954a64ad7d9be885a",
-    "signature": "18703f0be96f66afaf0bf079ec89605eb3637fda6935332ef2bdde8a6ba98f89"
+    "payload_sha256": "9d3265f8952c1d3ef1c3e54c3bad3e6a65948dac031cb6c78c841b129fd7da36",
+    "signature": "a123ef420ac50b03f9a3373c11ef8c3572a588cca94b16b5ad2b706899ad4086"
   }
 }

@@ -80,10 +80,10 @@
     discarded: "已放弃",
   });
   const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
-  // 给日常经办人的默认模板只有日期加十一原子字段，共十二列；班次
+  // 给日常经办人的默认模板只有数据时间加十一原子字段，共十二列；班次
   // 明细在复核页按需展开，避免默认导出四十余列的宽表。
   const CSV_TEMPLATE_HEADER = [
-    "日期",
+    "数据时间",
     "风量(m3/min)",
     "电量(kWh)",
     "雷管(发)",
@@ -193,6 +193,16 @@
     });
     return text;
   };
+  const formatMinute = (value) => {
+    if (!value) return "—";
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.valueOf())
+      ? String(value)
+      : parsed.toLocaleString("zh-CN", {
+          year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", hour12: false,
+        });
+  };
   const evidenceMethodLabel = (value) => {
     const method = String(value || "");
     if (method === "l1_reconciliation") return "多项数据一致性核对";
@@ -216,11 +226,13 @@
     return "本地只读核对";
   };
   const reportingWindow = (payload) => {
+    const start = payload ? formatMinute(payload.period_start) : "—";
+    const end = payload ? formatMinute(payload.period_end) : "—";
     return {
       label: "生产数据批次",
       dateRange: payload && payload.period_start === payload.period_end
-        ? payload.period_start
-        : `${payload.period_start} 至 ${payload.period_end}`,
+        ? start
+        : `${start} 至 ${end}`,
     };
   };
   const can = (permission) =>
@@ -256,6 +268,7 @@
     $("fqCancelPreview").addEventListener("click", cancelUploadPreview);
     $("fqCancelPreviewBottom").addEventListener("click", cancelUploadPreview);
     $("fqMaterializeButton").addEventListener("click", materializeUploadPreview);
+    $("fqWatchConfigForm").addEventListener("submit", saveWatchConfiguration);
     $("fqScanWatch").addEventListener("click", scanWatchedDirectories);
     $("fqManualAddRow").addEventListener("click", () => addManualRow());
     $("fqManualForm").addEventListener("submit", submitManualRows);
@@ -417,7 +430,9 @@
     const fileInput = $("fqUploadFile");
     const uploadButton = $("fqUploadButton");
     const scanButton = $("fqScanWatch");
-    if (!fileInput || !uploadButton || !scanButton) return;
+    const watchInput = $("fqWatchDirectories");
+    const watchSaveButton = $("fqSaveWatchConfig");
+    if (!fileInput || !uploadButton || !scanButton || !watchInput || !watchSaveButton) return;
     const writable = can("write");
     const previewActive = false;
     const file = fileInput.files && fileInput.files[0];
@@ -428,6 +443,8 @@
     uploadButton.disabled =
       previewActive || !writable || !validFile || state.busy.has("fqUploadButton");
     scanButton.disabled = !writable || state.busy.has("fqScanWatch");
+    watchInput.disabled = !writable || state.busy.has("fqSaveWatchConfig");
+    watchSaveButton.disabled = !writable || state.busy.has("fqSaveWatchConfig");
     const previewBusy = state.busy.has("fqMaterializeButton");
     $("fqCancelPreview").disabled = previewBusy;
     $("fqCancelPreviewBottom").disabled = previewBusy;
@@ -584,13 +601,13 @@
     ) {
       previewColumns.unshift({
         source_index: Number(dateColumn.source_index),
-        source_header: dateColumn.source_header || "日期",
+        source_header: dateColumn.source_header || "数据时间",
         target_metric: "date",
         target_period: null,
         target_unit: "ISO date",
         confidence: dateColumn.confidence,
         source: "deterministic",
-        reason: dateColumn.inferred ? "日期列由格式推断，建稿后需重点复核" : "日期列已确定",
+        reason: dateColumn.inferred ? "数据时间列由格式推断，建稿后需重点复核" : "数据时间列已确定",
         status: "date",
       });
     }
@@ -641,9 +658,9 @@
     $("fqMappingPreview").hidden = false;
     const monthText = state.uploadPreview.detected_months.length
       ? state.uploadPreview.detected_months.join("、")
-      : "日期范围待确认";
+      : "时间范围待确认";
     const dayText = state.uploadPreview.valid_day_count > 0
-      ? ` · ${state.uploadPreview.valid_day_count} 个有效日期`
+      ? ` · ${state.uploadPreview.valid_day_count} 条有效时间记录`
       : "";
     $("fqPreviewSummary").textContent =
       `${filename} · ${columns.length} 个来源列 · ${monthText}${dayText}`;
@@ -665,7 +682,7 @@
         : "未提供";
       const fixedDate = isFixedDateColumn(column);
       const control = fixedDate
-        ? '<span class="fq-fixed-mapping">日期列（固定）</span>'
+        ? '<span class="fq-fixed-mapping">数据时间列（固定）</span>'
         : `<label class="fq-mapping-select-label"><span class="sr-only">为 ${escapeHtml(column.source_header)} 选择映射</span><select class="fq-mapping-select" data-source-index="${column.source_index}">${mappingOptionHtml(column.selection)}</select></label>`;
       return `<tr class="${previewRowClass(column)}" data-preview-row="${column.source_index}">
         <td><strong>${escapeHtml(column.source_header)}</strong><small>第 ${column.source_index + 1} 列</small></td>
@@ -843,7 +860,7 @@
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
     setUploadResult(
-      "生产数据 CSV 模板已下载；每行填写一个日期，没有的数据保持空白。",
+      "生产数据 CSV 模板已下载；每行填写一个精确到分钟的数据时间，没有的数据保持空白。",
       "success",
     );
   }
@@ -866,7 +883,10 @@
     const directories = state.status.watched_directories || [];
     $("fqWatchSummary").textContent = directories.length
       ? `已配置 ${directories.length} 个受控目录：${directories.join("；")}`
-      : "尚未配置固定监听目录；可继续使用人工上传或设备/API 接口。";
+      : "尚未配置自动发现目录；可在下方填写路径，或继续使用人工上传。";
+    if (document.activeElement !== $("fqWatchDirectories")) {
+      $("fqWatchDirectories").value = directories.join("\n");
+    }
     const connectorEnabled = state.status.machine_connector_enabled;
     const connectorCount = Number(state.status.connector_client_count || 0);
     $("fqConnectorSummary").textContent =
@@ -894,7 +914,10 @@
     );
     if (coverage) {
       $("fqLatestCoverage").textContent = `${Number(coverage.provided_quantity_count || 0)}/10 项`;
-      $("fqLatestCoverageDetail").textContent = `${coverage.period_start === coverage.period_end ? coverage.period_start : `${coverage.period_start} 至 ${coverage.period_end}`} · ${Number(coverage.day_count || 0)} 条日期记录`;
+      const range = coverage.period_start === coverage.period_end
+        ? formatMinute(coverage.period_start)
+        : `${formatMinute(coverage.period_start)} 至 ${formatMinute(coverage.period_end)}`;
+      $("fqLatestCoverageDetail").textContent = `${range} · ${Number(coverage.day_count || 0)} 条生产记录`;
     } else {
       $("fqLatestCoverage").textContent = "—";
       $("fqLatestCoverageDetail").textContent = "尚无生产数据";
@@ -1076,12 +1099,12 @@
   function manualDateValue() {
     const now = new Date();
     const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
-    return local.toISOString().slice(0, 10);
+    return local.toISOString().slice(0, 16);
   }
 
   function addManualRow(values = {}) {
     const row = document.createElement("tr");
-    row.innerHTML = `<td><label class="sr-only">日期</label><input class="fq-manual-input" data-manual-date type="date" value="${escapeHtml(values.date || manualDateValue())}"></td>${MANUAL_COLUMNS.map(([metric]) => `<td><label class="sr-only">${escapeHtml(metricLabel(metric))}</label><input class="fq-manual-input" data-manual-metric="${escapeHtml(metric)}" type="number" min="0" step="any" inputmode="decimal" value="${escapeHtml(values[metric] == null ? "" : values[metric])}"></td>`).join("")}<td><button class="fq-link-button" data-manual-action="remove" type="button">删除</button></td>`;
+    row.innerHTML = `<td><label class="sr-only">数据时间</label><input class="fq-manual-input" data-manual-date type="datetime-local" step="60" value="${escapeHtml(values.date || manualDateValue())}"></td>${MANUAL_COLUMNS.map(([metric]) => `<td><label class="sr-only">${escapeHtml(metricLabel(metric))}</label><input class="fq-manual-input" data-manual-metric="${escapeHtml(metric)}" type="number" min="0" step="any" inputmode="decimal" value="${escapeHtml(values[metric] == null ? "" : values[metric])}"></td>`).join("")}<td><button class="fq-link-button" data-manual-action="remove" type="button">删除</button></td>`;
     $("fqManualRows").append(row);
   }
 
@@ -1114,8 +1137,8 @@
       );
       if (!values.some((value) => value !== "")) return;
       const date = row.querySelector("[data-manual-date]").value.trim();
-      if (!date) throw new Error("每条已填写的数据都必须选择日期。");
-      if (seenDates.has(date)) throw new Error(`日期 ${date} 重复，请合并到同一行。`);
+      if (!date) throw new Error("每条已填写的数据都必须选择数据时间。");
+      if (seenDates.has(date)) throw new Error(`数据时间 ${date} 重复，请合并到同一行。`);
       seenDates.add(date);
       dataRows.push([date, ...values]);
     });
@@ -1473,7 +1496,7 @@
           <div><small>绑定草稿修订</small><strong>${escapeHtml(preflight.bound_revision || preflight.draft_revision || draft.revision)}</strong></div>
           <div><small>来源数</small><strong>${escapeHtml(sourceCount)}</strong></div>
           <div class="${missing ? "is-warn" : "is-ok"}"><small>缺失数据格</small><strong>${escapeHtml(missing)}</strong></div>
-          <div class="${missingDays ? "is-warn" : "is-ok"}"><small>缺失整日报</small><strong>${escapeHtml(missingDays)}</strong></div>
+          <div class="${missingDays ? "is-warn" : "is-ok"}"><small>缺失完整记录</small><strong>${escapeHtml(missingDays)}</strong></div>
           <div class="${mismatches ? "is-warn" : "is-ok"}"><small>日报/班次不一致</small><strong>${escapeHtml(mismatches)}</strong></div>
         </div>
         ${warnings.length ? `<ul class="fq-autofill-warnings">${warnings.map((warning) => `<li>${escapeHtml(typeof warning === "string" ? warning : warning.message || warning.reason || "存在待人工核对项")}</li>`).join("")}</ul>` : ""}`
@@ -1688,8 +1711,8 @@
         ).join("");
         const needsAttention = dayMissing > 0 || dayReceived < TEN_QUANTITIES.length;
         return `<details class="fq-day-card" ${dayMissing ? "" : ""}>
-          <summary><span><strong>${escapeHtml(day.date)}</strong><small>已填生产指标 ${dayReceived}/10${dayMissing ? ` · ${dayMissing} 个已接入字段缺失` : ""} · 允许部分报送</small></span><span class="fq-status ${needsAttention ? "is-warn" : "is-ok"}">${needsAttention ? "待核对" : "完整"}</span></summary>
-          <label class="field fq-operating-state"><span>当日运行状态</span><select data-fq-operating-state data-day="${dayIndex}" ${locked ? "disabled" : ""}>${[
+          <summary><span><strong>${escapeHtml(formatMinute(day.date))}</strong><small>已填生产指标 ${dayReceived}/10${dayMissing ? ` · ${dayMissing} 个已接入字段缺失` : ""} · 允许部分报送</small></span><span class="fq-status ${needsAttention ? "is-warn" : "is-ok"}">${needsAttention ? "待核对" : "完整"}</span></summary>
+          <label class="field fq-operating-state"><span>该时点运行状态</span><select data-fq-operating-state data-day="${dayIndex}" ${locked ? "disabled" : ""}>${[
             ["producing", "生产"], ["stopped", "停产"], ["maintenance", "检修"], ["restarting", "复产过渡"], ["unknown", "待确认"],
           ].map(([value, label]) => `<option value="${value}" ${day.operating_state === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
           ${dailyGroup}
@@ -1742,13 +1765,13 @@
         ? "当前账号缺少确认或提交权限，可继续复核和保存。"
         : "确认后消息进入可靠发送队列；接收回执不代表监管认定正常。";
     target.innerHTML = `
-      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(draft.payload.mine.mine_name)}</p><h3>生产数据批次</h3><p>${escapeHtml(windowInfo.dateRange)} · ${draft.payload.days.length} 个数据日期 · 草稿修订 ${draft.revision}</p></div><span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span></div>
-      <div class="fq-summary-strip"><span><strong>${draft.payload.days.length}</strong>数据日期</span><span class="${receivedQuantityCount < 10 ? "is-warn" : "is-ok"}"><strong>${receivedQuantityCount}/10</strong>已填生产指标</span><span class="${missing ? "is-warn" : "is-ok"}"><strong>${missing}</strong>已接入字段缺失</span><span><strong>${draft.payload.sources.length}</strong>来源记录</span><span><strong>${draft.submission_revision}</strong>报送版本</span></div>
+      <div class="fq-detail-head"><div><p class="eyebrow">${escapeHtml(draft.payload.mine.mine_name)}</p><h3>生产数据批次</h3><p>${escapeHtml(windowInfo.dateRange)} · ${draft.payload.days.length} 条生产记录 · 草稿修订 ${draft.revision}</p></div><span class="fq-status is-${escapeHtml(draft.status)}">${escapeHtml(statusText(draft.status))}</span></div>
+      <div class="fq-summary-strip"><span><strong>${draft.payload.days.length}</strong>生产记录</span><span class="${receivedQuantityCount < 10 ? "is-warn" : "is-ok"}"><strong>${receivedQuantityCount}/10</strong>已填生产指标</span><span class="${missing ? "is-warn" : "is-ok"}"><strong>${missing}</strong>已接入字段缺失</span><span><strong>${draft.payload.sources.length}</strong>来源记录</span><span><strong>${draft.submission_revision}</strong>报送版本</span></div>
       ${receivedQuantityCount < 10 ? `<div class="fq-import-warning"><strong>当前已填 ${receivedQuantityCount}/10，可部分报送</strong><p>未填项目保持 null 并标记为缺失；人工核对后可以正常提交，系统不会用 0、历史值或算法补齐。</p></div>` : ""}
       ${reviewGate.required ? `<div class="fq-import-warning" role="status"><strong>四眼复核：${awaitingHumanPreparer ? "先由经办人接收核对" : currentIsLastEditor ? "待另一账号接手" : reviewActorMissing ? "经办人记录缺失" : "当前账号可独立复核"}</strong><p>${escapeHtml(reviewGate.message || "最后创建/编辑人不能确认或入发送队列。")}</p></div>` : ""}
       ${draft.predecessor ? `<div class="fq-import-warning" role="status"><strong>这是第 ${escapeHtml(draft.submission_revision)} 版正式更正草稿</strong><p>同一报送链继续编号；直接前序消息 ${escapeHtml(shortHash(draft.predecessor.message_id))} 及其签名摘要已锁定，保存本草稿不会覆盖历史报文。为避免修订链中断，更正草稿创建后不能放弃或删除，可暂存并在后续继续复核。</p></div>` : ""}
       ${importWarnings.length ? `<div class="fq-import-warning"><strong>导入映射需要人工核对</strong><ul>${importWarnings.slice(0, 20).map((item) => `<li>${escapeHtml(item.reason || "存在未明确的来源字段")}</li>`).join("")}</ul></div>` : ""}
-      <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。每天先核对已提供的生产数据日报合计；只有需要时再展开三个班次，销售量、运输量、洗煤量和开票量不强制提供班次实值。</div>
+      <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。每条记录精确到分钟；请核对该时间点已提供的生产数据，班次明细仅在来源确实提供时展开。</div>
       ${autofillEvidenceHtml(draft)}
       <div class="fq-day-list">${days}</div>
       <div class="fq-sticky-actions">
@@ -2021,7 +2044,7 @@
         (finding, index) => `<article class="fq-finding">
           <div class="fq-finding-head"><span class="fq-severity is-${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span><div><small>风险 ${index + 1}</small><h4>${escapeHtml(finding.title)}</h4></div></div>
           <p>${escapeHtml(enterpriseRiskText(finding.summary))}</p>
-          <dl class="fq-definition-list"><div><dt>日期</dt><dd>${escapeHtml((finding.affected_dates || []).join("、") || "未列明")}</dd></div><div><dt>指标</dt><dd>${escapeHtml((finding.affected_metrics || []).map(metricLabel).join("、") || "未列明")}</dd></div></dl>
+          <dl class="fq-definition-list"><div><dt>数据时间</dt><dd>${escapeHtml((finding.affected_dates || []).map(formatMinute).join("、") || "未列明")}</dd></div><div><dt>指标</dt><dd>${escapeHtml((finding.affected_metrics || []).map(metricLabel).join("、") || "未列明")}</dd></div></dl>
           <details><summary>查看核对依据</summary>${(finding.evidence || []).map((evidence) => `<div class="fq-evidence"><strong>${escapeHtml(evidenceMethodLabel(evidence.method))}</strong><span>${escapeHtml(enterpriseRiskText(evidence.summary))}</span><small>观测 ${escapeHtml(evidence.observed_value == null ? "—" : evidence.observed_value)}；参考 ${escapeHtml(evidence.expected_min == null ? "—" : evidence.expected_min)}～${escapeHtml(evidence.expected_max == null ? "—" : evidence.expected_max)}；偏离程度 ${escapeHtml(evidence.score == null ? "—" : evidence.score)}</small></div>`).join("")}</details>
         </article>`,
       )
@@ -2166,6 +2189,44 @@
       ? events.map((event) => `<article><span class="fq-timeline-dot" aria-hidden="true"></span><div><strong>${escapeHtml(auditEventLabel(event.event_type))}</strong><p>${escapeHtml(formatTime(event.occurred_at))} · ${escapeHtml(event.actor)}</p><small>序号 ${event.sequence} · ${escapeHtml(shortHash(event.event_hash))}</small></div></article>`).join("")
       : '<p class="fq-empty">暂无留痕</p>';
     if (notify) message("身份、接口和留痕状态已刷新。", "success");
+  }
+
+  function setWatchConfigResult(text, kind = "notice") {
+    const target = $("fqWatchConfigResult");
+    target.hidden = !text;
+    target.textContent = text || "";
+    target.className = `fq-upload-result is-${kind}`;
+  }
+
+  async function saveWatchConfiguration(event) {
+    event.preventDefault();
+    if (!can("write")) return message("当前账号没有配置权限。", "error");
+    const directories = $("fqWatchDirectories").value
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    setBusy("fqSaveWatchConfig", true, "正在验证…");
+    syncImportCapability();
+    setWatchConfigResult("正在由 Agent 服务验证目录访问权限…", "notice");
+    try {
+      const result = await api("/api/v2/watch/config", {
+        method: "PUT",
+        body: { directories },
+      });
+      await loadStatus();
+      const count = (result.watched_directories || []).length;
+      const text = count
+        ? `已保存 ${count} 个自动发现目录；后台扫描已立即生效。`
+        : "已关闭目录自动发现；仍可使用文件导入和手工填写。";
+      setWatchConfigResult(text, "success");
+      message(text, "success");
+    } catch (error) {
+      setWatchConfigResult(`保存失败：${error.message}`, "error");
+      message(error.message, "error");
+    } finally {
+      setBusy("fqSaveWatchConfig", false);
+      syncImportCapability();
+    }
   }
 
   function auditEventLabel(eventType) {

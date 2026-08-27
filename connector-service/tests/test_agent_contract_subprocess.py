@@ -47,7 +47,14 @@ validate_five_quantity_payload(
     imported["payload"], identity=identity, confirmed=False,
     contract_version=imported["contract_version"],
 )
-day = next(item for item in imported["payload"]["days"] if item["date"] == "2026-07-29")
+day = next(
+    item for item in imported["payload"]["days"]
+    if item["date"] == "2026-07-29T23:59:00+08:00"
+)
+zero_record = next(
+    item for item in imported["payload"]["days"]
+    if item["date"] == "2026-07-29T00:00:00+08:00"
+)
 print(json.dumps({
     "contract": imported["contract_version"],
     "month": imported["payload"]["reporting_month"],
@@ -56,7 +63,7 @@ print(json.dumps({
     "extraction": day["reported_quantity"]["daily_total"]["extraction_t"]["value"],
     "invoice": day["reported_quantity"]["daily_total"]["invoiced_quantity_t"]["value"],
     "zero_production": (
-        day["reported_quantity"]["shifts"]["zero_shift"]
+        zero_record["reported_quantity"]["shifts"]["zero_shift"]
         ["measurements"]["production_t"]["value"]
     ),
 }))
@@ -76,7 +83,7 @@ print(json.dumps({
     assert result == {
         "contract": "ten-quantity-submission-v3",
         "month": "2026-07",
-        "days": 31,
+        "days": 8,
         "production": 350.0,
         "extraction": 355.0,
         "invoice": 285.0,

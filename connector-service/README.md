@@ -12,12 +12,12 @@
 - `http-poll`：只发 GET；主机和端口显式 allowlist、DNS 解析后固定 IP、SSRF/云元数据地址防护、拒绝重定向、响应大小和超时上限。
 - `sqlite-query`：以 `mode=ro` 打开，启用 `query_only`、SQLite authorizer 和查询 deadline，只允许单条 `SELECT`/只读 `WITH`。
 - 异构字段映射：pipeline 提供默认值，每个 source 可分别覆盖 `timestamp_field`、`period_type`、`scope_field/scope_values`、`mapping` 和 `shifts`；不要假设 ERP、MES、火工品台账的列名和班次编码相同。
-- 月度 V3：每个来源按月形成完整 `days`、日报、零点班、八点班、四点班结构。日报
-  明确携带全部 11 个原子字段；来源没有的字段保持 `null + missing`，不以 0、历史值
+- 分钟级 V3：每个来源仍按月形成便于增量同步的来源快照，但 `days` 只包含来源实际出现的
+  分钟记录，不补造未观测日期或分钟。每条记录明确携带全部 11 个原子字段；来源没有的字段保持 `null + missing`，不以 0、历史值
   或模型结果补齐。三个班次必须携带前 7 个生产运行原子项；销售、运输、入洗、开票
   四项若该来源声明了对应班次映射但本期缺数则为 `null + missing`，未声明该班次口径则
   保持稳定单元格并标记 `null + not_applicable`，不会制造虚假缺报。
-- 日期覆盖：先按企业时区计算“本地今日减 `reporting_lag_days`”的应报截止日；截止日所在月从月初补到截止日，更早月份补到月末，跨月时不会提前声明未来覆盖。整日缺报仍形成 44 个稳定单元格，并按上述班次适用性分别标记 `missing` 或 `not_applicable`。没有独立受控状态字段时，运行状态保持 `unknown`，不能仅凭产量推断停产。
+- 时间覆盖：按企业时区把来源时间规范到分钟；同一分钟的同一字段按显式 reducer 消歧，不同分钟保留为不同记录。覆盖起止时间只取实际观测记录，`reporting_lag_days` 仅用于拒绝截止时间之后的数据，不会补造空白记录。没有独立受控状态字段时，运行状态保持 `unknown`，不能仅凭产量推断停产。
 - 多来源：同一 `(client_id, draft_key, source_id)` 由 Agent 保存最新来源快照并重算；不同来源非空值冲突时 Agent 阻断，绝不后写覆盖。
 - 完整代次：所有 `required_sources` 的最新修订到齐后，最后一个事件才设置 `trigger_workflow=true`；来源修订后组合摘要变化可再次体检。
 - 采集健康：每个 source/月度草稿持久记录 `success_nonempty/success_empty/error/stability_wait`，按状态变化或有界心跳投递。必需来源空、错误、过期，或 health 未绑定 Agent 当前已完成 contribution 时，不触发就绪预检。

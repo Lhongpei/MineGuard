@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from enterprise_agent.errors import ValidationBlockedError
 from enterprise_agent.five_quantity_exchange import MineIdentity
 from enterprise_agent.five_quantity_runtime import FiveQuantityRuntime
@@ -25,9 +24,7 @@ from enterprise_agent.storage import Repository
 from enterprise_agent.util import sha256_jcs
 
 SECRET = "connector-test-secret-at-least-thirty-two-bytes"
-_CANONICAL_DRAFT_KEY = (
-    "draft:operator-machine-001:five-quantity:monthly:2026-07"
-)
+_CANONICAL_DRAFT_KEY = "draft:operator-machine-001:five-quantity:monthly:2026-07"
 _ALLOWED_SOURCE_IDS = (
     "erp-production",
     "source-a",
@@ -87,12 +84,15 @@ def _payload(
     trigger: bool = True,
     observed_at: datetime | None = None,
 ) -> dict[str, Any]:
-    dates = [
-        line.split(",", 1)[0]
-        for line in csv_text.splitlines()[1:]
-        if line and len(line.split(",", 1)[0]) == 10
-    ]
-    coverage_as_of = max(dates)
+    record_times = []
+    for line in csv_text.splitlines()[1:]:
+        if not line:
+            continue
+        value = line.split(",", 1)[0]
+        if len(value) == 10:
+            value = f"{value}T00:00:00+08:00"
+        record_times.append(value)
+    coverage_as_of = max(record_times)
     return {
         "contract_version": "enterprise-autofill-ingestion/v1",
         "event_id": event_id,
@@ -172,9 +172,10 @@ def _raw_machine_request(
         f"POST\n{signing_path}\n"
         f"{timestamp_text}\n{request_id}\n{body_sha256}"
     ).encode()
-    signature = signature_override or hmac.new(
-        SECRET.encode(), material, hashlib.sha256
-    ).hexdigest()
+    signature = (
+        signature_override
+        or hmac.new(SECRET.encode(), material, hashlib.sha256).hexdigest()
+    )
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     try:
         connection.request(
@@ -221,11 +222,7 @@ def _health_payload(
         "record_count": 1 if nonempty else 0,
         "coverage_as_of": source["coverage_as_of"] if nonempty else None,
         "error_code": "source_poll_failed" if outcome == "error" else None,
-        "snapshot_sha256": (
-            snapshot_sha256
-            if nonempty
-            else None
-        ),
+        "snapshot_sha256": (snapshot_sha256 if nonempty else None),
         "autofill_event_id": autofill_event_id if nonempty else None,
         "source_revision": source_revision if nonempty else None,
     }
@@ -275,8 +272,7 @@ def _server(
     server = EnterpriseAgentHTTPServer(
         ("127.0.0.1", 0),
         service,
-        connector_clients=clients
-        or (_client(),),
+        connector_clients=clients or (_client(),),
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -309,21 +305,19 @@ def test_signed_connector_enters_visible_v2_inbox_and_replays_by_event(
         status, result = _machine_request(port, body, request_id="attempt-001")
         assert status == 202
         draft_id = result["draft_id"]
-        assert result["workflow"]["execution_mode"] == (
-            "v2_data_readiness_preflight"
-        )
+        assert result["workflow"]["execution_mode"] == ("v2_data_readiness_preflight")
         assert result["workflow"]["preflight"]["bound_revision"] == 1
         assert result["workflow"]["preflight"]["missing_count"] > 0
         assert result["import"]["mode"] == "ten_quantity_v3_direct_collection"
         coverage = result["workflow"]["preflight"]["calendar_coverage"]
         assert coverage["kind"] == "production_batch"
-        assert coverage["declared_day_count"] == 1
+        assert coverage["declared_record_count"] == 1
 
         status, draft = _get(port, f"/api/v2/drafts/{draft_id}")
         assert status == 200
-        measurement = draft["payload"]["days"][0]["reported_quantity"][
-            "daily_total"
-        ]["production_t"]
+        measurement = draft["payload"]["days"][0]["reported_quantity"]["daily_total"][
+            "production_t"
+        ]
         assert measurement["value"] == 100
         assert draft["payload"]["sources"][0]["acquisition_mode"] == (
             "direct_collection"
@@ -338,7 +332,9 @@ def test_signed_connector_enters_visible_v2_inbox_and_replays_by_event(
         assert evidence["latest_preflight"]["bound_revision"] == 1
         assert evidence["freshness"]["overall_state"] == "fresh"
         assert evidence["source_health"][0]["freshness_state"] == "fresh"
-        assert evidence["source_health"][0]["coverage_as_of"] == "2026-07-01"
+        assert evidence["source_health"][0]["coverage_as_of"] == (
+            "2026-07-01T00:00:00+08:00"
+        )
         serialised = json.dumps(evidence, ensure_ascii=False)
         assert SECRET not in serialised
         assert "source.content" not in serialised
@@ -398,9 +394,10 @@ def test_latest_source_snapshots_update_remove_and_reject_cross_source_conflict(
         assert created["workflow"]["preflight"]["bound_revision"] == 1
         draft = runtime.store.get_draft(draft_id)
         payload_sha256 = sha256_jcs(draft["payload"])
-        assert created["workflow"]["preflight"][
-            "payload_sha256_prefix"
-        ] == payload_sha256[:12]
+        assert (
+            created["workflow"]["preflight"]["payload_sha256_prefix"]
+            == payload_sha256[:12]
+        )
         with runtime.store.repository._read() as db:
             stored_preflight = json.loads(
                 db.execute(
@@ -410,9 +407,7 @@ def test_latest_source_snapshots_update_remove_and_reject_cross_source_conflict(
             )
         assert stored_preflight["bound_revision"] == draft["revision"]
         assert stored_preflight["payload_sha256"] == payload_sha256
-        _status, evidence = _get(
-            port, f"/api/v2/drafts/{draft_id}/ingestions"
-        )
+        _status, evidence = _get(port, f"/api/v2/drafts/{draft_id}/ingestions")
         assert evidence["latest_preflight"]["obsolete"] is False
         source_health = next(
             item
@@ -428,9 +423,7 @@ def test_latest_source_snapshots_update_remove_and_reject_cross_source_conflict(
             csv_text="date,production_t\n2026-07-01,101\n",
             trigger=False,
         )
-        status, update_result = _machine_request(
-            port, updated, request_id="req-a-1"
-        )
+        status, update_result = _machine_request(port, updated, request_id="req-a-1")
         assert status == 201
         assert update_result["draft_id"] == draft_id
         assert update_result["autofill_preview"]["source_revision"] == 2
@@ -448,9 +441,7 @@ def test_latest_source_snapshots_update_remove_and_reject_cross_source_conflict(
         status, evidence = _get(port, f"/api/v2/drafts/{draft_id}/ingestions")
         assert status == 200
         rejected = next(
-            item
-            for item in evidence["items"]
-            if item["event_id"] == "evt-b-0"
+            item for item in evidence["items"] if item["event_id"] == "evt-b-0"
         )
         assert rejected["status"] == "rejected"
         assert rejected["rejection"]["code"] == "connector_source_conflict"
@@ -480,16 +471,15 @@ def test_latest_source_snapshots_update_remove_and_reject_cross_source_conflict(
             port, conflicting, request_id="req-b-replay"
         )
         assert status == 409
-        assert replayed_error["error"]["code"] == (
-            "connector_source_conflict"
-        )
-        assert replayed_error["error"]["details"][
-            "idempotent_replay"
-        ] is True
+        assert replayed_error["error"]["code"] == ("connector_source_conflict")
+        assert replayed_error["error"]["details"]["idempotent_replay"] is True
         _status, draft = _get(port, f"/api/v2/drafts/{draft_id}")
-        assert draft["payload"]["days"][0]["reported_quantity"]["daily_total"][
-            "production_t"
-        ]["value"] == 101
+        assert (
+            draft["payload"]["days"][0]["reported_quantity"]["daily_total"][
+                "production_t"
+            ]["value"]
+            == 101
+        )
 
         removed = _payload(
             event_id="evt-a-2",
@@ -501,9 +491,12 @@ def test_latest_source_snapshots_update_remove_and_reject_cross_source_conflict(
         status, _result = _machine_request(port, removed, request_id="req-a-2")
         assert status == 201
         _status, draft = _get(port, f"/api/v2/drafts/{draft_id}")
-        assert draft["payload"]["days"][0]["reported_quantity"]["daily_total"][
-            "production_t"
-        ]["value"] is None
+        assert (
+            draft["payload"]["days"][0]["reported_quantity"]["daily_total"][
+                "production_t"
+            ]["value"]
+            is None
+        )
     finally:
         _close(server, thread)
 
@@ -534,9 +527,7 @@ def test_machine_never_overwrites_human_edit_and_month_key_is_bound(
             payload=edited,
             actor="human-operator",
         )
-        _status, evidence = _get(
-            port, f"/api/v2/drafts/{draft['draft_id']}/ingestions"
-        )
+        _status, evidence = _get(port, f"/api/v2/drafts/{draft['draft_id']}/ingestions")
         assert evidence["latest_preflight"]["obsolete"] is True
         assert evidence["latest_preflight"]["status"] == "attention_required"
         assert any(
@@ -551,23 +542,22 @@ def test_machine_never_overwrites_human_edit_and_month_key_is_bound(
             csv_text="date,production_t\n2026-07-01,110\n",
             trigger=False,
         )
-        status, error = _machine_request(
-            port, next_source, request_id="human-req-1"
-        )
+        status, error = _machine_request(port, next_source, request_id="human-req-1")
         assert status == 409
         assert "人工编辑" in error["error"]["message"]
-        assert runtime.store.get_draft(draft["draft_id"])["payload"]["days"][0][
-            "reported_quantity"
-        ]["daily_total"]["production_t"]["value"] == 105
+        assert (
+            runtime.store.get_draft(draft["draft_id"])["payload"]["days"][0][
+                "reported_quantity"
+            ]["daily_total"]["production_t"]["value"]
+            == 105
+        )
 
         wrong_month = _payload(
             event_id="evt-wrong-month",
             source_id="source-month",
             revision=1,
             csv_text="date,production_t\n2026-07-01,1\n",
-            draft_key=(
-                "draft:operator-machine-001:five-quantity:monthly:2026-08"
-            ),
+            draft_key=("draft:operator-machine-001:five-quantity:monthly:2026-08"),
             trigger=False,
         )
         status, error = _machine_request(
@@ -592,15 +582,18 @@ def test_machine_never_overwrites_human_edit_and_month_key_is_bound(
                 "WHERE event_type='five_quantity_machine_preflight_recomputed' "
                 "ORDER BY sequence DESC LIMIT 1"
             ).fetchone()
-            assert db.execute(
-                "SELECT COUNT(*) FROM fq_outbox WHERE aggregate_id=?",
-                (draft["draft_id"],),
-            ).fetchone()[0] == 1
+            assert (
+                db.execute(
+                    "SELECT COUNT(*) FROM fq_outbox WHERE aggregate_id=?",
+                    (draft["draft_id"],),
+                ).fetchone()[0]
+                == 1
+            )
         assert audit is not None
         audit_details = json.loads(audit["details_json"])
         assert audit_details["reason"] == "obsolete"
-        assert audit_details["preflight"]["bound_revision"] == (
-            edited_draft["revision"]
+        assert (
+            audit_details["preflight"]["bound_revision"] == (edited_draft["revision"])
         )
         assert audit_details["preflight"]["payload_sha256"] == sha256_jcs(
             edited_draft["payload"]
@@ -713,9 +706,9 @@ def test_human_pause_explicit_resume_and_discard_replacement(
         draft_id = created["draft_id"]
         draft = runtime.store.get_draft(draft_id)
         edited = json.loads(json.dumps(draft["payload"]))
-        edited["days"][0]["reported_quantity"]["daily_total"][
-            "production_t"
-        ]["value"] = 105
+        edited["days"][0]["reported_quantity"]["daily_total"]["production_t"][
+            "value"
+        ] = 105
         draft = runtime.save_draft(
             draft_id,
             expected_revision=draft["revision"],
@@ -730,9 +723,12 @@ def test_human_pause_explicit_resume_and_discard_replacement(
             accepted=True,
             actor="human-supervisor",
         )
-        assert resumed["payload"]["days"][0]["reported_quantity"][
-            "daily_total"
-        ]["production_t"]["value"] == 100
+        assert (
+            resumed["payload"]["days"][0]["reported_quantity"]["daily_total"][
+                "production_t"
+            ]["value"]
+            == 100
+        )
         assert runtime.machine_sync_state(draft_id)["state"] == "active"
 
         update = _payload(
@@ -770,9 +766,7 @@ def test_human_pause_explicit_resume_and_discard_replacement(
         assert replaced["draft_id"] != draft_id
         assert runtime.store.get_draft(draft_id)["status"] == "discarded"
         assert runtime.machine_sync_state(draft_id)["state"] == "paused"
-        assert runtime.machine_sync_state(replaced["draft_id"])["state"] == (
-            "active"
-        )
+        assert runtime.machine_sync_state(replaced["draft_id"])["state"] == ("active")
     finally:
         _close(server, thread)
 
@@ -790,16 +784,12 @@ def test_v5_connector_upgrade_recovers_machine_baseline_and_idempotency(
         csv_text="date,production_t\n2026-07-01,100\n",
         trigger=False,
     )
-    status, created = _machine_request(
-        port, first, request_id="migration-request-1"
-    )
+    status, created = _machine_request(port, first, request_id="migration-request-1")
     assert status == 201
     draft_id = created["draft_id"]
     draft = runtime.store.get_draft(draft_id)
     edited = json.loads(json.dumps(draft["payload"]))
-    edited["days"][0]["reported_quantity"]["daily_total"]["production_t"][
-        "value"
-    ] = 105
+    edited["days"][0]["reported_quantity"]["daily_total"]["production_t"]["value"] = 105
     runtime.save_draft(
         draft_id,
         expected_revision=draft["revision"],
@@ -861,9 +851,7 @@ def test_v5_connector_upgrade_recovers_machine_baseline_and_idempotency(
             csv_text="date,production_t\n2026-07-01,110\n",
             trigger=False,
         )
-        status, error = _machine_request(
-            port, update, request_id="migration-request-2"
-        )
+        status, error = _machine_request(port, update, request_id="migration-request-2")
         assert status == 409
         assert "人工编辑" in error["error"]["message"]
 
@@ -911,9 +899,7 @@ def test_machine_input_fails_closed_for_ambiguous_or_malformed_json(
         with_surrogate["event_id"] = "evt-surrogate"
         with_surrogate["source"]["content"] = "\ud800"
         raw = json.dumps(with_surrogate, ensure_ascii=True).encode()
-        status, error = _raw_machine_request(
-            port, raw, request_id="robust-surrogate"
-        )
+        status, error = _raw_machine_request(port, raw, request_id="robust-surrogate")
         assert status == 400
         assert "UTF-8" in error["error"]["message"]
 
@@ -964,16 +950,10 @@ def test_machine_input_fails_closed_for_ambiguous_or_malformed_json(
             event_id="evt-date-gap",
             source_id="source-a",
             revision=1,
-            csv_text=(
-                "date,production_t\n"
-                "2026-07-01,100\n"
-                "2026-07-03,100\n"
-            ),
+            csv_text=("date,production_t\n2026-07-01,100\n2026-07-03,100\n"),
             trigger=True,
         )
-        status, accepted = _machine_request(
-            port, gap, request_id="robust-date-gap"
-        )
+        status, accepted = _machine_request(port, gap, request_id="robust-date-gap")
         assert status == 202
         assert accepted["status"] == "completed"
     finally:
@@ -991,18 +971,14 @@ def test_event_replay_survives_process_restart(tmp_path: Path) -> None:
     )
     server, thread, _runtime = _server(database)
     port = int(server.server_address[1])
-    status, created = _machine_request(
-        port, body, request_id="restart-attempt-1"
-    )
+    status, created = _machine_request(port, body, request_id="restart-attempt-1")
     assert status == 201
     _close(server, thread)
 
     server, thread, runtime = _server(database)
     port = int(server.server_address[1])
     try:
-        status, replay = _machine_request(
-            port, body, request_id="restart-attempt-2"
-        )
+        status, replay = _machine_request(port, body, request_id="restart-attempt-2")
         assert status == 200
         assert replay["idempotent_replay"] is True
         assert replay["draft_id"] == created["draft_id"]
@@ -1103,9 +1079,7 @@ def test_multisource_discard_replacement_supports_same_content_and_aba(
         assert aba["draft_id"] == replacement_id
 
         final_draft = runtime.store.get_draft(replacement_id)
-        day = final_draft["payload"]["days"][0]["reported_quantity"][
-            "daily_total"
-        ]
+        day = final_draft["payload"]["days"][0]["reported_quantity"]["daily_total"]
         assert day["production_t"]["value"] == 110
         assert day["electricity_kwh"]["value"] == 200
         assert len(final_draft["payload"]["sources"]) == 2
@@ -1169,15 +1143,22 @@ def test_concurrent_events_create_one_month_draft_without_duplicate_rows(
         assert len({result["draft_id"] for _, result in results}) == 1
         assert len(runtime.store.list_drafts()) == 1
         with runtime.store.repository._read() as db:
-            assert db.execute(
-                "SELECT COUNT(*) FROM connector_ingestions"
-            ).fetchone()[0] == 2
-            assert db.execute(
-                "SELECT COUNT(*) FROM connector_draft_bindings"
-            ).fetchone()[0] == 1
-            assert db.execute(
-                "SELECT COUNT(*) FROM fq_machine_source_contributions"
-            ).fetchone()[0] == 2
+            assert (
+                db.execute("SELECT COUNT(*) FROM connector_ingestions").fetchone()[0]
+                == 2
+            )
+            assert (
+                db.execute("SELECT COUNT(*) FROM connector_draft_bindings").fetchone()[
+                    0
+                ]
+                == 1
+            )
+            assert (
+                db.execute(
+                    "SELECT COUNT(*) FROM fq_machine_source_contributions"
+                ).fetchone()[0]
+                == 2
+            )
     finally:
         _close(server, thread)
 
@@ -1268,9 +1249,7 @@ def test_source_health_is_bound_monotonic_dynamic_and_blocks_confirmation(
         )
         assert status == 201
         assert result["applied"] is True
-        _status, evidence = _get(
-            port, f"/api/v2/drafts/{draft_id}/ingestions"
-        )
+        _status, evidence = _get(port, f"/api/v2/drafts/{draft_id}/ingestions")
         source_health = next(
             item
             for item in evidence["source_health"]
@@ -1302,15 +1281,16 @@ def test_source_health_is_bound_monotonic_dynamic_and_blocks_confirmation(
                 attestation="已核对",
                 accepted=True,
             )
-        monkeypatch.setattr(
-            runtime, "machine_source_health", original_health_check
-        )
+        monkeypatch.setattr(runtime, "machine_source_health", original_health_check)
         assert runtime.store.get_draft(draft_id)["status"] == "ready_review"
         with runtime.store.repository._read() as db:
-            assert db.execute(
-                "SELECT COUNT(*) FROM fq_outbox WHERE aggregate_id=?",
-                (draft_id,),
-            ).fetchone()[0] == 0
+            assert (
+                db.execute(
+                    "SELECT COUNT(*) FROM fq_outbox WHERE aggregate_id=?",
+                    (draft_id,),
+                ).fetchone()[0]
+                == 0
+            )
 
         restored_time = base_time + timedelta(seconds=2)
         restored = _health_payload(
@@ -1326,9 +1306,7 @@ def test_source_health_is_bound_monotonic_dynamic_and_blocks_confirmation(
             port, restored, request_id="health-restored-request"
         )
         assert status == 201
-        _status, evidence = _get(
-            port, f"/api/v2/drafts/{draft_id}/ingestions"
-        )
+        _status, evidence = _get(port, f"/api/v2/drafts/{draft_id}/ingestions")
         assert evidence["freshness"]["overall_state"] == "fresh"
         source_health = next(
             item
@@ -1353,15 +1331,13 @@ def test_source_health_is_bound_monotonic_dynamic_and_blocks_confirmation(
         )
         assert source_a["freshness_state"] == "stale"
         assert boundary["freshness"]["overall_state"] == "stale"
-        assert runtime.store.get_draft(draft_id)["revision"] == (
-            draft_before["revision"]
+        assert (
+            runtime.store.get_draft(draft_id)["revision"] == (draft_before["revision"])
         )
 
         unsafe_error = dict(failed)
         unsafe_error["event_id"] = "health-unsafe-error"
-        unsafe_error["completed_at"] = (
-            base_time + timedelta(seconds=3)
-        ).isoformat()
+        unsafe_error["completed_at"] = (base_time + timedelta(seconds=3)).isoformat()
         unsafe_error["error_code"] = "upstream password=secret"
         status, error = _health_request(
             port, unsafe_error, request_id="health-unsafe-request"
@@ -1427,9 +1403,7 @@ def test_delayed_older_autofill_does_not_clear_newer_source_error(
         )
         assert status == 202
         assert updated["draft_id"] == draft_id
-        _status, evidence = _get(
-            port, f"/api/v2/drafts/{draft_id}/ingestions"
-        )
+        _status, evidence = _get(port, f"/api/v2/drafts/{draft_id}/ingestions")
         source_health = next(
             item
             for item in evidence["source_health"]
@@ -1498,10 +1472,13 @@ def test_machine_draft_fails_closed_when_active_source_policy_is_missing(
             accepted=True,
         )
     with repository._read() as db:
-        assert db.execute(
-            "SELECT COUNT(*) FROM fq_outbox WHERE aggregate_id=?",
-            (draft_id,),
-        ).fetchone()[0] == 0
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM fq_outbox WHERE aggregate_id=?",
+                (draft_id,),
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_multisource_draft_blocks_when_restart_policy_omits_one_source(
@@ -1510,9 +1487,7 @@ def test_multisource_draft_blocks_when_restart_policy_omits_one_source(
     database = tmp_path / "agent.db"
     server, thread, _runtime = _server(
         database,
-        clients=(
-            _client(required_sources=("source-a", "source-b")),
-        ),
+        clients=(_client(required_sources=("source-a", "source-b")),),
     )
     port = int(server.server_address[1])
     source_a = _payload(
@@ -1530,13 +1505,9 @@ def test_multisource_draft_blocks_when_restart_policy_omits_one_source(
         trigger=False,
     )
     try:
-        status, first = _machine_request(
-            port, source_a, request_id="policy-a-request"
-        )
+        status, first = _machine_request(port, source_a, request_id="policy-a-request")
         assert status == 201
-        status, second = _machine_request(
-            port, source_b, request_id="policy-b-request"
-        )
+        status, second = _machine_request(port, source_b, request_id="policy-b-request")
         assert status == 201
         assert second["draft_id"] == first["draft_id"]
         draft_id = first["draft_id"]
@@ -1559,9 +1530,7 @@ def test_multisource_draft_blocks_when_restart_policy_omits_one_source(
         )
     )
     health = restarted.machine_source_health(draft_id)
-    by_source = {
-        item["source_id"]: item for item in health["source_health"]
-    }
+    by_source = {item["source_id"]: item for item in health["source_health"]}
     assert by_source["source-a"]["freshness_state"] == "fresh"
     assert by_source["source-b"]["required"] is True
     assert by_source["source-b"]["freshness_state"] == "unknown"
@@ -1583,7 +1552,10 @@ def test_multisource_draft_blocks_when_restart_policy_omits_one_source(
             accepted=True,
         )
     with repository._read() as db:
-        assert db.execute(
-            "SELECT COUNT(*) FROM fq_outbox WHERE aggregate_id=?",
-            (draft_id,),
-        ).fetchone()[0] == 0
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM fq_outbox WHERE aggregate_id=?",
+                (draft_id,),
+            ).fetchone()[0]
+            == 0
+        )

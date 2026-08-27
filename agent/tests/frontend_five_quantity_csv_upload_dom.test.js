@@ -86,8 +86,8 @@ const draft = {
     },
     reporting_month: "2026-07",
     timezone: "Asia/Shanghai",
-    period_start: "2026-07-01",
-    period_end: "2026-07-02",
+    period_start: "2026-07-01T08:30:00+08:00",
+    period_end: "2026-07-02T08:30:00+08:00",
     closed_at: "2026-07-03T00:00:00+08:00",
     comparison_context: {
       capacity_band: "medium",
@@ -97,7 +97,7 @@ const draft = {
       operating_regime: "normal-production",
     },
     days: ["2026-07-01", "2026-07-02"].map((date) => ({
-      date,
+      date: `${date}T08:30:00+08:00`,
       operating_state: "producing",
       reported_quantity: {
         daily_total: measurements(`source-${date}`),
@@ -146,6 +146,7 @@ function createDom(permissions) {
   const requests = [];
   const runtimeErrors = [];
   let imported = false;
+  let watchDirectories = [];
   let downloadedBlob = null;
   let downloadedName = "";
   async function fakeFetch(input, options = {}) {
@@ -171,7 +172,7 @@ function createDom(permissions) {
         mine_name: "CSV 测试煤矿",
         operator_id: "operator-csv-001",
         system_id: "agent-csv-001",
-        watched_directories: [],
+        watched_directories: watchDirectories,
         platform_configured: false,
         machine_connector_enabled: false,
         connector_client_count: 0,
@@ -247,6 +248,13 @@ function createDom(permissions) {
             status: "blocked",
           },
         ],
+      });
+    }
+    if (url.pathname === "/api/v2/watch/config" && method === "PUT") {
+      watchDirectories = JSON.parse(options.body).directories;
+      return response({
+        watched_directories: watchDirectories,
+        enabled: watchDirectories.length > 0,
       });
     }
     if (
@@ -419,6 +427,24 @@ async function main() {
     assert.match(document.getElementById("fqSelectedFileSummary").textContent, /等待 Agent 识别/);
     assert.equal(uploadButton.disabled, false);
 
+    const watchInput = document.getElementById("fqWatchDirectories");
+    watchInput.value = "C:\\ProductionData\nD:\\ScaleExports";
+    document.getElementById("fqWatchConfigForm").dispatchEvent(
+      new window.Event("submit", { bubbles: true, cancelable: true }),
+    );
+    await waitFor(
+      () => /已保存 2 个/.test(document.getElementById("fqWatchConfigResult").textContent),
+      "watch directory configuration",
+    );
+    const watchRequest = writer.requests.find(
+      (item) => item.method === "PUT" && item.path === "/api/v2/watch/config",
+    );
+    assert.deepEqual(JSON.parse(watchRequest.options.body).directories, [
+      "C:\\ProductionData",
+      "D:\\ScaleExports",
+    ]);
+    assert.equal(watchRequest.options.headers["X-CSRF-Token"], "csrf-csv-user");
+
     document.getElementById("fqUploadForm").dispatchEvent(
       new window.Event("submit", { bubbles: true, cancelable: true }),
     );
@@ -453,7 +479,7 @@ async function main() {
     );
     assert.equal(document.getElementById("fqPanelReview").hidden, false);
     await waitFor(
-      () => /2026-07-01 至 2026-07-02/.test(document.getElementById("fqDraftDetail").textContent),
+      () => /2026\/07\/01 08:30 至 2026\/07\/02 08:30/.test(document.getElementById("fqDraftDetail").textContent),
       "created draft detail",
     );
     const detail = document.getElementById("fqDraftDetail");
@@ -527,7 +553,7 @@ async function main() {
 
     const manualRow = document.querySelector("#fqManualRows tr");
     assert(manualRow, "manual fallback starts with one editable row");
-    manualRow.querySelector('[data-manual-date]').value = "2026-07-15";
+    manualRow.querySelector('[data-manual-date]').value = "2026-07-15T09:45";
     manualRow.querySelector('[data-manual-metric="production_t"]').value = "123.5";
     document.getElementById("fqManualForm").dispatchEvent(
       new window.Event("submit", { bubbles: true, cancelable: true }),
@@ -545,7 +571,7 @@ async function main() {
     const manualBody = JSON.parse(manualPost.options.body);
     assert.match(manualBody.filename, /^manual-production-data-\d+\.csv$/);
     const manualCsv = Buffer.from(manualBody.content_base64, "base64").toString("utf8");
-    assert.match(manualCsv, /2026-07-15/);
+    assert.match(manualCsv, /2026-07-15T09:45/);
     assert.match(manualCsv, /123\.5/);
     assert.equal(writer.runtimeErrors.length, 0, String(writer.runtimeErrors[0] || ""));
   } finally {

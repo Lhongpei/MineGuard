@@ -12,7 +12,7 @@ import socket
 import sys
 import time
 from collections.abc import Callable
-from datetime import date
+from datetime import timedelta
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -164,9 +164,7 @@ class EnterpriseAgentHTTPServer(ThreadingHTTPServer):
         # meaningful when an authenticated connector has explicitly been
         # configured, so avoid imposing that dependency on every HTTP server.
         self.machine_autofill = (
-            MachineAutofillCoordinator(service)
-            if self.connector_clients
-            else None
+            MachineAutofillCoordinator(service) if self.connector_clients else None
         )
         five_quantity_runtime = getattr(self.service, "_five_quantity", None)
         configure_policies = getattr(
@@ -654,9 +652,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             request_id=values["request_id"],
             signature=values["signature"],
             raw_body=raw,
-            maximum_clock_skew_seconds=(
-                self.server.connector_max_clock_skew_seconds
-            ),
+            maximum_clock_skew_seconds=(self.server.connector_max_clock_skew_seconds),
         )
         self.server.service.repository.register_connector_request(
             client_id=authenticated.client_id,
@@ -745,9 +741,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             request_id=values["request_id"],
             signature=values["signature"],
             raw_body=raw,
-            maximum_clock_skew_seconds=(
-                self.server.connector_max_clock_skew_seconds
-            ),
+            maximum_clock_skew_seconds=(self.server.connector_max_clock_skew_seconds),
             path=SOURCE_HEALTH_PATH,
         )
         self.server.service.repository.register_connector_request(
@@ -779,31 +773,28 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 "draft_key 不属于当前经营主体的机器来源健康范围"
             )
         if payload["coverage_as_of"] is not None:
-            local_today = utc_now().astimezone(
-                ZoneInfo(runtime.identity.timezone)
-            ).date()
-            if date.fromisoformat(payload["coverage_as_of"]) > local_today:
-                raise ValueError("coverage_as_of 不得晚于矿区当前日期")
+            local_now = utc_now().astimezone(ZoneInfo(runtime.identity.timezone))
+            coverage_time = parse_aware_datetime(
+                payload["coverage_as_of"], "coverage_as_of"
+            ).astimezone(ZoneInfo(runtime.identity.timezone))
+            if coverage_time > local_now + timedelta(minutes=5):
+                raise ValueError("coverage_as_of 不得晚于矿区当前时间")
         client = next(
             item
             for item in self.server.connector_clients
             if item.client_id == authenticated.client_id
         )
-        policy = client.source_policy(
-            payload["source_id"], payload["source_system"]
-        )
+        policy = client.source_policy(payload["source_id"], payload["source_system"])
         if policy is None:
             raise ConnectorAuthorizationError(
                 "该权威连接器未获准声明此 source_id/source_system 来源"
             )
-        result, created = (
-            self.server.service.repository.record_connector_source_health(
-                client_id=authenticated.client_id,
-                request_sha256=authenticated.body_sha256,
-                payload=payload,
-                source_required=policy.required,
-                freshness_max_seconds=policy.freshness_max_seconds,
-            )
+        result, created = self.server.service.repository.record_connector_source_health(
+            client_id=authenticated.client_id,
+            request_sha256=authenticated.body_sha256,
+            payload=payload,
+            source_required=policy.required,
+            freshness_max_seconds=policy.freshness_max_seconds,
         )
         self._json(HTTPStatus.CREATED if created else HTTPStatus.OK, result)
 
@@ -1550,9 +1541,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                 {
                     **status,
                     "machine_connector_enabled": connector_enabled,
-                    "connector_client_count": len(
-                        self.server.connector_clients
-                    ),
+                    "connector_client_count": len(self.server.connector_clients),
                 },
             )
             return True
@@ -1685,6 +1674,23 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             items = runtime.scan_watched_directories()
             self._json(HTTPStatus.OK, {"items": items, "count": len(items)})
             return True
+        if path == "/api/v2/watch/config":
+            if method != "PUT":
+                self._method_not_allowed(("PUT",))
+                return True
+            if not self._require(context, "write"):
+                return True
+            body = self._body()
+            self._reject_unknown_fields(body, frozenset({"directories"}))
+            directories = body.get("directories")
+            if not isinstance(directories, list):
+                raise ValueError("directories 必须是路径数组")
+            result = runtime.configure_watched_directories(
+                directories,
+                actor=actor,
+            )
+            self._json(HTTPStatus.OK, result)
+            return True
         if path == "/api/v2/drafts":
             if method != "GET":
                 self._method_not_allowed(("GET",))
@@ -1751,11 +1757,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                     draft_id
                 )
                 latest_preflight_item = next(
-                    (
-                        item
-                        for item in items
-                        if item.get("preflight") is not None
-                    ),
+                    (item for item in items if item.get("preflight") is not None),
                     None,
                 )
                 sync_state = runtime.machine_sync_state(draft_id)
@@ -1767,11 +1769,8 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                     else None
                 )
                 if latest_preflight_item is not None:
-                    internal = (
-                        self.server.service.repository
-                        .get_connector_ingestion(
-                            latest_preflight_item["ingestion_id"]
-                        )
+                    internal = self.server.service.repository.get_connector_ingestion(
+                        latest_preflight_item["ingestion_id"]
                     )
                     stored = internal.get("workflow_result")
                     preflight_is_current = bool(
@@ -1784,8 +1783,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                             else "five-quantity-machine-preflight/v1"
                         )
                         and stored.get("bound_revision") == draft["revision"]
-                        and stored.get("payload_sha256")
-                        == current_payload_sha256
+                        and stored.get("payload_sha256") == current_payload_sha256
                     )
                     latest_preflight["obsolete"] = not preflight_is_current
                     if not preflight_is_current:
@@ -2308,9 +2306,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
                         is not None
                     ),
                     "agent_v2_governed_learning": "proposal_approval_only",
-                    "machine_autofill_available": bool(
-                        self.server.connector_clients
-                    ),
+                    "machine_autofill_available": bool(self.server.connector_clients),
                     "machine_autofill_contract_version": (
                         "enterprise-autofill-ingestion/v1"
                     ),
@@ -2427,8 +2423,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
             if method == "POST":
                 body = self._body()
                 values = {
-                    name: body.get(name)
-                    for name in ("api_key", "base_url", "model")
+                    name: body.get(name) for name in ("api_key", "base_url", "model")
                 }
                 if any(not isinstance(value, str) for value in values.values()):
                     self._error(
@@ -3234,9 +3229,7 @@ def serve(
             public_origin=public_origin,
             web_root=root,
             connector_clients=connector_clients,
-            connector_max_clock_skew_seconds=(
-                connector_max_clock_skew_seconds
-            ),
+            connector_max_clock_skew_seconds=(connector_max_clock_skew_seconds),
         )
     except KeyboardInterrupt:
         disable_harness = getattr(service, "disable_harness", None)

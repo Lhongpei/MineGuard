@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import hashlib
 import hmac
 from http.client import HTTPConnection
@@ -1231,9 +1231,9 @@ def _assert_contract(document: dict[str, Any], schema_name: str) -> None:
 
 def _assert_problem(document: dict[str, Any]) -> None:
     openapi = json.loads(
-        (
-            CONTRACTS / "openapi" / "five-quantity-exchange-v2.openapi.json"
-        ).read_text(encoding="utf-8")
+        (CONTRACTS / "openapi" / "five-quantity-exchange-v2.openapi.json").read_text(
+            encoding="utf-8"
+        )
     )
     Draft202012Validator(openapi["components"]["schemas"]["Problem"]).validate(document)
 
@@ -1296,9 +1296,13 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
     # A production batch is an as-of snapshot.  It may be confirmed while the
     # final governed shift is still in progress; unobserved values remain null.
     submission["payload"]["closed_at"] = "2026-07-31T12:00:00Z"
-    assert submission["payload"]["closed_at"] < (
-        submission["payload"]["days"][-1]["reported_quantity"]["shifts"]
-        ["four_shift"]["end_at"]
+    assert (
+        submission["payload"]["closed_at"]
+        < (
+            submission["payload"]["days"][-1]["reported_quantity"]["shifts"][
+                "four_shift"
+            ]["end_at"]
+        )
     )
     reported = submission["payload"]["days"][0]["reported_quantity"]
     available_metrics = {"production_t", "sales_t"}
@@ -1314,14 +1318,14 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
     # Exercise the complete signed HTTP path with a sparse batch that spans
     # two calendar months.  V3 production batches are not monthly reports.
     previous_month_day = deepcopy(submission["payload"]["days"][0])
-    previous_month_day["date"] = "2026-06-30"
+    previous_month_day["date"] = "2026-06-30T23:30:00+08:00"
     for shift in previous_month_day["reported_quantity"]["shifts"].values():
         for field in ("start_at", "end_at"):
             shifted = datetime.fromisoformat(
                 shift[field].replace("Z", "+00:00")
             ) - timedelta(days=31)
             shift[field] = shifted.isoformat().replace("+00:00", "Z")
-    submission["payload"]["period_start"] = "2026-06-30"
+    submission["payload"]["period_start"] = "2026-06-30T23:30:00+08:00"
     submission["payload"]["days"].insert(0, previous_month_day)
     submission_body = _signed_enterprise_message(submission, secret=V3_EXAMPLE_SECRET)
     _assert_contract(submission, "ten-quantity-submission-v3.schema.json")
@@ -1401,12 +1405,18 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
 
         stored = server.store.get_submission(submission["message_id"])
         assert stored.quantity_scope == "ten_quantity_v3"
-        assert stored.period_start.isoformat() == "2026-06-30"
-        assert stored.period_end.isoformat() == "2026-07-31"
+        assert stored.period_start.isoformat() == "2026-06-30T23:30:00+08:00"
+        assert stored.period_end.isoformat() == "2026-07-31T23:30:00+08:00"
         assert [item.date.isoformat() for item in stored.days] == [
-            "2026-06-30",
-            "2026-07-31",
+            "2026-06-30T23:30:00+08:00",
+            "2026-07-31T23:30:00+08:00",
         ]
+        july_facts = server.store.list_daily_facts(
+            submission["mine_id"],
+            date_from=date(2026, 7, 31),
+            date_to=date(2026, 7, 31),
+        )
+        assert [item["date"] for item in july_facts] == ["2026-07-31T23:30:00+08:00"]
         day = stored.days[0]
         assert day.extraction_t is not None
         assert day.extraction_t.daily_total is None
@@ -1450,9 +1460,7 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
         assert stored_report.response_required is False
         assert stored_report.finding_ids == []
         assert stored_report.result.method_version == "regulatory-ten-quantity-v3.3.0"
-        assert "本次提交的实际数据范围" in (
-            stored_report.result.decision_reasons[0]
-        )
+        assert "本次提交的实际数据范围" in (stored_report.result.decision_reasons[0])
 
         wrong_route_status, wrong_route_problem = request(
             "GET",
@@ -1618,9 +1626,9 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
 
         ack = deepcopy(
             json.loads(
-                (
-                    CONTRACTS / "examples" / "risk-delivery-ack-v2.json"
-                ).read_text(encoding="utf-8")
+                (CONTRACTS / "examples" / "risk-delivery-ack-v2.json").read_text(
+                    encoding="utf-8"
+                )
             )
         )
         ack["message_id"] = str(uuid4())
@@ -1672,9 +1680,9 @@ def test_complete_two_product_exchange_and_read_only_dashboard(tmp_path: Path) -
 
         response_message = deepcopy(
             json.loads(
-                (
-                    CONTRACTS / "examples" / "enterprise-risk-response-v2.json"
-                ).read_text(encoding="utf-8")
+                (CONTRACTS / "examples" / "enterprise-risk-response-v2.json").read_text(
+                    encoding="utf-8"
+                )
             )
         )
         response_message["message_id"] = str(uuid4())

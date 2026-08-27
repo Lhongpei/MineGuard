@@ -358,12 +358,12 @@ async function main() {
     );
     assert.match(evidence.textContent, /多来源数值冲突/);
     assert.match(evidence.textContent, /connector_source_conflict/);
-    assert.match(evidence.textContent, /缺失整日报/);
+    assert.match(evidence.textContent, /缺失完整记录/);
     assert.match(evidence.textContent, /这份预检已经过期/);
     assert.match(evidence.textContent, /当前草稿为修订 4/);
     assert.equal(evidence.querySelector("img"), null, "rejection text must be escaped");
     assert.match(document.getElementById("fqDraftDetail").textContent, /生产数据批次/);
-    assert.match(document.getElementById("fqDraftDetail").textContent, /1 个数据日期/);
+    assert.match(document.getElementById("fqDraftDetail").textContent, /1 条生产记录/);
     assert.match(document.getElementById("fqDraftDetail").textContent, /申报窗口内的完整内容/);
     assert(!document.getElementById("fqDraftDetail").textContent.includes("本月完整内容"));
     for (const forbidden of [

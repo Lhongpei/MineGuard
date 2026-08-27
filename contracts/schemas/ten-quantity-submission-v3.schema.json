@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:mineguard:contract:ten-quantity-submission:v3",
   "title": "Ten-Quantity Submission V3",
-  "description": "One mine's human-confirmed daily and shift report for ten business groups represented by eleven atomic measurements. V3 does not alter or reinterpret Five-Quantity V2 messages.",
+  "description": "One mine's minute-granularity production records and optional governed shift detail for ten business groups represented by eleven atomic measurements.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -134,7 +134,10 @@
       "additionalProperties": false,
       "required": ["date", "operating_state", "reported_quantity"],
       "properties": {
-        "date": {"type": "string", "format": "date"},
+        "date": {
+          "$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime",
+          "description": "Governed observation time, aligned to an exact minute."
+        },
         "operating_state": {
           "type": "string",
           "enum": ["producing", "stopped", "maintenance", "restarting", "unknown"]
@@ -214,8 +217,8 @@
           "maxLength": 64,
           "pattern": "^(?:UTC|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]|[A-Za-z][A-Za-z0-9._+-]*(?:/[A-Za-z0-9._+-]+)+)$"
         },
-        "period_start": {"type": "string", "format": "date"},
-        "period_end": {"type": "string", "format": "date"},
+        "period_start": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"},
+        "period_end": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"},
         "closed_at": {
           "$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"
         },
@@ -223,7 +226,7 @@
         "days": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 366,
+          "maxItems": 4096,
           "items": {"$ref": "#/$defs/day"}
         },
         "sources": {

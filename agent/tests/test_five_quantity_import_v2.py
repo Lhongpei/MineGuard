@@ -5,8 +5,6 @@ import zipfile
 from io import BytesIO
 
 import pytest
-from openpyxl import Workbook
-
 from enterprise_agent.errors import ImportContentError
 from enterprise_agent.five_quantity_exchange import MineIdentity
 from enterprise_agent.five_quantity_import import (
@@ -15,6 +13,7 @@ from enterprise_agent.five_quantity_import import (
     inspect_five_quantity_csv,
 )
 from enterprise_agent.quantity_catalog import LEGACY_V2_METRICS, METRICS
+from openpyxl import Workbook
 
 
 def identity() -> MineIdentity:
@@ -58,8 +57,8 @@ def test_csv_normalisation_never_invents_missing_values_or_trust_tiers() -> None
     )
     payload = imported["payload"]
     assert payload["mine"] == identity().mine
-    assert payload["period_start"] == "2026-07-01"
-    assert payload["period_end"] == "2026-07-02"
+    assert payload["period_start"] == "2026-07-01T00:00:00+08:00"
+    assert payload["period_end"] == "2026-07-02T00:00:00+08:00"
     assert len(payload["days"]) == 2
     assert (
         payload["days"][1]["reported_quantity"]["daily_total"]["production_t"]["value"]
@@ -86,24 +85,57 @@ def test_csv_normalisation_never_invents_missing_values_or_trust_tiers() -> None
 def test_production_batch_can_cross_months_and_skip_dates() -> None:
     imported = import_five_quantity_bytes(
         filename="跨月生产数据.csv",
-        content=(
-            b"date,daily_production_t\n"
-            b"2026-07-31,100\n"
-            b"2026-08-02,120\n"
-        ),
+        content=(b"date,daily_production_t\n2026-07-31,100\n2026-08-02,120\n"),
         acquisition_mode="manual_import",
         identity=identity(),
         captured_at="2026-08-03T00:00:00Z",
     )
 
     payload = imported["payload"]
-    assert payload["period_start"] == "2026-07-31"
-    assert payload["period_end"] == "2026-08-02"
+    assert payload["period_start"] == "2026-07-31T00:00:00+08:00"
+    assert payload["period_end"] == "2026-08-02T00:00:00+08:00"
     assert [day["date"] for day in payload["days"]] == [
-        "2026-07-31",
-        "2026-08-02",
+        "2026-07-31T00:00:00+08:00",
+        "2026-08-02T00:00:00+08:00",
     ]
     assert "reporting_month" not in payload
+
+
+def test_same_day_can_contain_multiple_distinct_minute_records() -> None:
+    imported = import_five_quantity_bytes(
+        filename="分钟生产数据.csv",
+        content=(
+            "数据时间,企业报表产量\n2026-08-27 08:15,100\n2026-08-27 08:45,120\n"
+        ).encode(),
+        acquisition_mode="manual_import",
+        identity=identity(),
+        captured_at="2026-08-27T01:00:00Z",
+    )
+
+    assert [item["date"] for item in imported["payload"]["days"]] == [
+        "2026-08-27T08:15:00+08:00",
+        "2026-08-27T08:45:00+08:00",
+    ]
+
+
+def test_second_precision_is_rejected_instead_of_silently_rounded() -> None:
+    with pytest.raises(ImportContentError, match="精确到分钟"):
+        import_five_quantity_bytes(
+            filename="秒级生产数据.json",
+            content=json.dumps(
+                {
+                    "days": [
+                        {
+                            "date": "2026-08-27T08:15:30+08:00",
+                            "reported_quantity": {},
+                        }
+                    ]
+                }
+            ).encode(),
+            acquisition_mode="manual_import",
+            identity=identity(),
+            captured_at="2026-08-27T01:00:00Z",
+        )
 
 
 def test_preferred_chinese_five_quantity_header_keeps_first_and_only_day() -> None:
@@ -119,7 +151,7 @@ def test_preferred_chinese_five_quantity_header_keeps_first_and_only_day() -> No
         captured_at="2026-08-01T00:00:00Z",
     )
     assert [item["date"] for item in imported["payload"]["days"]] == [
-        "2026-07-01"
+        "2026-07-01T00:00:00+08:00"
     ]
     values = imported["payload"]["days"][0]["reported_quantity"]["daily_total"]
     assert {metric: values[metric]["value"] for metric in LEGACY_V2_METRICS} == {
@@ -163,9 +195,7 @@ def test_complete_three_shift_csv_template_maps_every_scope() -> None:
         "入井人员量(人次)",
         "企业报表产量(t)",
     )
-    header = ["日期"] + [
-        f"{scope}_{metric}" for scope in scopes for metric in metrics
-    ]
+    header = ["日期"] + [f"{scope}_{metric}" for scope in scopes for metric in metrics]
     values = ["2026-07-01"] + [str(index) for index in range(1, 25)]
     imported = import_five_quantity_bytes(
         filename="五量填报标准模板.csv",
@@ -176,8 +206,7 @@ def test_complete_three_shift_csv_template_maps_every_scope() -> None:
     )
     reported = imported["payload"]["days"][0]["reported_quantity"]
     assert [
-        reported["daily_total"][metric]["value"]
-        for metric in LEGACY_V2_METRICS
+        reported["daily_total"][metric]["value"] for metric in LEGACY_V2_METRICS
     ] == [
         1,
         2,
@@ -208,8 +237,7 @@ def test_csv_reports_unmapped_and_unsafe_numeric_cells_without_executing() -> No
     imported = import_five_quantity_bytes(
         filename="待核对.csv",
         content=(
-            '日期,企业报表产量,电量,企业备注\n'
-            '2026-07-01,=1+1,"1,2",不得自动采用\n'
+            '日期,企业报表产量,电量,企业备注\n2026-07-01,=1+1,"1,2",不得自动采用\n'
         ).encode(),
         acquisition_mode="manual_import",
         identity=identity(),
@@ -273,10 +301,7 @@ def test_csv_preview_masks_values_and_infers_an_opaque_date_header() -> None:
 
 
 def test_headerless_csv_fails_closed_instead_of_exposing_first_data_row() -> None:
-    content = (
-        b"2026-08-01,2600,96000\n"
-        b"2026-08-02,2700,97000\n"
-    )
+    content = b"2026-08-01,2600,96000\n2026-08-02,2700,97000\n"
 
     with pytest.raises(ImportContentError, match="日期列"):
         inspect_five_quantity_csv(filename="无表头.csv", content=content)
@@ -304,8 +329,7 @@ def test_headerless_unit_values_cannot_masquerade_as_safe_headers() -> None:
     "content",
     (
         b"date,2600,SECRET-RAW-VALUE\n2026-08-01,2700,other\n",
-        b"date,=HYPERLINK('https://invalid'),production_t\n"
-        b"2026-08-01,2700,2800\n",
+        b"date,=HYPERLINK('https://invalid'),production_t\n2026-08-01,2700,2800\n",
     ),
 )
 def test_declared_date_header_rejects_observation_or_formula_cells(
@@ -319,11 +343,7 @@ def test_declared_date_header_rejects_observation_or_formula_cells(
 def test_multilevel_header_rejects_observation_or_formula_detail(
     detail: str,
 ) -> None:
-    content = (
-        "date,业务字段,内部备注\n"
-        f",{detail}\n"
-        "2026-08-01,2700,SECRET\n"
-    ).encode()
+    content = (f"date,业务字段,内部备注\n,{detail}\n2026-08-01,2700,SECRET\n").encode()
 
     with pytest.raises(ImportContentError, match="表头明细行"):
         inspect_five_quantity_csv(filename="伪造多层表头.csv", content=content)
@@ -349,8 +369,7 @@ def test_opaque_date_inference_accepts_real_erp_field_codes() -> None:
 
 def test_reviewed_csv_mapping_materializes_values_without_model_editing() -> None:
     content = (
-        "业务日,原煤完成量,当日总电耗,内部备注\n"
-        "2026-07-01,2600,96000,不得写入报表\n"
+        "业务日,原煤完成量,当日总电耗,内部备注\n2026-07-01,2600,96000,不得写入报表\n"
     ).encode()
     imported = import_five_quantity_bytes(
         filename="ERP导出.csv",
@@ -379,8 +398,7 @@ def test_reviewed_csv_mapping_materializes_values_without_model_editing() -> Non
     assert daily["electricity_kwh"]["value"] == 96000
     assert imported["payload"]["agent_processing"]["model_assistance_used"] is True
     assert any(
-        item["kind"] == "explicitly_unmapped_column"
-        and item["source_column"] == 3
+        item["kind"] == "explicitly_unmapped_column" and item["source_column"] == 3
         for item in imported["suggestions"]
     )
 
@@ -481,8 +499,7 @@ def test_legacy_labor_header_is_accepted_but_output_is_canonical() -> None:
     assert "labor_persons" not in values
     assert values["mine_entry_persons"]["value"] == 320
     assert any(
-        item["kind"] == "legacy_mine_entry_alias"
-        for item in imported["suggestions"]
+        item["kind"] == "legacy_mine_entry_alias" for item in imported["suggestions"]
     )
 
 
@@ -512,8 +529,7 @@ def test_generic_fire_material_with_embedded_children_is_rejected() -> None:
         import_five_quantity_bytes(
             filename="火工品明细.csv",
             content=(
-                "日期,火工品量\n"
-                '2026-07-01,"电子雷管:120发、乳化炸药:240kg"\n'
+                '日期,火工品量\n2026-07-01,"电子雷管:120发、乳化炸药:240kg"\n'
             ).encode(),
             acquisition_mode="manual_import",
             identity=identity(),
@@ -524,10 +540,7 @@ def test_generic_fire_material_with_embedded_children_is_rejected() -> None:
 def test_duplicate_fire_child_columns_do_not_overwrite_or_guess_total() -> None:
     imported = import_five_quantity_bytes(
         filename="重复雷管列.csv",
-        content=(
-            "日期,工业雷管,电子雷管,炸药\n"
-            "2026-07-01,100,20,240\n"
-        ).encode(),
+        content=("日期,工业雷管,电子雷管,炸药\n2026-07-01,100,20,240\n").encode(),
         acquisition_mode="manual_import",
         identity=identity(),
         captured_at="2026-08-01T00:00:00Z",
@@ -545,10 +558,7 @@ def test_duplicate_fire_child_columns_do_not_overwrite_or_guess_total() -> None:
 def test_unapproved_fire_component_is_not_folded_into_known_children() -> None:
     imported = import_five_quantity_bytes(
         filename="其他火工品.csv",
-        content=(
-            "日期,雷管,炸药,导爆索,产量\n"
-            "2026-07-01,120,240,30,2600\n"
-        ).encode(),
+        content=("日期,雷管,炸药,导爆索,产量\n2026-07-01,120,240,30,2600\n").encode(),
         acquisition_mode="manual_import",
         identity=identity(),
         captured_at="2026-08-01T00:00:00Z",
@@ -664,9 +674,7 @@ def test_structured_json_legacy_person_key_is_canonicalised() -> None:
     for day in imported["days"]:
         assert "labor_persons" not in day["reported_quantity"]["daily_total"]
         assert (
-            day["reported_quantity"]["daily_total"]["mine_entry_persons"][
-                "metric_code"
-            ]
+            day["reported_quantity"]["daily_total"]["mine_entry_persons"]["metric_code"]
             == "mine_entry_persons"
         )
 

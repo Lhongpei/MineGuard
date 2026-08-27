@@ -59,7 +59,7 @@ LEGACY_BASELINE_ADMISSION_RULE_VERSION = "baseline-admission-v2.2"
 LEGACY_BUSINESS_QUANTITY_GROUP_VERSION = "five-business-quantities-v2.3"
 LEGACY_CONTRACT_VERSION = "enterprise-five-quantity-submission-v2"
 TEN_CONTRACT_VERSION = "enterprise-ten-quantity-submission-v3"
-CalendarDate = date
+CalendarDate = AwareDatetime | date
 
 
 class DecisionStatus(StrEnum):
@@ -618,10 +618,10 @@ class FiveQuantitySubmission(StrictModel):
     supersedes_submission_id: Annotated[
         str | None, Field(min_length=8, max_length=128)
     ] = None
-    period_start: date
-    period_end: date
+    period_start: CalendarDate
+    period_end: CalendarDate
     comparison_context: ComparisonContext | None = None
-    days: Annotated[list[FiveQuantityDay], Field(min_length=1, max_length=366)]
+    days: Annotated[list[FiveQuantityDay], Field(min_length=1, max_length=4096)]
     provenance: Annotated[
         list[SubmissionProvenance], Field(min_length=1, max_length=64)
     ]
@@ -655,6 +655,31 @@ class FiveQuantitySubmission(StrictModel):
         )
         if self.quantity_scope != expected_scope:
             raise ValueError("contract_version and quantity_scope do not match")
+        if self.quantity_scope == "ten_quantity_v3":
+            points = (
+                self.period_start,
+                self.period_end,
+                *(item.date for item in self.days),
+            )
+            if any(
+                not isinstance(item, datetime) or item.tzinfo is None for item in points
+            ):
+                raise ValueError("V3 production record times must include a timezone")
+            if any(
+                item.second or item.microsecond
+                for item in points
+                if isinstance(item, datetime)
+            ):
+                raise ValueError("V3 production record times must align to a minute")
+        elif any(
+            isinstance(item, datetime)
+            for item in (
+                self.period_start,
+                self.period_end,
+                *(day.date for day in self.days),
+            )
+        ):
+            raise ValueError("V2 daily dates cannot contain a time")
         if self.quantity_scope == "five_quantity_v2" and any(
             getattr(day, metric) is not None or metric in day.quality
             for day in self.days
@@ -666,11 +691,9 @@ class FiveQuantitySubmission(StrictModel):
         expected_span = (self.period_end - self.period_start).days + 1
         if expected_span > 366:
             raise ValueError("submission period cannot exceed 366 days")
-        if (
-            self.quantity_scope == "five_quantity_v2"
-            and self.period_start.strftime("%Y-%m")
-            != self.period_end.strftime("%Y-%m")
-        ):
+        if self.quantity_scope == "five_quantity_v2" and self.period_start.strftime(
+            "%Y-%m"
+        ) != self.period_end.strftime("%Y-%m"):
             raise ValueError("one five-quantity submission must stay in one month")
         try:
             ZoneInfo(self.reporting_timezone)
@@ -678,14 +701,16 @@ class FiveQuantitySubmission(StrictModel):
             raise ValueError("reporting_timezone is not an IANA timezone") from error
         dates = [item.date for item in self.days]
         if len(dates) != len(set(dates)):
-            raise ValueError("daily dates must be unique")
+            raise ValueError("production record times must be unique")
         outside = [
             item.isoformat()
             for item in dates
             if item < self.period_start or item > self.period_end
         ]
         if outside:
-            raise ValueError("daily date outside submission period: " + outside[0])
+            raise ValueError(
+                "production record time outside submission period: " + outside[0]
+            )
         return self
 
     @property
@@ -1068,10 +1093,7 @@ def _legacy_signal_from_advanced(
         observed=signal.observed,
         expected_lower=signal.expected_lower,
         expected_upper=signal.expected_upper,
-        basis=(
-            f"advanced_v3_{signal.layer.value}:"
-            f"{signal.basis}"
-        ),
+        basis=(f"advanced_v3_{signal.layer.value}:{signal.basis}"),
     )
 
 
@@ -1177,23 +1199,22 @@ def analyze_five_quantity(
     insufficient_reasons: list[str] = []
     if legacy_scope and coverage.complete_day_count < parameters.minimum_complete_days:
         insufficient_reasons.append("完整五量日不足")
-    if legacy_scope and coverage.completeness_ratio < parameters.minimum_completeness_ratio:
+    if (
+        legacy_scope
+        and coverage.completeness_ratio < parameters.minimum_completeness_ratio
+    ):
         insufficient_reasons.append("统计期数据覆盖率不足")
     # V3 submissions are arbitrary production-data batches, not fixed seven-day
     # or calendar-complete reports.  Missing dates and metrics remain explicit in
     # coverage/signals, but they must not invalidate the values that were actually
     # supplied.  Only a batch with no usable production value is unanalyzable.
     if not legacy_scope and not any(
-        value is not None
-        for values in effective.values()
-        for value in values.values()
+        value is not None for values in effective.values() for value in values.values()
     ):
         insufficient_reasons.append("本批次没有可分析的生产数据")
     if not reconciliation.success:
         insufficient_reasons.append(
-            "已提供数据的一致性核对未完成"
-            if not legacy_scope
-            else "线性协调求解失败"
+            "已提供数据的一致性核对未完成" if not legacy_scope else "线性协调求解失败"
         )
     risk_signals = [
         item
@@ -1326,13 +1347,13 @@ def _prepare_days(
     days: Sequence[FiveQuantityDay],
     parameters: RegulatoryFiveQuantityParameters,
 ) -> tuple[
-    dict[date, dict[str, float | None]],
-    dict[date, list[_Observation]],
+    dict[CalendarDate, dict[str, float | None]],
+    dict[CalendarDate, list[_Observation]],
     list[AnalysisSignal],
     CoverageSummary,
 ]:
-    effective: dict[date, dict[str, float | None]] = {}
-    observations: dict[date, list[_Observation]] = defaultdict(list)
+    effective: dict[CalendarDate, dict[str, float | None]] = {}
+    observations: dict[CalendarDate, list[_Observation]] = defaultdict(list)
     signals: list[AnalysisSignal] = []
     complete_count = 0
     applicable_metrics = submission.applicable_metrics
@@ -1494,7 +1515,11 @@ def _prepare_days(
         if day_quality_complete and complete_values:
             complete_count += 1
 
-    expected = (submission.period_end - submission.period_start).days + 1
+    expected = (
+        len(days)
+        if ten_quantity
+        else (submission.period_end - submission.period_start).days + 1
+    )
     reported_dates = set(effective)
     missing = expected - len(reported_dates)
     ratio = complete_count / expected
@@ -1509,7 +1534,7 @@ def _prepare_days(
         )
     incomplete = len(days) - complete_count
     if incomplete:
-        quantity_name = "十量日报（11个原子指标）" if ten_quantity else "五量值"
+        quantity_name = "生产记录（11个原子指标）" if ten_quantity else "五量值"
         signals.append(
             AnalysisSignal(
                 code=(
@@ -1518,7 +1543,7 @@ def _prepare_days(
                     else "incomplete_five_quantity_days"
                 ),
                 severity=SignalSeverity.REVIEW,
-                message=f"有 {incomplete} 个日期缺少可用的完整{quantity_name}",
+                message=f"有 {incomplete} 条记录缺少可用的完整{quantity_name}",
                 basis="required_metric_completeness",
             )
         )
@@ -1546,16 +1571,18 @@ def _observation_tolerance(
 
 
 def _operating_states(
-    effective: dict[date, dict[str, float | None]],
+    effective: dict[CalendarDate, dict[str, float | None]],
     parameters: RegulatoryFiveQuantityParameters,
-) -> dict[date, OperatingState]:
-    states: dict[date, OperatingState] = {}
+) -> dict[CalendarDate, OperatingState]:
+    states: dict[CalendarDate, OperatingState] = {}
     nonproduction_run = 0
     ramp_remaining = 0
-    previous_date: date | None = None
+    previous_date: CalendarDate | None = None
     for observed_date in sorted(effective):
-        if previous_date is not None and observed_date != previous_date + timedelta(
-            days=1
+        if (
+            previous_date is not None
+            and not isinstance(observed_date, datetime)
+            and observed_date != previous_date + timedelta(days=1)
         ):
             nonproduction_run = 0
             ramp_remaining = 0
@@ -2352,8 +2379,8 @@ def _temporal_signals(
 
 def _past_only_detector_signals(
     submission: FiveQuantitySubmission,
-    effective: dict[date, dict[str, float | None]],
-    states: dict[date, OperatingState],
+    effective: dict[CalendarDate, dict[str, float | None]],
+    states: dict[CalendarDate, OperatingState],
     history: Sequence[HistoricalFiveQuantityDay],
     relationships: Sequence[RelationshipCode],
     parameters: RegulatoryFiveQuantityParameters,
@@ -2367,10 +2394,22 @@ def _past_only_detector_signals(
 
     observations: list[TemporalObservation] = []
     source_id = f"governed-{submission.quantity_scope}-history"
+
+    def aligned(value: CalendarDate) -> CalendarDate:
+        if isinstance(submission.period_start, datetime):
+            if isinstance(value, datetime):
+                return value.astimezone(submission.period_start.tzinfo)
+            return datetime.combine(
+                value,
+                datetime.min.time(),
+                tzinfo=submission.period_start.tzinfo,
+            )
+        return value.date() if isinstance(value, datetime) else value
+
     history_by_date = {
-        item.date: item.values()
+        aligned(item.date): item.values()
         for item in history
-        if item.date < submission.period_start
+        if aligned(item.date) < submission.period_start
     }
     history_rows = sorted(history_by_date.items())
     current_rows = [
@@ -2398,10 +2437,14 @@ def _past_only_detector_signals(
                     mine_id=submission.mine_id,
                     source_id=source_id,
                     metric_code=relationship.value,
-                    timestamp=datetime.combine(
-                        observed_date,
-                        datetime.min.time(),
-                        tzinfo=UTC,
+                    timestamp=(
+                        observed_date.astimezone(UTC)
+                        if isinstance(observed_date, datetime)
+                        else datetime.combine(
+                            observed_date,
+                            datetime.min.time(),
+                            tzinfo=UTC,
+                        )
                     ),
                     value=float(numerator_value) / float(denominator_value),
                     quality=1.0,
@@ -2431,15 +2474,23 @@ def _past_only_detector_signals(
                 page_hinkley_threshold=parameters.temporal_page_hinkley_threshold,
                 exclude_detected_anomalies_from_baseline=True,
             ),
-            report_start=datetime.combine(
-                submission.period_start,
-                datetime.min.time(),
-                tzinfo=UTC,
+            report_start=(
+                submission.period_start.astimezone(UTC)
+                if isinstance(submission.period_start, datetime)
+                else datetime.combine(
+                    submission.period_start,
+                    datetime.min.time(),
+                    tzinfo=UTC,
+                )
             ),
-            report_end=datetime.combine(
-                submission.period_end + timedelta(days=1),
-                datetime.min.time(),
-                tzinfo=UTC,
+            report_end=(
+                submission.period_end.astimezone(UTC) + timedelta(minutes=1)
+                if isinstance(submission.period_end, datetime)
+                else datetime.combine(
+                    submission.period_end + timedelta(days=1),
+                    datetime.min.time(),
+                    tzinfo=UTC,
+                )
             ),
         )
     )
@@ -2467,7 +2518,11 @@ def _past_only_detector_signals(
                             f"{RELATIONSHIP_LABELS[RelationshipCode(series.metric_code)]}："
                             f"{item.explanation}"
                         ),
-                        date=point.timestamp.date(),
+                        date=(
+                            point.timestamp.astimezone(submission.period_start.tzinfo)
+                            if isinstance(submission.period_start, datetime)
+                            else point.timestamp.date()
+                        ),
                         metric=series.metric_code,
                         observed=point.observed_value,
                         basis=(

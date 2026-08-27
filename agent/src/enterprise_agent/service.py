@@ -651,9 +651,7 @@ class EnterpriseAgentService:
         with self._integrity_lock:
             snapshot = self._production_integrity_snapshot
             if snapshot is None:
-                raise ConflictError(
-                    "正式模式尚未完成启动全链核验；就绪状态拒绝放行"
-                )
+                raise ConflictError("正式模式尚未完成启动全链核验；就绪状态拒绝放行")
             runtime_boundary = self._runtime_integrity_boundary()
             status = deep_copy_json(snapshot["status"])
             completed_at = str(snapshot["completed_at"])
@@ -874,8 +872,8 @@ class EnterpriseAgentService:
                 "enterprise_name": str(mine["operator_name"]),
                 "unified_social_credit_code": "",
                 "mine_name": str(mine["mine_name"]),
-                "window_start": f"{payload['period_start']}T00:00:00+08:00",
-                "window_end": f"{payload['period_end']}T23:59:59+08:00",
+                "window_start": str(payload["period_start"]),
+                "window_end": str(payload["period_end"]),
                 "status": source["status"],
                 "notes": "生产数据批次只读分析视图",
             }
@@ -898,7 +896,7 @@ class EnterpriseAgentService:
                         "metric_code": metric_code,
                         "value": value,
                         "unit": measurement["unit"],
-                        "observed_at": f"{day['date']}T12:00:00+08:00",
+                        "observed_at": str(day["date"]),
                         "received_at": str(payload["closed_at"]),
                     }
                 )

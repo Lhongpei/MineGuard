@@ -139,12 +139,12 @@ V2_FIVE_QUANTITY_GROUPS = {
 }
 EXPECTED_V3_VECTORS = {
     "ten-quantity-submission-v3.json": (
-        "2e22623b7c9303cd3d26698533d8c26ac39d93e803b0fb1954a64ad7d9be885a",
-        "18703f0be96f66afaf0bf079ec89605eb3637fda6935332ef2bdde8a6ba98f89",
+        "9d3265f8952c1d3ef1c3e54c3bad3e6a65948dac031cb6c78c841b129fd7da36",
+        "a123ef420ac50b03f9a3373c11ef8c3572a588cca94b16b5ad2b706899ad4086",
     ),
     "analysis-report-v3.json": (
-        "1a4d5b433daa6ffaaa705e658b88a6929fbc56b75b3bbc972ba942d505f7df2c",
-        "a1ed980a381cabef728761ade76ac3a5956097f4f5e044d0e635ed69492c1ab2",
+        "5ab2f0ec1f2c839b409391f35d3398c08d2021119c0d677c7a2c7260c8fa7346",
+        "4bd4a50b412d49135c6fd1e8b1e6911c5afdd79516f9b26d8886d4aae8d63b86",
     ),
 }
 V3_EXAMPLE_SECRET = b"example-v3-exchange-secret-not-for-production"
@@ -232,10 +232,10 @@ V3_BUSINESS_SEMANTICS = {
     },
 }
 V3_EXPECTED_BODY_SHA256 = (
-    "80391318cc19539f0f19f7ddb02b7964970cdeb0b9f8ee5a76ec6e2c682ce60b"
+    "3fdb9c01fc57156351ceb92f1c3a71de242d7b8da545ca8050f7e71a7035e599"
 )
 V3_EXPECTED_TRANSPORT_SIGNATURE = (
-    "99bf92ec2ea53cb601c52699af8b0c8c0b5d67ad82c49a5261088ba092de0eb9"
+    "396d1cdd7ec430d5b4fda47a9315a89b742810f5a73b28d69b630003679bf24a"
 )
 V3_TRANSPORT_EXAMPLE_SECRET = b"example-v3-transport-secret-not-for-production"
 
@@ -1306,20 +1306,28 @@ def _check_v3_submission_semantics(submission: dict[str, Any]) -> None:
             "V3 closing, confirmation, creation and signing times are misordered"
         )
 
-    period_start = _parse_date(payload["period_start"], "period_start")
-    period_end = _parse_date(payload["period_end"], "period_end")
+    period_start = _aware_datetime(payload["period_start"], "period_start")
+    period_end = _aware_datetime(payload["period_end"], "period_end")
+    if any(value.second or value.microsecond for value in (period_start, period_end)):
+        raise ContractValidationError("V3 period bounds must align to a minute")
     if period_end < period_start:
         raise ContractValidationError("V3 reporting period ends before it starts")
     days = payload["days"]
-    day_values = [_parse_date(day["date"], "days[].date") for day in days]
+    day_values = [_aware_datetime(day["date"], "days[].date") for day in days]
+    if any(value.second or value.microsecond for value in day_values):
+        raise ContractValidationError("V3 production records must align to a minute")
     if day_values != sorted(set(day_values)):
         raise ContractValidationError(
-            "V3 days must be unique and chronologically ordered"
+            "V3 production records must be unique and chronologically ordered"
         )
     if day_values[0] != period_start or day_values[-1] != period_end:
-        raise ContractValidationError("V3 period must match the first and last day")
+        raise ContractValidationError(
+            "V3 period must match the first and last production record"
+        )
     if any(day < period_start or day > period_end for day in day_values):
-        raise ContractValidationError("V3 day falls outside the declared period")
+        raise ContractValidationError(
+            "V3 production record falls outside the declared period"
+        )
 
     sources = payload["sources"]
     source_ids = [source["source_id"] for source in sources]
@@ -1948,11 +1956,11 @@ def _check_model_credential_examples(documents: dict[Path, Any]) -> None:
             "model issuer trust store example must be sorted by issuer_key_id"
         )
     first = issuers[0]
-    if first.get("issuer_id") != profile.get("issuer_id") or first.get(
-        "issuer_key_id"
-    ) != profile.get("issuer_key_id") or first.get(
-        "issuer_key_epoch"
-    ) != profile.get("issuer_key_epoch"):
+    if (
+        first.get("issuer_id") != profile.get("issuer_id")
+        or first.get("issuer_key_id") != profile.get("issuer_key_id")
+        or first.get("issuer_key_epoch") != profile.get("issuer_key_epoch")
+    ):
         raise ContractValidationError(
             "model issuer trust store example does not anchor the example profile"
         )

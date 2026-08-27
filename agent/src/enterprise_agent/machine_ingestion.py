@@ -15,7 +15,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from http import HTTPStatus
 from typing import Any
 
@@ -35,7 +35,7 @@ _ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.:-]{0,63}$")
 
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 _EVENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$")
-_DRAFT_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
+_DRAFT_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@/-]{0,255}$")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$")
 _HEX_64 = re.compile(r"^[0-9A-Fa-f]{64}$")
 _SAFE_METADATA_LIMITS = {
@@ -109,9 +109,7 @@ class ConnectorSourcePolicy:
             or not isinstance(self.freshness_max_seconds, int)
             or not 300 <= self.freshness_max_seconds <= 30 * 24 * 60 * 60
         ):
-            raise ValueError(
-                "连接器来源 freshness_max_seconds 必须在 300-2592000 秒"
-            )
+            raise ValueError("连接器来源 freshness_max_seconds 必须在 300-2592000 秒")
         object.__setattr__(self, "source_system", safe_system)
 
     def public_policy(self) -> dict[str, Any]:
@@ -131,12 +129,11 @@ class ConnectorClient:
     allowed_sources: tuple[ConnectorSourcePolicy | tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.client_id, str) or _CLIENT_ID.fullmatch(
-            self.client_id
-        ) is None:
-            raise ValueError(
-                "连接器 client_id 必须是 1-64 位安全标识符"
-            )
+        if (
+            not isinstance(self.client_id, str)
+            or _CLIENT_ID.fullmatch(self.client_id) is None
+        ):
+            raise ValueError("连接器 client_id 必须是 1-64 位安全标识符")
         if not isinstance(self.secret, str) or len(self.secret.encode("utf-8")) < 32:
             raise ValueError("连接器 secret 必须至少为 32 字节")
         if self.permissions != frozenset({"autofill"}):
@@ -152,9 +149,7 @@ class ConnectorClient:
             if isinstance(item, ConnectorSourcePolicy):
                 policy = item
             elif isinstance(item, tuple) and len(item) == 2:
-                policy = ConnectorSourcePolicy(
-                    source_id=item[0], source_system=item[1]
-                )
+                policy = ConnectorSourcePolicy(source_id=item[0], source_system=item[1])
             else:
                 raise ValueError("连接器 allowed_sources 映射非法")
             if policy.source_id in seen:
@@ -208,9 +203,7 @@ def parse_connector_clients_json(raw: str | None) -> tuple[ConnectorClient, ...]
             "ENTERPRISE_AGENT_CONNECTOR_CLIENTS_JSON 必须是有效 JSON"
         ) from error
     if not isinstance(parsed, list) or len(parsed) > 1:
-        raise ValueError(
-            "one-mine 模式最多允许配置 1 个权威机器连接器 client"
-        )
+        raise ValueError("one-mine 模式最多允许配置 1 个权威机器连接器 client")
     clients: list[ConnectorClient] = []
     seen: set[str] = set()
     for index, item in enumerate(parsed):
@@ -225,9 +218,8 @@ def parse_connector_clients_json(raw: str | None) -> tuple[ConnectorClient, ...]
         if unknown:
             raise ValueError(f"连接器配置第 {index + 1} 项包含不支持字段")
         permissions = item.get("permissions", ["autofill"])
-        if (
-            not isinstance(permissions, list)
-            or any(not isinstance(value, str) for value in permissions)
+        if not isinstance(permissions, list) or any(
+            not isinstance(value, str) for value in permissions
         ):
             raise ValueError("连接器 permissions 必须是文本数组")
         allowed_sources = item.get("allowed_sources")
@@ -244,9 +236,7 @@ def parse_connector_clients_json(raw: str | None) -> tuple[ConnectorClient, ...]
                 )
                 continue
             if not isinstance(policy_value, dict):
-                raise ValueError(
-                    "allowed_sources 的值必须是系统名或受控策略对象"
-                )
+                raise ValueError("allowed_sources 的值必须是系统名或受控策略对象")
             unknown_policy = set(policy_value) - {
                 "source_system",
                 "required",
@@ -287,10 +277,7 @@ def signature_material(
 ) -> str:
     """Return the exact, versioned signing material from the public contract."""
 
-    return (
-        f"{HMAC_DOMAIN}\nPOST\n{path}\n{timestamp}\n"
-        f"{request_id}\n{body_sha256}"
-    )
+    return f"{HMAC_DOMAIN}\nPOST\n{path}\n{timestamp}\n{request_id}\n{body_sha256}"
 
 
 def authenticate_connector_request(
@@ -459,16 +446,14 @@ def validate_autofill_payload(body: dict[str, Any]) -> dict[str, Any]:
     if source.get("truth_statement") is not True:
         raise ValueError("source.truth_statement 必须明确为 true")
     observed_at = source.get("observed_at")
-    observed_at = utc_text(
-        parse_aware_datetime(observed_at, "source.observed_at")
-    )
+    observed_at = utc_text(parse_aware_datetime(observed_at, "source.observed_at"))
     coverage_as_of = source.get("coverage_as_of")
     if not isinstance(coverage_as_of, str):
-        raise ValueError("source.coverage_as_of 必须是 ISO 日期")
-    try:
-        date.fromisoformat(coverage_as_of)
-    except ValueError as error:
-        raise ValueError("source.coverage_as_of 必须是 ISO 日期") from error
+        raise ValueError("source.coverage_as_of 必须是带时区的 ISO 分钟")
+    coverage_time = parse_aware_datetime(coverage_as_of, "source.coverage_as_of")
+    if coverage_time.second or coverage_time.microsecond:
+        raise ValueError("source.coverage_as_of 必须精确到分钟")
+    coverage_as_of = coverage_time.isoformat(timespec="seconds")
     return {
         "contract_version": AUTOFILL_INGESTION_CONTRACT,
         "event_id": event_id,
@@ -570,14 +555,14 @@ def validate_source_health_payload(body: dict[str, Any]) -> dict[str, Any]:
     if outcome != "success_nonempty" and record_count != 0:
         raise ValueError("非 success_nonempty 的 record_count 必须为 0")
     coverage_as_of = body.get("coverage_as_of")
-    coverage_date: date | None = None
+    coverage_date: datetime | None = None
     if coverage_as_of is not None:
         if not isinstance(coverage_as_of, str):
-            raise ValueError("coverage_as_of 必须是 ISO 日期或 null")
-        try:
-            coverage_date = date.fromisoformat(coverage_as_of)
-        except ValueError as error:
-            raise ValueError("coverage_as_of 必须是 ISO 日期或 null") from error
+            raise ValueError("coverage_as_of 必须是带时区的 ISO 分钟或 null")
+        coverage_date = parse_aware_datetime(coverage_as_of, "coverage_as_of")
+        if coverage_date.second or coverage_date.microsecond:
+            raise ValueError("coverage_as_of 必须精确到分钟")
+        coverage_as_of = coverage_date.isoformat(timespec="seconds")
         if coverage_date.strftime("%Y-%m") != reporting_month:
             raise ValueError("coverage_as_of 必须属于申报月")
     if outcome == "success_nonempty" and coverage_date is None:
@@ -688,18 +673,14 @@ class MachineAutofillCoordinator:
                         ),
                         source_name=payload["source"]["source_name"],
                         source_system=payload["source"]["source_system"],
-                        original_filename=(
-                            payload["source"]["original_filename"]
-                        ),
+                        original_filename=(payload["source"]["original_filename"]),
                         observed_at=payload["source"]["observed_at"],
                         coverage_as_of=payload["source"]["coverage_as_of"],
                         format_name=payload["source"]["format"],
                         content=payload["source"]["content"].encode("utf-8"),
                         actor_id=actor_id,
                         source_required=source_policy.required,
-                        freshness_max_seconds=(
-                            source_policy.freshness_max_seconds
-                        ),
+                        freshness_max_seconds=(source_policy.freshness_max_seconds),
                     )
                 except (ConflictError, ImportContentError, ValueError) as error:
                     failure = self._safe_failure(ingestion, error)
@@ -734,9 +715,7 @@ class MachineAutofillCoordinator:
                     "coverage_as_of": ingestion["source_coverage_as_of"],
                     "request_hash": ingestion["request_sha256"][:12],
                     "draft_revision": ingestion.get("draft_revision"),
-                    "merge": (ingestion.get("import_summary") or {}).get(
-                        "merge", {}
-                    ),
+                    "merge": (ingestion.get("import_summary") or {}).get("merge", {}),
                     "review_required": True,
                     "raw_content_retained": False,
                 },
@@ -778,9 +757,7 @@ class MachineAutofillCoordinator:
             "missing_count": value.get("missing_count"),
             "missing_day_count": value.get("missing_day_count"),
             "calendar_coverage": value.get("calendar_coverage"),
-            "arithmetic_mismatch_count": value.get(
-                "arithmetic_mismatch_count"
-            ),
+            "arithmetic_mismatch_count": value.get("arithmetic_mismatch_count"),
             "source_count": value.get("source_count"),
             "checked_at": value.get("checked_at"),
             "warnings": list(value.get("warnings", []))[:20],
@@ -797,11 +774,14 @@ class MachineAutofillCoordinator:
         else:
             code = "connector_source_invalid"
             status = HTTPStatus.BAD_REQUEST
-        message = "".join(
-            character
-            for character in str(error)[:500]
-            if ord(character) >= 32 and ord(character) != 127
-        ) or "机器来源材料未通过校验"
+        message = (
+            "".join(
+                character
+                for character in str(error)[:500]
+                if ord(character) >= 32 and ord(character) != 127
+            )
+            or "机器来源材料未通过校验"
+        )
         return {
             "code": code,
             "http_status": int(status),
