@@ -125,6 +125,31 @@ def test_enterprise_v2_http_import_review_confirm_and_audit(tmp_path: Path) -> N
         assert runtime_status["mine_id"] == "MINE-HTTP-001"
         assert runtime_status["acquisition_trust_tiering"] is False
 
+        watched_directory = tmp_path / "watched-production-data"
+        watched_directory.mkdir()
+        status, watch_configuration = request_json(
+            connection,
+            "PUT",
+            "/api/v2/watch/config",
+            {"directories": [str(watched_directory)]},
+        )
+        assert status == 200
+        assert watch_configuration == {
+            "watched_directories": [str(watched_directory.resolve())],
+            "enabled": True,
+        }
+        status, runtime_status = request_json(connection, "GET", "/api/v2/status")
+        assert status == 200
+        assert runtime_status["watched_directories"] == [
+            str(watched_directory.resolve())
+        ]
+
+        connection.request("OPTIONS", "/api/v2/watch/config")
+        options_response = connection.getresponse()
+        assert options_response.status == 204
+        assert "PUT" in (options_response.getheader("Allow") or "").split(", ")
+        assert options_response.read() == b""
+
         csv = (
             b"date,ventilation_m3_min,mine_entry_persons,electricity_kwh,"
             b"detonators_count,explosives_kg,production_t\n"
@@ -180,10 +205,12 @@ def test_enterprise_v2_http_import_review_confirm_and_audit(tmp_path: Path) -> N
         assert status == 200
         assert audit["valid"] is True
         assert [event["event_type"] for event in audit["events"]] == [
+            "production_watch_directories_configured",
             "production_data_imported",
             "submission_confirmed_and_queued",
         ]
         assert [event["event_code"] for event in audit["events"]] == [
+            "production_watch_directories_configured",
             "five_quantity_imported",
             "five_quantity_confirmed_and_queued",
         ]

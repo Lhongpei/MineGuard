@@ -3161,7 +3161,7 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Allow", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Allow", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -3173,6 +3173,9 @@ class EnterpriseAgentHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         self._safe_dispatch("POST")
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._safe_dispatch("PUT")
 
     def do_PATCH(self) -> None:  # noqa: N802
         self._safe_dispatch("PATCH")
