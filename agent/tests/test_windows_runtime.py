@@ -812,6 +812,19 @@ def test_windows_service_uses_a_dedicated_verified_service_sid() -> None:
     assert "[IO.File]::SetAccessControl" in canonical_file_writer
     assert "Assert-EAExactRawSidAcl" in canonical_file_writer
     assert "Invoke-EAIcaclsChecked" not in canonical_file_writer
+    instance_acl_writer = helper[
+        helper.index("function Set-EAInstanceCanonicalAcl") : helper.index(
+            "function Assert-EACanonicalInstanceBoundaryAcl"
+        )
+    ]
+    assert "$Context.BackupDirectory" in instance_acl_writer
+    assert '"snapshot-auth.key"' in instance_acl_writer
+    assert "Set-EACanonicalFileAcl -Path $SnapshotAuthenticationKey" in (
+        instance_acl_writer
+    )
+    assert instance_acl_writer.index('Name "Agent backup directory"') < (
+        instance_acl_writer.index("Set-EACanonicalFileAcl -Path")
+    )
     instance_acl_verifier = helper[
         helper.index("function Assert-EACanonicalInstanceBoundaryAcl") : helper.index(
             "function Grant-EAServiceWatchReadAcl"

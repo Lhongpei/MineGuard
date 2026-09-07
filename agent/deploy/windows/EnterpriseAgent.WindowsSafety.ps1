@@ -918,6 +918,17 @@ function Set-EAInstanceCanonicalAcl {
     }
     Set-EACanonicalInheritedTreeAcl -Root $Context.BackupDirectory `
         -Name "Agent backup directory" -ServicePermission 'None'
+    # Reapplying the backup-tree ACL intentionally resets descendants to
+    # inherit from the administrative backup root.  The authentication key is
+    # the one exception: backup verification requires an independently
+    # protected file ACL so copying the key cannot be confused with copying a
+    # snapshot.  Preserve the key bytes and restore only its canonical ACL.
+    $SnapshotAuthenticationKey = Join-Path `
+        $Context.BackupDirectory "snapshot-auth.key"
+    if (Test-Path -LiteralPath $SnapshotAuthenticationKey -PathType Leaf) {
+        Set-EACanonicalFileAcl -Path $SnapshotAuthenticationKey `
+            -Name "Snapshot authentication key" -ServicePermission 'None'
+    }
 }
 
 function Assert-EACanonicalInstanceBoundaryAcl {
