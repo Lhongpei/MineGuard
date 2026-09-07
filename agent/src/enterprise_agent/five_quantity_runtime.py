@@ -1788,7 +1788,10 @@ class FiveQuantityStore:
             if not isinstance(details, dict):
                 return failure("audit_details_invalid")
             event_type = str(row["event_type"])
-            if event_type == "five_quantity_confirmed_and_queued":
+            if event_type in {
+                "five_quantity_confirmed_and_queued",
+                "five_quantity_automatically_queued",
+            }:
                 message_id = details.get("message_id")
                 draft_id = details.get("draft_id")
                 payload_sha256 = details.get("payload_sha256")
@@ -3925,6 +3928,14 @@ class FiveQuantityStore:
             values = json.loads(str(row["setting_value"]))
         except (TypeError, json.JSONDecodeError) as error:
             raise ValueError("自动发现目录配置已损坏，请联系管理员") from error
+        # The temporary PowerShell workaround issued for the 0.4.6 HTTP 501
+        # defect could persist one directory as a JSON string instead of the
+        # intended one-element array.  Treat that exact, still fully validated
+        # representation as a single directory so affected production
+        # instances can restart and save the canonical array through the fixed
+        # PUT endpoint.  Every other malformed shape continues to fail closed.
+        if isinstance(values, str):
+            values = [values]
         if not isinstance(values, list) or any(
             not isinstance(value, str) for value in values
         ):

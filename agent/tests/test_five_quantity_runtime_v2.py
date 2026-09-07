@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+
 from enterprise_agent.five_quantity_exchange import MineIdentity, sign_message
 from enterprise_agent.five_quantity_runtime import (
     CURRENT_SUBMISSION_CONTRACT,
@@ -15,7 +16,7 @@ from enterprise_agent.five_quantity_runtime import (
 )
 from enterprise_agent.service import EnterpriseAgentService
 from enterprise_agent.storage import Repository
-from enterprise_agent.util import utc_text
+from enterprise_agent.util import jcs_json, utc_text
 
 MESSAGE_SECRET = "current-message-secret-abcdefghijklmnopqrstuvwxyz"
 
@@ -131,6 +132,32 @@ def test_watch_directories_can_be_configured_and_survive_restart(
 
     disabled = restarted.configure_watched_directories([], actor="operator-1")
     assert disabled == {"watched_directories": [], "enabled": False}
+
+
+def test_legacy_single_watch_directory_string_can_restart(tmp_path: Path) -> None:
+    database = tmp_path / "legacy-watch-setting.db"
+    watched = tmp_path / "legacy-watch"
+    watched.mkdir()
+    quarantine = tmp_path / "legacy-watch-quarantine"
+    runtime = FiveQuantityRuntime(
+        Repository(database),
+        identity=identity(),
+        quarantine_directory=quarantine,
+    )
+    with runtime.store.repository._transaction() as db:
+        db.execute(
+            "INSERT INTO fq_settings(setting_key,setting_value,updated_at) "
+            "VALUES ('watched_directories',?,?)",
+            (jcs_json(str(watched.resolve())), utc_text()),
+        )
+
+    restarted = FiveQuantityRuntime(
+        Repository(database),
+        identity=identity(),
+        quarantine_directory=quarantine,
+    )
+
+    assert restarted.status()["watched_directories"] == [str(watched.resolve())]
 
 
 def test_watch_directory_rejects_relative_missing_and_state_parent_paths(
@@ -617,8 +644,9 @@ def test_watcher_ai_checks_partial_batch_and_automatically_reports(
     watched.mkdir()
     model = AutomaticReviewModel()
     government = FakeGovernment(identity())
+    database = tmp_path / "automatic-state" / "agent.db"
     runtime = FiveQuantityRuntime(
-        Repository(tmp_path / "automatic-state" / "agent.db"),
+        Repository(database),
         identity=identity(),
         platform_client=government,
         watched_directories=(str(watched),),
@@ -646,6 +674,16 @@ def test_watcher_ai_checks_partial_batch_and_automatically_reports(
         if item.get("kind") == "automatic_dispatch_review"
     ]
     assert reviews[-1]["decision"] == "auto_send"
+
+    restarted = FiveQuantityRuntime(
+        Repository(database),
+        identity=identity(),
+        platform_client=government,
+        watched_directories=(str(watched),),
+        quarantine_directory=tmp_path / "automatic-state" / "quarantine",
+        llm_provider=model,
+    )
+    assert restarted.store.verify_audit()["valid"] is True
 
 
 def test_duplicate_watcher_pass_recovers_interrupted_automatic_dispatch(
