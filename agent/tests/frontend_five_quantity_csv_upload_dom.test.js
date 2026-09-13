@@ -5,6 +5,8 @@ const fs = require("fs");
 const path = require("path");
 const { JSDOM } = require("jsdom");
 
+process.env.TZ = "Asia/Shanghai";
+
 const projectRoot = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(projectRoot, "web", "index.html"), "utf8");
 const script = fs.readFileSync(path.join(projectRoot, "web", "v2-app.js"), "utf8");
@@ -146,6 +148,8 @@ function createDom(permissions) {
   const requests = [];
   const runtimeErrors = [];
   let imported = false;
+  let draftStatus = "ready_review";
+  let draftReceipt = null;
   let watchDirectories = [];
   let downloadedBlob = null;
   let downloadedName = "";
@@ -275,6 +279,8 @@ function createDom(permissions) {
     }
     if (url.pathname === "/api/v2/imports" && method === "POST") {
       imported = true;
+      draftStatus = "ready_review";
+      draftReceipt = null;
       return response(
         {
           import_id: draft.import_id,
@@ -295,9 +301,12 @@ function createDom(permissions) {
                 draft_id: draft.draft_id,
                 filename: "七月五量.csv",
                 acquisition_mode: "manual_import",
-                status: "ready_review",
+                status: draftStatus,
                 content_sha256: "c".repeat(64),
-                suggestions: [],
+                suggestions: [
+                  { kind: "automatic_structure", fingerprint: "f".repeat(64) },
+                  { kind: "automatic_mapping_check", mapped_column_count: 6 },
+                ],
                 created_at: "2026-07-03T00:00:00+08:00",
               },
             ]
@@ -305,16 +314,41 @@ function createDom(permissions) {
       });
     }
     if (url.pathname === "/api/v2/drafts") {
-      return response({ items: imported ? [draft] : [] });
+      return response({
+        items: imported ? [{ ...draft, status: draftStatus, receipt: draftReceipt }] : [],
+      });
+    }
+    if (
+      url.pathname === `/api/v2/drafts/${draft.draft_id}/confirm` &&
+      method === "POST"
+    ) {
+      draftStatus = "queued";
+      return response({ ...draft, status: draftStatus, receipt: null }, 202);
+    }
+    if (
+      url.pathname === `/api/v2/drafts/${draft.draft_id}/send-now` &&
+      method === "POST"
+    ) {
+      draftStatus = "submitted";
+      draftReceipt = {
+        message_id: "receipt-message-1",
+        payload: { receipt_id: "receipt-1" },
+      };
+      return response({ items: [{ status: "succeeded" }], count: 1 });
     }
     if (url.pathname === `/api/v2/drafts/${draft.draft_id}`) {
-      return response({ ...draft, sync_state: { state: "not_machine" } });
+      return response({
+        ...draft,
+        status: draftStatus,
+        receipt: draftReceipt,
+        sync_state: null,
+      });
     }
     if (url.pathname === `/api/v2/drafts/${draft.draft_id}/ingestions`) {
       return response({
         items: [],
         latest_preflight: null,
-        sync_state: { state: "not_machine" },
+        sync_state: null,
         source_health: [],
         freshness: null,
       });
@@ -474,7 +508,7 @@ async function main() {
       "enterprise users must not be forced through a mapping preview",
     );
     await waitFor(
-      () => /待人工核验记录/.test(document.getElementById("fqGlobalMessage").textContent),
+      () => /报送确认页/.test(document.getElementById("fqGlobalMessage").textContent),
       "CSV draft creation",
     );
     assert.equal(document.getElementById("fqPanelReview").hidden, false);
@@ -498,6 +532,7 @@ async function main() {
       0,
       "missing V2 fields are shown but never fabricated into the payload",
     );
+    assert.doesNotMatch(detail.textContent, /导入映射需要人工核对/);
 
     assert.equal(
       writer.requests.filter(
@@ -555,6 +590,11 @@ async function main() {
     assert(manualRow, "manual fallback starts with one editable row");
     manualRow.querySelector('[data-manual-date]').value = "2026-07-15T09:45";
     manualRow.querySelector('[data-manual-metric="production_t"]').value = "123.5";
+    document.getElementById("fqManualAddRow").click();
+    const manualRows = document.querySelectorAll("#fqManualRows tr");
+    assert.equal(manualRows.length, 2);
+    manualRows[1].querySelector('[data-manual-date]').value = "2026-07-15T09:45";
+    manualRows[1].querySelector('[data-manual-metric="electricity_kwh"]').value = "456";
     document.getElementById("fqManualForm").dispatchEvent(
       new window.Event("submit", { bubbles: true, cancelable: true }),
     );
@@ -573,6 +613,29 @@ async function main() {
     const manualCsv = Buffer.from(manualBody.content_base64, "base64").toString("utf8");
     assert.match(manualCsv, /2026-07-15T09:45/);
     assert.match(manualCsv, /123\.5/);
+    assert.match(manualCsv, /456/);
+    assert.equal(
+      (manualCsv.match(/2026-07-15T09:45/g) || []).length,
+      2,
+      "complementary metrics may be entered on separate rows at the same timestamp",
+    );
+    await waitFor(
+      () => document.querySelector('[data-fq-action="confirm-draft"]'),
+      "manual draft confirmation action",
+    );
+    document.getElementById("fqDraftAccepted").checked = true;
+    document.querySelector('[data-fq-action="confirm-draft"]').click();
+    await waitFor(
+      () =>
+        writer.requests.some(
+          (item) =>
+            item.method === "POST" &&
+            item.path === `/api/v2/drafts/${draft.draft_id}/send-now`,
+        ) && /已送达政府/.test(document.getElementById("fqImportRows").textContent),
+      "manual confirmation immediate delivery and inbox refresh",
+    );
+    assert.match(document.getElementById("fqDraftDetail").textContent, /政府已接收/);
+    assert.match(document.getElementById("fqGlobalMessage").textContent, /已接收并返回回执/);
     assert.equal(writer.runtimeErrors.length, 0, String(writer.runtimeErrors[0] || ""));
   } finally {
     writer.dom.window.close();

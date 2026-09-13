@@ -738,7 +738,7 @@ def test_production_ready_and_machine_intake_fail_closed_after_runtime_tamper(
         healthy_payload = json.loads(healthy.read())
         assert healthy.status == 200
         assert healthy_payload["integrity"] == "valid"
-        assert healthy_payload["schema_version"] == 1
+        assert healthy_payload["schema_version"] == 2
 
         login_body = json.dumps(
             {"username": "ready-admin", "password": "Ready-Admin-Password-2026!"}

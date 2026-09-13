@@ -181,6 +181,9 @@
         <button class="fq-nav-button" type="button" data-fq-tab="audit" aria-pressed="false">
           <span>4</span> 留痕与设置
         </button>
+        <button class="fq-nav-button fq-assistant-button" id="fqOpenAssistant" type="button">
+          <span>AI</span> 智能助手
+        </button>
       </nav>
 
       <p class="fq-global-message" id="fqGlobalMessage" role="status" aria-live="polite">
@@ -190,9 +193,9 @@
       <section class="fq-panel is-active" id="fqPanelInbox" data-fq-panel="inbox">
         <div class="fq-page-head">
           <div>
-            <p class="eyebrow">自动发现 · 智能检查 · 可靠报送</p>
+            <p class="eyebrow">自动发现 · 确定性校验 · 可靠报送</p>
             <h2>数据报送</h2>
-            <p>系统自动发现生产数据并在每次发送前检查结构、口径和数值冲突；通过后直接报送，有疑问时保留为待人工核验。缺少部分指标不等于异常，空白始终保持为空。</p>
+            <p>系统自动发现生产数据，完成格式、字段冲突与重复检查后直接报送；无法安全解析时保留为待人工核验。AI 不参与报送放行判断，缺少部分指标不等于异常，空白始终保持为空。</p>
           </div>
           <button class="button button-secondary" id="fqRefreshInbox" type="button">刷新</button>
         </div>
@@ -292,8 +295,8 @@
               <p class="fq-upload-result" id="fqWatchConfigResult" role="status" aria-live="polite" hidden></p>
             </form>
             <small>
-              系统会等待文件写入稳定、按内容去重，并在发送前执行确定性检查和一次 AI 检查。
-              两层检查都通过才会自动报送；结构变化、歧义或冲突会暂停并进入待人工核验。
+              系统会等待文件写入稳定、按内容去重，并在发送前执行确定性格式和字段冲突检查。
+              校验通过即自动报送；无法识别的字段、非法内容或同一指标数值冲突会暂停并进入待人工核验。
             </small>
           </article>
         </div>
@@ -310,7 +313,7 @@
             </div>
             <div class="fq-manual-actions">
               <button class="button button-secondary" id="fqManualAddRow" type="button">添加一行</button>
-              <button class="button button-primary" id="fqManualSubmit" type="submit">生成待核验记录</button>
+              <button class="button button-primary" id="fqManualSubmit" type="submit">生成并进入报送确认</button>
             </div>
             <p class="fq-upload-result" id="fqManualResult" role="status" aria-live="polite" hidden></p>
           </form>

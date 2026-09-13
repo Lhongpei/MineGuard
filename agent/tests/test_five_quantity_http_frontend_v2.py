@@ -646,7 +646,9 @@ def test_frontend_exposes_only_the_four_step_v2_mainline() -> None:
     assert "/correction" in script
     assert "系统没有创建分叉" in script
     assert "直接前序消息" in script
-    assert "发现数据后自动检查，通过即发送" in script
+    assert "发现数据后确定性校验，通过即发送" in script
+    assert 'id="fqOpenAssistant"' in html
+    assert "openProductionDataAssistant" in script
     assert "自动发现与报送" in html
     assert 'id="fqDownloadCsvTemplate"' in html
     assert 'id="fqSelectedFileSummary" role="status"' in html

@@ -507,6 +507,15 @@
 
   function init() {
     cacheElements();
+    // The current production-data shell replaced the legacy workspace that
+    // originally owned this panel. Move the shared assistant out of that
+    // permanently hidden ancestor so the visible navigation can open it.
+    if (els.coalChatWorkbench.closest(".legacy-workspace")) {
+      els.fiveQuantityWorkspace.insertAdjacentElement(
+        "afterend",
+        els.coalChatWorkbench,
+      );
+    }
     bindStaticEvents();
     setEnterpriseMode("simple", false);
     applyAgentTaskPreset("full");
@@ -545,6 +554,8 @@
       "newDraftButton",
       "agentTaskButton",
       "coalChatButton",
+      "fqOpenAssistant",
+      "fiveQuantityWorkspace",
       "refreshDraftsButton",
       "draftSearch",
       "draftList",
@@ -889,6 +900,9 @@
     });
     els.agentTaskButton.addEventListener("click", () => void openAgentWorkbench());
     els.coalChatButton.addEventListener("click", () => void openCoalChat());
+    els.fqOpenAssistant.addEventListener("click", () =>
+      void openProductionDataAssistant(),
+    );
     els.closeCoalChatButton.addEventListener("click", closeCoalChat);
     els.newCoalChatButton.addEventListener("click", () => void createCoalChat());
     els.deleteCoalChatButton.addEventListener("click", () =>
@@ -5947,6 +5961,7 @@
     stopAgentV2Polling();
     els.agentWorkbench.hidden = true;
     els.agentV2Workbench.hidden = true;
+    els.fiveQuantityWorkspace.hidden = true;
     els.coalChatWorkbench.hidden = false;
     if (state.activeDraft && !state.chat.draftChoiceTouched) {
       els.coalChatUseCurrentDraft.checked = true;
@@ -5964,23 +5979,44 @@
     }
   }
 
-  async function openProductionDataAssistant(binding) {
-    if (!binding || typeof binding.draft_id !== "string") return;
-    state.activeDraft = {
-      id: binding.draft_id,
-      enterprise: { mine_name: String(binding.mine_name || "当前矿井") },
-    };
-    state.chat.draftChoiceTouched = false;
-    state.chat.selectedSessionId = "";
-    state.chat.detail = null;
+  async function ensureCoalChatSession() {
+    if (state.principal && hasPermission("read")) return;
+    const payload = await api(endpoints.me(), { suppressAuthRedirect: true });
+    applyAuthenticatedSession(payload);
+    if (!hasPermission("read")) {
+      throw new Error("当前账号没有使用智能助手的权限。");
+    }
+  }
+
+  async function openProductionDataAssistant(binding = null) {
+    try {
+      await ensureCoalChatSession();
+    } catch (error) {
+      showToast(error.message || "请先登录企业账号。", "error");
+      return;
+    }
+    const hasDraftBinding = Boolean(
+      binding && typeof binding.draft_id === "string" && binding.draft_id,
+    );
+    if (hasDraftBinding) {
+      state.activeDraft = {
+        id: binding.draft_id,
+        enterprise: { mine_name: String(binding.mine_name || "当前矿井") },
+      };
+      state.chat.draftChoiceTouched = false;
+      state.chat.selectedSessionId = "";
+      state.chat.detail = null;
+    }
     await openCoalChat();
-    await createCoalChat();
+    if (hasDraftBinding) await createCoalChat();
   }
 
   function closeCoalChat() {
     stopCoalChatPolling();
     els.coalChatWorkbench.hidden = true;
-    els.coalChatButton.focus();
+    els.fiveQuantityWorkspace.hidden = false;
+    if (els.fqOpenAssistant) els.fqOpenAssistant.focus();
+    else if (!els.coalChatButton.hidden) els.coalChatButton.focus();
   }
 
   async function refreshCoalChat() {

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 import sqlite3
+from threading import RLock
 from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -126,6 +127,26 @@ def _ten_submission(
             "days": days,
         }
     )
+
+
+def _create_legacy_v1_store(database: Path) -> RegulatoryV2Store:
+    store = object.__new__(RegulatoryV2Store)
+    store.path = str(database)
+    store._now = lambda: NOW  # noqa: SLF001
+    store.production_mode = False
+    store.allow_legacy_schema_adoption = False
+    store._lock = RLock()  # noqa: SLF001
+    store._integrity_checkpoint = None  # noqa: SLF001
+    store._integrity_failed = False  # noqa: SLF001
+    store._connection = sqlite3.connect(  # noqa: SLF001
+        database,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    store._connection.row_factory = sqlite3.Row  # noqa: SLF001
+    store._connection.execute("PRAGMA foreign_keys = ON")  # noqa: SLF001
+    store._create_schema(target_version=1)  # noqa: SLF001
+    return store
 
 
 def _record_exchange_audit(
@@ -666,15 +687,37 @@ def test_schema_migration_ledger_is_explicit_and_append_only(tmp_path: Path) -> 
     database = tmp_path / "schema-ledger.sqlite3"
     with RegulatoryV2Store(database, now=lambda: NOW) as store:
         status = store.schema_status()
-        assert status["current_version"] == status["supported_version"] == 1
-        assert [item["version"] for item in status["migrations"]] == [1]
+        assert status["current_version"] == status["supported_version"] == 2
+        assert [item["version"] for item in status["migrations"]] == [1, 2]
         assert len(status["migrations"][0]["checksum"]) == 64
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 2
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
             store._connection.execute(
                 "UPDATE v2_schema_migrations SET checksum = ? WHERE version = 1",
                 ("0" * 64,),
             )
+
+
+def test_v1_schema_upgrades_without_data_loss_and_allows_parallel_batches(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "schema-v1-upgrade.sqlite3"
+    first_id = str(uuid4())
+    legacy = _create_legacy_v1_store(database)
+    try:
+        legacy.submit_and_analyze(_submission(first_id))
+    finally:
+        legacy.close()
+
+    second_id = str(uuid4())
+    with RegulatoryV2Store(database, now=lambda: NOW, production_mode=True) as store:
+        assert store.schema_status()["current_version"] == 2
+        assert store.get_submission(first_id).submission_id == first_id
+        second = store.submit_and_analyze(_submission(second_id))
+        assert second.submission_id == second_id
+        assert len(store.list_submissions(mine_id="mine-a")) == 2
+        assert store.verify_integrity() is True
+        assert store._connection.execute("PRAGMA foreign_key_check").fetchone() is None
 
 
 def test_pre_ledger_v2_database_requires_explicit_offline_exact_adoption(
@@ -709,7 +752,7 @@ def test_pre_ledger_v2_database_requires_explicit_offline_exact_adoption(
         assert adopted.get_submission(submission_id).submission_id == submission_id
 
     with RegulatoryV2Store(database, now=lambda: NOW, production_mode=True) as upgraded:
-        assert upgraded.schema_status()["current_version"] == 1
+        assert upgraded.schema_status()["current_version"] == 2
         assert upgraded.get_submission(submission_id).submission_id == submission_id
         assert upgraded.verify_integrity() is True
 
@@ -806,19 +849,19 @@ def test_unknown_future_schema_is_rejected_before_current_schema_changes(
             """
             INSERT INTO v2_schema_migrations(
                 version, migration_id, checksum, applied_at
-            ) VALUES (2, 'future-migration', ?, ?)
+            ) VALUES (3, 'future-migration', ?, ?)
             """,
             ("f" * 64, NOW.isoformat()),
         )
-        store._connection.execute("PRAGMA user_version = 2")
+        store._connection.execute("PRAGMA user_version = 3")
 
     with pytest.raises(RegulatoryV2SchemaVersionError, match="newer"):
         RegulatoryV2Store(database, now=lambda: NOW)
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert (
             connection.execute(
-                "SELECT migration_id FROM v2_schema_migrations WHERE version = 2"
+                "SELECT migration_id FROM v2_schema_migrations WHERE version = 3"
             ).fetchone()[0]
             == "future-migration"
         )
@@ -831,11 +874,11 @@ def test_production_write_rejects_runtime_future_schema_marker(tmp_path: Path) -
             """
             INSERT INTO v2_schema_migrations(
                 version, migration_id, checksum, applied_at
-            ) VALUES (2, 'future-runtime-migration', ?, ?)
+            ) VALUES (3, 'future-runtime-migration', ?, ?)
             """,
             ("e" * 64, NOW.isoformat()),
         )
-        store._connection.execute("PRAGMA user_version = 2")
+        store._connection.execute("PRAGMA user_version = 3")
         with pytest.raises(RegulatoryV2SchemaVersionError, match="newer"):
             store.claim_transport_nonce(
                 "agent-a",

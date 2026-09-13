@@ -5028,7 +5028,7 @@ class FiveQuantityRuntime:
         )
         automatic_review: dict[str, Any] | None = None
         if acquisition_mode == "direct_collection":
-            automatic_review = self._review_automatic_import(imported)
+            automatic_review = self._check_automatic_import(imported)
         validate_five_quantity_payload(
             imported["payload"],
             identity=self.identity,
@@ -5048,7 +5048,7 @@ class FiveQuantityRuntime:
             )
         if automatic_review is not None and recoverable_automatic_import:
             # This also closes the small crash window between importing a file,
-            # recording its AI review, and queueing it.  A duplicate watcher
+            # recording its deterministic check, and queueing it. A duplicate watcher
             # pass may resume only its own untouched direct-collection draft;
             # manual imports and previously held batches are never promoted.
             self.store.annotate_automatic_review(
@@ -5067,7 +5067,7 @@ class FiveQuantityRuntime:
                         confirmer_name="MineGuard 自动报送策略",
                         confirmer_role="企业生产数据智能体",
                         attestation=(
-                            "已完成来源固化、确定性校验与报送前智能检查；"
+                            "已完成来源固化、格式校验、字段冲突与重复检查；"
                             f"检查记录 {sha256_jcs(automatic_review)}。"
                         ),
                         accepted=True,
@@ -5218,7 +5218,8 @@ class FiveQuantityRuntime:
             }
         )
 
-    def _review_automatic_import(self, imported: dict[str, Any]) -> dict[str, Any]:
+    def _check_automatic_import(self, imported: dict[str, Any]) -> dict[str, Any]:
+        """Apply deterministic safety gates without model judgment."""
         payload = imported["payload"]
         preflight = _v2_machine_preflight(
             payload,
@@ -5234,15 +5235,11 @@ class FiveQuantityRuntime:
             None,
         )
         fingerprint = str(structure.get("fingerprint")) if structure else ""
-        previous = self.store.latest_automatic_structure_fingerprint()
         deterministic_reasons: list[str] = []
         deterministic_summary: list[str] = []
         if self.four_eyes_required:
             deterministic_reasons.append("source_warning")
             deterministic_summary.append("当前实例启用了双人复核，自动报送策略未生效")
-        if previous is not None and fingerprint != previous:
-            deterministic_reasons.append("structure_changed")
-            deterministic_summary.append("来源文件结构与最近一次成功自动报送不同")
         if preflight["arithmetic_mismatch_count"]:
             deterministic_reasons.append("conflicting_values")
             deterministic_summary.extend(preflight["warnings"][:5])
@@ -5273,96 +5270,15 @@ class FiveQuantityRuntime:
             deterministic_reasons.append("source_warning")
             deterministic_summary.append("来源中存在未安全采用的歧义、重复或非法内容")
 
-        days = []
-        for day in payload["days"]:
-            quantity = day["reported_quantity"]
-            days.append(
-                {
-                    "date": day["date"],
-                    "operating_state": day["operating_state"],
-                    "daily_total": {
-                        metric: quantity["daily_total"][metric]["value"]
-                        for metric in METRICS
-                    },
-                    "shifts": {
-                        shift: {
-                            metric: quantity["shifts"][shift]["measurements"]
-                            .get(metric, {})
-                            .get("value")
-                            for metric in METRICS
-                        }
-                        for shift in SHIFT_KEYS
-                    },
-                }
-            )
-        context = {
-            "contract_version": "production-batch-ai-review-context/v1",
-            "mine": {
-                "mine_id": self.identity.mine_id,
-                "mine_name": self.identity.mine_name,
-            },
-            "period_start": payload["period_start"],
-            "period_end": payload["period_end"],
-            "days": days,
-            "coverage": {
-                "missing_value_count": preflight["missing_count"],
-                "provided_metrics_may_be_partial": True,
-            },
-            "structure": {
-                "fingerprint": fingerprint,
-                "previous_successful_fingerprint": previous,
-                "changed": previous is not None and fingerprint != previous,
-            },
-            "normalization_notices": [
-                *deterministic_summary,
-                *(
-                    list(mapping_check.get("warnings", []))
-                    if isinstance(mapping_check, dict)
-                    else []
-                ),
-            ][:20],
-        }
-        provider = self.csv_mapping_provider
-        review_method = getattr(provider, "review_production_batch", None)
-        if provider is None or not callable(review_method):
-            model_review = {
-                "contract_version": "production-batch-ai-review/v1",
-                "decision": "needs_review",
-                "reason_codes": ["source_warning"],
-                "summary": ["智能模型尚未配置，自动报送已安全暂停"],
-                "reviewed_at": utc_text(),
-                "model": None,
-            }
-        else:
-            try:
-                model_review = review_method(batch_context=context)
-            except Exception:
-                model_review = {
-                    "contract_version": "production-batch-ai-review/v1",
-                    "decision": "needs_review",
-                    "reason_codes": ["source_warning"],
-                    "summary": ["智能检查暂时不可用，自动报送将在人工核验前保持暂停"],
-                    "reviewed_at": utc_text(),
-                    "model": getattr(getattr(provider, "config", None), "model", None),
-                }
-        reasons = list(
-            dict.fromkeys([*deterministic_reasons, *model_review["reason_codes"]])
-        )
-        if deterministic_reasons or model_review["decision"] != "auto_send":
-            decision = "needs_review"
-            reasons = [reason for reason in reasons if reason != "none"] or [
-                "source_warning"
-            ]
-        else:
-            decision = "auto_send"
-            reasons = ["none"]
+        decision = "needs_review" if deterministic_reasons else "auto_send"
         review = {
-            **model_review,
+            "contract_version": "production-batch-deterministic-check/v1",
             "decision": decision,
-            "reason_codes": reasons,
-            "summary": list(
-                dict.fromkeys([*deterministic_summary, *model_review["summary"]])
-            )[:8],
+            "reason_codes": list(dict.fromkeys(deterministic_reasons)) or ["none"],
+            "summary": list(dict.fromkeys(deterministic_summary))[:8]
+            or ["确定性格式、字段冲突与重复检查通过；未提供指标保持为空"],
+            "reviewed_at": utc_text(),
+            "model": None,
             "deterministic_preflight_sha256": sha256_jcs(preflight),
             "source_content_sha256": imported["content_sha256"],
             "structure_fingerprint": fingerprint,
@@ -5389,6 +5305,7 @@ class FiveQuantityRuntime:
         actor_id: str,
         source_required: bool,
         freshness_max_seconds: int,
+        auto_dispatch: bool = True,
     ) -> dict[str, Any]:
         """Normalise one connector snapshot into the formal V2 review inbox."""
 
@@ -5447,7 +5364,7 @@ class FiveQuantityRuntime:
             "payload": draft["payload"],
             "content_sha256": result["payload_sha256"],
         }
-        automatic_review = self._review_automatic_import(review_input)
+        automatic_review = self._check_automatic_import(review_input)
         import_id = result["import_summary"]["import_id"]
         self.store.annotate_automatic_review(
             import_id,
@@ -5455,6 +5372,9 @@ class FiveQuantityRuntime:
             actor=actor_id,
         )
         result["automatic_review"] = automatic_review
+        if not auto_dispatch:
+            result["automatic_dispatch"] = "deferred"
+            return result
         if automatic_review["decision"] != "auto_send":
             result["automatic_dispatch"] = "needs_review"
             return result
@@ -5466,7 +5386,7 @@ class FiveQuantityRuntime:
                 confirmer_name="MineGuard 自动报送策略",
                 confirmer_role="企业生产数据智能体",
                 attestation=(
-                    "已完成来源固化、确定性校验与报送前智能检查；"
+                    "已完成来源固化、格式校验、字段冲突与重复检查；"
                     f"检查记录 {sha256_jcs(automatic_review)}。"
                 ),
                 accepted=True,

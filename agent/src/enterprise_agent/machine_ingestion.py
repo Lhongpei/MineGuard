@@ -681,6 +681,7 @@ class MachineAutofillCoordinator:
                         actor_id=actor_id,
                         source_required=source_policy.required,
                         freshness_max_seconds=(source_policy.freshness_max_seconds),
+                        auto_dispatch=payload["trigger_workflow"],
                     )
                 except (ConflictError, ImportContentError, ValueError) as error:
                     failure = self._safe_failure(ingestion, error)

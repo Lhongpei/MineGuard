@@ -516,11 +516,17 @@ async function main() {
     "active draft",
   );
 
-  document.getElementById("coalChatButton").click();
+  document.getElementById("fqOpenAssistant").click();
+  assert.equal(
+    document.getElementById("coalChatWorkbench").parentElement,
+    document.body,
+    "assistant must be moved out of the permanently hidden legacy workspace",
+  );
   await waitFor(
     () => document.querySelectorAll(".coal-chat-session-item").length === 3,
     "chat sessions",
   );
+  assert.equal(document.getElementById("fiveQuantityWorkspace").hidden, true);
   await waitFor(
     () => document.getElementById("coalChatTitle").textContent.includes("七月煤量"),
     "first session",

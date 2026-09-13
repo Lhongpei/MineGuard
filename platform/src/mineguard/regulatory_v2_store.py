@@ -64,12 +64,18 @@ class RegulatoryV2SchemaVersionError(RuntimeError):
     """The regulatory database schema is unsupported or has an invalid ledger."""
 
 
-REGULATORY_V2_SCHEMA_VERSION = 1
+REGULATORY_V2_SCHEMA_VERSION = 2
 _SCHEMA_MIGRATIONS: dict[int, tuple[str, str]] = {
     1: (
         "regulatory-v2-append-only-baseline",
         hashlib.sha256(
             b"mineguard:regulatory-v2-schema:1:append-only-baseline"
+        ).hexdigest(),
+    ),
+    2: (
+        "regulatory-v2-independent-submission-batches",
+        hashlib.sha256(
+            b"mineguard:regulatory-v2-schema:2:independent-submission-batches"
         ).hexdigest(),
     ),
 }
@@ -160,7 +166,9 @@ class _ManagedTableContract:
     indexes: tuple[_ManagedIndexContract, ...]
 
 
-_EXPECTED_MANAGED_SCHEMA_CONTRACT: tuple[_ManagedTableContract, ...] | None = None
+_EXPECTED_MANAGED_SCHEMA_CONTRACTS: dict[
+    int, tuple[_ManagedTableContract, ...]
+] = {}
 _SCHEMA_CONTRACT_LOCK = RLock()
 
 
@@ -807,11 +815,14 @@ class RegulatoryV2Store:
     @classmethod
     def _expected_managed_schema_contract(
         cls,
+        schema_version: int = REGULATORY_V2_SCHEMA_VERSION,
     ) -> tuple[_ManagedTableContract, ...]:
-        global _EXPECTED_MANAGED_SCHEMA_CONTRACT
+        if schema_version not in _SCHEMA_MIGRATIONS:
+            raise ValueError(f"unsupported schema contract version: {schema_version}")
         with _SCHEMA_CONTRACT_LOCK:
-            if _EXPECTED_MANAGED_SCHEMA_CONTRACT is not None:
-                return _EXPECTED_MANAGED_SCHEMA_CONTRACT
+            cached = _EXPECTED_MANAGED_SCHEMA_CONTRACTS.get(schema_version)
+            if cached is not None:
+                return cached
             reference = object.__new__(cls)
             reference.path = ":memory:"
             reference._now = lambda: datetime(2000, 1, 1, tzinfo=UTC)
@@ -826,20 +837,22 @@ class RegulatoryV2Store:
             reference._connection.row_factory = sqlite3.Row
             reference._connection.execute("PRAGMA foreign_keys = ON")
             try:
-                reference._create_schema()
-                _EXPECTED_MANAGED_SCHEMA_CONTRACT = (
-                    cls._capture_managed_schema_contract_from(reference._connection)
+                reference._create_schema(target_version=schema_version)
+                contract = cls._capture_managed_schema_contract_from(
+                    reference._connection
                 )
+                _EXPECTED_MANAGED_SCHEMA_CONTRACTS[schema_version] = contract
             finally:
                 reference._connection.close()
-            return _EXPECTED_MANAGED_SCHEMA_CONTRACT
+            return contract
 
     def _verify_managed_schema_contract_locked(
         self,
         *,
         legacy_without_ledger: bool = False,
+        schema_version: int = REGULATORY_V2_SCHEMA_VERSION,
     ) -> bool:
-        expected = self._expected_managed_schema_contract()
+        expected = self._expected_managed_schema_contract(schema_version)
         if legacy_without_ledger:
             expected = tuple(
                 item for item in expected if item.name != "v2_schema_migrations"
@@ -900,9 +913,14 @@ class RegulatoryV2Store:
                     raise RegulatoryV2SchemaVersionError(
                         "legacy database user_version must be zero"
                     )
-                if not self._verify_managed_schema_contract_locked(
-                    legacy_without_ledger=True
-                ):
+                matches_known_contract = any(
+                    self._verify_managed_schema_contract_locked(
+                        legacy_without_ledger=True,
+                        schema_version=version,
+                    )
+                    for version in range(REGULATORY_V2_SCHEMA_VERSION, 0, -1)
+                )
+                if not matches_known_contract:
                     raise RegulatoryV2SchemaVersionError(
                         "legacy V2 schema does not match the exact adoption fingerprint"
                     )
@@ -946,6 +964,19 @@ class RegulatoryV2Store:
                 raise RegulatoryV2SchemaVersionError(
                     "database schema version disagrees with migration ledger"
                 )
+            if ledger_version == 1:
+                if not self._verify_managed_schema_contract_locked(
+                    schema_version=1
+                ):
+                    raise RegulatoryV2SchemaVersionError(
+                        "managed regulatory schema contract is missing or altered"
+                    )
+                if not self._verify_immutable_triggers_locked():
+                    raise RegulatoryV2IntegrityError(
+                        "regulatory audit chain or append-only trigger integrity "
+                        "check failed"
+                    )
+                return
             if ledger_version != REGULATORY_V2_SCHEMA_VERSION:
                 raise RegulatoryV2SchemaVersionError(
                     "database schema migration is incomplete"
@@ -984,8 +1015,148 @@ class RegulatoryV2Store:
                     "database schema migration is incomplete"
                 )
 
-    def _create_schema(self) -> None:
-        schema = """
+    @staticmethod
+    def _submissions_table_sql(
+        *,
+        legacy_period_revision_uniqueness: bool,
+        table_name: str = "v2_submissions",
+    ) -> str:
+        period_constraint = (
+            "UNIQUE (mine_id, period_start, period_end, revision),"
+            if legacy_period_revision_uniqueness
+            else ""
+        )
+        return f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            submission_id TEXT PRIMARY KEY,
+            mine_id TEXT NOT NULL,
+            mine_name TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            supersedes_submission_id TEXT REFERENCES {table_name}(submission_id),
+            reporting_month TEXT NOT NULL,
+            root_workflow_id TEXT NOT NULL,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            comparison_group TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            payload_sha256 TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            {period_constraint}
+            UNIQUE (mine_id, idempotency_key)
+        );
+        """
+
+    def _has_legacy_submission_period_constraint_locked(self) -> bool:
+        for row in self._connection.execute(
+            "PRAGMA index_list(v2_submissions)"
+        ).fetchall():
+            if not int(row["unique"]):
+                continue
+            index_name = str(row["name"]).replace('"', '""')
+            columns = tuple(
+                str(column["name"])
+                for column in self._connection.execute(
+                    f'PRAGMA index_info("{index_name}")'
+                ).fetchall()
+            )
+            if columns == ("mine_id", "period_start", "period_end", "revision"):
+                return True
+        return False
+
+    def _migrate_submission_batches_v2_locked(
+        self,
+        *,
+        applied_versions: set[int],
+    ) -> None:
+        """Remove the obsolete period/revision uniqueness without losing rows."""
+
+        legacy_table = "v2_submissions_schema_v1"
+        foreign_keys_enabled = int(
+            self._connection.execute("PRAGMA foreign_keys").fetchone()[0]
+        )
+        self._connection.execute("PRAGMA foreign_keys = OFF")
+        self._connection.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute("DROP TRIGGER v2_submissions_no_update")
+            self._connection.execute("DROP TRIGGER v2_submissions_no_delete")
+            self._connection.execute("DROP INDEX IF EXISTS idx_v2_submissions_mine_period")
+            self._connection.execute("DROP INDEX IF EXISTS idx_v2_submission_workflow")
+            self._connection.execute(
+                f"ALTER TABLE v2_submissions RENAME TO {legacy_table}"
+            )
+            self._connection.execute(
+                self._submissions_table_sql(
+                    legacy_period_revision_uniqueness=False
+                )
+            )
+            self._connection.execute(
+                f"""
+                INSERT INTO v2_submissions(
+                    submission_id, mine_id, mine_name, revision,
+                    supersedes_submission_id, reporting_month, root_workflow_id,
+                    period_start, period_end, comparison_group, idempotency_key,
+                    payload_json, payload_sha256, received_at
+                )
+                SELECT
+                    submission_id, mine_id, mine_name, revision,
+                    supersedes_submission_id, reporting_month, root_workflow_id,
+                    period_start, period_end, comparison_group, idempotency_key,
+                    payload_json, payload_sha256, received_at
+                FROM {legacy_table}
+                """
+            )
+            self._connection.execute(f"DROP TABLE {legacy_table}")
+            self._connection.execute(
+                "CREATE INDEX idx_v2_submissions_mine_period "
+                "ON v2_submissions(mine_id, period_start, period_end, revision)"
+            )
+            self._connection.execute(
+                "CREATE INDEX idx_v2_submission_workflow "
+                "ON v2_submissions(root_workflow_id, revision)"
+            )
+            if self._connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise RegulatoryV2SchemaVersionError(
+                    "submission batch migration would break a foreign-key relation"
+                )
+            for version in range(1, REGULATORY_V2_SCHEMA_VERSION + 1):
+                if version in applied_versions:
+                    continue
+                migration_id, checksum = _SCHEMA_MIGRATIONS[version]
+                self._connection.execute(
+                    """
+                    INSERT INTO v2_schema_migrations(
+                        version, migration_id, checksum, applied_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (version, migration_id, checksum, self._timestamp()),
+                )
+            self._connection.execute(
+                f"PRAGMA user_version = {REGULATORY_V2_SCHEMA_VERSION}"
+            )
+            self._connection.commit()
+        except BaseException:
+            with suppress(sqlite3.Error):
+                self._connection.rollback()
+            raise
+        finally:
+            self._connection.execute("PRAGMA legacy_alter_table = OFF")
+            self._connection.execute(
+                f"PRAGMA foreign_keys = {1 if foreign_keys_enabled else 0}"
+            )
+
+    def _create_schema(
+        self,
+        *,
+        target_version: int = REGULATORY_V2_SCHEMA_VERSION,
+    ) -> None:
+        if target_version not in _SCHEMA_MIGRATIONS:
+            raise ValueError(f"unsupported schema target version: {target_version}")
+        submissions_schema = self._submissions_table_sql(
+            legacy_period_revision_uniqueness=target_version == 1
+        )
+        schema = f"""
         CREATE TABLE IF NOT EXISTS v2_schema_migrations (
             version INTEGER PRIMARY KEY CHECK (version >= 1),
             migration_id TEXT NOT NULL UNIQUE,
@@ -1027,24 +1198,7 @@ class RegulatoryV2Store:
         CREATE INDEX IF NOT EXISTS idx_v2_inbox_result
             ON v2_inbox_commands(result_kind, result_id);
 
-        CREATE TABLE IF NOT EXISTS v2_submissions (
-            submission_id TEXT PRIMARY KEY,
-            mine_id TEXT NOT NULL,
-            mine_name TEXT NOT NULL,
-            revision INTEGER NOT NULL CHECK (revision >= 1),
-            supersedes_submission_id TEXT REFERENCES v2_submissions(submission_id),
-            reporting_month TEXT NOT NULL,
-            root_workflow_id TEXT NOT NULL,
-            period_start TEXT NOT NULL,
-            period_end TEXT NOT NULL,
-            comparison_group TEXT NOT NULL,
-            idempotency_key TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            payload_sha256 TEXT NOT NULL,
-            received_at TEXT NOT NULL,
-            UNIQUE (mine_id, period_start, period_end, revision),
-            UNIQUE (mine_id, idempotency_key)
-        );
+        {submissions_schema}
         CREATE TABLE IF NOT EXISTS v2_daily_facts (
             submission_id TEXT NOT NULL REFERENCES v2_submissions(submission_id),
             observed_date TEXT NOT NULL,
@@ -1288,7 +1442,20 @@ class RegulatoryV2Store:
                     "SELECT version FROM v2_schema_migrations"
                 ).fetchall()
             }
-            for version in range(1, REGULATORY_V2_SCHEMA_VERSION + 1):
+            if (
+                target_version == REGULATORY_V2_SCHEMA_VERSION
+                and self._has_legacy_submission_period_constraint_locked()
+            ):
+                self._migrate_submission_batches_v2_locked(
+                    applied_versions=applied_versions
+                )
+                applied_versions = {
+                    int(row["version"])
+                    for row in self._connection.execute(
+                        "SELECT version FROM v2_schema_migrations"
+                    ).fetchall()
+                }
+            for version in range(1, target_version + 1):
                 if version in applied_versions:
                     continue
                 migration_id, checksum = _SCHEMA_MIGRATIONS[version]
@@ -1301,7 +1468,7 @@ class RegulatoryV2Store:
                     (version, migration_id, checksum, self._timestamp()),
                 )
             self._connection.execute(
-                f"PRAGMA user_version = {REGULATORY_V2_SCHEMA_VERSION}"
+                f"PRAGMA user_version = {target_version}"
             )
             for table in _IMMUTABLE_TABLES:
                 self._connection.executescript(

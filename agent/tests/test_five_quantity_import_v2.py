@@ -5,6 +5,8 @@ import zipfile
 from io import BytesIO
 
 import pytest
+from openpyxl import Workbook
+
 from enterprise_agent.errors import ImportContentError
 from enterprise_agent.five_quantity_exchange import MineIdentity
 from enterprise_agent.five_quantity_import import (
@@ -13,7 +15,6 @@ from enterprise_agent.five_quantity_import import (
     inspect_five_quantity_csv,
 )
 from enterprise_agent.quantity_catalog import LEGACY_V2_METRICS, METRICS
-from openpyxl import Workbook
 
 
 def identity() -> MineIdentity:
@@ -45,6 +46,86 @@ def csv_bytes() -> bytes:
         b"2026-07-01,4800,320,96000,120,240,2600,850\n"
         b"2026-07-02,4900,322,97000,121,242,,860\n"
     )
+
+
+def test_same_timestamp_rows_merge_complementary_metrics() -> None:
+    imported = import_five_quantity_bytes(
+        filename="分项数据.csv",
+        content=(
+            "数据时间,电量(kWh),雷管(发)\n"
+            "2026-07-01 08:30,96000,\n"
+            "2026-07-01 08:30,,120\n"
+        ).encode(),
+        acquisition_mode="manual_import",
+        identity=identity(),
+        captured_at="2026-08-01T00:00:00Z",
+    )
+
+    assert len(imported["payload"]["days"]) == 1
+    daily = imported["payload"]["days"][0]["reported_quantity"]["daily_total"]
+    assert daily["electricity_kwh"]["value"] == 96000
+    assert daily["detonators_count"]["value"] == 120
+
+
+def test_same_timestamp_across_workbook_sheets_merges_complementary_metrics() -> None:
+    workbook = Workbook()
+    electricity = workbook.active
+    electricity.title = "电量"
+    electricity.append(["数据时间", "电量(kWh)"])
+    electricity.append(["2026-07-01 08:30", 96000])
+    blasting = workbook.create_sheet("火工品")
+    blasting.append(["数据时间", "雷管(发)", "炸药(kg)"])
+    blasting.append(["2026-07-01 08:30", 120, 240])
+    buffer = BytesIO()
+    workbook.save(buffer)
+
+    imported = import_five_quantity_bytes(
+        filename="多表分项数据.xlsx",
+        content=buffer.getvalue(),
+        acquisition_mode="direct_collection",
+        identity=identity(),
+        captured_at="2026-08-01T00:00:00Z",
+    )
+
+    assert len(imported["payload"]["days"]) == 1
+    daily = imported["payload"]["days"][0]["reported_quantity"]["daily_total"]
+    assert daily["electricity_kwh"]["value"] == 96000
+    assert daily["detonators_count"]["value"] == 120
+    assert daily["explosives_kg"]["value"] == 240
+
+
+def test_same_timestamp_rejects_different_values_for_the_same_metric() -> None:
+    with pytest.raises(ImportContentError, match="电量存在两个不同数值"):
+        import_five_quantity_bytes(
+            filename="冲突数据.csv",
+            content=(
+                "数据时间,电量(kWh)\n"
+                "2026-07-01 08:30,96000\n"
+                "2026-07-01 08:30,97000\n"
+            ).encode(),
+            acquisition_mode="manual_import",
+            identity=identity(),
+            captured_at="2026-08-01T00:00:00Z",
+        )
+
+
+def test_same_timestamp_accepts_the_same_metric_when_values_agree() -> None:
+    imported = import_five_quantity_bytes(
+        filename="重复但一致.csv",
+        content=(
+            "数据时间,电量(kWh),雷管(发)\n"
+            "2026-07-01 08:30,96000,\n"
+            "2026-07-01 08:30,96000,120\n"
+        ).encode(),
+        acquisition_mode="manual_import",
+        identity=identity(),
+        captured_at="2026-08-01T00:00:00Z",
+    )
+
+    assert len(imported["payload"]["days"]) == 1
+    daily = imported["payload"]["days"][0]["reported_quantity"]["daily_total"]
+    assert daily["electricity_kwh"]["value"] == 96000
+    assert daily["detonators_count"]["value"] == 120
 
 
 def test_csv_normalisation_never_invents_missing_values_or_trust_tiers() -> None:

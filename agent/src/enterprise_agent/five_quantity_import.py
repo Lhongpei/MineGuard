@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
 import io
@@ -21,6 +22,7 @@ from .five_quantity_exchange import MineIdentity
 from .quantity_catalog import (
     AGGREGATIONS,
     LEGACY_V2_METRICS,
+    METRIC_LABELS,
     METRICS,
     OPTIONAL_SHIFT_METRICS,
     UNITS,
@@ -1830,6 +1832,108 @@ def _jsonl_payload(
     return payload
 
 
+def _merge_import_measurement(
+    previous: dict[str, Any],
+    incoming: dict[str, Any],
+    *,
+    timestamp: str,
+    scope: str,
+    metric: str,
+) -> dict[str, Any]:
+    """Merge complementary observations without hiding a value conflict."""
+
+    label = METRIC_LABELS.get(metric, metric)
+    for field in ("metric_code", "unit", "aggregation"):
+        if previous.get(field) != incoming.get(field):
+            raise ImportContentError(
+                f"数据时间 {timestamp} 的{label}结构不一致（{scope}）"
+            )
+    previous_value = previous.get("value")
+    incoming_value = incoming.get("value")
+    if previous_value is None and incoming_value is not None:
+        return copy.deepcopy(incoming)
+    if previous_value is not None and incoming_value is None:
+        return copy.deepcopy(previous)
+    if (
+        previous_value is not None
+        and incoming_value is not None
+        and float(previous_value) != float(incoming_value)
+    ):
+        raise ImportContentError(
+            f"数据时间 {timestamp} 的{label}存在两个不同数值"
+            f"（{previous_value} 与 {incoming_value}），请核对后重新导入"
+        )
+    result = copy.deepcopy(previous)
+    flags = sorted(
+        set(previous.get("quality_flags", []))
+        | set(incoming.get("quality_flags", []))
+    )
+    refs = sorted(
+        set(previous.get("source_refs", [])) | set(incoming.get("source_refs", []))
+    )
+    if len(refs) > 16:
+        raise ImportContentError(
+            f"数据时间 {timestamp} 的{label}重复来源超过 16 个，请核对数据"
+        )
+    result["quality_flags"] = flags
+    result["source_refs"] = refs
+    return result
+
+
+def _merge_complementary_timestamp_rows(
+    days: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Coalesce rows by minute; only a same-field value disagreement is fatal.
+
+    Enterprise exports commonly split electricity, blasting materials and
+    production figures across sheets or rows that share one timestamp.  The
+    timestamp therefore identifies an observation window, not a unique row.
+    """
+
+    merged_by_time: dict[str, dict[str, Any]] = {}
+    for day in days:
+        timestamp = str(day["date"])
+        previous = merged_by_time.get(timestamp)
+        if previous is None:
+            merged_by_time[timestamp] = copy.deepcopy(day)
+            continue
+        previous_quantity = previous["reported_quantity"]
+        incoming_quantity = day["reported_quantity"]
+        for metric in METRICS:
+            previous_quantity["daily_total"][metric] = _merge_import_measurement(
+                previous_quantity["daily_total"][metric],
+                incoming_quantity["daily_total"][metric],
+                timestamp=timestamp,
+                scope="日报合计",
+                metric=metric,
+            )
+        for shift in SHIFT_KEYS:
+            previous_shift = previous_quantity["shifts"][shift]
+            incoming_shift = incoming_quantity["shifts"][shift]
+            for field in ("shift_code", "start_at", "end_at"):
+                if previous_shift.get(field) != incoming_shift.get(field):
+                    raise ImportContentError(
+                        f"数据时间 {timestamp} 的班次边界不一致（{shift}）"
+                    )
+            for metric in METRICS:
+                previous_shift["measurements"][metric] = _merge_import_measurement(
+                    previous_shift["measurements"][metric],
+                    incoming_shift["measurements"][metric],
+                    timestamp=timestamp,
+                    scope=shift,
+                    metric=metric,
+                )
+        previous_state = previous.get("operating_state")
+        incoming_state = day.get("operating_state")
+        if previous_state == "unknown":
+            previous["operating_state"] = incoming_state
+        elif incoming_state not in {None, "unknown", previous_state}:
+            raise ImportContentError(
+                f"数据时间 {timestamp} 的运行状态存在冲突"
+            )
+    return [merged_by_time[key] for key in sorted(merged_by_time)]
+
+
 def _draft_payload(
     *,
     identity: MineIdentity,
@@ -1843,10 +1947,8 @@ def _draft_payload(
 ) -> dict[str, Any]:
     if not days:
         raise ImportContentError("未提取到任何有效生产记录")
-    days.sort(key=lambda item: item["date"])
+    days = _merge_complementary_timestamp_rows(days)
     dates = [item["date"] for item in days]
-    if len(dates) != len(set(dates)):
-        raise ImportContentError("文件中存在重复的数据时间，请合并后重新导入")
     months = {value[:7] for value in dates}
     processing_record = {
         "captured_at": captured_at,

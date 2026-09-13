@@ -5742,7 +5742,7 @@ body.is-model-api-admin #coalChatButton {
   border-radius: 14px;
   display: grid;
   gap: 6px;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   padding: 6px;
 }
 
@@ -5883,6 +5883,11 @@ body.is-model-api-admin #coalChatButton {
   border-radius: 8px;
   color: var(--green-dark);
   padding: 9px 10px;
+}
+
+body > .coal-chat-workbench {
+  margin: 20px auto 56px;
+  max-width: 1504px;
 }
 
 .fq-watch-config {

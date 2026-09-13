@@ -68,9 +68,9 @@
     ["four_shift", "四点班"],
   ]);
   const STATUS = Object.freeze({
-    ready_review: "待复核",
+    ready_review: "待确认报送",
     needs_review: "待人工核验",
-    automatic_ready: "自动检查通过",
+    automatic_ready: "确定性检查通过",
     queued: "已确认，待发送",
     submitted: "已送达政府",
     quarantined: "已隔离",
@@ -345,7 +345,11 @@
       state.principal = payload.principal;
       state.csrf = payload.csrf_token;
       syncImportCapability();
-      if (actorChanged || forceLoad || !state.status) await loadAll();
+      if (actorChanged || forceLoad || !state.status) {
+        await loadAll();
+      } else {
+        await refreshOperationalState();
+      }
     } catch (error) {
       if (error.status !== 401) message(error.message, "error");
     }
@@ -838,7 +842,7 @@
     const dayText = dayCount > 0 ? `${dayCount} 天数据` : "文件内数据";
     const successText = result.duplicate
       ? `已找到该${sourceLabel}对应的 ${dayText}记录，本次未重复创建。`
-      : `已读取 ${dayText}并生成待人工核验记录；空白值保持为空。`;
+      : `已读取 ${dayText}并打开报送确认页；核对后点击“确认并报送”。`;
     setUploadResult(successText, "success");
     message(successText, "success");
     if (result.draft_id) {
@@ -901,7 +905,7 @@
     $("fqAutomaticState").textContent = automaticRunning ? "运行中" : "待配置";
     $("fqAutomaticState").className = automaticRunning ? "is-ok" : "is-warn";
     $("fqAutomaticDetail").textContent = automaticRunning
-      ? "发现数据后自动检查，通过即发送"
+      ? "发现数据后确定性校验，通过即发送"
       : "可继续使用文件导入或手工填写";
     $("fqReportingConnection").textContent = state.status.platform_configured
       ? "已配置"
@@ -985,6 +989,28 @@
         },
       )
       .join("");
+  }
+
+  async function refreshOperationalState() {
+    const refreshKey = "background-operational-refresh";
+    if (state.busy.has(refreshKey)) return;
+    state.busy.add(refreshKey);
+    try {
+      const selectedId = state.currentDraft && state.currentDraft.draft_id;
+      const selectedStatus = state.currentDraft && state.currentDraft.status;
+      await Promise.all([loadStatus(), loadInbox(false), loadDrafts(false)]);
+      const listed = selectedId
+        ? state.drafts.find((draft) => draft.draft_id === selectedId)
+        : null;
+      if (listed && listed.status !== selectedStatus) {
+        state.currentDraft = await api(
+          `/api/v2/drafts/${encodeURIComponent(selectedId)}`,
+        );
+        renderDraft();
+      }
+    } finally {
+      state.busy.delete(refreshKey);
+    }
   }
 
   function renderProductionSituation(coverage) {
@@ -1129,7 +1155,6 @@
   }
 
   function manualCsvBytes() {
-    const seenDates = new Set();
     const dataRows = [];
     $("fqManualRows").querySelectorAll("tr").forEach((row) => {
       const values = MANUAL_COLUMNS.map(([metric]) =>
@@ -1138,8 +1163,6 @@
       if (!values.some((value) => value !== "")) return;
       const date = row.querySelector("[data-manual-date]").value.trim();
       if (!date) throw new Error("每条已填写的数据都必须选择数据时间。");
-      if (seenDates.has(date)) throw new Error(`数据时间 ${date} 重复，请合并到同一行。`);
-      seenDates.add(date);
       dataRows.push([date, ...values]);
     });
     if (!dataRows.length) throw new Error("请至少填写一个生产数据指标。");
@@ -1160,7 +1183,7 @@
     }
     setBusy("fqManualSubmit", true, "正在生成…");
     syncImportCapability();
-    setManualResult("正在生成待人工核验记录…", "notice");
+    setManualResult("正在生成报送确认记录…", "notice");
     try {
       let binary = "";
       for (let offset = 0; offset < bytes.length; offset += 32768) {
@@ -1175,7 +1198,7 @@
       });
       $("fqManualRows").replaceChildren();
       addManualRow();
-      setManualResult("已生成待人工核验记录。", "success");
+      setManualResult("已生成并打开报送确认页。", "success");
       await completeImportedDraft(result, { sourceLabel: "手工填写" });
     } catch (error) {
       setManualResult(`生成失败：${error.message}`, "error");
@@ -1683,7 +1706,11 @@
       (item) => item.import_id === draft.import_id,
     );
     const importWarnings = ((importRecord && importRecord.suggestions) || []).filter(
-      (item) => item.kind !== "column_mapping",
+      (item) =>
+        item &&
+        item.requires_human_review === true &&
+        typeof item.reason === "string" &&
+        item.reason.trim() !== "",
     );
     let missing = 0;
     for (const day of draft.payload.days) {
@@ -1789,7 +1816,7 @@
         </div>
         <label class="field"><span>确认说明</span><textarea id="fqDraftAttestation" rows="3" ${locked ? "disabled" : ""}>本人已对照生产数据原始记录、适用班次记录及单位口径逐项核对。</textarea></label>
         <label class="check-row"><input id="fqDraftAccepted" type="checkbox" ${locked ? "disabled" : ""}><span>我确认上述申报窗口内的完整内容真实反映企业核对结果，并同意发送至政府监管平台。</span></label>
-        <button class="button button-primary" type="button" data-fq-action="confirm-draft" ${locked || !finalizeAllowed ? "disabled" : ""}>确认并进入发送队列</button>
+        <button class="button button-primary" type="button" data-fq-action="confirm-draft" ${locked || !finalizeAllowed ? "disabled" : ""}>确认并报送</button>
         ${draft.receipt ? `<div class="fq-receipt"><strong>政府已接收</strong><span>回执：${escapeHtml((draft.receipt.payload && draft.receipt.payload.receipt_id) || draft.receipt.message_id)}</span><small>政府接收并排队，不等于监管结论。</small></div>` : ""}
       </section>`;
   }
@@ -1945,7 +1972,36 @@
             accepted: true,
           },
         });
-        message("已完成企业确认，消息已可靠入队并会自动重试。", "success");
+        let deliveryError = null;
+        try {
+          const delivery = await api(
+            `/api/v2/drafts/${encodeURIComponent(state.currentDraft.draft_id)}/send-now`,
+            { method: "POST", body: {} },
+          );
+          const attempt = delivery.items && delivery.items[0];
+          if (!attempt) {
+            deliveryError = new Error("当前未执行发送，请检查监管接口配置");
+          } else if (attempt.status !== "succeeded") {
+            deliveryError = new Error(
+              attempt.error || "政府接口暂未返回有效回执",
+            );
+          }
+        } catch (error) {
+          deliveryError = error;
+        }
+        state.currentDraft = await api(
+          `/api/v2/drafts/${encodeURIComponent(state.currentDraft.draft_id)}`,
+        );
+        if (state.currentDraft.status === "submitted") {
+          message("政府监管平台已接收并返回回执。", "success");
+        } else if (deliveryError) {
+          message(
+            `已可靠入队，首次发送未成功：${deliveryError.message}；后台将自动重试。`,
+            "error",
+          );
+        } else {
+          message("已可靠入队，正在等待政府回执。", "notice");
+        }
       } else if (action === "send-draft") {
         const delivery = await api(`/api/v2/drafts/${encodeURIComponent(state.currentDraft.draft_id)}/send-now`, { method: "POST", body: {} });
         state.currentDraft = await api(`/api/v2/drafts/${encodeURIComponent(state.currentDraft.draft_id)}`);
@@ -1970,7 +2026,12 @@
         message("草稿已放弃并写入审计链；原始导入和草稿内容仍保留。", "success");
         return;
       }
-      await Promise.all([loadDrafts(false), loadAudit(false)]);
+      await Promise.all([
+        loadStatus(),
+        loadInbox(false),
+        loadDrafts(false),
+        loadAudit(false),
+      ]);
       renderDraft();
     } catch (error) {
       message(error.message, "error");

@@ -637,7 +637,25 @@ class AutomaticReviewModel:
         }
 
 
-def test_watcher_ai_checks_partial_batch_and_automatically_reports(
+class NoisyPartialCoverageModel(AutomaticReviewModel):
+    def review_production_batch(
+        self, *, batch_context: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.contexts.append(batch_context)
+        return {
+            "contract_version": "production-batch-ai-review/v1",
+            "decision": "needs_review",
+            "reason_codes": ["structure_changed", "source_warning"],
+            "summary": [
+                "来源文件结构与上次不同",
+                "数据覆盖不完整，部分指标缺失",
+            ],
+            "reviewed_at": utc_text(),
+            "model": self.config.model,
+        }
+
+
+def test_watcher_uses_deterministic_checks_without_calling_model(
     tmp_path: Path,
 ) -> None:
     watched = tmp_path / "automatic-inbox"
@@ -664,8 +682,7 @@ def test_watcher_ai_checks_partial_batch_and_automatically_reports(
     assert result["automatic_dispatch"] == "queued"
     assert result["draft"]["status"] == "submitted"
     assert government.submission is not None
-    assert model.contexts[0]["coverage"]["missing_value_count"] > 0
-    assert model.contexts[0]["coverage"]["provided_metrics_may_be_partial"] is True
+    assert model.contexts == []
     imports = runtime.store.list_imports()
     assert imports[0]["status"] == "submitted"
     reviews = [
@@ -684,6 +701,45 @@ def test_watcher_ai_checks_partial_batch_and_automatically_reports(
         llm_provider=model,
     )
     assert restarted.store.verify_audit()["valid"] is True
+
+
+def test_schema_subset_change_and_partial_coverage_do_not_call_or_hold_model(
+    tmp_path: Path,
+) -> None:
+    stable_model = AutomaticReviewModel()
+    government = FakeGovernment(identity())
+    runtime = FiveQuantityRuntime(
+        Repository(tmp_path / "safe-structure-state" / "agent.db"),
+        identity=identity(),
+        platform_client=government,
+        quarantine_directory=tmp_path / "safe-structure-state" / "quarantine",
+        llm_provider=stable_model,
+    )
+    first = runtime.ingest_bytes(
+        filename="生产综合.csv",
+        content=csv_bytes(),
+        acquisition_mode="direct_collection",
+        actor="system-watcher",
+    )
+    assert first["draft"]["status"] == "submitted"
+
+    noisy_model = NoisyPartialCoverageModel()
+    runtime.csv_mapping_provider = noisy_model
+    second = runtime.ingest_bytes(
+        filename="电量分项.csv",
+        content=(
+            "数据时间,电量(kWh)\n"
+            "2026-07-03 08:30,98000\n"
+        ).encode(),
+        acquisition_mode="direct_collection",
+        actor="system-watcher",
+    )
+
+    assert noisy_model.contexts == []
+    assert second["automatic_review"]["decision"] == "auto_send"
+    assert second["automatic_review"]["reason_codes"] == ["none"]
+    assert second["automatic_review"]["model"] is None
+    assert second["draft"]["status"] == "submitted"
 
 
 def test_duplicate_watcher_pass_recovers_interrupted_automatic_dispatch(
