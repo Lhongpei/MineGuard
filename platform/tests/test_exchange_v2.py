@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from mineguard.external_submission import jcs_canonical_json
 from mineguard.exchange_v2 import (
@@ -15,6 +16,7 @@ from mineguard.exchange_v2 import (
     ExchangeAuthenticationError,
     ExchangeClient,
     ExchangeLineageError,
+    TenQuantitySubmissionPayload,
     authenticate_transport,
     decode_inbound_message,
     load_exchange_clients,
@@ -40,6 +42,25 @@ PRODUCTION_COMPARISON_CONTEXT = {
     "coal_type": "thermal-coal",
     "operating_regime": "normal-production",
 }
+
+
+def test_v3_wire_payload_accepts_seconds_and_rejects_fractional_seconds() -> None:
+    payload = json.loads((EXAMPLES / "ten-quantity-submission-v3.json").read_bytes())[
+        "payload"
+    ]
+    payload["period_start"] = "2026-07-31T23:30:27+08:00"
+    payload["period_end"] = "2026-07-31T23:30:27+08:00"
+    payload["days"][0]["date"] = "2026-07-31T23:30:27+08:00"
+
+    accepted = TenQuantitySubmissionPayload.model_validate(payload)
+
+    assert accepted.days[0].date.second == 27
+    fractional = deepcopy(payload)
+    fractional["period_start"] = "2026-07-31T23:30:27.125+08:00"
+    fractional["period_end"] = "2026-07-31T23:30:27.125+08:00"
+    fractional["days"][0]["date"] = "2026-07-31T23:30:27.125+08:00"
+    with pytest.raises(ValidationError, match="aligned to a second"):
+        TenQuantitySubmissionPayload.model_validate(fractional)
 
 
 def _production_registry_document() -> dict[str, object]:
@@ -520,15 +541,11 @@ def test_inbound_models_reject_schema_invalid_members(case: str) -> None:
         )
     elif case == "response_uuid":
         document = json.loads(
-            (EXAMPLES / "enterprise-risk-response-v2.json").read_text(
-                encoding="utf-8"
-            )
+            (EXAMPLES / "enterprise-risk-response-v2.json").read_text(encoding="utf-8")
         )
     else:
         document = json.loads(
-            (EXAMPLES / "five-quantity-submission-v2.json").read_text(
-                encoding="utf-8"
-            )
+            (EXAMPLES / "five-quantity-submission-v2.json").read_text(encoding="utf-8")
         )
 
     if case == "ack_revision":
@@ -800,13 +817,16 @@ def test_v3_route_uses_v3_transport_domain_for_reused_v2_message_contract() -> N
         contract_version="risk-delivery-ack-v2",
     )
     assert absolute_headers["X-Exchange-Signature-Version"] == "hmac-sha256-v3"
-    assert authenticate_transport(
-        {client.sender_id: client},
-        absolute_headers,
-        method="POST",
-        request_target=absolute_target,
-        body=body,
-    )[0] is client
+    assert (
+        authenticate_transport(
+            {client.sender_id: client},
+            absolute_headers,
+            method="POST",
+            request_target=absolute_target,
+            body=body,
+        )[0]
+        is client
+    )
 
     with pytest.raises(ExchangeAuthenticationError):
         authenticate_transport(

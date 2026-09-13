@@ -513,7 +513,7 @@ async function main() {
     );
     assert.equal(document.getElementById("fqPanelReview").hidden, false);
     await waitFor(
-      () => /2026\/07\/01 08:30 至 2026\/07\/02 08:30/.test(document.getElementById("fqDraftDetail").textContent),
+      () => /2026\/07\/01 08:30:00 至 2026\/07\/02 08:30:00/.test(document.getElementById("fqDraftDetail").textContent),
       "created draft detail",
     );
     const detail = document.getElementById("fqDraftDetail");
@@ -588,12 +588,13 @@ async function main() {
 
     const manualRow = document.querySelector("#fqManualRows tr");
     assert(manualRow, "manual fallback starts with one editable row");
-    manualRow.querySelector('[data-manual-date]').value = "2026-07-15T09:45";
+    assert.equal(manualRow.querySelector('[data-manual-date]').step, "1");
+    manualRow.querySelector('[data-manual-date]').value = "2026-07-15T09:45:27";
     manualRow.querySelector('[data-manual-metric="production_t"]').value = "123.5";
     document.getElementById("fqManualAddRow").click();
     const manualRows = document.querySelectorAll("#fqManualRows tr");
     assert.equal(manualRows.length, 2);
-    manualRows[1].querySelector('[data-manual-date]').value = "2026-07-15T09:45";
+    manualRows[1].querySelector('[data-manual-date]').value = "2026-07-15T09:45:27";
     manualRows[1].querySelector('[data-manual-metric="electricity_kwh"]').value = "456";
     document.getElementById("fqManualForm").dispatchEvent(
       new window.Event("submit", { bubbles: true, cancelable: true }),
@@ -611,11 +612,11 @@ async function main() {
     const manualBody = JSON.parse(manualPost.options.body);
     assert.match(manualBody.filename, /^manual-production-data-\d+\.csv$/);
     const manualCsv = Buffer.from(manualBody.content_base64, "base64").toString("utf8");
-    assert.match(manualCsv, /2026-07-15T09:45/);
+    assert.match(manualCsv, /2026-07-15T09:45:27/);
     assert.match(manualCsv, /123\.5/);
     assert.match(manualCsv, /456/);
     assert.equal(
-      (manualCsv.match(/2026-07-15T09:45/g) || []).length,
+      (manualCsv.match(/2026-07-15T09:45:27/g) || []).length,
       2,
       "complementary metrics may be entered on separate rows at the same timestamp",
     );

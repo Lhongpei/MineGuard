@@ -1308,14 +1308,14 @@ def _check_v3_submission_semantics(submission: dict[str, Any]) -> None:
 
     period_start = _aware_datetime(payload["period_start"], "period_start")
     period_end = _aware_datetime(payload["period_end"], "period_end")
-    if any(value.second or value.microsecond for value in (period_start, period_end)):
-        raise ContractValidationError("V3 period bounds must align to a minute")
+    if any(value.microsecond for value in (period_start, period_end)):
+        raise ContractValidationError("V3 period bounds must align to a second")
     if period_end < period_start:
         raise ContractValidationError("V3 reporting period ends before it starts")
     days = payload["days"]
     day_values = [_aware_datetime(day["date"], "days[].date") for day in days]
-    if any(value.second or value.microsecond for value in day_values):
-        raise ContractValidationError("V3 production records must align to a minute")
+    if any(value.microsecond for value in day_values):
+        raise ContractValidationError("V3 production records must align to a second")
     if day_values != sorted(set(day_values)):
         raise ContractValidationError(
             "V3 production records must be unique and chronologically ordered"

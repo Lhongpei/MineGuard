@@ -654,9 +654,9 @@ class WireTenDay(WireContractModel):
     reported_quantity: WireTenReportedQuantity
 
     @model_validator(mode="after")
-    def validate_observation_minute(self) -> "WireTenDay":
-        if self.date.second or self.date.microsecond:
-            raise ValueError("production record time must be aligned to a minute")
+    def validate_observation_second(self) -> "WireTenDay":
+        if self.date.microsecond:
+            raise ValueError("production record time must be aligned to a second")
         return self
 
 
@@ -870,17 +870,14 @@ class TenQuantitySubmissionPayload(WireContractModel):
 
     @model_validator(mode="after")
     def validate_reporting_window(self) -> "TenQuantitySubmissionPayload":
-        if any(
-            value.second or value.microsecond
-            for value in (self.period_start, self.period_end)
-        ):
-            raise ValueError("production batch bounds must be aligned to a minute")
+        if any(value.microsecond for value in (self.period_start, self.period_end)):
+            raise ValueError("production batch bounds must be aligned to a second")
         if self.period_end < self.period_start:
             raise ValueError("period_end cannot predate period_start")
         dates = [item.date for item in self.days]
         if dates != sorted(dates) or len(dates) != len(set(dates)):
             raise ValueError(
-                "production record minutes must be unique and chronological"
+                "production record seconds must be unique and chronological"
             )
         if dates[0] != self.period_start or dates[-1] != self.period_end:
             raise ValueError("period window must equal the first and last record times")

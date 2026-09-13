@@ -215,10 +215,10 @@ def _iso_date(value: Any, label: str) -> date:
         raise ValueError(f"{label} 必须是 ISO 日期") from error
 
 
-def _iso_minute(value: Any, label: str) -> datetime:
+def _iso_second(value: Any, label: str) -> datetime:
     parsed = parse_aware_datetime(value, label)
-    if parsed.second or parsed.microsecond:
-        raise ValueError(f"{label} 必须精确到分钟，不得包含秒或微秒")
+    if parsed.microsecond:
+        raise ValueError(f"{label} 必须精确到秒，不得包含微秒")
     return parsed
 
 
@@ -294,8 +294,8 @@ def validate_five_quantity_payload(
     elif identity.comparison_context is not None:
         raise ValueError("草稿缺少本实例已配置的可选同类矿资料")
     if is_ten_quantity:
-        start: date | datetime = _iso_minute(payload["period_start"], "period_start")
-        end: date | datetime = _iso_minute(payload["period_end"], "period_end")
+        start: date | datetime = _iso_second(payload["period_start"], "period_start")
+        end: date | datetime = _iso_second(payload["period_end"], "period_end")
     else:
         start = _iso_date(payload["period_start"], "period_start")
         end = _iso_date(payload["period_end"], "period_end")
@@ -361,7 +361,7 @@ def validate_five_quantity_payload(
         if set(day) != {"date", "operating_state", "reported_quantity"}:
             raise ValueError(f"days[{day_index}] 字段非法")
         current_date = (
-            _iso_minute(day["date"], f"days[{day_index}].date")
+            _iso_second(day["date"], f"days[{day_index}].date")
             if is_ten_quantity
             else _iso_date(day["date"], f"days[{day_index}].date")
         )
@@ -458,7 +458,7 @@ def validate_five_quantity_payload(
                 ):
                     raise ValueError(f"{metric}.source_refs 引用了未知来源")
     if dates != sorted(dates) or len(dates) != len(set(dates)):
-        raise ValueError("days 必须按数据时间升序且同一分钟不得重复")
+        raise ValueError("days 必须按数据时间升序且同一秒不得重复")
     if dates[0] != start or dates[-1] != end:
         raise ValueError("period_start/end 必须等于首尾生产记录时间")
     processing = _object(payload["agent_processing"], "agent_processing")
@@ -646,10 +646,10 @@ def _v2_machine_preflight(
     missing_count = 0
     mismatches: list[str] = []
     if contract_version == CURRENT_SUBMISSION_CONTRACT:
-        period_start: date | datetime = _iso_minute(
+        period_start: date | datetime = _iso_second(
             payload["period_start"], "period_start"
         )
-        period_end: date | datetime = _iso_minute(payload["period_end"], "period_end")
+        period_end: date | datetime = _iso_second(payload["period_end"], "period_end")
     else:
         period_start = date.fromisoformat(str(payload["period_start"]))
         period_end = date.fromisoformat(str(payload["period_end"]))

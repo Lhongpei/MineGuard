@@ -193,14 +193,14 @@
     });
     return text;
   };
-  const formatMinute = (value) => {
+  const formatSecond = (value) => {
     if (!value) return "—";
     const parsed = new Date(value);
     return Number.isNaN(parsed.valueOf())
       ? String(value)
       : parsed.toLocaleString("zh-CN", {
           year: "numeric", month: "2-digit", day: "2-digit",
-          hour: "2-digit", minute: "2-digit", hour12: false,
+          hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
         });
   };
   const evidenceMethodLabel = (value) => {
@@ -226,8 +226,8 @@
     return "本地只读核对";
   };
   const reportingWindow = (payload) => {
-    const start = payload ? formatMinute(payload.period_start) : "—";
-    const end = payload ? formatMinute(payload.period_end) : "—";
+    const start = payload ? formatSecond(payload.period_start) : "—";
+    const end = payload ? formatSecond(payload.period_end) : "—";
     return {
       label: "生产数据批次",
       dateRange: payload && payload.period_start === payload.period_end
@@ -864,7 +864,7 @@
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
     setUploadResult(
-      "生产数据 CSV 模板已下载；每行填写一个精确到分钟的数据时间，没有的数据保持空白。",
+      "生产数据 CSV 模板已下载；每行填写一个精确到秒的数据时间，没有的数据保持空白。",
       "success",
     );
   }
@@ -919,8 +919,8 @@
     if (coverage) {
       $("fqLatestCoverage").textContent = `${Number(coverage.provided_quantity_count || 0)}/10 项`;
       const range = coverage.period_start === coverage.period_end
-        ? formatMinute(coverage.period_start)
-        : `${formatMinute(coverage.period_start)} 至 ${formatMinute(coverage.period_end)}`;
+        ? formatSecond(coverage.period_start)
+        : `${formatSecond(coverage.period_start)} 至 ${formatSecond(coverage.period_end)}`;
       $("fqLatestCoverageDetail").textContent = `${range} · ${Number(coverage.day_count || 0)} 条生产记录`;
     } else {
       $("fqLatestCoverage").textContent = "—";
@@ -1125,12 +1125,12 @@
   function manualDateValue() {
     const now = new Date();
     const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
-    return local.toISOString().slice(0, 16);
+    return local.toISOString().slice(0, 19);
   }
 
   function addManualRow(values = {}) {
     const row = document.createElement("tr");
-    row.innerHTML = `<td><label class="sr-only">数据时间</label><input class="fq-manual-input" data-manual-date type="datetime-local" step="60" value="${escapeHtml(values.date || manualDateValue())}"></td>${MANUAL_COLUMNS.map(([metric]) => `<td><label class="sr-only">${escapeHtml(metricLabel(metric))}</label><input class="fq-manual-input" data-manual-metric="${escapeHtml(metric)}" type="number" min="0" step="any" inputmode="decimal" value="${escapeHtml(values[metric] == null ? "" : values[metric])}"></td>`).join("")}<td><button class="fq-link-button" data-manual-action="remove" type="button">删除</button></td>`;
+    row.innerHTML = `<td><label class="sr-only">数据时间</label><input class="fq-manual-input" data-manual-date type="datetime-local" step="1" value="${escapeHtml(values.date || manualDateValue())}"></td>${MANUAL_COLUMNS.map(([metric]) => `<td><label class="sr-only">${escapeHtml(metricLabel(metric))}</label><input class="fq-manual-input" data-manual-metric="${escapeHtml(metric)}" type="number" min="0" step="any" inputmode="decimal" value="${escapeHtml(values[metric] == null ? "" : values[metric])}"></td>`).join("")}<td><button class="fq-link-button" data-manual-action="remove" type="button">删除</button></td>`;
     $("fqManualRows").append(row);
   }
 
@@ -1738,7 +1738,7 @@
         ).join("");
         const needsAttention = dayMissing > 0 || dayReceived < TEN_QUANTITIES.length;
         return `<details class="fq-day-card" ${dayMissing ? "" : ""}>
-          <summary><span><strong>${escapeHtml(formatMinute(day.date))}</strong><small>已填生产指标 ${dayReceived}/10${dayMissing ? ` · ${dayMissing} 个已接入字段缺失` : ""} · 允许部分报送</small></span><span class="fq-status ${needsAttention ? "is-warn" : "is-ok"}">${needsAttention ? "待核对" : "完整"}</span></summary>
+          <summary><span><strong>${escapeHtml(formatSecond(day.date))}</strong><small>已填生产指标 ${dayReceived}/10${dayMissing ? ` · ${dayMissing} 个已接入字段缺失` : ""} · 允许部分报送</small></span><span class="fq-status ${needsAttention ? "is-warn" : "is-ok"}">${needsAttention ? "待核对" : "完整"}</span></summary>
           <label class="field fq-operating-state"><span>该时点运行状态</span><select data-fq-operating-state data-day="${dayIndex}" ${locked ? "disabled" : ""}>${[
             ["producing", "生产"], ["stopped", "停产"], ["maintenance", "检修"], ["restarting", "复产过渡"], ["unknown", "待确认"],
           ].map(([value, label]) => `<option value="${value}" ${day.operating_state === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
@@ -1798,7 +1798,7 @@
       ${reviewGate.required ? `<div class="fq-import-warning" role="status"><strong>四眼复核：${awaitingHumanPreparer ? "先由经办人接收核对" : currentIsLastEditor ? "待另一账号接手" : reviewActorMissing ? "经办人记录缺失" : "当前账号可独立复核"}</strong><p>${escapeHtml(reviewGate.message || "最后创建/编辑人不能确认或入发送队列。")}</p></div>` : ""}
       ${draft.predecessor ? `<div class="fq-import-warning" role="status"><strong>这是第 ${escapeHtml(draft.submission_revision)} 版正式更正草稿</strong><p>同一报送链继续编号；直接前序消息 ${escapeHtml(shortHash(draft.predecessor.message_id))} 及其签名摘要已锁定，保存本草稿不会覆盖历史报文。为避免修订链中断，更正草稿创建后不能放弃或删除，可暂存并在后续继续复核。</p></div>` : ""}
       ${importWarnings.length ? `<div class="fq-import-warning"><strong>导入映射需要人工核对</strong><ul>${importWarnings.slice(0, 20).map((item) => `<li>${escapeHtml(item.reason || "存在未明确的来源字段")}</li>`).join("")}</ul></div>` : ""}
-      <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。每条记录精确到分钟；请核对该时间点已提供的生产数据，班次明细仅在来源确实提供时展开。</div>
+      <div class="fq-safe-note">空白保持为 null，系统不会用 0 或历史值填补。每条记录精确到秒；请核对该时间点已提供的生产数据，班次明细仅在来源确实提供时展开。</div>
       ${autofillEvidenceHtml(draft)}
       <div class="fq-day-list">${days}</div>
       <div class="fq-sticky-actions">
@@ -2105,7 +2105,7 @@
         (finding, index) => `<article class="fq-finding">
           <div class="fq-finding-head"><span class="fq-severity is-${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span><div><small>风险 ${index + 1}</small><h4>${escapeHtml(finding.title)}</h4></div></div>
           <p>${escapeHtml(enterpriseRiskText(finding.summary))}</p>
-          <dl class="fq-definition-list"><div><dt>数据时间</dt><dd>${escapeHtml((finding.affected_dates || []).map(formatMinute).join("、") || "未列明")}</dd></div><div><dt>指标</dt><dd>${escapeHtml((finding.affected_metrics || []).map(metricLabel).join("、") || "未列明")}</dd></div></dl>
+          <dl class="fq-definition-list"><div><dt>数据时间</dt><dd>${escapeHtml((finding.affected_dates || []).map(formatSecond).join("、") || "未列明")}</dd></div><div><dt>指标</dt><dd>${escapeHtml((finding.affected_metrics || []).map(metricLabel).join("、") || "未列明")}</dd></div></dl>
           <details><summary>查看核对依据</summary>${(finding.evidence || []).map((evidence) => `<div class="fq-evidence"><strong>${escapeHtml(evidenceMethodLabel(evidence.method))}</strong><span>${escapeHtml(enterpriseRiskText(evidence.summary))}</span><small>观测 ${escapeHtml(evidence.observed_value == null ? "—" : evidence.observed_value)}；参考 ${escapeHtml(evidence.expected_min == null ? "—" : evidence.expected_min)}～${escapeHtml(evidence.expected_max == null ? "—" : evidence.expected_max)}；偏离程度 ${escapeHtml(evidence.score == null ? "—" : evidence.score)}</small></div>`).join("")}</details>
         </article>`,
       )

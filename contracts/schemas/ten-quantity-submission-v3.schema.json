@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:mineguard:contract:ten-quantity-submission:v3",
   "title": "Ten-Quantity Submission V3",
-  "description": "One mine's minute-granularity production records and optional governed shift detail for ten business groups represented by eleven atomic measurements.",
+  "description": "One mine's second-granularity production records and optional governed shift detail for ten business groups represented by eleven atomic measurements.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -87,6 +87,14 @@
     }
   ],
   "$defs": {
+    "secondDateTime": {
+      "allOf": [
+        {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"},
+        {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.0+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+        }
+      ]
+    },
     "shift": {
       "type": "object",
       "additionalProperties": false,
@@ -135,8 +143,8 @@
       "required": ["date", "operating_state", "reported_quantity"],
       "properties": {
         "date": {
-          "$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime",
-          "description": "Governed observation time, aligned to an exact minute."
+          "$ref": "#/$defs/secondDateTime",
+          "description": "Governed observation time, aligned to an exact second without non-zero fractional seconds."
         },
         "operating_state": {
           "type": "string",
@@ -217,8 +225,8 @@
           "maxLength": 64,
           "pattern": "^(?:UTC|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]|[A-Za-z][A-Za-z0-9._+-]*(?:/[A-Za-z0-9._+-]+)+)$"
         },
-        "period_start": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"},
-        "period_end": {"$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"},
+        "period_start": {"$ref": "#/$defs/secondDateTime"},
+        "period_end": {"$ref": "#/$defs/secondDateTime"},
         "closed_at": {
           "$ref": "urn:mineguard:contract:exchange-common:v3#/$defs/dateTime"
         },

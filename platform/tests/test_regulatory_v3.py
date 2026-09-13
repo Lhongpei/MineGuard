@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 import json
 
 import pytest
@@ -122,8 +122,7 @@ def _submission(
         mine_id="mine-a",
         period_start=start,
         period_end=start + timedelta(days=day_count - 1),
-        coverage_as_of=coverage_as_of
-        or start + timedelta(days=day_count + 10),
+        coverage_as_of=coverage_as_of or start + timedelta(days=day_count + 10),
         operating_regime="normal",
         days=report_days,
         applicability=applicability or ModuleApplicability(),
@@ -165,7 +164,31 @@ def test_v3_has_ten_business_groups_and_exactly_eleven_atomic_fields() -> None:
     )
 
 
-def test_metric_validation_rejects_negative_physical_values_and_fractional_counts() -> None:
+def test_analysis_window_accepts_seconds_and_rejects_fractional_seconds() -> None:
+    base = _submission(day_count=1)
+    point = datetime(2026, 7, 1, 8, 15, 27, tzinfo=UTC)
+    document = base.model_dump(mode="python")
+    document.update(
+        {
+            "period_start": point,
+            "period_end": point,
+            "coverage_as_of": point,
+            "credential_support": None,
+        }
+    )
+    document["days"][0]["date"] = point
+
+    accepted = TenQuantitySubmission.model_validate(document)
+
+    assert accepted.days[0].date == point
+    document["days"][0]["date"] = point.replace(microsecond=1)
+    with pytest.raises(ValidationError, match="align to a second"):
+        TenQuantitySubmission.model_validate(document)
+
+
+def test_metric_validation_rejects_negative_physical_values_and_fractional_counts() -> (
+    None
+):
     with pytest.raises(ValidationError, match="production_t cannot be negative"):
         _day(date(2026, 7, 1), production_t=-1.0)
     with pytest.raises(ValidationError, match="mine_entry_persons must be integral"):
@@ -173,9 +196,7 @@ def test_metric_validation_rejects_negative_physical_values_and_fractional_count
 
     # The main ten-quantity field is normal/blue-invoice physical tonnage.
     # Red invoices and returns must arrive as separate support events.
-    with pytest.raises(
-        ValidationError, match="invoiced_quantity_t cannot be negative"
-    ):
+    with pytest.raises(ValidationError, match="invoiced_quantity_t cannot be negative"):
         _day(date(2026, 7, 1), invoiced_quantity_t=-10.0)
 
 
@@ -205,8 +226,7 @@ def test_partial_optional_commercial_shifts_do_not_override_a_daily_total() -> N
 
     assert result.totals.sales_t == 30.0
     assert not any(
-        item.code == "partial_shift_values"
-        and item.affected_metrics == ["sales_t"]
+        item.code == "partial_shift_values" and item.affected_metrics == ["sales_t"]
         for item in result.signals
     )
 
@@ -259,7 +279,8 @@ def test_daily_shift_mismatch_is_deterministic_p2_not_physical_p1() -> None:
     result = analyze_ten_quantity(_submission(day_count=1, days=[day]))
 
     mismatch = next(
-        item for item in result.signals
+        item
+        for item in result.signals
         if item.code == "daily_shift_arithmetic_mismatch"
     )
     assert mismatch.layer is EvidenceLayer.DETERMINISTIC
@@ -279,9 +300,7 @@ def test_missing_support_returns_insufficient_without_inventing_conflict() -> No
 
     assert result.decision is DecisionStatus.INSUFFICIENT_DATA
     assert result.review_priority is ReviewPriority.DATA
-    assert {item.status for item in result.balance_checks} == {
-        CheckStatus.INSUFFICIENT
-    }
+    assert {item.status for item in result.balance_checks} == {CheckStatus.INSUFFICIENT}
     assert not any(item.layer is EvidenceLayer.PHYSICAL for item in result.signals)
     assert result.reconciliation.status is SolverStatus.INSUFFICIENT
 
@@ -357,7 +376,9 @@ def test_sales_transport_and_invoice_are_not_three_material_outflows() -> None:
         _submission(days=days, credential_support=credentials)
     )
 
-    raw = next(item for item in result.balance_checks if item.code == "raw_coal_balance")
+    raw = next(
+        item for item in result.balance_checks if item.code == "raw_coal_balance"
+    )
     assert raw.status is CheckStatus.CONSISTENT
     assert raw.residual == pytest.approx(0.0)
     assert result.runtime_manifest["sales_transport_invoice_role"] == (
@@ -369,7 +390,8 @@ def test_wash_support_is_required_but_can_be_governed_not_applicable() -> None:
     missing = _submission().model_copy(update={"wash_support": None})
     missing_result = analyze_ten_quantity(missing)
     wash_missing = next(
-        item for item in missing_result.balance_checks
+        item
+        for item in missing_result.balance_checks
         if item.code == "wash_mass_balance"
     )
     assert wash_missing.status is CheckStatus.INSUFFICIENT
@@ -385,7 +407,8 @@ def test_wash_support_is_required_but_can_be_governed_not_applicable() -> None:
     )
     skipped_result = analyze_ten_quantity(not_applicable)
     wash_skipped = next(
-        item for item in skipped_result.balance_checks
+        item
+        for item in skipped_result.balance_checks
         if item.code == "wash_mass_balance"
     )
     assert wash_skipped.status is CheckStatus.SKIPPED
@@ -423,7 +446,8 @@ def test_incomplete_credential_register_is_insufficient_not_a_mismatch() -> None
     result = analyze_ten_quantity(_submission(credential_support=support))
 
     module = next(
-        item for item in result.modules
+        item
+        for item in result.modules
         if item.module == "sales_transport_invoice_credentials"
     )
     assert module.status is ModuleStatus.INSUFFICIENT
@@ -431,7 +455,9 @@ def test_incomplete_credential_register_is_insufficient_not_a_mismatch() -> None
     assert not any("credential_mismatch" in item.code for item in result.signals)
 
 
-def test_missing_closed_invoices_have_exact_coverage_and_do_not_pollute_cumulative_check() -> None:
+def test_missing_closed_invoices_have_exact_coverage_and_do_not_pollute_cumulative_check() -> (
+    None
+):
     support = _credentials(date(2026, 7, 1))
     for cohort in support.cohorts[:2]:
         cohort.invoiced_at = None
@@ -442,11 +468,13 @@ def test_missing_closed_invoices_have_exact_coverage_and_do_not_pollute_cumulati
     result = analyze_ten_quantity(_submission(credential_support=support))
 
     module = next(
-        item for item in result.modules
+        item
+        for item in result.modules
         if item.module == "sales_transport_invoice_credentials"
     )
     cumulative = next(
-        item for item in result.credential_summary.checks
+        item
+        for item in result.credential_summary.checks
         if item.code == "sales_invoice_closed_cumulative_match"
     )
     assert module.status is ModuleStatus.INSUFFICIENT
@@ -461,7 +489,8 @@ def test_linked_sales_transport_mismatch_is_p2_and_never_a_physical_outflow() ->
     result = analyze_ten_quantity(_submission(credential_support=support))
 
     signal = next(
-        item for item in result.signals
+        item
+        for item in result.signals
         if item.code == "sales_transport_credential_mismatch"
     )
     assert signal.priority is ReviewPriority.P2
@@ -565,8 +594,7 @@ def test_historical_outlier_can_only_create_p2() -> None:
     result = analyze_ten_quantity(_submission(), history=_history(start))
 
     historical = [
-        item for item in result.signals
-        if item.layer is EvidenceLayer.HISTORICAL
+        item for item in result.signals if item.layer is EvidenceLayer.HISTORICAL
     ]
     assert historical
     assert all(item.priority is ReviewPriority.P2 for item in historical)
@@ -619,9 +647,7 @@ def test_duplicate_history_references_do_not_inflate_baseline_sample() -> None:
     start = date(2026, 7, 1)
     one_reference = _history(start, count=1)[0]
 
-    result = analyze_ten_quantity(
-        _submission(), history=[one_reference] * 7
-    )
+    result = analyze_ten_quantity(_submission(), history=[one_reference] * 7)
 
     assert all(item.sample_count == 1 for item in result.historical_diagnostics)
     assert not any(item.layer is EvidenceLayer.HISTORICAL for item in result.signals)
@@ -630,21 +656,21 @@ def test_duplicate_history_references_do_not_inflate_baseline_sample() -> None:
 def test_extreme_extraction_is_not_silently_equated_to_production() -> None:
     start = date(2026, 7, 1)
     days = [
-        _day(start + timedelta(days=index), extraction_t=10_000.0)
-        for index in range(3)
+        _day(start + timedelta(days=index), extraction_t=10_000.0) for index in range(3)
     ]
 
     result = analyze_ten_quantity(_submission(days=days))
 
     assert not any(
-        item.layer is EvidenceLayer.PHYSICAL
-        and "extraction_t" in item.affected_metrics
+        item.layer is EvidenceLayer.PHYSICAL and "extraction_t" in item.affected_metrics
         for item in result.signals
     )
     assert result.decision is DecisionStatus.NORMAL_CANDIDATE
 
 
-def test_solver_unavailable_is_explicitly_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_solver_unavailable_is_explicitly_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(v3, "_linprog", None)
 
     result = analyze_ten_quantity(_submission())

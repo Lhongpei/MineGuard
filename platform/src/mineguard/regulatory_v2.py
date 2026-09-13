@@ -665,12 +665,8 @@ class FiveQuantitySubmission(StrictModel):
                 not isinstance(item, datetime) or item.tzinfo is None for item in points
             ):
                 raise ValueError("V3 production record times must include a timezone")
-            if any(
-                item.second or item.microsecond
-                for item in points
-                if isinstance(item, datetime)
-            ):
-                raise ValueError("V3 production record times must align to a minute")
+            if any(item.microsecond for item in points if isinstance(item, datetime)):
+                raise ValueError("V3 production record times must align to a second")
         elif any(
             isinstance(item, datetime)
             for item in (
@@ -2484,7 +2480,7 @@ def _past_only_detector_signals(
                 )
             ),
             report_end=(
-                submission.period_end.astimezone(UTC) + timedelta(minutes=1)
+                submission.period_end.astimezone(UTC) + timedelta(seconds=1)
                 if isinstance(submission.period_end, datetime)
                 else datetime.combine(
                     submission.period_end + timedelta(days=1),

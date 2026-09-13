@@ -367,14 +367,10 @@ class TenQuantitySubmission(StrictModel):
                 not isinstance(item, datetime) or item.tzinfo is None for item in points
             ):
                 raise ValueError(
-                    "minute records and batch bounds must all include timezone"
+                    "second-precision records and batch bounds must all include timezone"
                 )
-            if any(
-                item.second or item.microsecond
-                for item in points
-                if isinstance(item, datetime)
-            ):
-                raise ValueError("production record times must align to a minute")
+            if any(item.microsecond for item in points if isinstance(item, datetime)):
+                raise ValueError("production record times must align to a second")
         if self.period_end < self.period_start:
             raise ValueError("period_end cannot predate period_start")
         if (self.period_end - self.period_start).days >= 366:

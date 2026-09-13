@@ -449,10 +449,10 @@ def validate_autofill_payload(body: dict[str, Any]) -> dict[str, Any]:
     observed_at = utc_text(parse_aware_datetime(observed_at, "source.observed_at"))
     coverage_as_of = source.get("coverage_as_of")
     if not isinstance(coverage_as_of, str):
-        raise ValueError("source.coverage_as_of 必须是带时区的 ISO 分钟")
+        raise ValueError("source.coverage_as_of 必须是带时区的 ISO 秒")
     coverage_time = parse_aware_datetime(coverage_as_of, "source.coverage_as_of")
-    if coverage_time.second or coverage_time.microsecond:
-        raise ValueError("source.coverage_as_of 必须精确到分钟")
+    if coverage_time.microsecond:
+        raise ValueError("source.coverage_as_of 必须精确到秒，不得包含微秒")
     coverage_as_of = coverage_time.isoformat(timespec="seconds")
     return {
         "contract_version": AUTOFILL_INGESTION_CONTRACT,
@@ -558,10 +558,10 @@ def validate_source_health_payload(body: dict[str, Any]) -> dict[str, Any]:
     coverage_date: datetime | None = None
     if coverage_as_of is not None:
         if not isinstance(coverage_as_of, str):
-            raise ValueError("coverage_as_of 必须是带时区的 ISO 分钟或 null")
+            raise ValueError("coverage_as_of 必须是带时区的 ISO 秒或 null")
         coverage_date = parse_aware_datetime(coverage_as_of, "coverage_as_of")
-        if coverage_date.second or coverage_date.microsecond:
-            raise ValueError("coverage_as_of 必须精确到分钟")
+        if coverage_date.microsecond:
+            raise ValueError("coverage_as_of 必须精确到秒，不得包含微秒")
         coverage_as_of = coverage_date.isoformat(timespec="seconds")
         if coverage_date.strftime("%Y-%m") != reporting_month:
             raise ValueError("coverage_as_of 必须属于申报月")

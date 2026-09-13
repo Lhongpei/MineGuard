@@ -167,7 +167,7 @@ function solverDisplay(value) {
 const formatTime = (value) => {
   if (!value) return "—";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : new Intl.DateTimeFormat("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(date);
+  return Number.isNaN(date.getTime()) ? String(value) : new Intl.DateTimeFormat("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false}).format(date);
 };
 
 const statusInfo = (status) => ({
@@ -1228,7 +1228,7 @@ function renderSelectedSeriesChart() {
     .flatMap((group) => group.series);
   const chartElement = $("seriesChart");
   chartElement.className = `series-chart tracks-${Math.max(1, Math.min(4, definitions.length))}`;
-  if (!rows.length || !definitions.length) { chartElement.innerHTML = `<div class="empty-state">暂无可展示的分钟级生产数据</div>`; return; }
+  if (!rows.length || !definitions.length) { chartElement.innerHTML = `<div class="empty-state">暂无可展示的秒级生产数据</div>`; return; }
   const measuredWidth = Number(chartElement.clientWidth);
   const width = Math.max(760, Number.isFinite(measuredWidth) && measuredWidth > 0 ? Math.round(measuredWidth) : 1100);
   const left = 132, right = 78, top = 8, bottom = 38;
@@ -1238,7 +1238,7 @@ function renderSelectedSeriesChart() {
   const x = (index) => left + index / Math.max(1, rows.length - 1) * plotWidth;
   const trackBottom = top + definitions.length * trackHeight + (definitions.length - 1) * trackGap;
   let svg = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-labelledby="seriesChartTitle seriesChartDescription">`;
-  svg += `<title id="seriesChartTitle">十量风险优先趋势图</title><desc id="seriesChartDescription">默认最多展示三个十量业务项；火工品量的雷管和炸药保持独立轨道，各轨道共用分钟级时间轴并按当前窗口缩放。</desc>`;
+  svg += `<title id="seriesChartTitle">十量风险优先趋势图</title><desc id="seriesChartDescription">默认最多展示三个十量业务项；火工品量的雷管和炸药保持独立轨道，各轨道共用秒级时间轴并按当前窗口缩放。</desc>`;
   const labelIndexes = [...new Set([0, Math.floor((rows.length-1)/2), rows.length-1])];
   svg += labelIndexes.map((index) => `<line class="date-grid" x1="${x(index)}" y1="${top}" x2="${x(index)}" y2="${trackBottom}"/>`).join("");
   definitions.forEach((definition, trackIndex) => {
@@ -1361,7 +1361,7 @@ function localDateTimeInputValue(value) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
-  return local.toISOString().slice(0, 16);
+  return local.toISOString().slice(0, 19);
 }
 
 function setTraceRangePreset(preset) {
@@ -1437,7 +1437,7 @@ function formatTraceTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
   return new Intl.DateTimeFormat("zh-CN", {
-    year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12:false,
+    year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false,
   }).format(date);
 }
 

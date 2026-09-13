@@ -294,7 +294,7 @@ def test_signed_connector_enters_visible_v2_inbox_and_replays_by_event(
         event_id="evt-july-001",
         source_id="erp-production",
         revision=1,
-        csv_text="date,production_t\n2026-07-01,100\n",
+        csv_text="date,production_t\n2026-07-01T08:15:27+08:00,100\n",
     )
     try:
         status, service_status = _get(port, "/api/v2/status")
@@ -333,7 +333,7 @@ def test_signed_connector_enters_visible_v2_inbox_and_replays_by_event(
         assert evidence["freshness"]["overall_state"] == "fresh"
         assert evidence["source_health"][0]["freshness_state"] == "fresh"
         assert evidence["source_health"][0]["coverage_as_of"] == (
-            "2026-07-01T00:00:00+08:00"
+            "2026-07-01T08:15:27+08:00"
         )
         serialised = json.dumps(evidence, ensure_ascii=False)
         assert SECRET not in serialised

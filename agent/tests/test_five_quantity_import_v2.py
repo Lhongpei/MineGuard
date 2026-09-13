@@ -99,9 +99,7 @@ def test_same_timestamp_rejects_different_values_for_the_same_metric() -> None:
         import_five_quantity_bytes(
             filename="冲突数据.csv",
             content=(
-                "数据时间,电量(kWh)\n"
-                "2026-07-01 08:30,96000\n"
-                "2026-07-01 08:30,97000\n"
+                "数据时间,电量(kWh)\n2026-07-01 08:30,96000\n2026-07-01 08:30,97000\n"
             ).encode(),
             acquisition_mode="manual_import",
             identity=identity(),
@@ -182,11 +180,11 @@ def test_production_batch_can_cross_months_and_skip_dates() -> None:
     assert "reporting_month" not in payload
 
 
-def test_same_day_can_contain_multiple_distinct_minute_records() -> None:
+def test_same_minute_can_contain_multiple_distinct_second_records() -> None:
     imported = import_five_quantity_bytes(
-        filename="分钟生产数据.csv",
+        filename="秒级生产数据.csv",
         content=(
-            "数据时间,企业报表产量\n2026-08-27 08:15,100\n2026-08-27 08:45,120\n"
+            "数据时间,企业报表产量\n2026-08-27 08:15:12,100\n2026-08-27 08:15:47,120\n"
         ).encode(),
         acquisition_mode="manual_import",
         identity=identity(),
@@ -194,20 +192,20 @@ def test_same_day_can_contain_multiple_distinct_minute_records() -> None:
     )
 
     assert [item["date"] for item in imported["payload"]["days"]] == [
-        "2026-08-27T08:15:00+08:00",
-        "2026-08-27T08:45:00+08:00",
+        "2026-08-27T08:15:12+08:00",
+        "2026-08-27T08:15:47+08:00",
     ]
 
 
-def test_second_precision_is_rejected_instead_of_silently_rounded() -> None:
-    with pytest.raises(ImportContentError, match="精确到分钟"):
+def test_fractional_second_precision_is_rejected_instead_of_silently_rounded() -> None:
+    with pytest.raises(ImportContentError, match="精确到秒且不含微秒"):
         import_five_quantity_bytes(
-            filename="秒级生产数据.json",
+            filename="微秒生产数据.json",
             content=json.dumps(
                 {
                     "days": [
                         {
-                            "date": "2026-08-27T08:15:30+08:00",
+                            "date": "2026-08-27T08:15:30.123456+08:00",
                             "reported_quantity": {},
                         }
                     ]

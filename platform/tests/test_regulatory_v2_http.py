@@ -1293,6 +1293,9 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
         (CONTRACTS / "examples" / "ten-quantity-submission-v3.json").read_bytes()
     )
     submission["payload"].pop("comparison_context")
+    submission["payload"]["period_start"] = "2026-07-31T23:30:27+08:00"
+    submission["payload"]["period_end"] = "2026-07-31T23:30:27+08:00"
+    submission["payload"]["days"][0]["date"] = "2026-07-31T23:30:27+08:00"
     # A production batch is an as-of snapshot.  It may be confirmed while the
     # final governed shift is still in progress; unobserved values remain null.
     submission["payload"]["closed_at"] = "2026-07-31T12:00:00Z"
@@ -1318,14 +1321,14 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
     # Exercise the complete signed HTTP path with a sparse batch that spans
     # two calendar months.  V3 production batches are not monthly reports.
     previous_month_day = deepcopy(submission["payload"]["days"][0])
-    previous_month_day["date"] = "2026-06-30T23:30:00+08:00"
+    previous_month_day["date"] = "2026-06-30T23:30:11+08:00"
     for shift in previous_month_day["reported_quantity"]["shifts"].values():
         for field in ("start_at", "end_at"):
             shifted = datetime.fromisoformat(
                 shift[field].replace("Z", "+00:00")
             ) - timedelta(days=31)
             shift[field] = shifted.isoformat().replace("+00:00", "Z")
-    submission["payload"]["period_start"] = "2026-06-30T23:30:00+08:00"
+    submission["payload"]["period_start"] = "2026-06-30T23:30:11+08:00"
     submission["payload"]["days"].insert(0, previous_month_day)
     submission_body = _signed_enterprise_message(submission, secret=V3_EXAMPLE_SECRET)
     _assert_contract(submission, "ten-quantity-submission-v3.schema.json")
@@ -1405,18 +1408,18 @@ def test_ten_quantity_v3_submission_and_report_are_end_to_end_and_route_isolated
 
         stored = server.store.get_submission(submission["message_id"])
         assert stored.quantity_scope == "ten_quantity_v3"
-        assert stored.period_start.isoformat() == "2026-06-30T23:30:00+08:00"
-        assert stored.period_end.isoformat() == "2026-07-31T23:30:00+08:00"
+        assert stored.period_start.isoformat() == "2026-06-30T23:30:11+08:00"
+        assert stored.period_end.isoformat() == "2026-07-31T23:30:27+08:00"
         assert [item.date.isoformat() for item in stored.days] == [
-            "2026-06-30T23:30:00+08:00",
-            "2026-07-31T23:30:00+08:00",
+            "2026-06-30T23:30:11+08:00",
+            "2026-07-31T23:30:27+08:00",
         ]
         july_facts = server.store.list_daily_facts(
             submission["mine_id"],
             date_from=date(2026, 7, 31),
             date_to=date(2026, 7, 31),
         )
-        assert [item["date"] for item in july_facts] == ["2026-07-31T23:30:00+08:00"]
+        assert [item["date"] for item in july_facts] == ["2026-07-31T23:30:27+08:00"]
         day = stored.days[0]
         assert day.extraction_t is not None
         assert day.extraction_t.daily_total is None

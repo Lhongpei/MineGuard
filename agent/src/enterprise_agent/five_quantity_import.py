@@ -686,6 +686,11 @@ def _date_value(value: Any) -> date | datetime | None:
     if parsed_iso is not None and ("T" in clean or ":" in clean):
         return parsed_iso
     for pattern in (
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y.%m.%d %H:%M:%S",
+        "%Y年%m月%d日 %H:%M:%S",
         "%Y-%m-%dT%H:%M",
         "%Y-%m-%d %H:%M",
         "%Y/%m/%d %H:%M",
@@ -704,8 +709,8 @@ def _date_value(value: Any) -> date | datetime | None:
     return None
 
 
-def _minute_value(value: Any, timezone: str) -> datetime | None:
-    """Return one governed local minute without silently keeping seconds."""
+def _second_value(value: Any, timezone: str) -> datetime | None:
+    """Return one governed local second without silently keeping fractions."""
 
     parsed = _date_value(value)
     if parsed is None:
@@ -719,9 +724,9 @@ def _minute_value(value: Any, timezone: str) -> datetime | None:
         )
     else:
         instant = datetime.combine(parsed, time.min, tzinfo=zone)
-    if instant.second or instant.microsecond:
+    if instant.microsecond:
         return None
-    return instant.replace(second=0, microsecond=0)
+    return instant.replace(microsecond=0)
 
 
 def _measurement(metric: str, value: Any, source_id: str) -> dict[str, Any]:
@@ -1568,7 +1573,7 @@ def _normalise_sheet(
     for row_index in range(start_row, min(len(sheet.rows), MAX_ROWS)):
         row = sheet.rows[row_index]
         raw_date = row[date_column] if date_column < len(row) else None
-        day_value = _minute_value(raw_date, timezone)
+        day_value = _second_value(raw_date, timezone)
         if day_value is None:
             if any(value not in {None, ""} for value in row):
                 suggestions.append(
@@ -1709,10 +1714,10 @@ def _json_payload(
     for index, item in enumerate(days):
         if not isinstance(item, dict):
             raise ImportContentError(f"JSON days[{index}] 必须是对象")
-        day_value = _minute_value(item.get("date"), identity.timezone)
+        day_value = _second_value(item.get("date"), identity.timezone)
         if day_value is None:
             raise ImportContentError(
-                f"JSON days[{index}].date 必须是带时区、精确到分钟的数据时间"
+                f"JSON days[{index}].date 必须是带时区、精确到秒且不含微秒的数据时间"
             )
         quantity = item.get("reported_quantity")
         if not isinstance(quantity, dict):
@@ -1865,8 +1870,7 @@ def _merge_import_measurement(
         )
     result = copy.deepcopy(previous)
     flags = sorted(
-        set(previous.get("quality_flags", []))
-        | set(incoming.get("quality_flags", []))
+        set(previous.get("quality_flags", [])) | set(incoming.get("quality_flags", []))
     )
     refs = sorted(
         set(previous.get("source_refs", [])) | set(incoming.get("source_refs", []))
@@ -1883,7 +1887,7 @@ def _merge_import_measurement(
 def _merge_complementary_timestamp_rows(
     days: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Coalesce rows by minute; only a same-field value disagreement is fatal.
+    """Coalesce rows by exact second; only a same-field disagreement is fatal.
 
     Enterprise exports commonly split electricity, blasting materials and
     production figures across sheets or rows that share one timestamp.  The
@@ -1928,9 +1932,7 @@ def _merge_complementary_timestamp_rows(
         if previous_state == "unknown":
             previous["operating_state"] = incoming_state
         elif incoming_state not in {None, "unknown", previous_state}:
-            raise ImportContentError(
-                f"数据时间 {timestamp} 的运行状态存在冲突"
-            )
+            raise ImportContentError(f"数据时间 {timestamp} 的运行状态存在冲突")
     return [merged_by_time[key] for key in sorted(merged_by_time)]
 
 
