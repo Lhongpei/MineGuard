@@ -519,11 +519,11 @@ begin
       'Where-Object{-not[string]::IsNullOrWhiteSpace($_)}|' +
       'ForEach-Object{[IO.Path]::GetFullPath($_).TrimEnd([char]92)};' +
       '$cursor=[IO.Path]::GetDirectoryName($p);while($cursor){' +
+      'if($cursor.TrimEnd([char]92).Equals($root.TrimEnd([char]92),' +
+      '[StringComparison]::OrdinalIgnoreCase)){break};' +
       'if(@($standard|Where-Object{$cursor.Equals($_,' +
       '[StringComparison]::OrdinalIgnoreCase)}).Count-gt 0){break};' +
       'if([IO.Directory]::Exists($cursor)){Assert-SafeSecurity $cursor};' +
-      'if($cursor.TrimEnd([char]92).Equals($root.TrimEnd([char]92),' +
-      '[StringComparison]::OrdinalIgnoreCase)){break};' +
       '$next=[IO.Path]::GetDirectoryName($cursor);' +
       'if([string]::IsNullOrWhiteSpace($next)-or($next-eq$cursor)){break};' +
       '$cursor=$next}};' +

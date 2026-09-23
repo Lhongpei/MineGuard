@@ -606,6 +606,20 @@ def test_inno_scripts() -> None:
         assert "SetAccessControl($target,$acl)" not in preflight, (
             f"{name} must reject an unsafe existing root instead of repairing it"
         )
+        ancestor_start = preflight.index("function Assert-AncestorSecurity")
+        ancestor_end = preflight.index("function Assert-CodeSecurity", ancestor_start)
+        ancestor_security = preflight[ancestor_start:ancestor_end]
+        drive_boundary = ancestor_security.index(
+            "$cursor.TrimEnd([char]92).Equals($root.TrimEnd([char]92)"
+        )
+        standard_boundary = ancestor_security.index(
+            "if(@($standard|Where-Object{$cursor.Equals($_"
+        )
+        security_check = ancestor_security.index("Assert-SafeSecurity $cursor")
+        assert drive_boundary < standard_boundary < security_check, (
+            f"{name} must stop at the fixed-volume root before checking its "
+            "normal Windows ACL"
+        )
         trusted_start = preflight.index("$trusted=@{")
         trusted_end = preflight.index("$danger=", trusted_start)
         trusted_write_exemptions = preflight[trusted_start:trusted_end]
