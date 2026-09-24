@@ -1594,7 +1594,7 @@ function Invoke-InstallerLifecycleTest {
             }
         }
         $PreservationRoot = if ($Product -eq "platform") { $InstallRoot } else { Join-Path $AgentStateRoot "ci-preservation" }
-        foreach ($DirectoryName in @("config", "state", "backups", "logs")) {
+        foreach ($DirectoryName in $(if ($Product -eq 'platform') { @("config", "state", "backups", "logs") } else { @() })) {
             $Directory = Join-Path $PreservationRoot $DirectoryName
             New-Item -ItemType Directory -Path $Directory -Force | Out-Null
             [IO.File]::WriteAllText((Join-Path $Directory "ci-state-sentinel.txt"), "preserve-$Product")
@@ -1791,6 +1791,15 @@ function Invoke-InstallerLifecycleTest {
                     $_.IdentityReference.Value -eq $LegacyUsers.Value
                 }).Count -ne 0) {
             throw "$Product upgrade did not remove the obsolete root ACE."
+        }
+        # These are uninstall-preservation sentinels, not configured Agent
+        # instances. Add them only after the upgrade's instance validation.
+        if ($Product -eq 'agent') {
+            foreach ($DirectoryName in @('config', 'state', 'backups', 'logs')) {
+                $Directory = Join-Path $PreservationRoot $DirectoryName
+                New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+                [IO.File]::WriteAllText((Join-Path $Directory 'ci-state-sentinel.txt'), "preserve-$Product")
+            }
         }
         foreach ($DirectoryName in @('config', 'state', 'backups', 'logs')) {
             $Sentinel = Join-Path (Join-Path $PreservationRoot $DirectoryName) `
