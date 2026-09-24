@@ -1729,7 +1729,9 @@ function Invoke-InstallerLifecycleTest {
                 throw "Platform configuration rollback leaked: $($LeakedConfigurationTransaction.FullName)"
             }
         }
-        Invoke-RuntimeSmoke -Product $Product -Executable $RuntimeExecutable -WorkingStateRoot (Join-Path $PreservationRoot "state")
+        # Standalone demo smoke creates its own user-owned state and ACLs.
+        # Keep it outside the service-managed retained-data fixture.
+        Invoke-RuntimeSmoke -Product $Product -Executable $RuntimeExecutable -WorkingStateRoot (Join-Path $VerificationRoot "runtime-smoke-state")
 
         # Exercise the field-upgrade case that originally exposed an overly
         # strict preflight: an authenticated older product root can be safe
@@ -1846,7 +1848,7 @@ function Invoke-InstallerLifecycleTest {
         Remove-ServiceStateProbe -ServiceName $ServiceName
 
         $ForegroundPort = Get-FreeLoopbackPort
-        $ForegroundState = Join-Path $PreservationRoot "state\foreground-blocking-test"
+        $ForegroundState = Join-Path $VerificationRoot "foreground-blocking-test"
         New-Item -ItemType Directory -Path $ForegroundState -Force | Out-Null
         if ($Product -eq "platform") {
             $ForegroundArguments = @(
