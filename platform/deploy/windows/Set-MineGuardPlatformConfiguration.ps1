@@ -676,6 +676,7 @@ Initialize-StateOwnership -Path $stateDirectory -Root $InstallRoot
 Assert-NoReparseTree -Path $stateDirectory -Label '状态目录'
 
 Set-ConfigAcl -Path $configDirectory
+Grant-BootstrapPasswordDeleteToService -Path $bootstrapPath
 Set-StateAcl -Path $stateDirectory
 
 $installedClientsPath = if ($DemoWithoutClientRegistry) { '' } else {

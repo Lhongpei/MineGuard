@@ -1668,6 +1668,7 @@ function Invoke-InstallerLifecycleTest {
                 (Join-Path $ConfigRoot "settings.json")
             )
             $BeforeConfigurationHashes = @{}
+            $BeforeConfigurationAcls = @{}
             foreach ($ConfigFile in $ProtectedConfiguration) {
                 if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
                     throw "Platform initial configuration did not create: $ConfigFile"
@@ -1675,6 +1676,7 @@ function Invoke-InstallerLifecycleTest {
                 $BeforeConfigurationHashes[$ConfigFile] = (
                     Get-FileHash -LiteralPath $ConfigFile -Algorithm SHA256
                 ).Hash
+                $BeforeConfigurationAcls[$ConfigFile] = (Get-Acl -LiteralPath $ConfigFile).Sddl
             }
             $ChangedPassword = ConvertTo-SecureString `
                 "MineGuard-CI-Changed-456!" -AsPlainText -Force
@@ -1714,6 +1716,9 @@ function Invoke-InstallerLifecycleTest {
                     -Algorithm SHA256).Hash
                 if ($AfterHash -ne $BeforeConfigurationHashes[$ConfigFile]) {
                     throw "Platform configuration rollback changed protected content: $ConfigFile"
+                }
+                if ((Get-Acl -LiteralPath $ConfigFile).Sddl -cne $BeforeConfigurationAcls[$ConfigFile]) {
+                    throw "Platform configuration rollback changed protected ACL: $ConfigFile"
                 }
             }
             $LeakedConfigurationTransaction = Get-ChildItem `
