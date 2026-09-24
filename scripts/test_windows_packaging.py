@@ -1704,12 +1704,12 @@ def test_audit_and_lifecycle() -> None:
             "configuration rollback audit must reject pre-validation false positives: "
             f"{token}"
         )
-    assert lifecycle.count("Invoke-WindowsGuiProcessAndWait") == 8, (
+    assert lifecycle.count("Invoke-WindowsGuiProcessAndWait") == 10, (
         "all installer, upgrade and uninstaller lifecycle launches must wait for "
         "the GUI process and read its actual exit code"
     )
-    assert lifecycle.count("-OperationLabel") == 8
-    assert lifecycle.count("-DiagnosticLogPath") == 8
+    assert lifecycle.count("-OperationLabel") == 10
+    assert lifecycle.count("-DiagnosticLogPath") == 10
     for diagnostic_log in (
         "negative-missing.log",
         "negative-wrong.log",
@@ -1827,7 +1827,7 @@ def test_audit_and_lifecycle() -> None:
     uninstaller_wait = lifecycle.index(
         "Wait-InnoUninstallerSelfCleanup -Product $Product"
     )
-    assert lifecycle.count("Wait-InnoUninstallerSelfCleanup -Product $Product") == 1
+    assert lifecycle.count("Wait-InnoUninstallerSelfCleanup -Product $Product") == 2
     assert final_uninstall < uninstaller_wait < lifecycle.index(
         "$PathsExpectedRemoved", uninstaller_wait
     ), "only the final successful uninstall may wait for Inno self-cleanup"

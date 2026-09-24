@@ -453,6 +453,28 @@ begin
       'return [BitConverter]::ToString($h.ComputeHash($s)).Replace(''-'','''').' +
       'ToLowerInvariant()}finally{$h.Dispose();$s.Dispose()}};' +
     'function Assert-ExistingProduct([string]$p){' +
+      '$retained=@(''config'',''state'',''backups'',''logs'',' +
+      '''provisioning-authority'',''provisioning-activations'',''provisioning-registrations'');' +
+      '$children=@([IO.Directory]::GetFileSystemEntries($p));' +
+      '$dataOnly=$true;foreach($child in $children){' +
+      'if((-not[IO.Directory]::Exists($child))-or' +
+      '([IO.Path]::GetFileName($child)-notin$retained)){$dataOnly=$false}};' +
+      'if($dataOnly){' +
+      '$settingsPath=[IO.Path]::Combine($p,''config'',''settings.json'');' +
+      'Assert-SafeSecurity $settingsPath;' +
+      '$settings=[IO.File]::ReadAllText($settingsPath,[Text.Encoding]::UTF8)|ConvertFrom-Json;' +
+      '$state=[IO.Path]::Combine($p,''state'');' +
+      'if(-not([IO.Path]::GetFullPath([string]$settings.stateDirectory).TrimEnd([char]92)).Equals(' +
+      '$state,[StringComparison]::OrdinalIgnoreCase)){' +
+      'throw ''Retained state directory must match the original install location.''};' +
+      '$markerPath=[IO.Path]::Combine($state,''.mineguard-platform-state.json'');' +
+      '$marker=[IO.File]::ReadAllText($markerPath,[Text.Encoding]::UTF8)|ConvertFrom-Json;' +
+      'if(([int]$marker.schemaVersion-ne 1)-or' +
+      '([string]$marker.product-cne''MineGuard Platform State'')-or' +
+      '(-not([IO.Path]::GetFullPath([string]$marker.initializedFor).TrimEnd([char]92)).Equals(' +
+      '$p,[StringComparison]::OrdinalIgnoreCase))){' +
+      'throw ''Retained state ownership does not match this Platform install root.''};' +
+      'Write-Host ''Restoring Platform runtime with retained configuration and state.'';return};' +
       '$meta=[IO.Path]::Combine($p,''release-metadata'');' +
       '$mp=[IO.Path]::Combine($meta,''release-manifest.json'');' +
       '$bp=[IO.Path]::Combine($meta,''build-metadata.json'');' +
@@ -574,7 +596,10 @@ begin
       '$wasEmpty=([IO.Directory]::GetFileSystemEntries($target).Count-eq 0);' +
       'if(-not $wasEmpty){Assert-ExistingProduct $target;' +
       'foreach($leaf in @(''config'',''state'',''backups'',''logs'')){' +
-      'Assert-ProtectedLegacyDirectory ([IO.Path]::Combine($target,$leaf))};' +
+      '$business=[IO.Path]::Combine($target,$leaf);' +
+      'if([IO.Directory]::Exists($business)-and' +
+      '(-not([IO.Directory]::GetAccessControl($business)).AreAccessRulesProtected)){' +
+      'throw ''Business directory still inherits access rules: ''+$business}};' +
       'Assert-CodeSecurity $target}' +
       '}else{[void][IO.Directory]::CreateDirectory($target,$acl)};' +
     'Assert-Ancestors $target;Assert-AncestorSecurity $target;Assert-Tree $target;' +

@@ -1978,6 +1978,29 @@ function Invoke-InstallerLifecycleTest {
                 throw "$Product uninstall removed preserved operational state: $Sentinel"
             }
         }
+        if ($Product -eq 'platform') {
+            $RetainedHashes = @{}
+            foreach ($Leaf in @('config', 'state', 'backups', 'logs')) {
+                foreach ($File in Get-ChildItem -LiteralPath (Join-Path $InstallRoot $Leaf) -File -Recurse -Force) {
+                    $RetainedHashes[$File.FullName] = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash
+                }
+            }
+            $RecoveryLog = Join-Path $VerificationRoot 'retained-data-reinstall.log'
+            $RecoveryArguments = @($InstallArguments | Where-Object { $_ -notlike '/LOG=*' })
+            $RecoveryArguments += "/LOG=$RecoveryLog"
+            $RecoveryExit = Invoke-WindowsGuiProcessAndWait -FilePath $Installer -ArgumentList $RecoveryArguments -TimeoutSeconds 600 -OperationLabel 'Platform retained-data reinstall' -DiagnosticLogPath $RecoveryLog
+            if ($RecoveryExit -ne 0) { throw "Platform retained-data reinstall failed: $RecoveryExit" }
+            foreach ($Path in $RetainedHashes.Keys) {
+                if ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -ne $RetainedHashes[$Path]) {
+                    throw "Platform recovery changed retained data: $Path"
+                }
+            }
+            $RecoveryUninstaller = @(Get-ChildItem -LiteralPath $InstallRoot -Filter 'unins*.exe' -File)
+            if ($RecoveryUninstaller.Count -ne 1) { throw 'Recovery uninstaller missing.' }
+            $RecoveryCleanup = Invoke-WindowsGuiProcessAndWait -FilePath $RecoveryUninstaller[0].FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -TimeoutSeconds 300 -OperationLabel 'Platform recovery cleanup' -DiagnosticLogPath $RecoveryLog
+            if ($RecoveryCleanup -ne 0) { throw 'Recovery cleanup failed.' }
+            Wait-InnoUninstallerSelfCleanup -Product $Product -InstallRoot $InstallRoot
+        }
         Write-Host "$Product silent install, health and state-preserving uninstall passed."
     }
     catch {
