@@ -1898,9 +1898,11 @@ if (-not $BuildFromSource) {
     # The trusted Setup bootstrap has authenticated the candidate source.
     # Harden the destination parent before executable staging directories are
     # created so ordinary local users cannot modify a copied file before use.
-    if (-not $HasTrustedBootstrapTransaction) {
-        Set-EACanonicalProductTreeAcl -Path $InstallRoot
-    }
+    # Begin has already captured the pre-upgrade root descriptor.  Always
+    # converge this one directory before executable staging, including safe
+    # legacy roots whose protected DACL contains obsolete trusted rules.  A
+    # later transaction failure restores the captured descriptor exactly.
+    Set-EACanonicalProductTreeAcl -Path $InstallRoot
 
     $StagedRuntime = Join-Path $InstallRoot (".runtime-stage-" + [Guid]::NewGuid().ToString("N"))
     $RollbackRuntime = Join-Path $InstallRoot (".runtime-rollback-" + [Guid]::NewGuid().ToString("N"))

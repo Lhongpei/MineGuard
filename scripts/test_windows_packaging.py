@@ -606,6 +606,37 @@ def test_inno_scripts() -> None:
         assert "SetAccessControl($target,$acl)" not in preflight, (
             f"{name} must reject an unsafe existing root instead of repairing it"
         )
+        existing_root_start = preflight.index(
+            "if($existed){Assert-Tree $target;"
+        )
+        existing_root_end = preflight.index(
+            "}else{[void][IO.Directory]::CreateDirectory($target,$acl)}",
+            existing_root_start,
+        )
+        existing_root = preflight[existing_root_start:existing_root_end]
+        assert "Assert-ProtectedLegacyDirectory $target" in existing_root, (
+            f"{name} must reject a legacy root that grants mutation rights "
+            "to an ordinary principal"
+        )
+        protected_legacy_start = preflight.index(
+            "function Assert-ProtectedLegacyDirectory"
+        )
+        protected_legacy_end = preflight.index(
+            "function Assert-CanonicalRoot", protected_legacy_start
+        )
+        protected_legacy = preflight[
+            protected_legacy_start:protected_legacy_end
+        ]
+        assert "AreAccessRulesProtected" in protected_legacy
+        assert "Assert-SafeSecurity $p" in protected_legacy
+        assert "Assert-CanonicalRoot $target" not in existing_root, (
+            f"{name} must accept a safe verified legacy product root for "
+            "transactional ACL convergence"
+        )
+        assert "if(-not $existed){Assert-CanonicalRoot $target}" in preflight, (
+            f"{name} must still require an atomically created root to match "
+            "the exact canonical DACL"
+        )
         ancestor_start = preflight.index("function Assert-AncestorSecurity")
         ancestor_end = preflight.index("function Assert-CodeSecurity", ancestor_start)
         ancestor_security = preflight[ancestor_start:ancestor_end]
@@ -1673,16 +1704,17 @@ def test_audit_and_lifecycle() -> None:
             "configuration rollback audit must reject pre-validation false positives: "
             f"{token}"
         )
-    assert lifecycle.count("Invoke-WindowsGuiProcessAndWait") == 7, (
+    assert lifecycle.count("Invoke-WindowsGuiProcessAndWait") == 8, (
         "all installer, upgrade and uninstaller lifecycle launches must wait for "
         "the GUI process and read its actual exit code"
     )
-    assert lifecycle.count("-OperationLabel") == 7
-    assert lifecycle.count("-DiagnosticLogPath") == 7
+    assert lifecycle.count("-OperationLabel") == 8
+    assert lifecycle.count("-DiagnosticLogPath") == 8
     for diagnostic_log in (
         "negative-missing.log",
         "negative-wrong.log",
         "install.log",
+        "safe-legacy-root-upgrade.log",
         "running-upgrade-rejection.log",
         "registered-service-uninstall-rejection.log",
         "foreground-upgrade-rejection.log",
@@ -2323,6 +2355,19 @@ def test_audit_and_lifecycle() -> None:
         assert token in platform_acl, f"Platform atomic ACL helper misses: {token}"
     assert "icacls" not in platform_acl.lower()
     assert "'/reset'" not in platform_acl and '"/reset"' not in platform_acl
+    platform_root_convergence = (
+        "Set-MineGuardDirectoryAcl -Path $InstallRoot -ServicePermission 'RX'"
+    )
+    platform_root_convergence_index = platform_installer.index(
+        platform_root_convergence
+    )
+    assert platform_root_convergence_index < platform_installer.index(
+        "$runtimeIncoming = Join-Path $InstallRoot",
+        platform_root_convergence_index,
+    ), (
+        "Platform binary upgrades must converge a safe legacy root inside "
+        "the rollback-protected transaction"
+    )
 
     agent_acl_start = agent_installer.index(
         "function Set-EACanonicalProductTreeAcl"
@@ -2344,6 +2389,13 @@ def test_audit_and_lifecycle() -> None:
     ):
         assert token in agent_acl, f"Agent atomic ACL helper misses: {token}"
     assert '"/reset"' not in agent_acl
+    agent_root_convergence = (
+        "Set-EACanonicalProductTreeAcl -Path $InstallRoot\n"
+    )
+    assert agent_root_convergence in agent_installer, (
+        "Agent binary upgrades must converge a safe legacy root inside the "
+        "rollback-protected transaction"
+    )
     first_runtime_switch = agent_installer.index(
         "-SourcePath $StagedRuntime -SourceParent $InstallRoot"
     )

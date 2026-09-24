@@ -1039,12 +1039,11 @@ if ($binaryMode) {
     # The trusted Setup bootstrap has already authenticated the staged source.
     # Protect the destination parent before creating any executable incoming
     # directory so an unprivileged local process cannot win a copy/use race.
-    if (-not $trustedBootstrapTransaction -or
-        $newlyCreatedDirectories.ContainsKey(
-            [System.IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
-        )) {
-        Set-MineGuardDirectoryAcl -Path $InstallRoot -ServicePermission 'RX'
-    }
+    # Begin has already captured the pre-upgrade root descriptor.  Always
+    # converge this one directory before executable staging, including safe
+    # legacy roots whose protected DACL contains obsolete trusted rules.  A
+    # later transaction failure restores the captured descriptor exactly.
+    Set-MineGuardDirectoryAcl -Path $InstallRoot -ServicePermission 'RX'
     $runtimeIncoming = Join-Path $InstallRoot (
         '.runtime.incoming.' + [Guid]::NewGuid().ToString('N')
     )

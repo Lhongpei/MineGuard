@@ -1721,6 +1721,74 @@ function Invoke-InstallerLifecycleTest {
             }
         }
         Invoke-RuntimeSmoke -Product $Product -Executable $RuntimeExecutable -WorkingStateRoot (Join-Path $PreservationRoot "state")
+
+        # Exercise the field-upgrade case that originally exposed an overly
+        # strict preflight: an authenticated older product root can be safe
+        # and protected while retaining an obsolete read-only ACE.  Setup
+        # must accept it, converge it inside the rollback journal, and retain
+        # all operational data.
+        $LegacyRoot = Get-Item -LiteralPath $InstallRoot -Force
+        $LegacyAcl = [IO.Directory]::GetAccessControl($LegacyRoot.FullName)
+        if (-not $LegacyAcl.AreAccessRulesProtected) {
+            throw "$Product clean-install root is unexpectedly inheriting ACLs."
+        }
+        $LegacyUsers = New-Object Security.Principal.SecurityIdentifier(
+            'S-1-5-32-545'
+        )
+        $LegacyReadRule = New-Object Security.AccessControl.FileSystemAccessRule(
+            $LegacyUsers,
+            [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+            ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ObjectInherit),
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$LegacyAcl.AddAccessRule($LegacyReadRule)
+        [IO.Directory]::SetAccessControl($LegacyRoot.FullName, $LegacyAcl)
+        $LegacyRules = @([IO.Directory]::GetAccessControl(
+                $LegacyRoot.FullName
+            ).GetAccessRules(
+                $true, $false,
+                [Security.Principal.SecurityIdentifier]
+            ))
+        if (@($LegacyRules | Where-Object {
+                    $_.IdentityReference.Value -eq $LegacyUsers.Value
+                }).Count -ne 1) {
+            throw "$Product legacy-root fixture did not add its safe obsolete ACE."
+        }
+        $LegacyUpgradeLog = Join-Path $VerificationRoot `
+            'safe-legacy-root-upgrade.log'
+        $LegacyUpgradeArguments = @(
+            $InstallArguments | Where-Object { $_ -notlike '/LOG=*' }
+        )
+        $LegacyUpgradeArguments += "/LOG=$LegacyUpgradeLog"
+        $LegacyUpgradeExitCode = Invoke-WindowsGuiProcessAndWait `
+            -FilePath $Installer -ArgumentList $LegacyUpgradeArguments `
+            -TimeoutSeconds 600 `
+            -OperationLabel "$Product safe legacy-root upgrade" `
+            -DiagnosticLogPath $LegacyUpgradeLog
+        if ($LegacyUpgradeExitCode -ne 0) {
+            throw "$Product safe legacy-root upgrade returned $LegacyUpgradeExitCode."
+        }
+        $ConvergedRules = @([IO.Directory]::GetAccessControl(
+                $LegacyRoot.FullName
+            ).GetAccessRules(
+                $true, $false,
+                [Security.Principal.SecurityIdentifier]
+            ))
+        if (@($ConvergedRules | Where-Object {
+                    $_.IdentityReference.Value -eq $LegacyUsers.Value
+                }).Count -ne 0) {
+            throw "$Product upgrade did not remove the obsolete root ACE."
+        }
+        foreach ($DirectoryName in @('config', 'state', 'backups', 'logs')) {
+            $Sentinel = Join-Path (Join-Path $PreservationRoot $DirectoryName) `
+                'ci-state-sentinel.txt'
+            if (-not (Test-Path -LiteralPath $Sentinel -PathType Leaf)) {
+                throw "$Product legacy-root upgrade removed operational state: $Sentinel"
+            }
+        }
+
         $Uninstallers = @(Get-ChildItem -LiteralPath $InstallRoot -Filter "unins*.exe" -File)
         if ($Uninstallers.Count -ne 1) {
             throw "$Product install must contain exactly one Inno uninstaller."

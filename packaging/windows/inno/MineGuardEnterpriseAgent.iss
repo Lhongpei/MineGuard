@@ -654,6 +654,12 @@ begin
       'foreach($pattern in @(''unins*.exe'',''unins*.dat'')){' +
       'foreach($f in [IO.Directory]::GetFiles($p,$pattern)){' +
       'Assert-SafeSecurity $f}}};' +
+    'function Assert-ProtectedLegacyDirectory([string]$p){' +
+      'if(-not[IO.Directory]::Exists($p)){return};' +
+      '$s=[IO.Directory]::GetAccessControl($p);' +
+      'if(-not$s.AreAccessRulesProtected){' +
+      'throw ''Legacy product directory still inherits access rules: ''+$p};' +
+      'Assert-SafeSecurity $p};' +
     'function Assert-CanonicalRoot([string]$p){' +
       '$actual=[IO.Directory]::GetAccessControl($p);' +
       '$owner=$actual.GetOwner([Security.Principal.SecurityIdentifier]).Value;' +
@@ -681,15 +687,16 @@ begin
     'Assert-Ancestors $target;Assert-AncestorSecurity $target;' +
     '$existed=[IO.Directory]::Exists($target);$wasEmpty=$false;' +
     'if($existed){Assert-Tree $target;' +
+      'Assert-ProtectedLegacyDirectory $target;' +
       '$wasEmpty=([IO.Directory]::GetFileSystemEntries($target).Count-eq 0);' +
       'if(-not $wasEmpty){Assert-ExistingProduct $target};' +
-      'Assert-CanonicalRoot $target;if(-not $wasEmpty){Assert-CodeSecurity $target}' +
+      'if(-not $wasEmpty){Assert-CodeSecurity $target}' +
       '}else{[void][IO.Directory]::CreateDirectory($target,$acl)};' +
     'Assert-Ancestors $target;Assert-AncestorSecurity $target;Assert-Tree $target;' +
     'if(((-not $existed)-or $wasEmpty)-and' +
       '([IO.Directory]::GetFileSystemEntries($target).Count-ne 0)){' +
       'throw ''Install root changed during secure creation.''};' +
-    'Assert-CanonicalRoot $target';
+    'if(-not $existed){Assert-CanonicalRoot $target}';
   Parameters := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' +
     CommandText + '"';
   if not ExecAndLogOutput(PowerShellPath, Parameters, '', SW_HIDE,
