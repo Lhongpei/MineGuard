@@ -512,6 +512,10 @@ function Invoke-WindowsGuiProcessAndWait {
             "[installer-lifecycle] END $OperationLabel " +
             "exit=$ExitCode elapsed_ms=$($Stopwatch.ElapsedMilliseconds)"
         )
+        if ($ExitCode -ne 0 -and
+            -not [string]::IsNullOrWhiteSpace($DiagnosticLogPath)) {
+            Write-Host (Get-WindowsDiagnosticLogTail -PathValue $DiagnosticLogPath)
+        }
         return $ExitCode
     }
     finally {
